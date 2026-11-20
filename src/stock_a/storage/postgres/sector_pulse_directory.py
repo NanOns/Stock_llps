@@ -35,7 +35,6 @@ def read_source_sector_pulse_directory_page(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     source_pool_count: int,
     profile_revision: str,
@@ -55,7 +54,7 @@ def read_source_sector_pulse_directory_page(
         or target_session > research_cutoff
         or any(
             type(value) is not int or value <= 0
-            for value in (source_package_id, source_capture_id, source_pool_count)
+            for value in (source_capture_id, source_pool_count)
         )
         or not isinstance(profile_revision, str)
         or not profile_revision.startswith("PROFILE_R")
@@ -99,9 +98,9 @@ def read_source_sector_pulse_directory_page(
             """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint,
        count(DISTINCT profile_revision)::bigint,min(producer_version),max(producer_version)
 FROM source_pool_seed_day_facts
-WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
+WHERE target_session=%s AND source_capture_id=%s
   AND profile_revision=%s""",
-            (target_session, source_package_id, source_capture_id, profile_revision),
+            (target_session, source_capture_id, profile_revision),
         )
         seed = cursor.fetchone()
         if (
@@ -134,16 +133,15 @@ WHERE snapshot_id=ANY(%s) GROUP BY snapshot_id,board_kind""",
          AND p.formal_rotation_state='NOT_EVALUATED'
          AND p.research_mode='NON_PIT_RETROSPECTIVE'
          AND p.membership_mode='CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT'
-         AND p.price_coordinate='RAW_UNADJUSTED')::int
+         AND p.price_coordinate='FORWARD_ADJUSTED')::int
 FROM source_sector_cross_period_pulse_facts p
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
-WHERE p.target_session=%s AND p.source_package_id=%s
-  AND p.source_capture_id=%s AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.source_capture_id=%s
+  AND p.profile_revision=%s
   AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)
 GROUP BY c.snapshot_id,c.board_kind""",
             (
                 target_session,
-                source_package_id,
                 source_capture_id,
                 profile_revision,
                 _ALGORITHM,
@@ -184,13 +182,12 @@ GROUP BY c.snapshot_id,c.board_kind""",
         )
 
         base_where = (
-            "p.target_session=%s AND p.source_package_id=%s "
-            "AND p.source_capture_id=%s AND p.profile_revision=%s "
+            "p.target_session=%s AND p.source_capture_id=%s "
+            "AND p.profile_revision=%s "
             "AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)"
         )
         base_params: list[Any] = [
             target_session,
-            source_package_id,
             source_capture_id,
             profile_revision,
             _ALGORITHM,
@@ -234,13 +231,12 @@ LIMIT %s OFFSET %s""",
             """SELECT p.pulse_state,count(*)::int
 FROM source_sector_cross_period_pulse_facts p
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
-WHERE p.target_session=%s AND p.source_package_id=%s
-  AND p.source_capture_id=%s AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.source_capture_id=%s
+  AND p.profile_revision=%s
   AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)
 GROUP BY p.pulse_state""",
             (
                 target_session,
-                source_package_id,
                 source_capture_id,
                 profile_revision,
                 _ALGORITHM,
@@ -259,8 +255,8 @@ GROUP BY p.pulse_state""",
                 """WITH scoped AS (
   SELECT p.id FROM source_sector_cross_period_pulse_facts p
   JOIN tdx_sector_catalog c ON c.id=p.catalog_id
-  WHERE p.target_session=%s AND p.source_package_id=%s
-    AND p.source_capture_id=%s AND p.profile_revision=%s
+  WHERE p.target_session=%s AND p.source_capture_id=%s
+    AND p.profile_revision=%s
     AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)
 ), outcomes AS (
   SELECT p.id,CASE WHEN count(f.id)=0 THEN 'NOT_COMPUTED'
@@ -275,7 +271,6 @@ GROUP BY p.pulse_state""",
 SELECT outcome_status,count(*)::int FROM outcomes GROUP BY outcome_status""",
                 (
                     target_session,
-                    source_package_id,
                     source_capture_id,
                     profile_revision,
                     _ALGORITHM,
@@ -297,7 +292,7 @@ SELECT outcome_status,count(*)::int FROM outcomes GROUP BY outcome_status""",
         if pulse_ids and due_horizons:
             cursor.execute(
                 """SELECT pulse_fact_id,horizon_sessions,target_session,
-       target_source_package_id,target_source_capture_id,fixed_member_denominator,
+       target_source_capture_id,fixed_member_denominator,
        observed_member_count,unknown_member_count,equal_weight_return_numerator,
        equal_weight_return_denominator,outcome_status,reason_codes,research_mode,
        membership_mode,price_coordinate,calendar_id,calendar_revision
@@ -330,7 +325,7 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
                 and row["formal_rotation_state"] == "NOT_EVALUATED"
                 and row["research_mode"] == "NON_PIT_RETROSPECTIVE"
                 and row["membership_mode"] == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-                and row["price_coordinate"] == "RAW_UNADJUSTED"
+                and row["price_coordinate"] == "FORWARD_ADJUSTED"
                 and int(row["source_pool_count"]) == source_pool_count
             )
             pulse = {
@@ -412,7 +407,7 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
                     and fact["research_mode"] == "NON_PIT_RETROSPECTIVE"
                     and fact["membership_mode"]
                     == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-                    and fact["price_coordinate"] == "RAW_UNADJUSTED"
+                    and fact["price_coordinate"] == "FORWARD_ADJUSTED"
                     and fixed == pulse["member_count"]
                     and observed + unknown == fixed
                     and (denominator is None or int(denominator) > 0)
@@ -439,7 +434,7 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
                 "horizons": horizon_facts,
                 "research_mode": "NON_PIT_RETROSPECTIVE",
                 "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": "FORWARD_ADJUSTED",
             }
             quality = str(row["snapshot_source_quality"] or "UNKNOWN")
             quality_label = quality.split(";", 1)[0]
@@ -477,7 +472,6 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
         source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         snapshot_ids=snapshot_ids,
@@ -497,7 +491,6 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
         if partition_complete
         else ["PULSE_DIRECTORY_PARTITION_INCOMPLETE"],
         "target_session": target_session.isoformat(),
-        "source_package_id": source_package_id,
         "source_capture_id": source_capture_id,
         "profile_revision": profile_revision,
         "snapshot_ids": dict(snapshot_ids),

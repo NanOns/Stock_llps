@@ -28,7 +28,7 @@ def _run_source_fep_baseline(args) -> int:
         result = produce_fep_baseline(
             config,
             research_cutoff=cutoff,
-            source_package_id=args.source_package_id,
+            source_capture_id=args.source_capture_id,
             rule_ids=tuple(sorted(set(args.rule_id))),
             horizons=tuple(sorted(set(args.horizon))),
             lanes=tuple(sorted(set(args.lane))),

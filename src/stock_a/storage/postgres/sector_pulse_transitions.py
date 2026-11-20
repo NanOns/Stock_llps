@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import time
 from typing import Any, Mapping, Sequence
 
 from stock_a.domain.sector_pulse_transitions import classify_pulse_transition
@@ -63,14 +64,11 @@ def _day_identity(day: Mapping[str, Any], label: str) -> dict[str, Any]:
         raise SectorPulseTransitionPgError(
             "PULSE_TRANSITION_SOURCE_VERSION_MISSING", f"{label}来源版本缺失"
         )
-    package_id = source.get("source_package_id")
     capture_id = source.get("source_capture_id")
     row_count = source.get("raw_row_count")
     profile_revision = day.get("profile_revision")
     if (
-        type(package_id) is not int
-        or package_id <= 0
-        or type(capture_id) is not int
+        type(capture_id) is not int
         or capture_id <= 0
         or type(row_count) is not int
         or row_count < 1
@@ -83,7 +81,6 @@ def _day_identity(day: Mapping[str, Any], label: str) -> dict[str, Any]:
         )
     return {
         "target_session": session,
-        "source_package_id": package_id,
         "source_capture_id": capture_id,
         "raw_row_count": row_count,
         "profile_revision": profile_revision,
@@ -96,17 +93,12 @@ def _verify_source_partition(cursor: Any, day: Mapping[str, Any], label: str) ->
     identity = _day_identity(day, label)
     cursor.execute(
         "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
-        "count(DISTINCT source_capture_id)::bigint, count(DISTINCT source_package_id)::bigint "
-        "FROM source_raw_daily WHERE session_date=%s AND source_package_id=%s "
-        "AND source_capture_id=%s",
-        (
-            identity["target_session"],
-            identity["source_package_id"],
-            identity["source_capture_id"],
-        ),
+        "count(DISTINCT source_capture_id)::bigint "
+        "FROM source_raw_daily WHERE session_date=%s AND source_capture_id=%s",
+        (identity["target_session"], identity["source_capture_id"]),
     )
     raw = tuple(map(int, cursor.fetchone()))
-    if raw != (identity["raw_row_count"], identity["raw_row_count"], 1, 1):
+    if raw != (identity["raw_row_count"], identity["raw_row_count"], 1):
         raise SectorPulseTransitionPgError(
             "PULSE_TRANSITION_RAW_PARTITION_MISMATCH",
             f"{label}Raw总体未闭合到精确数据包和捕获ID",
@@ -114,11 +106,11 @@ def _verify_source_partition(cursor: Any, day: Mapping[str, Any], label: str) ->
     cursor.execute(
         "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
         "count(DISTINCT profile_revision)::bigint, min(producer_version), max(producer_version) "
-        "FROM source_pool_seed_day_facts WHERE target_session=%s AND source_package_id=%s "
-        "AND source_capture_id=%s AND profile_revision=%s",
+        "FROM source_pool_seed_day_facts WHERE target_session=%s AND source_capture_id=%s "
+        "AND profile_revision=%s "
+        "AND price_coordinate='FORWARD_ADJUSTED'",
         (
             identity["target_session"],
-            identity["source_package_id"],
             identity["source_capture_id"],
             identity["profile_revision"],
         ),
@@ -152,17 +144,16 @@ def _pulse_parent_id(
         )
     cursor.execute(
         f"SELECT p.id, p.pulse_state, p.pulse_reason_codes, p.profile_revision, "
-        f"p.target_session, p.source_package_id, p.source_capture_id, "
+        f"p.target_session, p.source_capture_id, "
         f"p.algorithm_contract, p.calculation_status, p.formal_rotation_state, "
         f"p.research_mode, p.membership_mode, p.price_coordinate, "
         f"c.snapshot_id, c.board_kind, c.board_native_id "
         f"FROM {_PULSE_TABLE} p JOIN tdx_sector_catalog c ON c.id=p.catalog_id "
-        "WHERE p.target_session=%s AND p.source_package_id=%s "
-        "AND p.source_capture_id=%s AND p.profile_revision=%s "
+        "WHERE p.target_session=%s AND p.source_capture_id=%s "
+        "AND p.profile_revision=%s "
         "AND p.catalog_id=%s AND p.algorithm_contract=%s",
         (
             identity["target_session"],
-            identity["source_package_id"],
             identity["source_capture_id"],
             identity["profile_revision"],
             catalog_id,
@@ -178,17 +169,16 @@ def _pulse_parent_id(
     if (
         str(row[3]).strip() != identity["profile_revision"]
         or row[4] != identity["target_session"]
-        or int(row[5]) != identity["source_package_id"]
-        or int(row[6]) != identity["source_capture_id"]
-        or row[7] != _PULSE_ALGORITHM
-        or row[8] != "COMPLETE"
-        or row[9] != "NOT_EVALUATED"
-        or row[10] != "NON_PIT_RETROSPECTIVE"
-        or row[11] != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-        or row[12] != "RAW_UNADJUSTED"
-        or int(row[13]) != fact.get("snapshot_id")
-        or row[14] != kind
-        or row[15] != board_id
+        or int(row[5]) != identity["source_capture_id"]
+        or row[6] != _PULSE_ALGORITHM
+        or row[7] != "COMPLETE"
+        or row[8] != "NOT_EVALUATED"
+        or row[9] != "NON_PIT_RETROSPECTIVE"
+        or row[10] != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+        or row[11] != "FORWARD_ADJUSTED"
+        or int(row[12]) != fact.get("snapshot_id")
+        or row[13] != kind
+        or row[14] != board_id
     ):
         raise SectorPulseTransitionPgError(
             "PULSE_TRANSITION_PARENT_SCOPE_MISMATCH",
@@ -315,7 +305,7 @@ def _expected_rows(
                 "formal_rotation_state": "NOT_EVALUATED",
                 "research_mode": "NON_PIT_RETROSPECTIVE",
                 "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": "FORWARD_ADJUSTED",
             }
             expected_facts[board_id] = record
             values = {
@@ -333,7 +323,7 @@ def _expected_rows(
                 "target_reason_codes": list(target_reasons),
                 "calculation_status": "COMPLETE",
                 "research_mode": "NON_PIT_RETROSPECTIVE",
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": "FORWARD_ADJUSTED",
                 "formal_rotation_state": "NOT_EVALUATED",
             }
             rows.append(tuple(values[name] for name in _COLUMNS))

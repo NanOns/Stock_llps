@@ -127,14 +127,14 @@ function changeRelationReason(item, relation) {
     item.highlight_category === "CLOSE_MA20_ABOVE_TO_BELOW"
   )
     return `前一官方会话收盘高于MA20 → 当日收盘低于MA20（两端价格与MA20均可观察）`;
-  return `所选两期关系：${before} → ${after}；仅当两端价格与MA20质量均为OBSERVED且Core语义、RAW坐标兼容时分类。`;
+  return `所选两期关系：${before} → ${after}；仅当两端BaoStock前复权价格与MA20质量均为OBSERVED且Core语义、FORWARD_ADJUSTED坐标兼容时分类。`;
 }
 function highlightQualityText(item) {
-  const price = `收盘 ${text(item.before_raw_price_quality)} → ${text(item.after_raw_price_quality)}`;
+  const price = `前复权收盘 ${text(item.before_qfq_price_quality)} → ${text(item.after_qfq_price_quality)}`;
   const priceReason =
-    item.after_raw_price_quality === "OBSERVED"
-      ? item.before_raw_price_reason
-      : item.after_raw_price_reason || item.before_raw_price_reason;
+    item.after_qfq_price_quality === "OBSERVED"
+      ? item.before_qfq_price_reason
+      : item.after_qfq_price_reason || item.before_qfq_price_reason;
   const ma20 = `MA20 ${text(item.before_ma20_quality)} → ${text(item.after_ma20_quality)}`;
   const ma20Reason =
     item.after_ma20_quality === "OBSERVED"
@@ -158,7 +158,7 @@ function appendHighlightSourceIdentity(parent, item, data) {
   source.className = "highlight-identity";
   const identitySide = item.after_present ? "after" : "before";
   const identity = document.createElement("span");
-  identity.textContent = `${text(item[`${identitySide}_identity_status`])} · 来源包ID ${text(item[`${identitySide}_source_package_id`])} · rev ${text(item.before_profile_revision)}→${text(item.after_profile_revision)}`;
+  identity.textContent = `${text(item[`${identitySide}_identity_status`])} · 来源捕获ID ${text(item[`${identitySide}_source_capture_id`])} · rev ${text(item.before_profile_revision)}→${text(item.after_profile_revision)}`;
   source.append(identity);
   const qualityIdentity = document.createElement("span");
   qualityIdentity.textContent = `security_id ${text(item[`${identitySide}_stable_security_id_status`])} · 上市 ${text(item[`${identitySide}_listing_status`])} · 停牌 ${text(item[`${identitySide}_suspension_status`])} · ${text(item[`${identitySide}_pit_status`])} · ${text(data.formal_listing_universe || "UNKNOWN_NOT_CONNECTED")}`;
@@ -168,7 +168,7 @@ function appendHighlightSourceIdentity(parent, item, data) {
   summary.textContent = "展开完整来源版本身份";
   details.append(summary);
   const full = document.createElement("div");
-  full.textContent = `前目标日 ${data.before_snapshot.target_session}；后目标日 ${data.after_snapshot.target_session}；前来源包ID ${item.before_source_package_id}；后来源包ID ${item.after_source_package_id}；前 profile_revision ${item.before_profile_revision}；后 profile_revision ${item.after_profile_revision}；前后坐标 ${text(item.before_price_coordinate)} → ${text(item.after_price_coordinate)}`;
+  full.textContent = `前目标日 ${data.before_snapshot.target_session}；后目标日 ${data.after_snapshot.target_session}；前来源捕获ID ${item.before_source_capture_id}；后来源捕获ID ${item.after_source_capture_id}；前 profile_revision ${item.before_profile_revision}；后 profile_revision ${item.after_profile_revision}；前后坐标 ${text(item.before_price_coordinate)} → ${text(item.after_price_coordinate)}`;
   details.append(full);
   source.append(details);
   parent.append(source);

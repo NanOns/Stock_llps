@@ -1,18 +1,19 @@
-"""将明确来源版本直接绑定到PostgreSQL Raw研究行。"""
+"""将明确BaoStock价格捕获绑定到PostgreSQL价格事实。"""
 
 from __future__ import annotations
 
 from datetime import date
 from typing import Any, Mapping, Sequence
 
-from stock_a.storage.postgres.source_raw import (
-    RawSourcePgError,
-    read_source_version_context as _read_source_version_context,
+from stock_a.storage.postgres.baostock_price_facts import (
+    BaoStockPriceFactsError,
+    read_baostock_price_catalog,
+    read_baostock_capture_roster,
 )
 
 
 class PgResearchBindingError(Exception):
-    """来源版本与用户请求的PG Raw事实无法精确闭合。"""
+    """价格捕获与用户请求的PG事实无法精确闭合。"""
 
     def __init__(self, code: str, message: str):
         self.code = code
@@ -29,44 +30,41 @@ def bind_source_context_to_raw_rows(
     source_context: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     target_raw_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """核对所选来源版本与目标日Raw行的日期、数字包ID和捕获引用。"""
+    """核对所选paired捕获与目标日BaoStock价格行。"""
     if (
         source_context.get("status") != "AVAILABLE"
         or source_context.get("target_session") != target_session.isoformat()
-        or source_context.get("source_package_id") != source_package_id
+        or source_context.get("source_capture_id") != source_capture_id
     ):
         raise PgResearchBindingError(
             "PG_RESEARCH_SOURCE_VERSION_MISMATCH",
-            "来源版本上下文与请求日期或数字包ID不一致。",
+            "来源捕获上下文与请求日期或source_capture_id不一致。",
         )
     target_rows = [
         row
         for row in target_raw_rows
         if _is_target_session(row.get("session_date"), target_session)
     ]
-    if len(target_rows) != 1:
+    if not target_rows:
         raise PgResearchBindingError(
-            "PG_RESEARCH_TARGET_RAW_AMBIGUOUS",
-            "单股Raw查询必须返回恰好一条精确目标日行。",
+            "PG_RESEARCH_TARGET_PRICE_MISSING",
+            "BaoStock价格查询没有返回精确目标日行。",
         )
-    target_row = target_rows[0]
-    if (
-        target_row.get("source_package_id") != source_package_id
-        or target_row.get("source_package_id")
-        != source_context.get("source_package_id")
-        or target_row.get("source_capture_id")
-        != source_context.get("source_capture_id")
+    if any(
+        row.get("source_capture_id") != source_capture_id
+        or row.get("source_symbol") is None
+        for row in target_rows
     ):
         raise PgResearchBindingError(
-            "PG_RESEARCH_RAW_REFERENCE_MISMATCH",
-            "目标日Raw行与来源包数字ID或捕获引用不一致。",
+            "PG_RESEARCH_PRICE_REFERENCE_MISMATCH",
+            "目标日价格行没有绑定同一BaoStock捕获与来源代码。",
         )
     bound_context = dict(source_context)
-    bound_context["target_raw_binding_count"] = 1
-    bound_context["target_raw_binding_verified"] = True
+    bound_context["target_price_binding_count"] = len(target_rows)
+    bound_context["target_price_binding_verified"] = True
     return bound_context
 
 
@@ -74,31 +72,97 @@ def read_source_version_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int | None,
+    research_cutoff: date | None = None,
     target_raw_rows: Sequence[Mapping[str, Any]] = (),
     expected_raw_row_count: int | None = None,
+    price_coordinate: str | None = None,
 ) -> dict[str, Any]:
-    """从Raw、捕获和原始包父记录读取精确来源上下文。"""
-    try:
-        source = _read_source_version_context(
-            config,
-            target_session=target_session,
-            source_package_id=source_package_id,
+    """读取唯一paired BaoStock捕获上下文，不从TDX包或文件回退。"""
+    if type(target_session) is not date:
+        raise PgResearchBindingError(
+            "PG_RESEARCH_TARGET_SESSION_INVALID", "研究来源上下文必须绑定官方交易日"
         )
-    except RawSourcePgError as error:
+    cutoff = target_session if research_cutoff is None else research_cutoff
+    if type(cutoff) is not date or cutoff < target_session:
+        raise PgResearchBindingError(
+            "PG_RESEARCH_CUTOFF_INVALID", "来源上下文截止日必须不早于目标会话"
+        )
+    if source_capture_id is not None and (
+        type(source_capture_id) is not int or source_capture_id <= 0
+    ):
+        raise PgResearchBindingError(
+            "PG_RESEARCH_CAPTURE_ID_INVALID", "source_capture_id必须为正整数或空值"
+        )
+    try:
+        catalog = read_baostock_price_catalog(
+            config,
+            cutoff=cutoff,
+            source_capture_id=source_capture_id,
+        )
+    except BaoStockPriceFactsError as error:
         raise PgResearchBindingError(error.code, str(error)) from error
-    if source.get("status") != "AVAILABLE":
+    versions = [
+        item
+        for item in catalog.get("price_coordinate_versions", [])
+        if item.get("session_date") == target_session.isoformat()
+        and (
+            source_capture_id is None
+            or item.get("source_capture_id") == source_capture_id
+        )
+    ]
+    capture_ids = {item.get("source_capture_id") for item in versions}
+    if not versions:
         raise PgResearchBindingError(
             "PG_RESEARCH_SOURCE_VERSION_UNAVAILABLE",
-            "该日期与数字来源包ID没有可用的Raw来源版本。",
+            "该日期没有可读的paired BaoStock价格捕获。",
         )
+    if len(capture_ids) != 1 or None in capture_ids:
+        raise PgResearchBindingError(
+            "PG_RESEARCH_SOURCE_VERSION_AMBIGUOUS",
+            "该目标日对应多个BaoStock捕获，必须明确指定source_capture_id。",
+        )
+    capture_id = next(iter(capture_ids))
+    try:
+        roster = read_baostock_capture_roster(
+            config,
+            source_capture_id=int(capture_id),
+            cutoff=cutoff,
+        )
+    except BaoStockPriceFactsError as error:
+        raise PgResearchBindingError(error.code, str(error)) from error
+    if (
+        not isinstance(roster, Mapping)
+        or roster.get("status") != "AVAILABLE"
+        or roster.get("source_capture_id") != capture_id
+    ):
+        raise PgResearchBindingError(
+            "PG_RESEARCH_CAPTURE_CLOCK_UNAVAILABLE",
+            "BaoStock capture roster缺少已存的真实read_started_at/validated_at。",
+        )
+    by_coordinate = {item.get("price_coordinate"): item for item in versions}
+    raw = by_coordinate.get("RAW_UNADJUSTED")
+    qfq = by_coordinate.get("FORWARD_ADJUSTED")
+    if raw is None or qfq is None:
+        raise PgResearchBindingError(
+            "PG_RESEARCH_PAIRED_COORDINATE_MISSING",
+            "目标日paired捕获缺少RAW_UNADJUSTED或FORWARD_ADJUSTED目录事实。",
+        )
+    raw_rows = raw.get("row_count")
+    expected_rows = raw.get("expected_row_count")
     if expected_raw_row_count is not None and (
-        type(expected_raw_row_count) is not int
-        or expected_raw_row_count != source.get("raw_row_count")
+        type(expected_raw_row_count) is not int or expected_raw_row_count != raw_rows
     ):
         raise PgResearchBindingError(
             "PG_RESEARCH_RAW_COUNT_MISMATCH",
-            "目标日Raw行数与同一捕获记录的来源代码数不一致。",
+            "目标日RAW行数与BaoStock捕获目录不一致。",
+        )
+    if price_coordinate is not None and price_coordinate not in {
+        "RAW_UNADJUSTED",
+        "FORWARD_ADJUSTED",
+    }:
+        raise PgResearchBindingError(
+            "PG_RESEARCH_PRICE_COORDINATE_INVALID", "价格坐标不在固定BaoStock坐标枚举中"
         )
     if target_raw_rows:
         target_rows = [
@@ -106,24 +170,46 @@ def read_source_version_context(
             for row in target_raw_rows
             if _is_target_session(row.get("session_date"), target_session)
         ]
-        if not target_rows:
+        if not target_rows or any(
+            row.get("source_capture_id") != capture_id for row in target_rows
+        ):
             raise PgResearchBindingError(
-                "PG_RESEARCH_TARGET_RAW_MISSING", "读取中没有精确目标日Raw行。"
+                "PG_RESEARCH_PRICE_REFERENCE_MISMATCH",
+                "读取的目标价格行与paired捕获身份不一致。",
             )
-        for row in target_rows:
-            if (
-                row.get("source_package_id") != source_package_id
-                or row.get("source_package_id") != source.get("source_package_id")
-                or row.get("source_capture_id") != source.get("source_capture_id")
-            ):
-                raise PgResearchBindingError(
-                    "PG_RESEARCH_RAW_REFERENCE_MISMATCH",
-                    "目标日Raw行与来源包或捕获引用不一致。",
-                )
-    source["capture_read_started_at"] = source.get("capture_started_at")
-    source["target_raw_binding_count"] = len(target_raw_rows)
-    source["target_raw_binding_verified"] = bool(target_raw_rows)
-    source["database_write"] = False
-    source["ddl_executed"] = False
-    source["candidate_fallback"] = False
-    return source
+    complete = (
+        raw.get("coverage_status") == "COMPLETE"
+        and qfq.get("coverage_status") == "COMPLETE"
+    )
+    return {
+        "status": "AVAILABLE",
+        "target_session": target_session.isoformat(),
+        "source_capture_id": capture_id,
+        "capture_read_started_at": roster.get("captured_at_start"),
+        "capture_validated_at": roster.get("captured_at_validated"),
+        "capture_started_at": roster.get("captured_at_start"),
+        "capture_verified_at": roster.get("captured_at_validated"),
+        "provider": "BAOSTOCK",
+        "source_time_quality": roster.get("source_time_quality"),
+        "source_clock_role": roster.get("source_clock_role"),
+        "source_available_at": None,
+        "price_coordinate": price_coordinate,
+        "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+        "raw_row_count": raw_rows,
+        "qfq_row_count": qfq.get("row_count"),
+        "capture_expected_row_count": expected_rows,
+        "raw_coverage_status": raw.get("coverage_status"),
+        "qfq_coverage_status": qfq.get("coverage_status"),
+        "version_status": "COMPLETE" if complete else "INCOMPLETE",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+        "listing_status": "LISTING_STATUS_UNKNOWN",
+        "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
+        "official_listing_universe_status": "UNKNOWN",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "database_write": False,
+        "ddl_executed": False,
+        "source_io_attempted": False,
+        "candidate_fallback": False,
+    }

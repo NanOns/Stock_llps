@@ -352,7 +352,7 @@ def aggregate_days(days):
     """对每个同日对照等权；市场宽度正负是预先固定的条件分层。"""
     identities = {
         (
-            d["source_version"].get("source_package_id"),
+            d["source_version"].get("source_capture_id"),
             d["source_version"].get("parser_contract"),
             d["source_version"].get("source_time_quality"),
             d["calendar_revision"],

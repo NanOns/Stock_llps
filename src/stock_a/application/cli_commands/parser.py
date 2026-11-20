@@ -4,15 +4,7 @@ from __future__ import annotations
 
 import argparse
 from stock_a.application.runtime_config import (
-    DiagnosticError,
-    _CONFIG_ROOT,
     _EXIT_ARGUMENT,
-    _EXIT_ENGINEERING,
-    _EXIT_OK,
-    _EXIT_PERMISSION,
-    _EXIT_UNAVAILABLE,
-    _WORKSPACE,
-    load_runtime_config as _load_runtime_config,
 )
 
 from stock_a.application.cli_commands.common import _emit
@@ -137,9 +129,6 @@ def _parser() -> argparse.ArgumentParser:
     from stock_a.application.cli_commands.parser_registration.research import (
         register_commands as register_research,
     )
-    from stock_a.application.cli_commands.parser_registration.vipdata import (
-        register_commands as register_vipdata,
-    )
     from stock_a.application.cli_commands.parser_registration.source import (
         register_commands as register_source,
     )
@@ -150,7 +139,6 @@ def _parser() -> argparse.ArgumentParser:
     register_diagnostics(commands)
     register_inspection(commands)
     register_research(commands)
-    register_vipdata(commands)
     register_source(commands)
     register_analysis(commands)
     return parser

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import time
+import traceback
 from typing import Any, Iterator, Mapping, Sequence
 from typing import Callable
 
@@ -188,9 +189,22 @@ def _transaction(
             if write
             else "PG_READ_FAILED"
         )
+        origin = ""
+        frames = traceback.extract_tb(error.__traceback__)
+        if frames:
+            frame = frames[-1]
+            origin = f"，位置={Path(frame.filename).name}:{frame.lineno} {frame.name}"
+        detail = ""
+        if sqlstate is None and type(error).__name__ == "ProgrammingError":
+            primary = getattr(getattr(error, "diag", None), "message_primary", None)
+            if not isinstance(primary, str) or not primary.strip():
+                primary = str(error).splitlines()[0] if str(error) else ""
+            if primary:
+                detail = f"，诊断={primary[:180]}"
         raise RawSourcePgError(
             failure_code,
-            f"固定stock_a.stock来源Raw事务失败（{type(error).__name__}，SQLSTATE={sqlstate or 'UNKNOWN'}）",
+            "固定stock_a.stock来源Raw事务失败"
+            f"（{type(error).__name__}，SQLSTATE={sqlstate or 'UNKNOWN'}{origin}{detail}）",
         ) from error
 
 

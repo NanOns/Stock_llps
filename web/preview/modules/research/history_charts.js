@@ -52,20 +52,28 @@ function validOhlc(fields, quality) {
     return null;
   return result;
 }
-function dayOhlc(point) {
-  return validOhlc(point.raw_ohlc, point.raw_ohlc?.quality);
+function coordinateOhlc(point, coordinate = state.timeline?.price_coordinate) {
+  if (coordinate === "RAW_UNADJUSTED") return point?.raw_ohlc || null;
+  if (coordinate === "FORWARD_ADJUSTED") return point?.qfq_ohlc || null;
+  return null;
+}
+function dayOhlc(point, coordinate = state.timeline?.price_coordinate) {
+  const fields = coordinateOhlc(point, coordinate);
+  return validOhlc(fields, fields?.quality);
 }
 function periodOhlc(period, binding) {
-  const samePackage =
-    Array.isArray(period.source_source_package_ids) &&
-    period.source_source_package_ids.length > 0 &&
-    period.source_source_package_ids.every(
-      (value) => value === binding.source_package_id,
-    );
   if (
-    !samePackage ||
+    period.source_capture_id !== binding.source_capture_id ||
+    period.price_coordinate !== binding.price_coordinate ||
+    period.time_role !== "NON_PIT_RETROSPECTIVE" ||
     period.calendar_closed !== true ||
-    period.coverage_status !== "COMPLETE"
+    period.coverage_status !== "COMPLETE" ||
+    !Array.isArray(period.daily_rows) ||
+    period.daily_rows.some(
+      (row) =>
+        row.source_capture_id !== binding.source_capture_id ||
+        row.price_coordinate !== binding.price_coordinate,
+    )
   )
     return null;
   const fields = Object.fromEntries(
@@ -80,8 +88,9 @@ function periodOhlc(period, binding) {
   return validOhlc(fields, "OBSERVED");
 }
 function pointDetail(point) {
-  const fields = point.raw_ohlc || {};
-  const values = dayOhlc(point);
+  const coordinate = state.timeline?.price_coordinate;
+  const fields = coordinateOhlc(point, coordinate) || {};
+  const values = dayOhlc(point, coordinate);
   const source = state.timeline?.source_version || {};
   const root = $("chartDetail");
   renderPriceStructureObservation(point);
@@ -90,7 +99,7 @@ function pointDetail(point) {
   const details = document.createElement("dl");
   const pairs = [
     [
-      "RAW OHLC",
+      `${coordinate || "UNKNOWN"} OHLC`,
       values
         ? `O ${values.open.exact} · H ${values.high.exact} · L ${values.low.exact} · C ${values.close.exact}`
         : `不出蜡烛 · ${text(fields.reason || point.price_reason || point.raw_status)}`,
@@ -107,16 +116,16 @@ function pointDetail(point) {
         : `UNKNOWN · ${text(point.relation_unknown_reason)}`,
     ],
     [
-      "原始坐标 / 时间资格",
-      `${state.timeline?.price_coordinate || "RAW_UNADJUSTED"} · ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · ${state.timeline?.identity_status || "SOURCE_SYMBOL_ONLY"}`,
+      "价格坐标 / 时间资格",
+      `${coordinate || "UNKNOWN"} · ${state.timeline?.time_role || state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · ${state.timeline?.identity_status || "SOURCE_SYMBOL_ONLY"}`,
     ],
     [
-      "目标 / 代码 / 来源包ID",
-      `${state.timeline?.target_session || "—"} · ${state.timeline?.symbol || "—"} · ${point.source_package_id}`,
+      "目标 / 代码 / 来源捕获ID",
+      `${state.timeline?.target_session || "—"} · ${state.timeline?.symbol || "—"} · ${point.source_capture_id}`,
     ],
     [
       "来源捕获ID",
-      `${text(point.source_capture_id)} · 来源包 ${text(point.source_package_id)}`,
+      `${text(point.source_capture_id)} · 来源捕获 ${text(point.source_capture_id)}`,
     ],
     [
       "MA20窗口",
@@ -124,7 +133,7 @@ function pointDetail(point) {
     ],
     [
       "研究边界",
-      "NON_PIT来源代码级历史观察，不是复权价格、正式Profile或交易信号。",
+      `${coordinate || "UNKNOWN"}来源代码级历史观察；历史后验NON_PIT，不是正式Profile或交易信号。`,
     ],
   ];
   for (const [label, value] of pairs) {
@@ -136,7 +145,7 @@ function pointDetail(point) {
     appendText(
       root,
       "p",
-      "PG未保存该官方会话Raw行；不可发起单日Core请求。",
+      "PG未保存该官方会话价格行；不可发起单日Core请求。",
       "muted",
     );
     return;
@@ -144,16 +153,20 @@ function pointDetail(point) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "quiet";
-  button.textContent = "查看当日Core / 周月";
+  button.textContent =
+    coordinate === "RAW_UNADJUSTED"
+      ? "查看当日未复权价格 / 周月"
+      : "查看当日Core / 前复权价格";
   const exactOption = state.versions.some(
     (version) =>
       version.session_date === point.session_date &&
-      version.source_package_id === point.source_package_id,
+      version.source_capture_id === point.source_capture_id,
   );
   button.disabled = !exactOption;
   if (exactOption)
     button.addEventListener("click", () => openTimelineSession(point));
-  else button.title = "目录中没有相同日期和来源包ID的版本，不能回退其他版本。";
+  else
+    button.title = "目录中没有相同日期和来源捕获ID的版本，不能回退其他版本。";
   root.append(button);
 }
 function periodDetail(period, mode) {
@@ -170,13 +183,13 @@ function periodDetail(period, mode) {
     root,
     "p",
     ohlc
-      ? `闭合且完整 · RAW_UNADJUSTED · O ${ohlc.open.exact} · H ${ohlc.high.exact} · L ${ohlc.low.exact} · C ${ohlc.close.exact}`
+      ? `闭合且完整 · ${period.price_coordinate} · ${period.time_role} · O ${ohlc.open.exact} · H ${ohlc.high.exact} · L ${ohlc.low.exact} · C ${ohlc.close.exact}`
       : `不出完整周期蜡烛 · ${text(period.coverage_status)} · ${(period.reason_codes || []).map(text).join(" / ") || "周期未闭合或来源覆盖不足"}`,
   );
   appendText(
     root,
     "p",
-    `官方会话 ${period.elapsed_expected_session_count}/${period.calendar_expected_session_count} · 有效Bar ${period.valid_price_bar_count} · 缺Bar ${period.target_missing_count} · 读取失败 ${period.read_failed_count} · PG未保存 ${period.missing_history_count} · 来源包ID ${state.rawPeriods?.snapshot_identity?.source_package_id || "UNKNOWN"}`,
+    `官方会话 ${period.elapsed_expected_session_count}/${period.calendar_expected_session_count} · 有效Bar ${period.valid_price_bar_count} · 缺Bar ${period.target_missing_count} · 读取失败 ${period.read_failed_count} · PG未保存 ${period.missing_history_count} · 来源捕获ID ${state.rawPeriods?.snapshot_identity?.source_capture_id || "UNKNOWN"}`,
     "muted",
   );
   if (!period.daily_rows?.length) {
@@ -191,7 +204,7 @@ function periodDetail(period, mode) {
   tableRow(head, [
     "交易会话",
     "Bar / 价格质量",
-    "RAW OHLC",
+    `${state.rawPeriodContext?.price_coordinate || "UNKNOWN"} OHLC`,
     "来源证据",
     "单日研究",
   ]);
@@ -203,7 +216,7 @@ function periodDetail(period, mode) {
       daily.valid_price_bar
         ? `O ${text(daily.open)} · H ${text(daily.high)} · L ${text(daily.low)} · C ${text(daily.close)}`
         : "无有效OHLC",
-      `${text(daily.source_package_id)} · ${text(daily.source_capture_id)}`,
+      `${text(daily.source_capture_id)} · ${text(daily.price_coordinate)} · ${text(period.time_role)}`,
       "",
     ]);
     const action = row.lastElementChild;
@@ -220,7 +233,7 @@ function periodDetail(period, mode) {
     const exactOption = state.versions.some(
       (version) =>
         version.session_date === daily.session &&
-        version.source_package_id === state.rawPeriodContext?.source_package_id,
+        version.source_capture_id === state.rawPeriodContext?.source_capture_id,
     );
     button.disabled = !point || !point.raw_row_present || !exactOption;
     if (!button.disabled)
@@ -237,9 +250,11 @@ function periodDetail(period, mode) {
 function chartContextForTimeline(data) {
   return {
     target_session: data?.selection?.target_session || data?.target_session,
-    source_package_id:
-      data?.selection?.source_package_id || data?.source_package_id,
+    source_capture_id:
+      data?.selection?.source_capture_id || data?.source_capture_id,
     symbol: data?.selection?.source_symbol || data?.symbol,
+    price_coordinate: data?.price_coordinate,
+    time_role: data?.time_role || "NON_PIT_RETROSPECTIVE",
   };
 }
 function chartSlotLabel(item, mode) {
@@ -250,7 +265,7 @@ function makeCandleTitle(item, mode) {
   const label = chartSlotLabel(item, mode);
   if (!item.ohlc)
     return `${label} · ${item.quality || "UNKNOWN"} · ${item.reason || "不出蜡烛"}`;
-  return `${label} · RAW_UNADJUSTED · O ${item.ohlc.open.exact} · H ${item.ohlc.high.exact} · L ${item.ohlc.low.exact} · C ${item.ohlc.close.exact}`;
+  return `${label} · ${state.timeline?.price_coordinate || item.period?.price_coordinate || "UNKNOWN"} · O ${item.ohlc.open.exact} · H ${item.ohlc.high.exact} · L ${item.ohlc.low.exact} · C ${item.ohlc.close.exact}`;
 }
 function renderCandlestickChart(data) {
   const chart = $("candlestickChart");
@@ -275,21 +290,26 @@ function renderCandlestickChart(data) {
   }
   const timelineBinding = chartContextForTimeline(data);
   const periodBinding = state.chartPeriodContext || timelineBinding;
-  identity.textContent = `${mode === "day" ? "日K轨迹" : mode === "week" ? "自然周K" : "自然月K"} · ${periodBinding.symbol} · 截止 ${periodBinding.target_session} · 来源包ID ${periodBinding.source_package_id} · RAW_UNADJUSTED / NON_PIT / SOURCE_SYMBOL_ONLY`;
+  identity.textContent = `${mode === "day" ? "日K轨迹" : mode === "week" ? "自然周K" : "自然月K"} · ${periodBinding.symbol} · 截止 ${periodBinding.target_session} · 来源捕获ID ${periodBinding.source_capture_id} · ${periodBinding.price_coordinate || "UNKNOWN"} / NON_PIT_RETROSPECTIVE / SOURCE_SYMBOL_ONLY`;
   let items = [];
   let periods = [];
   if (mode === "day") {
     items = (data.points || []).map((point) => ({
       point,
-      ohlc: dayOhlc(point),
-      quality: point.raw_ohlc?.quality || point.price_quality,
-      reason: point.raw_ohlc?.reason || point.price_reason || point.raw_status,
+      ohlc: dayOhlc(point, data.price_coordinate),
+      quality:
+        coordinateOhlc(point, data.price_coordinate)?.quality ||
+        point.price_quality,
+      reason:
+        coordinateOhlc(point, data.price_coordinate)?.reason ||
+        point.price_reason ||
+        point.raw_status,
     }));
-    notice.textContent = `实际官方会话 ${items.length} 个；有效RAW蜡烛 ${items.filter((item) => item.ohlc).length} 个。缺Bar、读取失败、未保存Raw、坏值均保留原会话位置且不补价；黄色线仅连接连续可观测Core MA20。`;
+    notice.textContent = `实际官方会话 ${items.length} 个；有效${data.price_coordinate}蜡烛 ${items.filter((item) => item.ohlc).length} 个。缺Bar、读取失败、未保存价格行、坏值均保留原会话位置且不补价；橙线仅连接连续可观测Core MA20。`;
   } else {
     if (!rawPeriodsMatch(periodBinding)) {
       notice.textContent =
-        "尚无与当前轨迹日期、来源包ID和来源代码一致的周期结果；切换后按当前身份进行一次只读读取。";
+        "尚无与当前轨迹日期、来源捕获ID和来源代码一致的周期结果；切换后按当前身份进行一次只读读取。";
       if (!state.chartSelection) detail.replaceChildren();
       return;
     }
@@ -364,7 +384,7 @@ function renderCandlestickChart(data) {
     class: "candlestick-svg",
     viewBox: `0 0 ${width} ${height}`,
     role: "group",
-    "aria-label": `${identity.textContent}；图中仅绘制真实且质量合格的RAW OHLC。`,
+    "aria-label": `${identity.textContent}；图中仅绘制真实且质量合格的所选价格坐标OHLC。`,
     preserveAspectRatio: "xMidYMid meet",
   });
   svg.append(svgElement("title", {}, identity.textContent));
@@ -539,7 +559,7 @@ async function setChartMode(mode) {
   if (rawPeriodsMatch(binding)) return;
   const version = {
     target_session: binding.target_session,
-    source_package_id: binding.source_package_id,
+    source_capture_id: binding.source_capture_id,
   };
   try {
     await loadRawPeriods(
@@ -580,39 +600,41 @@ function renderTimeline(data, errorMessage = "") {
     .map(([event, count]) => `${text(event)} ${count}`)
     .join(" · ");
   status.textContent =
-    `${data.symbol} · 截止 ${data.target_session} · ${data.total_session_count} 个官方会话 · ` +
-    `Raw行 ${data.raw_row_count} · 有效价格Bar ${data.valid_price_bar_count} · ` +
-    `MA20关系可评价 ${data.known_count}/${data.total_session_count} · ` +
-    `未知 ${data.unknown_count} · 可比较跨日 ${data.comparable_transition_count} · ` +
-    `不可比较 ${data.not_comparable_count} · 首次可评价 ${data.first_evaluable_count}次 ` +
-    `（${data.first_evaluable_session || "尚无"}）。` +
-    `事件：${counts || "无"}。${data.price_coordinate} / ${data.research_mode}；` +
-    `${data.producer || "stock_a.research.core:calculate_core"} · ${data.semantic_version || "CORE_PRIMITIVES_FIELDSET_R2"}。` +
-    "身份SOURCE_SYMBOL_ONLY/NON_PIT；选股NOT_EVALUATED/NOT_CONNECTED；严格PIT、复权与RPS资格UNKNOWN；Raw候选数不等于官方上市总体。";
+    data.price_coordinate === "RAW_UNADJUSTED"
+      ? `${data.symbol} · 截止 ${data.target_session} · ${data.total_session_count}个官方会话 · 捕获ID ${data.source_capture_id} · RAW OHLC有效 ${data.valid_price_bar_count} · Core/MA关系 NOT_COMPUTED（QFQ专用）。历史后验 NON_PIT_RETROSPECTIVE；SOURCE_SYMBOL_ONLY。`
+      : `${data.symbol} · 截止 ${data.target_session} · ${data.total_session_count} 个官方会话 · ` +
+        `BaoStock行 ${data.raw_row_count} · 有效QFQ价格Bar ${data.valid_price_bar_count} · ` +
+        `MA20关系可评价 ${data.known_count}/${data.total_session_count} · ` +
+        `未知 ${data.unknown_count} · 可比较跨日 ${data.comparable_transition_count} · ` +
+        `不可比较 ${data.not_comparable_count} · 首次可评价 ${data.first_evaluable_count}次 ` +
+        `（${data.first_evaluable_session || "尚无"}）。` +
+        `事件：${counts || "无"}。${data.price_coordinate} / ${data.research_mode}；` +
+        `${data.producer || "stock_a.research.core:calculate_core"} · ${data.semantic_version || "CORE_PRIMITIVES_FIELDSET_R2"}。` +
+        "身份SOURCE_SYMBOL_ONLY/NON_PIT；选股NOT_EVALUATED/NOT_CONNECTED；严格PIT、复权与RPS资格UNKNOWN；来源候选不等于官方上市总体。";
   renderTimelineReturnControls(state.timelineContext, selectedVersion());
   renderMa20DirectionHistory(data.ma20_direction_history);
   renderPriceRelationHistory(data.price_relation_history);
   for (const point of data.points || []) {
     const tr = document.createElement("tr");
-    const rawOhlc = point.raw_ohlc;
-    const rawOhlcText = rawOhlc
+    const priceOhlc = coordinateOhlc(point, data.price_coordinate);
+    const priceOhlcText = priceOhlc
       ? [
-          `O ${timelineField(rawOhlc.open)}`,
-          `H ${timelineField(rawOhlc.high)}`,
-          `L ${timelineField(rawOhlc.low)}`,
-          `C ${timelineField(rawOhlc.close)}`,
-          rawOhlc.quality === "OBSERVED"
+          `O ${timelineField(priceOhlc.open)}`,
+          `H ${timelineField(priceOhlc.high)}`,
+          `L ${timelineField(priceOhlc.low)}`,
+          `C ${timelineField(priceOhlc.close)}`,
+          priceOhlc.quality === "OBSERVED"
             ? "OBSERVED"
-            : `${text(rawOhlc.quality)} · ${text(rawOhlc.reason)}`,
+            : `${text(priceOhlc.quality)} · ${text(priceOhlc.reason)}`,
         ].join(" · ")
-      : "UNKNOWN · 轨迹未提供RAW OHLC字段";
+      : `NOT_COMPUTED · 轨迹未提供${text(data.price_coordinate)} OHLC字段`;
     cell(tr, point.session_date);
     cell(
       tr,
-      `${text(point.raw_status)} · ${text(point.price_quality)}${point.price_reason ? ` · ${point.price_reason}` : ""}`,
+      `${text(point.raw_status)} · ${text(priceOhlc?.quality || point.price_quality)}${priceOhlc?.reason || point.price_reason ? ` · ${priceOhlc?.reason || point.price_reason}` : ""}`,
     );
-    cell(tr, rawOhlcText);
-    cell(tr, timelineField(point.raw_close));
+    cell(tr, priceOhlcText);
+    cell(tr, timelineField(priceOhlc?.close));
     cell(tr, timelineField(point.core_ma20));
     cell(
       tr,
@@ -645,7 +667,7 @@ function renderTimeline(data, errorMessage = "") {
     const exactOption = state.versions.some(
       (version) =>
         version.session_date === point.session_date &&
-        version.source_package_id === point.source_package_id,
+        version.source_capture_id === point.source_capture_id,
     );
     button.disabled = point.raw_row_present !== true || !exactOption;
     if (!point.raw_row_present) {
@@ -654,9 +676,13 @@ function renderTimeline(data, errorMessage = "") {
         "该官方会话没有此来源代码的PG Raw行，不会发起单日Core请求。";
     } else if (!exactOption) {
       button.textContent = "缺少精确目录版本";
-      button.title = "目录中没有同日期、来源包ID一致的版本，不能回退其他版本。";
+      button.title =
+        "目录中没有同日期、来源捕获ID一致的版本，不能回退其他版本。";
     } else {
-      button.textContent = "查看当日Core / 周月";
+      button.textContent =
+        data.price_coordinate === "RAW_UNADJUSTED"
+          ? "查看当日未复权价格 / 周月"
+          : "查看当日Core / 前复权价格";
       button.addEventListener("click", () => openTimelineSession(point));
     }
     actionCell.append(button);
@@ -678,7 +704,7 @@ async function queryTimeline(binding = null) {
     $("queryTimeline").disabled = false;
     renderTimeline(
       null,
-      "请先选择目标日和完整来源包版本，并填写来源代码及会话数。",
+      "请先选择目标日和完整价格捕获，并填写来源代码及会话数。",
     );
     return;
   }
@@ -689,6 +715,7 @@ async function queryTimeline(binding = null) {
     ...version,
     symbol,
     session_count: sessionCount,
+    price_coordinate: state.priceCoordinate,
     origin: binding?.origin || "manual",
     persistedProfileSnapshot: binding?.persistedProfileSnapshot || null,
     returnSelection: binding?.returnSelection || null,
@@ -696,14 +723,15 @@ async function queryTimeline(binding = null) {
   };
   state.timelineContext = context;
   renderCandlestickChart(null);
-  const requestKey = `${version.target_session}|${version.source_package_id}|${symbol}|${sessionCount}`;
+  const priceCoordinate = state.priceCoordinate;
+  const requestKey = `${version.target_session}|${version.source_capture_id}|${symbol}|${sessionCount}|${priceCoordinate}`;
   const requestIsCurrent = () => {
     const currentVersion = selectedVersion();
     return (
       requestId === state.timelineRequest &&
       state.timelineContext === context &&
       requestKey ===
-        `${currentVersion?.target_session}|${currentVersion?.source_package_id}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
+        `${currentVersion?.target_session}|${currentVersion?.source_capture_id}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}|${state.priceCoordinate}`
     );
   };
   $("queryTimeline").disabled = true;
@@ -718,53 +746,80 @@ async function queryTimeline(binding = null) {
       body: JSON.stringify({
         symbol,
         target_session: version.target_session,
-        source_package_id: version.source_package_id,
+        source_capture_id: version.source_capture_id,
         session_count: sessionCount,
+        price_coordinate: priceCoordinate,
       }),
     });
     if (!requestIsCurrent()) return;
     const relationHistory = data.price_relation_history;
     if (
+      data.price_coordinate !== priceCoordinate ||
+      data.time_role !== "NON_PIT_RETROSPECTIVE" ||
       data.snapshot_identity?.target_session !== version.target_session ||
-      data.snapshot_identity?.source_package_id !== version.source_package_id ||
+      data.snapshot_identity?.source_capture_id !== version.source_capture_id ||
+      data.snapshot_identity?.price_coordinate !== priceCoordinate ||
+      data.selection?.price_coordinate !== priceCoordinate ||
       data.selection?.source_symbol !== symbol ||
       data.selection?.target_session !== version.target_session ||
-      data.selection?.source_package_id !== version.source_package_id
+      data.selection?.source_capture_id !== version.source_capture_id ||
+      (data.source_capture_id != null &&
+        data.source_capture_id !== version.source_capture_id)
     )
       throw new Error("轨迹响应身份与精确变化快照不一致，已拒绝展示。");
     if (
-      !relationHistory ||
-      relationHistory.official_session_count !== data.total_session_count ||
-      relationHistory.comparison_count !==
-        Math.max(0, data.total_session_count - 1) * 5
+      !Array.isArray(data.points) ||
+      data.points.some(
+        (point) =>
+          point.source_capture_id !== version.source_capture_id ||
+          point.price_coordinate !== priceCoordinate,
+      )
+    )
+      throw new Error("轨迹价格点未回显匹配的来源捕获与价格坐标，已拒绝展示。");
+    if (
+      priceCoordinate === "FORWARD_ADJUSTED" &&
+      (!relationHistory ||
+        relationHistory.official_session_count !== data.total_session_count ||
+        relationHistory.comparison_count !==
+          Math.max(0, data.total_session_count - 1) * 5)
     )
       throw new Error(
         "价格变化记录没有绑定当前完整轨迹身份或官方会话分母，已拒绝展示。",
       );
-    const pointDates = (data.points || []).map((point) => point.session_date);
-    for (const item of relationHistory.observations || []) {
-      const index = pointDates.indexOf(item.session_date);
-      if (index < 1 || pointDates[index - 1] !== item.previous_official_session)
-        throw new Error(
-          "价格变化记录不是同一精确轨迹中的紧邻官方会话，已拒绝展示。",
-        );
+    if (priceCoordinate === "FORWARD_ADJUSTED") {
+      const pointDates = (data.points || []).map((point) => point.session_date);
+      for (const item of relationHistory.observations || []) {
+        const index = pointDates.indexOf(item.session_date);
+        if (
+          index < 1 ||
+          pointDates[index - 1] !== item.previous_official_session
+        )
+          throw new Error(
+            "价格变化记录不是同一精确轨迹中的紧邻官方会话，已拒绝展示。",
+          );
+      }
+      const eventKeys = new Set(
+        (relationHistory.events || []).map((item) => item.event_key),
+      );
+      if (
+        [...eventKeys].some(
+          (eventKey) =>
+            !(relationHistory.observations || []).some(
+              (item) =>
+                `${item.session_date}|${item.field_id}|${item.event_kind}` ===
+                  eventKey && item.comparison_status === "RELATION_CHANGED",
+            ),
+        ) ||
+        eventKeys.size !== relationHistory.event_count
+      )
+        throw new Error("价格变化事件与关系观察集合不一致，已拒绝展示。");
+      validateMa20DirectionHistory(data);
+    } else if (
+      relationHistory?.status !== "NOT_COMPUTED" ||
+      data.ma20_direction_history?.status !== "NOT_COMPUTED"
+    ) {
+      throw new Error("未复权响应错误地返回了Core或价格关系计算结果。");
     }
-    const eventKeys = new Set(
-      (relationHistory.events || []).map((item) => item.event_key),
-    );
-    if (
-      [...eventKeys].some(
-        (eventKey) =>
-          !(relationHistory.observations || []).some(
-            (item) =>
-              `${item.session_date}|${item.field_id}|${item.event_kind}` ===
-                eventKey && item.comparison_status === "RELATION_CHANGED",
-          ),
-      ) ||
-      eventKeys.size !== relationHistory.event_count
-    )
-      throw new Error("价格变化事件与关系观察集合不一致，已拒绝展示。");
-    validateMa20DirectionHistory(data);
     state.timeline = data;
     state.chartPeriodContext = chartContextForTimeline(data);
     renderTimeline(data);

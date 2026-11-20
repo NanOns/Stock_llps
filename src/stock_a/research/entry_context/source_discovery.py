@@ -31,7 +31,12 @@ def _normalize_symbol(value: str) -> tuple[str, str, str]:
     market, code = match.groups()
     market = market.upper()
     if market == "SH":
-        board = "MAIN_BOARD" if code.startswith(("600", "601", "603", "605")) else None
+        if code.startswith(("600", "601", "603", "605")):
+            board = "MAIN_BOARD"
+        elif code.startswith(("688", "689")):
+            board = "STAR_BOARD"
+        else:
+            board = None
         directory = "sh"
     else:
         if code.startswith(("000", "001", "002", "003")):
@@ -43,7 +48,7 @@ def _normalize_symbol(value: str) -> tuple[str, str, str]:
         directory = "sz"
     if board is None:
         raise ResearchEntryError(
-            "SYMBOL_OUT_OF_SCOPE", "代码类别不属于本入口的沪深主板/创业板范围"
+            "SYMBOL_OUT_OF_SCOPE", "代码类别不属于本入口的沪深主板、创业板或科创板范围"
         )
     symbol = f"{market}.{code}"
     return symbol, directory, board
@@ -158,7 +163,7 @@ def _discover_source_candidates(
     invalid_day_filenames = 0
     invalid_day_filename_samples: list[str] = []
     by_market = {"SH": 0, "SZ": 0}
-    by_board = {"MAIN_BOARD": 0, "GEM": 0}
+    by_board = {"MAIN_BOARD": 0, "GEM": 0, "STAR_BOARD": 0}
     for root in roots:
         for market, directory in (("SH", "sh"), ("SZ", "sz")):
             logical_directory = root / "vipdoc" / directory / "lday"

@@ -208,8 +208,9 @@ def _changed_stock_page(
     source = discovery["source"]
     required_source_fields = (
         "target_session",
-        "source_package_id",
         "source_capture_id",
+        "price_coordinate",
+        "time_role",
     )
     if any(not source.get(field) for field in required_source_fields):
         raise TdxSectorMembersApplicationError(
@@ -220,14 +221,15 @@ def _changed_stock_page(
             event_source = event.get("source")
             if (
                 not isinstance(event_source, Mapping)
-                or event_source.get("source_package_id") != source["source_package_id"]
                 or event_source.get("source_capture_id") != source["source_capture_id"]
                 or event_source.get("target_capture_id") != source["source_capture_id"]
+                or event_source.get("price_coordinate") != "FORWARD_ADJUSTED"
+                or event_source.get("time_role") != "NON_PIT_RETROSPECTIVE"
                 or event.get("target_session") != discovery["target_session"]
             ):
                 raise TdxSectorMembersApplicationError(
                     "D1_CHANGED_EVENT_SOURCE_MISMATCH",
-                    "D1变化锚事件与Raw来源包或目标捕获不一致",
+                    "D1变化锚事件与BaoStock paired capture或目标捕获不一致",
                 )
 
     sectors_by_symbol: dict[str, dict[tuple[str, str, str], dict[str, Any]]] = {
@@ -310,7 +312,8 @@ def _changed_stock_page(
                 "capture_started_at": discovery.get("source_capture_started_at"),
                 "capture_validated_at": discovery.get("source_capture_validated_at"),
                 "official_calendar": discovery.get("official_calendar"),
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": source["price_coordinate"],
+                "time_role": source["time_role"],
                 "entity_identity": "SOURCE_SYMBOL_ONLY",
                 "pit_status": "NON_PIT_RETROSPECTIVE",
             }
@@ -323,44 +326,17 @@ def _changed_stock_page(
             if member["also_in_sectors"]
             else "NO_CURRENT_TDX_BOARD_MEMBERSHIP_MATCH"
         )
-        history_base = [
-            "stock-a",
-            "source-d1-breakout-preview",
-            "--target-session",
-            discovery["target_session"],
-            "--research-cutoff",
-            discovery["research_cutoff"],
-            "--source-package-id",
-            source["source_package_id"],
-            "--symbol",
-            symbol,
-            "--history-start",
-            discovery["event_window_start"],
-            "--history-end",
-            discovery["target_session"],
-        ]
         member["drill_down"] = {
-            "research_stock_argv": [
-                "stock-a",
-                "research-stock",
-                symbol,
-                "--target-session",
-                discovery["target_session"],
-                "--unit-version",
-                "TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1",
-                "--pg-source-history",
-                "--pg-source-package-id",
-                source["source_package_id"],
+            "source_capture_id": source["source_capture_id"],
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "time_role": "NON_PIT_RETROSPECTIVE",
+            "source_symbol": symbol,
+            "target_session": discovery["target_session"],
+            "research_cutoff": discovery["research_cutoff"],
+            "history_start": discovery["event_window_start"],
+            "support_anchor_sessions": [
+                event["support_anchor_session"] for event in events
             ],
-            "d1_history_argv": [
-                history_base
-                + [
-                    "--support-anchor-session",
-                    event["support_anchor_session"],
-                ]
-                for event in events
-            ]
-            or [history_base],
         }
         stock_rows.append(member)
 
@@ -432,8 +408,16 @@ def _d0_launch_new_linkage(
         or len(change_rows) != source_keys.get("source_union_count")
         or not isinstance(before.get("source_version"), Mapping)
         or not isinstance(after.get("source_version"), Mapping)
-        or before["source_version"].get("source_package_id")
-        != after["source_version"].get("source_package_id")
+        or before["source_version"].get("source_capture_id")
+        != after["source_version"].get("source_capture_id")
+        or before["source_version"].get("price_coordinate") != "FORWARD_ADJUSTED"
+        or after["source_version"].get("price_coordinate") != "FORWARD_ADJUSTED"
+        or before["source_version"].get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or after["source_version"].get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or changes.get("source_capture_id")
+        != after["source_version"].get("source_capture_id")
+        or changes.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or changes.get("time_role") != "NON_PIT_RETROSPECTIVE"
         or before.get("official_calendar") != after.get("official_calendar")
         or before.get("session_contract") != after.get("session_contract")
         or before.get("algorithm_contract") != after.get("algorithm_contract")
@@ -484,7 +468,7 @@ def _d0_launch_new_linkage(
         if transition == "FALSE_TO_TRUE":
             if (
                 item.get("identity_status") != "SOURCE_SYMBOL_ONLY"
-                or item.get("price_coordinate") != "RAW_UNADJUSTED"
+                or item.get("price_coordinate") != "FORWARD_ADJUSTED"
                 or item.get("pit_status") != "NON_PIT_RETROSPECTIVE"
                 or item.get("scenario_role") != "DIAGNOSTIC_ONLY"
                 or not isinstance(item.get("before"), Mapping)
@@ -565,7 +549,7 @@ def _d0_launch_new_linkage(
             "before": change["before"],
             "after": change["after"],
             "identity_status": "SOURCE_SYMBOL_ONLY",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "pit_status": "NON_PIT_RETROSPECTIVE",
             "scenario_role": "DIAGNOSTIC_ONLY",
             "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
@@ -587,14 +571,18 @@ def _d0_launch_new_linkage(
     after_source = after["source_version"]
     summary = {
         "status": "AVAILABLE" if stock_rows else "EMPTY",
-        "analysis_scope": "FULL_RAW_SOURCE_POOL_D0_NEW_LAUNCH_JOINED_TO_CURRENT_TDX_MEMBERS",
+        "analysis_scope": "FULL_BAOSTOCK_QFQ_SOURCE_POOL_D0_NEW_LAUNCH_JOINED_TO_CURRENT_TDX_MEMBERS",
         "scenario": "LAUNCH_CONFIRM",
         "transition": "FALSE_TO_TRUE",
         "source_key": "market+source_symbol",
+        "source_capture_id": after_source.get("source_capture_id"),
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "before": {
             "target_session": before.get("target_session"),
             "source_capture_id": before_source.get("source_capture_id"),
-            "source_package_id": before_source.get("source_package_id"),
+            "price_coordinate": before_source.get("price_coordinate"),
+            "time_role": before_source.get("time_role"),
             "source_available_at": before_source.get("source_available_at"),
             "source_time_quality": before_source.get("source_time_quality"),
             "source_clock_role": before_source.get("source_clock_role"),
@@ -602,7 +590,8 @@ def _d0_launch_new_linkage(
         "after": {
             "target_session": after.get("target_session"),
             "source_capture_id": after_source.get("source_capture_id"),
-            "source_package_id": after_source.get("source_package_id"),
+            "price_coordinate": after_source.get("price_coordinate"),
+            "time_role": after_source.get("time_role"),
             "source_available_at": after_source.get("source_available_at"),
             "source_time_quality": after_source.get("source_time_quality"),
             "source_clock_role": after_source.get("source_clock_role"),
@@ -755,13 +744,17 @@ def combine_sector_strength_and_d1_changes(
     expected_identity = {
         "target_session": discovery.get("target_session"),
         "research_cutoff": discovery.get("research_cutoff"),
-        "source_package_id": d1_source.get("source_package_id"),
+        "source_capture_id": d1_source.get("source_capture_id"),
+        "price_coordinate": d1_source.get("price_coordinate"),
+        "time_role": d1_source.get("time_role"),
     }
     if (
         not expected_identity["target_session"]
         or not expected_identity["research_cutoff"]
-        or not expected_identity["source_package_id"]
-        or type(expected_identity["source_package_id"]) is not int
+        or type(expected_identity["source_capture_id"]) is not int
+        or expected_identity["source_capture_id"] <= 0
+        or expected_identity["price_coordinate"] != "FORWARD_ADJUSTED"
+        or expected_identity["time_role"] != "NON_PIT_RETROSPECTIVE"
     ):
         raise TdxSectorMembersApplicationError(
             "D1_SOURCE_IDENTITY_INVALID", "D1变化发现未绑定明确Raw来源身份"
@@ -792,12 +785,14 @@ def combine_sector_strength_and_d1_changes(
         actual_identity = {
             "target_session": strength.get("target_session"),
             "research_cutoff": strength.get("research_cutoff"),
-            "source_package_id": target_source.get("source_package_id"),
+            "source_capture_id": target_source.get("source_capture_id"),
+            "price_coordinate": target_source.get("price_coordinate"),
+            "time_role": target_source.get("time_role"),
         }
         if actual_identity != expected_identity:
             raise TdxSectorMembersApplicationError(
                 "R03_R04_SOURCE_IDENTITY_MISMATCH",
-                "R03强弱与R04变化不是同目标和数字来源包口径",
+                "R03强弱与R04变化不是同目标和数字来源捕获口径",
             )
         strength_calendar = strength.get("official_calendar")
         d1_calendar = discovery.get("official_calendar")
@@ -936,12 +931,14 @@ def combine_sector_strength_and_d1_changes(
         if (
             d0_after.get("target_session") != expected_identity["target_session"]
             or d0_after.get("research_cutoff") != expected_identity["research_cutoff"]
-            or d0_after_source.get("source_package_id")
-            != expected_identity["source_package_id"]
+            or d0_after_source.get("source_capture_id")
+            != expected_identity["source_capture_id"]
+            or d0_after_source.get("price_coordinate") != "FORWARD_ADJUSTED"
+            or d0_after_source.get("time_role") != "NON_PIT_RETROSPECTIVE"
         ):
             raise TdxSectorMembersApplicationError(
                 "D0_D1_SOURCE_IDENTITY_MISMATCH",
-                "D0后端与既有D1变化不是同目标、同来源包",
+                "D0后端与既有D1变化不是同目标、同来源捕获",
             )
     d0_by_symbol = {
         item["source_symbol"]: item
@@ -1023,40 +1020,15 @@ def combine_sector_strength_and_d1_changes(
             member = _member_detail(symbol, d1_symbols.get(symbol))
             if d0_launch_changes is not None:
                 member["d0_change"] = d0_by_symbol.get(symbol)
-            d1_history_base = [
-                "stock-a",
-                "source-d1-breakout-preview",
-                "--target-session",
-                expected_identity["target_session"],
-                "--research-cutoff",
-                expected_identity["research_cutoff"],
-                "--source-package-id",
-                expected_identity["source_package_id"],
-                "--symbol",
-                symbol,
-                "--history-start",
-                str(discovery["event_window_start"]),
-                "--history-end",
-                expected_identity["target_session"],
-            ]
-            d1_history_argv = [
-                d1_history_base + ["--support-anchor-session", anchor]
-                for anchor in member["historical_anchor_sessions"]
-            ] or [d1_history_base]
             member["drill_down"] = {
-                "research_stock_argv": [
-                    "stock-a",
-                    "research-stock",
-                    symbol,
-                    "--target-session",
-                    expected_identity["target_session"],
-                    "--unit-version",
-                    "TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1",
-                    "--pg-source-history",
-                    "--pg-source-package-id",
-                    expected_identity["source_package_id"],
-                ],
-                "d1_history_argv": d1_history_argv,
+                "source_capture_id": expected_identity["source_capture_id"],
+                "price_coordinate": "FORWARD_ADJUSTED",
+                "time_role": "NON_PIT_RETROSPECTIVE",
+                "source_symbol": symbol,
+                "target_session": expected_identity["target_session"],
+                "research_cutoff": expected_identity["research_cutoff"],
+                "history_start": discovery["event_window_start"],
+                "support_anchor_sessions": member["historical_anchor_sessions"],
             }
             if (member_state == "ALL" or member["change_state"] == member_state) and (
                 member_search is None
@@ -1140,8 +1112,9 @@ def combine_sector_strength_and_d1_changes(
         "analysis_scope": "NON_PIT_RETROSPECTIVE_CURRENT_TDX_MEMBER_CORE_RETURN_WITH_D1_SUPPORT_CHANGE",
         "target_session": expected_identity["target_session"],
         "research_cutoff": expected_identity["research_cutoff"],
-        "source_package_id": expected_identity["source_package_id"],
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": expected_identity["source_capture_id"],
+        "price_coordinate": expected_identity["price_coordinate"],
+        "time_role": expected_identity["time_role"],
         "entity_identity": "SOURCE_SYMBOL_ONLY",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
         "pit_status": "NON_PIT_RETROSPECTIVE",

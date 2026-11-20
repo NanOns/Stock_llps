@@ -230,13 +230,13 @@ function renderProfileBreadth(data) {
     appendText(
       identity,
       "p",
-      `${title} ${snapshot.target_session} · 来源包ID ${snapshot.source_package_id} · profile revision ${snapshot.profile_revision} · 日历 ${snapshot.history_calendar_id}/${snapshot.history_calendar_revision} · 窗口 ${snapshot.window_start} 至 ${snapshot.window_end} · ${snapshot.history_session_count}个官方会话`,
+      `${title} ${snapshot.target_session} · 来源捕获ID ${snapshot.source_capture_id} · profile revision ${snapshot.profile_revision} · 日历 ${snapshot.history_calendar_id}/${snapshot.history_calendar_revision} · 窗口 ${snapshot.window_start} 至 ${snapshot.window_end} · ${snapshot.history_session_count}个官方会话`,
     );
   }
   appendText(
     identity,
     "p",
-    `${data.research_scope} · ${data.price_coordinate} · ${data.pit_status} · 正式上市总体 ${text(data.formal_listing_universe)}。本查询只读PG，不打开来源包、不重算Core。`,
+    `${data.research_scope} · ${data.price_coordinate} · ${data.pit_status} · 正式上市总体 ${text(data.formal_listing_universe)}。本查询只读PG，不打开来源捕获、不重算Core。`,
   );
   root.append(identity);
   $("profileBreadthCount").textContent =
@@ -277,10 +277,11 @@ async function loadProfileBreadth(before, after) {
   const params = new URLSearchParams({
     before_session: before.target_session,
     after_session: after.target_session,
-    before_source_package_id: before.source_package_id,
+    before_source_capture_id: before.source_capture_id,
     before_profile_revision: before.profile_revision,
-    after_source_package_id: after.source_package_id,
+    after_source_capture_id: after.source_capture_id,
     after_profile_revision: after.profile_revision,
+    price_coordinate: "FORWARD_ADJUSTED",
   });
   try {
     const data = await api(
@@ -291,6 +292,12 @@ async function loadProfileBreadth(before, after) {
       key !== state.profileBreadthBinding
     )
       return;
+    if (
+      data.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.before_snapshot.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.after_snapshot.price_coordinate !== "FORWARD_ADJUSTED"
+    )
+      throw new Error("来源池广度响应未明确绑定BaoStock前复权坐标。");
     renderProfileBreadth(data);
   } catch (error) {
     if (
@@ -320,9 +327,9 @@ function breadthMemberRawText(item, side) {
   const relation = item[`${prefix}_source_pool_close_ma20_relation`];
   const unknown = item[`${prefix}_source_pool_unknown_reason`];
   const reason = unknown ? ` · ${breadthReason(unknown)}` : "";
-  const rawQuality = `${text(item[`${prefix}_raw_price_quality`])}${
-    item[`${prefix}_raw_price_reason`]
-      ? `：${text(item[`${prefix}_raw_price_reason`])}`
+  const qfqQuality = `${text(item[`${prefix}_qfq_price_quality`])}${
+    item[`${prefix}_qfq_price_reason`]
+      ? `：${text(item[`${prefix}_qfq_price_reason`])}`
       : ""
   }`;
   const ma20Quality = `${text(item[`${prefix}_ma20_quality`])}${
@@ -331,8 +338,8 @@ function breadthMemberRawText(item, side) {
       : ""
   }`;
   return (
-    `收盘 ${text(item[`${prefix}_raw_close`])} ` +
-    `(${rawQuality}) / ` +
+    `前复权收盘 ${text(item[`${prefix}_qfq_close`])} ` +
+    `(${qfqQuality}) / ` +
     `MA20 ${text(item[`${prefix}_ma20`])} ` +
     `(${ma20Quality}) · ` +
     `${text(relation)}${reason}`
@@ -349,7 +356,7 @@ function renderProfileBreadthMembers(data, query) {
     `第${page.total ? Math.floor(page.offset / page.limit) + 1 : 0}/` +
     `${page.total ? Math.ceil(page.total / page.limit) : 0}页 · ` +
     `每页${page.limit} · ${sessionRelationLabel(data.session_relation)} · ` +
-    `SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT；选股未评价。`;
+    `SOURCE_SYMBOL_ONLY / FORWARD_ADJUSTED / NON_PIT_RETROSPECTIVE；选股未评价。`;
   const rows = $("profileBreadthMembersRows");
   rows.replaceChildren();
   if (!data.rows.length) {
@@ -363,7 +370,7 @@ function renderProfileBreadthMembers(data, query) {
     button.className = "quiet breadth-member-open";
     button.textContent = `${item.source_symbol} · 双日画像`;
     button.title =
-      "打开两份精确来源画像；可继续查看75会话Raw/Core并返回本分类页。";
+      "打开两份精确来源画像；可继续查看75会话BaoStock前复权价格/Core并返回本分类页。";
     button.addEventListener("click", () => openBreadthMemberPair(item));
     codeCell.append(button);
     row.append(codeCell);
@@ -431,13 +438,14 @@ async function loadProfileBreadthMembers(query, offset) {
   const params = new URLSearchParams({
     before_session: breadth.before_snapshot.target_session,
     after_session: breadth.after_snapshot.target_session,
-    before_source_package_id: breadth.before_snapshot.source_package_id,
+    before_source_capture_id: breadth.before_snapshot.source_capture_id,
     before_profile_revision: breadth.before_snapshot.profile_revision,
-    after_source_package_id: breadth.after_snapshot.source_package_id,
+    after_source_capture_id: breadth.after_snapshot.source_capture_id,
     after_profile_revision: breadth.after_snapshot.profile_revision,
     mode: query.mode,
     offset: String(offset),
     limit: String(state.profileBreadthMemberLimit),
+    price_coordinate: "FORWARD_ADJUSTED",
   });
   if (query.mode === "ENDPOINT") {
     params.set("side", query.side);
@@ -453,14 +461,24 @@ async function loadProfileBreadthMembers(query, offset) {
     if (
       requestId !== state.profileBreadthMemberRequest ||
       binding !== state.profileBreadthBinding ||
-      data.before_snapshot.source_package_id !==
-        breadth.before_snapshot.source_package_id ||
+      data.before_snapshot.source_capture_id !==
+        breadth.before_snapshot.source_capture_id ||
       data.before_snapshot.profile_revision !==
         breadth.before_snapshot.profile_revision ||
-      data.after_snapshot.source_package_id !==
-        breadth.after_snapshot.source_package_id ||
+      data.after_snapshot.source_capture_id !==
+        breadth.after_snapshot.source_capture_id ||
       data.after_snapshot.profile_revision !==
-        breadth.after_snapshot.profile_revision
+        breadth.after_snapshot.profile_revision ||
+      data.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.rows.some(
+        (item) =>
+          (item.before_present &&
+            item.before_price_coordinate !== "FORWARD_ADJUSTED") ||
+          (item.after_present &&
+            item.after_price_coordinate !== "FORWARD_ADJUSTED"),
+      ) ||
+      data.before_snapshot.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.after_snapshot.price_coordinate !== "FORWARD_ADJUSTED"
     )
       return;
     renderProfileBreadthMembers(data, query);
@@ -491,10 +509,11 @@ async function openBreadthMemberPair(item) {
     before_session: breadth.before_snapshot.target_session,
     after_session: breadth.after_snapshot.target_session,
     symbol: item.source_symbol,
-    before_source_package_id: breadth.before_snapshot.source_package_id,
+    before_source_capture_id: breadth.before_snapshot.source_capture_id,
     before_profile_revision: breadth.before_snapshot.profile_revision,
-    after_source_package_id: breadth.after_snapshot.source_package_id,
+    after_source_capture_id: breadth.after_snapshot.source_capture_id,
     after_profile_revision: breadth.after_snapshot.profile_revision,
+    price_coordinate: "FORWARD_ADJUSTED",
   });
   resetChangeDetail();
   const root = $("changeDetail");
@@ -507,10 +526,14 @@ async function openBreadthMemberPair(item) {
       requestId !== state.pairRequest ||
       memberBinding !== state.profileBreadthBinding ||
       data.source_symbol !== item.source_symbol ||
-      data.before_snapshot.source_package_id !==
-        breadth.before_snapshot.source_package_id ||
-      data.after_snapshot.source_package_id !==
-        breadth.after_snapshot.source_package_id
+      data.price_coordinate !== "FORWARD_ADJUSTED" ||
+      (data.item && data.item.price_coordinate !== "FORWARD_ADJUSTED") ||
+      data.before_snapshot.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.after_snapshot.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.before_snapshot.source_capture_id !==
+        breadth.before_snapshot.source_capture_id ||
+      data.after_snapshot.source_capture_id !==
+        breadth.after_snapshot.source_capture_id
     )
       return;
     state.changeBinding = {

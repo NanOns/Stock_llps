@@ -1,10 +1,14 @@
-"""对已冻结来源候选，按单股PG历史逐日观察启动谓词。"""
+"""对已冻结来源候选，按单股BaoStock QFQ历史逐日观察启动谓词。"""
 
 from stock_a.research.d0_launch_raw import (
     calculate_d0_launch_confirm_raw,
     calculate_d0_recovery_turn_raw,
 )
-from stock_a.storage.postgres.source_raw import read_raw_daily_history_stock
+from stock_a.storage.postgres.baostock_price_facts import (
+    QFQ_COORDINATE,
+    read_baostock_capture_roster,
+    read_baostock_price_history_batch,
+)
 
 
 def observe_frozen_scenario(
@@ -13,15 +17,18 @@ def observe_frozen_scenario(
     symbol,
     target,
     cutoff,
-    source_package_id,
+    source_capture_id,
     target_capture_id,
     calendar,
     horizon,
     scenario="LAUNCH_CONFIRM",
 ):
-    """不扫描全池；恢复谓词缺少横截面RPS时只输出可证明的FALSE或UNKNOWN。"""
+    """只读同一paired BaoStock捕获；恢复谓词缺少横截面RPS时保留未知。"""
     if scenario not in {"LAUNCH_CONFIRM", "RECOVERY_TURN"}:
         raise ValueError("单股后继只支持已冻结的启动或恢复来源诊断")
+    if source_capture_id != target_capture_id:
+        raise ValueError("单股后继与冻结T0必须绑定同一BaoStock捕获")
+
     start = calendar.index(target)
     end = min(start + horizon, len(calendar) - 1)
     future = tuple(day for day in calendar[start + 1 : end + 1] if day <= cutoff)
@@ -35,39 +42,23 @@ def observe_frozen_scenario(
             "status": "NO_FOLLOWUP_SESSION",
             "formal_episode": "NOT_CREATED",
         }
+
     lookback = 20 if scenario == "LAUNCH_CONFIRM" else 24
     history_start = max(0, start - lookback)
-    history_sessions = tuple(calendar[history_start : start + 1])
-    history = read_raw_daily_history_stock(
-        config,
-        source_symbol=symbol,
-        target_session=target,
-        source_package_id=source_package_id,
-        sessions=history_sessions,
-        research_cutoff=cutoff,
-        include_parser_contract=True,
+    read_end = calendar.index(future[-1])
+    read_sessions = tuple(calendar[history_start : read_end + 1])
+    roster = read_baostock_capture_roster(
+        config, source_capture_id=source_capture_id, cutoff=cutoff
     )
-    forward = read_raw_daily_history_stock(
-        config,
-        source_symbol=symbol,
-        target_session=target,
-        source_package_id=source_package_id,
-        sessions=(target, *future),
-        research_cutoff=cutoff,
-        include_parser_contract=True,
-        starts_at_target=True,
+    roster_symbol = next(
+        (
+            row
+            for row in roster.get("symbols", ())
+            if row.get("source_symbol") == symbol
+        ),
+        None,
     )
-    rows = {row["session_date"]: row for row in history["history_rows"]}
-    forward_rows = {row["session_date"]: row for row in forward["history_rows"]}
-    if rows.get(target) != forward_rows.get(target):
-        raise ValueError("两次单股读取的T0来源事实不一致")
-    rows.update(forward_rows)
-    birth = rows.get(target)
-    if birth is None or birth["source_capture_id"] != target_capture_id:
-        raise ValueError("单股后继与冻结T0捕获不一致")
-    content = birth.get("source_package_id")
-    parser = birth.get("parser_contract")
-    if not content or not parser:
+    if roster.get("status") != "AVAILABLE" or roster_symbol is None:
         return {
             "observations": [],
             "first_false": None,
@@ -77,13 +68,52 @@ def observe_frozen_scenario(
             "status": "UNKNOWN_T0_SOURCE_IDENTITY",
             "formal_episode": "NOT_CREATED",
         }
-    safe = {
-        day: row
-        if row.get("source_package_id") == content
-        and row.get("parser_contract") == parser
-        else {**row, "reference_quality": False}
-        for day, row in rows.items()
+    if roster_symbol.get("request_complete") is not True:
+        return {
+            "observations": [],
+            "first_false": None,
+            "first_false_upper_bound": None,
+            "first_recovery_after_false": None,
+            "first_recovery_after_false_upper_bound": None,
+            "status": "UNKNOWN_SOURCE_CAPTURE_INCOMPLETE",
+            "formal_episode": "NOT_CREATED",
+        }
+
+    forward = read_baostock_price_history_batch(
+        config,
+        source_symbols=(symbol,),
+        sessions=read_sessions,
+        source_capture_id=source_capture_id,
+        price_coordinate=QFQ_COORDINATE,
+        cutoff=cutoff,
+        offset=0,
+        limit=len(read_sessions),
+    )
+    if (
+        forward.get("status") != "AVAILABLE"
+        or forward.get("source_capture_id") != source_capture_id
+        or forward.get("price_coordinate") != QFQ_COORDINATE
+        or forward.get("page", {}).get("next_offset") is not None
+    ):
+        raise ValueError("单股后继QFQ价格未从PG一次完整读回")
+
+    rows = {
+        row["session_date"]: row
+        for row in forward.get("rows", ())
+        if row.get("source_symbol") == symbol
     }
+    birth = rows.get(target)
+    if birth is None or birth.get("source_capture_id") != target_capture_id:
+        return {
+            "observations": [],
+            "first_false": None,
+            "first_false_upper_bound": None,
+            "first_recovery_after_false": None,
+            "first_recovery_after_false_upper_bound": None,
+            "status": "UNKNOWN_T0_SOURCE_IDENTITY",
+            "formal_episode": "NOT_CREATED",
+        }
+
     unknown_before = False
     first = upper = recovery = recovery_upper = None
     unknown_before_recovery = False
@@ -91,7 +121,7 @@ def observe_frozen_scenario(
     for day in future:
         position = calendar.index(day)
         window = tuple(calendar[max(0, position - lookback) : position + 1])
-        day_row = safe.get(day)
+        day_row = rows.get(day)
         capture = day_row.get("source_capture_id") if day_row else None
         if capture is None:
             state, reason = "UNKNOWN", "TARGET_SOURCE_CAPTURE_MISSING"
@@ -105,11 +135,12 @@ def observe_frozen_scenario(
             result = calculate(
                 target_session=day,
                 official_sessions=window,
-                history_rows_by_session={d: safe.get(d) for d in window},
+                history_rows_by_session={
+                    session: rows.get(session) for session in window
+                },
                 source_symbol=symbol,
-                source_package_id=source_package_id,
-                target_capture_id=capture,
-                parser_contract=parser,
+                source_capture_id=source_capture_id,
+                price_coordinate=QFQ_COORDINATE,
                 **extra,
             )
             state, reason = result["scenario_raw"], result["main_reason"]

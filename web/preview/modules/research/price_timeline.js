@@ -56,12 +56,13 @@ function renderPersistedProfileObservation(point) {
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
     snapshot.target_session === point.session_date &&
-    snapshot.source_package_id === point.source_package_id &&
+    snapshot.source_capture_id === point.source_capture_id &&
+    snapshot.price_coordinate === "FORWARD_ADJUSTED" &&
     snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
-      "本次轨迹未附带与所选日期、来源包ID及profile_revision一致的Profile11快照；此处仅展示RAW Core事实，不重新评价持久画像或选股状态。";
+      "本次轨迹未附带同日期、同来源捕获且明确为FORWARD_ADJUSTED的Profile11快照；此处仅展示所选坐标Core事实，不重新评价持久画像或选股状态。";
     tableRow(rows, [
       "未绑定精确Profile11",
       "NOT_EVALUATED",
@@ -70,12 +71,15 @@ function renderPersistedProfileObservation(point) {
     ]);
     return;
   }
-  const comparable = snapshot.semantic_compatible === true;
+  const coordinateCompatible =
+    state.timeline?.price_coordinate === snapshot.price_coordinate;
+  const comparable =
+    snapshot.semantic_compatible === true && coordinateCompatible;
   status.textContent =
-    `已绑定PG持久化快照 · ${snapshot.target_session} · 来源包ID ${snapshot.source_package_id} · Profile修订 ${snapshot.profile_revision}。` +
+    `已绑定PG持久化快照 · ${snapshot.target_session} · 来源捕获ID ${snapshot.source_capture_id} · Profile修订 ${snapshot.profile_revision}。` +
     (comparable
-      ? " 此快照与两日变化合同兼容。"
-      : " 仅展示本快照原值；两期语义不兼容，不能作变化比较。") +
+      ? " 此QFQ快照与当前轨迹坐标及两日变化合同兼容。"
+      : " Profile为QFQ；仅展示本快照原值，当前轨迹坐标或两期语义不兼容，不能作变化比较。") +
     " 选股资格仍为未评价。";
   let shown = 0;
   snapshot.field_ids.forEach((fieldId, index) => {
@@ -111,21 +115,22 @@ function renderPriceStructureObservation(point) {
     return;
   }
   panel.hidden = false;
+  const coordinate = state.timeline?.price_coordinate || "UNKNOWN";
   $("priceStructureIdentity").textContent =
-    `${point.session_date} · ${state.timeline?.symbol || "—"} · RAW_UNADJUSTED / ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · 来源包ID ${point.source_package_id || "UNKNOWN"}`;
+    `${point.session_date} · ${state.timeline?.symbol || "—"} · ${coordinate} / ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · 来源捕获ID ${point.source_capture_id || "UNKNOWN"}`;
   const ohlc = dayOhlc(point);
   const summaries = [
     [
-      "RAW OHLC与收盘",
+      `${coordinate} OHLC与收盘`,
       ohlc
         ? `O ${ohlc.open.exact} · H ${ohlc.high.exact} · L ${ohlc.low.exact} · C ${ohlc.close.exact}`
-        : `无合法OHLC · ${text(point.raw_ohlc?.reason || point.price_reason || point.raw_status)}`,
+        : `NOT_COMPUTED · 无${coordinate} OHLC · ${text(point.qfq_ohlc?.reason || point.raw_ohlc?.reason || point.price_reason || point.raw_status)}`,
     ],
     [
       "MA5 / 10 / 20 / 60排列",
       formatMovingAverageOrder(point.moving_average_order),
     ],
-    ["观察边界", "来源代码RAW事实 · NON_PIT · 选股NOT_EVALUATED"],
+    ["观察边界", `来源代码${coordinate}事实 · NON_PIT · 选股NOT_EVALUATED`],
   ];
   for (const [label, value] of summaries) {
     const card = document.createElement("div");
@@ -222,6 +227,14 @@ function renderPriceRelationHistory(history) {
     status.textContent = "";
     return;
   }
+  if (history.status === "NOT_COMPUTED") {
+    panel.hidden = false;
+    status.textContent = `${state.timeline?.price_coordinate || "UNKNOWN"} · ${history.reason_code || "NOT_COMPUTED"} · ${history.reason || "所选价格坐标不计算关系事件"}`;
+    summary.textContent =
+      "NOT_COMPUTED：价格关系事件只在FORWARD_ADJUSTED坐标计算。";
+    tableRow(rows, ["NOT_COMPUTED", "", "", "", "", "", ""]);
+    return;
+  }
   panel.hidden = false;
   for (const [label, value] of [
     [
@@ -253,7 +266,7 @@ function renderPriceRelationHistory(history) {
   summary.append(fieldSummary);
   status.textContent =
     `${state.timeline?.symbol || "—"} · ${state.timeline?.target_session || "—"} · ` +
-    `来源包ID ${state.timeline?.source_package_id || "UNKNOWN"}。` +
+    `来源捕获ID ${state.timeline?.source_capture_id || "UNKNOWN"}。` +
     "已知关系未变化不列为事件；UNKNOWN / 不可比原因独立统计。";
 
   const fieldFilter = $("priceRelationFieldFilter").value;
@@ -342,6 +355,12 @@ function renderMa20DirectionHistory(history) {
     tableRow(rows, ["等待历史轨迹查询。", "", "", "", "", ""]);
     return;
   }
+  if (history.status === "NOT_COMPUTED") {
+    identity.textContent = `${binding.target_session || "—"} · ${binding.source_symbol || "—"} · ${binding.price_coordinate || "UNKNOWN"} · 来源捕获ID ${binding.source_capture_id || "UNKNOWN"}`;
+    summary.textContent = `NOT_COMPUTED：MA20逐会话方向只在FORWARD_ADJUSTED坐标计算。${history.reason_code || ""}`;
+    tableRow(rows, ["NOT_COMPUTED", "", "", "", "", ""]);
+    return;
+  }
   const windowKey = $("ma20DirectionWindow").value;
   const windowData = history.windows?.[windowKey];
   const binding = history.binding || {};
@@ -370,7 +389,7 @@ function renderMa20DirectionHistory(history) {
     `来源版本 · ` +
     `日历 ${binding.calendar_id || "UNKNOWN"}/${binding.calendar_revision || "UNKNOWN"} · ` +
     `${binding.price_coordinate || "UNKNOWN"} / ${binding.coordinate_id || "UNKNOWN"} · ` +
-    `来源包ID ${binding.source_package_id || "UNKNOWN"}。`;
+    `来源捕获ID ${binding.source_capture_id || "UNKNOWN"}。`;
   for (const pair of windowData.pairs || []) {
     const row = document.createElement("tr");
     cell(row, pair.from_session || "—");
@@ -418,7 +437,7 @@ function invalidateTimeline(errorMessage = "") {
 function openTimelineSession(point) {
   const context = state.timelineContext;
   if (!context || !state.timeline || point.raw_row_present !== true) return;
-  const value = `${point.session_date}|${context.source_package_id}`;
+  const value = `${point.session_date}|${context.source_capture_id}`;
   const select = $("versionSelect");
   const option = Array.from(select.options).find(
     (item) => item.value === value,
@@ -428,7 +447,7 @@ function openTimelineSession(point) {
     !state.versions.some(
       (item) =>
         item.session_date === point.session_date &&
-        item.source_package_id === context.source_package_id,
+        item.source_capture_id === context.source_capture_id,
     )
   )
     return;
@@ -437,7 +456,7 @@ function openTimelineSession(point) {
       ...context,
       returnSelection: {
         target_session: context.target_session,
-        source_package_id: context.source_package_id,
+        source_capture_id: context.source_capture_id,
         symbol: context.symbol,
         session_count: context.session_count,
       },
@@ -447,7 +466,7 @@ function openTimelineSession(point) {
   state.chartSelection = null;
   state.chartPeriodContext = {
     target_session: point.session_date,
-    source_package_id: context.source_package_id,
+    source_capture_id: context.source_capture_id,
     symbol: context.symbol,
   };
   state.timeline = null;
@@ -461,7 +480,7 @@ function returnToTimelineCutoff() {
   const context = state.timelineContext;
   const selection = context?.returnSelection;
   if (!context || !selection || context.origin === "change") return;
-  const value = `${selection.target_session}|${selection.source_package_id}`;
+  const value = `${selection.target_session}|${selection.source_capture_id}`;
   if (
     !Array.from($("versionSelect").options).some((item) => item.value === value)
   )
@@ -469,7 +488,7 @@ function returnToTimelineCutoff() {
   state.timelineNavigation = true;
   state.chartPeriodContext = {
     target_session: selection.target_session,
-    source_package_id: selection.source_package_id,
+    source_capture_id: selection.source_capture_id,
     symbol: selection.symbol || context.symbol,
   };
   $("symbolInput").value = selection.symbol || context.symbol;
@@ -507,7 +526,7 @@ function exactSymbolReturnState(context) {
   const returnVersion = state.versions.find(
     (version) =>
       version.session_date === selection.target_session &&
-      version.source_package_id === selection.source_package_id,
+      version.source_capture_id === selection.source_capture_id,
   );
   if (!beforeSnapshot || !afterSnapshot || !returnVersion) return null;
   return { binding, selection, beforeSnapshot, afterSnapshot, returnVersion };
@@ -554,13 +573,13 @@ async function returnToChanges() {
     const mainSelectionChanged =
       !currentVersion ||
       currentVersion.target_session !== originalSelection.target_session ||
-      currentVersion.source_package_id !==
-        originalSelection.source_package_id ||
+      currentVersion.source_capture_id !==
+        originalSelection.source_capture_id ||
       $("symbolInput").value.trim().toUpperCase() !== binding.symbol ||
       Number($("windowInput").value) !== originalSelection.session_count;
     const returnNotice =
       queryContextChanged || mainSelectionChanged
-        ? `已恢复原精确双日查询 ${binding.before_snapshot.target_session} → ${binding.after_snapshot.target_session} · ${binding.symbol}；重点候选序位已按原来源包ID和profile revision重新读取。`
+        ? `已恢复原精确双日查询 ${binding.before_snapshot.target_session} → ${binding.after_snapshot.target_session} · ${binding.symbol}；重点候选序位已按原来源捕获ID和profile revision重新读取。`
         : null;
 
     $("changeBeforeSelect").value = profileSnapshotKey(binding.before_snapshot);
@@ -577,7 +596,7 @@ async function returnToChanges() {
     state.changeOffset = binding.change_offset ?? 0;
     state.changeLimit = binding.change_limit ?? state.changeLimit;
     $("versionSelect").value =
-      `${originalSelection.target_session}|${originalSelection.source_package_id}`;
+      `${originalSelection.target_session}|${originalSelection.source_capture_id}`;
     $("symbolInput").value = originalSelection.symbol;
     $("windowInput").value = String(originalSelection.session_count);
     state.stockRequest++;
@@ -638,7 +657,7 @@ async function returnToChanges() {
     state.changeLimit = changeReturnBinding.change_limit ?? state.changeLimit;
     state.changeBinding = { ...changeReturnBinding, origin: "change" };
   }
-  const value = `${selection.target_session}|${selection.source_package_id}`;
+  const value = `${selection.target_session}|${selection.source_capture_id}`;
   if (
     !Array.from($("versionSelect").options).some((item) => item.value === value)
   )
@@ -670,7 +689,7 @@ function returnToProfileBreadthMembers() {
   if (state.timelineContext?.origin === "breadth") {
     const selection = returnState.selectedVersion;
     if (selection) {
-      const value = `${selection.target_session}|${selection.source_package_id}`;
+      const value = `${selection.target_session}|${selection.source_capture_id}`;
       if (
         Array.from($("versionSelect").options).some(
           (option) => option.value === value,
@@ -721,7 +740,7 @@ function renderTimelineReturnControls(context, selected) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "quiet";
-    button.textContent = "返回RAW关系详情";
+    button.textContent = "返回前复权关系详情";
     button.addEventListener("click", returnToChanges);
     returnRoot.append(button);
   } else if (

@@ -22,6 +22,9 @@ class D0FirstDayDamage:
     close_to_ma20: Fraction | None
     official_sessions: tuple[date, ...]
     missing_sessions: tuple[date, ...]
+    source_capture_id: int | None = None
+    price_coordinate: str = "FORWARD_ADJUSTED"
+    time_role: str = "NON_PIT_RETROSPECTIVE"
 
 
 def _unknown(
@@ -29,6 +32,8 @@ def _unknown(
     *,
     sessions: tuple[date, ...],
     missing: tuple[date, ...] = (),
+    source_capture_id: int | None = None,
+    price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> D0FirstDayDamage:
     return D0FirstDayDamage(
         state="UNKNOWN",
@@ -40,6 +45,8 @@ def _unknown(
         close_to_ma20=None,
         official_sessions=sessions,
         missing_sessions=missing,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
     )
 
 
@@ -49,10 +56,19 @@ def calculate_d0_first_day_damage(
     official_sessions: Sequence[date],
     history_rows_by_session: Mapping[date, Mapping[str, object]],
     source_symbol: str,
-    source_package_id: int,
-    target_capture_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> D0FirstDayDamage:
-    """按目标日及其前19个紧邻官方会话计算C/MA20<97/100。"""
+    """按目标日及其前19个会话以同一QFQ坐标计算C/MA20<97/100。"""
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        raise ValueError("D0损伤必须绑定paired source_capture_id")
+    if price_coordinate != "FORWARD_ADJUSTED":
+        return _unknown(
+            "QFQ_COORDINATE_REQUIRED",
+            sessions=tuple(official_sessions),
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+        )
     sessions = tuple(official_sessions)
     if (
         type(target_session) is not date
@@ -61,11 +77,21 @@ def calculate_d0_first_day_damage(
         or tuple(sorted(set(sessions))) != sessions
         or sessions[-1] != target_session
     ):
-        return _unknown("OFFICIAL_WINDOW_INVALID", sessions=sessions)
+        return _unknown(
+            "OFFICIAL_WINDOW_INVALID",
+            sessions=sessions,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+        )
 
     window = sessions[-20:]
     if len(window) != 20:
-        return _unknown("OFFICIAL_WINDOW_LEFT_TRUNCATED", sessions=window)
+        return _unknown(
+            "OFFICIAL_WINDOW_LEFT_TRUNCATED",
+            sessions=window,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+        )
 
     closes: list[Fraction] = []
     missing: list[date] = []
@@ -77,28 +103,43 @@ def calculate_d0_first_day_damage(
         if (
             row.get("session_date") != session
             or row.get("source_symbol") != source_symbol
+            or row.get("source_capture_id") != source_capture_id
         ):
-            return _unknown("RAW_SOURCE_IDENTITY_MISMATCH", sessions=window)
-        if row.get("source_package_id") != source_package_id:
-            return _unknown("RAW_SOURCE_PACKAGE_MISMATCH", sessions=window)
-        if (
-            session == target_session
-            and row.get("source_capture_id") != target_capture_id
-        ):
-            return _unknown("RAW_TARGET_CAPTURE_MISMATCH", sessions=window)
-        if row.get("price_coordinate") != "RAW_UNADJUSTED":
-            return _unknown("PRICE_COORDINATE_MISMATCH", sessions=window)
+            return _unknown(
+                "SOURCE_CAPTURE_IDENTITY_MISMATCH",
+                sessions=window,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
+            )
+        row_coordinate = row.get(
+            "qfq_price_coordinate"
+            if price_coordinate == "FORWARD_ADJUSTED"
+            else "raw_price_coordinate",
+            row.get("price_coordinate"),
+        )
+        if row_coordinate not in (None, price_coordinate):
+            return _unknown(
+                "PRICE_COORDINATE_MISMATCH",
+                sessions=window,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
+            )
         if row.get("bar_status") != "TARGET_PRESENT":
             return _unknown(
                 "OFFICIAL_SESSION_BAR_MISSING",
                 sessions=window,
                 missing=(session,),
             )
-        if row.get("price_quality") != "OBSERVED":
-            reason_code = row.get("price_reason") or "RAW_PRICE_QUALITY_UNKNOWN"
-            return _unknown(str(reason_code), sessions=window)
+        if row.get("qfq_price_quality") != "OBSERVED":
+            reason_code = row.get("qfq_price_reason") or "QFQ_PRICE_QUALITY_UNKNOWN"
+            return _unknown(
+                str(reason_code),
+                sessions=window,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
+            )
         values = [
-            row.get(name) for name in ("raw_open", "raw_high", "raw_low", "raw_close")
+            row.get(name) for name in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
         ]
         if any(
             isinstance(value, bool)
@@ -107,7 +148,12 @@ def calculate_d0_first_day_damage(
             and not value.is_finite()
             for value in values
         ):
-            return _unknown("INVALID_PRICE_OHLC", sessions=window)
+            return _unknown(
+                "INVALID_PRICE_OHLC",
+                sessions=window,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
+            )
         opening, high, low, close_value = (Fraction(value) for value in values)
         if (
             min(opening, high, low, close_value) <= 0
@@ -115,7 +161,12 @@ def calculate_d0_first_day_damage(
             or not low <= opening <= high
             or not low <= close_value <= high
         ):
-            return _unknown("INVALID_PRICE_OHLC", sessions=window)
+            return _unknown(
+                "INVALID_PRICE_OHLC",
+                sessions=window,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
+            )
         closes.append(close_value)
 
     if missing:
@@ -123,6 +174,8 @@ def calculate_d0_first_day_damage(
             "OFFICIAL_SESSION_BAR_MISSING",
             sessions=window,
             missing=tuple(missing),
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
         )
     current_close = closes[-1]
     ma20 = sum(closes, Fraction(0)) / 20
@@ -144,18 +197,18 @@ def calculate_d0_first_day_damage(
         close_to_ma20=close_to_ma20,
         official_sessions=window,
         missing_sessions=(),
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
     )
 
 
 _REASONS = {
     "OFFICIAL_WINDOW_INVALID": "官方会话窗口缺少目标日或顺序不唯一。",
     "OFFICIAL_WINDOW_LEFT_TRUNCATED": "目标日前不足20个连续官方会话。",
-    "RAW_SOURCE_IDENTITY_MISMATCH": "历史行与目标来源代码或日期不一致。",
-    "RAW_SOURCE_PACKAGE_MISMATCH": "官方会话窗口内的RAW数字来源包不一致。",
-    "RAW_TARGET_CAPTURE_MISMATCH": "目标RAW行与来源捕获身份不一致。",
-    "PRICE_COORDINATE_MISMATCH": "官方会话窗口内的价格坐标不是RAW_UNADJUSTED。",
+    "SOURCE_CAPTURE_IDENTITY_MISMATCH": "历史行与目标来源代码、日期或paired capture不一致。",
+    "PRICE_COORDINATE_MISMATCH": "官方会话窗口内的价格坐标不是QFQ。",
     "OFFICIAL_SESSION_BAR_MISSING": "严格官方窗口至少一个会话缺少有效RAW日线。",
-    "RAW_PRICE_QUALITY_UNKNOWN": "官方会话RAW价格质量未知。",
+    "QFQ_PRICE_QUALITY_UNKNOWN": "官方会话QFQ价格质量未知。",
     "INVALID_PRICE_CLOSE": "官方会话收盘价缺失、非有限或非正数。",
     "INVALID_PRICE_OHLC": "官方会话原始OHLC缺失、非法或不满足价格范围关系。",
 }

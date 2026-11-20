@@ -379,8 +379,8 @@ function renderComparisonResults() {
   const identity = basket[0];
   if (identity) {
     $("comparisonIdentity").textContent =
-      `统一目标 ${identity.target_session} · 来源包ID ${identity.source_package_id} · profile_revision ${identity.profile_revision} · ` +
-      `官方会话窗 ${successful[0]?.data?.calendar_id || "—"}/${successful[0]?.data?.calendar_revision || "—"} · RAW_UNADJUSTED / NON_PIT。` +
+      `统一目标 ${identity.target_session} · 来源捕获ID ${identity.source_capture_id} · profile_revision ${identity.profile_revision} · ` +
+      `官方会话窗 ${successful[0]?.data?.calendar_id || "—"}/${successful[0]?.data?.calendar_revision || "—"} · FORWARD_ADJUSTED / NON_PIT_RETROSPECTIVE。` +
       (axis.baseSession
         ? `共同有效收盘基准 ${axis.baseSession}；只按精确有理数计算、显示时四舍五入2位。`
         : `共同有效收盘基准 UNKNOWN${failed.length ? "（至少一只历史未返回，不能用子集建立基准）" : ""}。`);
@@ -436,21 +436,21 @@ function renderComparisonResults() {
         appendText(
           facts,
           "span",
-          `RAW收盘 UNKNOWN · ${entry.error || "该官方会话未返回轨迹点"}`,
+          `前复权收盘 UNKNOWN · ${entry.error || "该官方会话未返回轨迹点"}`,
         );
         appendText(facts, "span", "MA20 UNKNOWN · 该日无对应Core点");
         appendText(facts, "span", "前高20 UNKNOWN · 该日无对应Core点");
         appendText(
           facts,
           "span",
-          `RAW指数 UNKNOWN · ${axis.baseSession ? "该代码或日期数据未返回" : "无共同基准"}`,
+          `前复权指数 UNKNOWN · ${axis.baseSession ? "该代码或日期数据未返回" : "无共同基准"}`,
           "comparison-index",
         );
         td.append(facts);
         row.append(td);
         continue;
       }
-      const close = point.raw_close;
+      const close = comparisonQfqClose(point);
       const ma20 = point.core_ma20;
       const priorHigh = point.core_prior_high20;
       const closeReason =
@@ -463,7 +463,7 @@ function renderComparisonResults() {
       appendText(
         facts,
         "span",
-        `RAW收盘 ${comparisonFieldText(close)} · ${text(point.raw_status)} · 原因 ${text(closeReason)}`,
+        `前复权收盘 ${comparisonFieldText(close)} · ${text(point.raw_status)} · 原因 ${text(closeReason)}`,
       );
       appendText(
         facts,
@@ -486,19 +486,19 @@ function renderComparisonResults() {
       } else if (session < axis.baseSession) {
         indexText = `共同基准 ${axis.baseSession} 以前无指数`;
       } else {
-        const closeFraction = rawCloseFraction(close);
+        const closeFraction = priceCloseFraction(close);
         const indexFraction = normalizedIndexFraction(
           closeFraction,
           axis.bases.get(entry.selection.source_symbol),
         );
         indexText = indexFraction
           ? formatIndexFraction(indexFraction)
-          : `UNKNOWN · ${text(close?.reason || point.price_reason || close?.quality || "RAW收盘不可观察")}`;
+          : `UNKNOWN · ${text(close?.reason || point.price_reason || close?.quality || "前复权收盘不可观察")}`;
       }
       appendText(
         facts,
         "strong",
-        `相对已存RAW价格指数 ${indexText}`,
+        `相对已存BaoStock QFQ价格指数 ${indexText}`,
         "comparison-index",
       );
       td.append(facts);
@@ -533,7 +533,7 @@ function comparisonPeriodAvailability(entry, periodKind) {
           period.coverage_status === "COMPLETE" &&
           !comparisonPeriodCloseFraction(period),
       )
-      .map((period) => `${period.period_key} COMPLETE但RAW收盘无效`),
+      .map((period) => `${period.period_key} COMPLETE但前复权收盘无效`),
   );
   return `${symbol}：没有合法COMPLETE闭合收盘${observedReasons.length ? `（${observedReasons.join("；")}）` : ""}`;
 }
@@ -572,11 +572,11 @@ function renderComparisonPeriodResults() {
     `${axis.rows.length}个${kindLabel} · ${successfulCount}/${entries.length}只周期响应`;
   const identity = state.comparisonBasket[0];
   const targetText = identity
-    ? `目标 ${identity.target_session} · 来源包ID ${identity.source_package_id} · profile_revision ${identity.profile_revision} · RAW_UNADJUSTED / NON_PIT_RETROSPECTIVE。`
+    ? `目标 ${identity.target_session} · 来源捕获ID ${identity.source_capture_id} · profile_revision ${identity.profile_revision} · FORWARD_ADJUSTED / NON_PIT_RETROSPECTIVE。`
     : "等待同一精确来源版本的比较篮。";
   if (axis.baseRow) {
     $("comparisonPeriodStatus").textContent =
-      `${targetText} ${kindLabel}共同t0=${axis.baseRow.key}（${axis.baseRow.metadata.calendar_start_session}至${axis.baseRow.metadata.calendar_end_session}）；仅所有选中代码均为COMPLETE、合法RAW收盘且官方周期范围一致的行计算指数。`;
+      `${targetText} ${kindLabel}共同t0=${axis.baseRow.key}（${axis.baseRow.metadata.calendar_start_session}至${axis.baseRow.metadata.calendar_end_session}）；仅所有选中代码均为COMPLETE、合法BaoStock QFQ收盘且官方周期范围一致的行计算指数。`;
   } else {
     const details = entries.map((entry) =>
       comparisonPeriodAvailability(entry, kind),
@@ -641,7 +641,7 @@ function renderComparisonPeriodResults() {
         appendText(
           facts,
           "span",
-          `${closedText} · ${period.coverage_status} · RAW行 ${period.stored_raw_row_count}/${period.elapsed_expected_session_count} · 有效价格Bar ${period.valid_price_bar_count}/${period.elapsed_expected_session_count}`,
+          `${closedText} · ${period.coverage_status} · BaoStock来源行 ${period.stored_raw_row_count}/${period.elapsed_expected_session_count} · 有效前复权价格Bar ${period.valid_price_bar_count}/${period.elapsed_expected_session_count}`,
         );
         appendText(
           facts,
@@ -653,8 +653,8 @@ function renderComparisonPeriodResults() {
           facts,
           "strong",
           item.indexFraction
-            ? `周期RAW价格指数 ${formatIndexFraction(item.indexFraction)}（t0=${axis.baseRow.key}）`
-            : `周期RAW价格指数 UNKNOWN · ${item.reason || "未形成共同完整基准"}`,
+            ? `周期BaoStock QFQ价格指数 ${formatIndexFraction(item.indexFraction)}（t0=${axis.baseRow.key}）`
+            : `周期BaoStock QFQ价格指数 UNKNOWN · ${item.reason || "未形成共同完整基准"}`,
           "comparison-index",
         );
         appendText(

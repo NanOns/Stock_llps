@@ -127,14 +127,24 @@ def generate(
     }.get(kind, ())
     if any(key not in inputs for key in required):
         raise ContractError("结构缺少声明字段绑定")
-    vals = {
-        key: number(
-            inputs[key],
-            positive=key
-            in {"atr_previous", "atr_today", "prior_high20", "ma5", "ma20"},
-        )
-        for key in required
-    }
+    vals = {}
+    zero_atr_scale = False
+    for key in required:
+        if key in {"atr_previous", "atr_today"}:
+            scale = number(inputs[key])
+            if scale == 0:
+                zero_atr_scale = True
+                vals[key] = None
+                continue
+            if scale is not None and scale < 0:
+                raise ValueError("ATR尺度不能为负数")
+            vals[key] = scale
+        else:
+            vals[key] = number(
+                inputs[key], positive=key in {"prior_high20", "ma5", "ma20"}
+            )
+    if zero_atr_scale:
+        return unknown("ZERO_ATR")
     if any(v is None for v in vals.values()):
         return unknown("STRUCTURE_INPUT_UNKNOWN")
     if "clv" in vals and not 0 <= vals["clv"] <= 1:
@@ -280,6 +290,7 @@ class SupportObservation:
     test_count: int
     separated_sessions: int
     retest_qualified: bool
+    reason: str | None = None
 
 
 def observe_support(
@@ -320,17 +331,31 @@ def observe_support(
         return SupportObservation(
             anchor.anchor_id, t, "IDLE", "PENDING", "FRESH", 0, 0, tests, 0, False
         )
+    atr_scale = number(atr_previous)
+    zero_atr_scale = atr_scale == 0
+    if atr_scale is not None and atr_scale < 0:
+        raise ValueError("ATR尺度不能为负数")
     vals = (
         number(lower, positive=True),
         number(upper, positive=True),
-        number(atr_previous, positive=True),
+        None if zero_atr_scale else atr_scale,
         number(clv),
     )
     price = _prices(today)
     actual_value = boolean(actual)
     if price is None or actual_value is not True or any(v is None for v in vals):
         return SupportObservation(
-            anchor.anchor_id, t, "UNKNOWN", "UNKNOWN", "STALE", 0, 0, tests, 0, False
+            anchor.anchor_id,
+            t,
+            "UNKNOWN",
+            "UNKNOWN",
+            "STALE",
+            0,
+            0,
+            tests,
+            0,
+            False,
+            "ZERO_ATR" if zero_atr_scale else "SUPPORT_INPUT_UNKNOWN",
         )
     lo, hi, a, close_location = vals
     if lo > hi or not 0 <= close_location <= 1:

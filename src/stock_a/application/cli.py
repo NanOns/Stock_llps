@@ -5,65 +5,28 @@ from __future__ import annotations
 import sys
 from stock_a.application.runtime_config import (
     DiagnosticError,
-    _CONFIG_ROOT,
-    _EXIT_ARGUMENT,
     _EXIT_ENGINEERING,
     _EXIT_OK,
-    _EXIT_PERMISSION,
-    _EXIT_UNAVAILABLE,
-    _WORKSPACE,
-    load_runtime_config as _load_runtime_config,
 )
 
 from stock_a.application.cli_commands.common import _emit, _parse_session_date
-from stock_a.application.cli_commands.research.d1_preview import (
-    _run_source_d1_breakout_preview,
-)
 from stock_a.application.cli_commands.research.d0_raw import _run_source_d0_raw
 from stock_a.application.cli_commands.research.fep_baseline import (
     _run_source_fep_baseline,
 )
-from stock_a.application.cli_commands.research.market_observation import (
-    _run_source_market_observation,
-)
-from stock_a.application.cli_commands.research.observation_segments import (
-    _run_source_observation_segments,
-)
-from stock_a.application.cli_commands.research.research_day import (
-    _run_source_research_day,
-)
-from stock_a.application.cli_commands.research.sector_pulse import (
-    _run_source_sector_pulse_transition_day,
-)
-from stock_a.application.cli_commands.research.sector_pulse_followup import (
-    _run_source_sector_pulse_followup_day,
-)
-from stock_a.application.cli_commands.research.market_research import (
-    _run_source_market_breadth,
-    _run_source_symbol_price_profile,
-)
 from stock_a.application.cli_commands.research.research_commands import (
     _run_research,
-    _run_research_universe,
 )
 from stock_a.application.cli_commands.source.sector_members import (
-    _run_source_raw_catalog,
     _run_source_tdx_sector_members,
-)
-from stock_a.application.cli_commands.source.display_names import (
-    run_source_symbol_display_names,
 )
 from stock_a.application.cli_commands.source.source_diagnostics import (
     _run_doctor,
     _run_pg_bind,
     _run_pg_identity,
 )
-from stock_a.application.cli_commands.source.vipdata import (
+from stock_a.application.cli_commands.source.day_inspect import (
     _run_source_inspect,
-    _run_source_vipdata,
-    _run_source_vipdata_persist,
-    _run_vipdata_revision_compare,
-    _run_vipdata_target_quality,
 )
 
 
@@ -96,42 +59,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_research(args, compare=False)
         if args.command == "research-compare":
             return _run_research(args, compare=True)
-        if args.command == "research-universe-preview":
-            return _run_research_universe(args)
-        if args.command == "source-vipdata-target-quality":
-            return _run_vipdata_target_quality(args)
-        if args.command == "source-vipdata-revision-compare":
-            return _run_vipdata_revision_compare(args)
-        if args.command == "source-vipdata":
-            return _run_source_vipdata(args)
-        if args.command == "source-vipdata-persist":
-            return _run_source_vipdata_persist(args)
-        if args.command == "source-raw-catalog":
-            return _run_source_raw_catalog(args)
         if args.command == "source-tdx-sector-members":
             return _run_source_tdx_sector_members(args)
-        if args.command == "source-symbol-display-names":
-            return run_source_symbol_display_names(args)
-        if args.command == "source-symbol-price-profile":
-            return _run_source_symbol_price_profile(args)
-        if args.command == "source-market-breadth":
-            return _run_source_market_breadth(args)
         if args.command == "source-d0-raw":
             return _run_source_d0_raw(args)
-        if args.command == "source-market-observation":
-            return _run_source_market_observation(args)
         if args.command == "source-fep-baseline":
             return _run_source_fep_baseline(args)
-        if args.command == "source-observation-segments":
-            return _run_source_observation_segments(args)
-        if args.command == "source-research-day":
-            return _run_source_research_day(args)
-        if args.command == "source-sector-pulse-transition-day":
-            return _run_source_sector_pulse_transition_day(args)
-        if args.command == "source-sector-pulse-followup-day":
-            return _run_source_sector_pulse_followup_day(args)
-        if args.command == "source-d1-breakout-preview":
-            return _run_source_d1_breakout_preview(args)
         if args.command in ("product-serve", "preview-serve"):
             from stock_a.service.preview_http import run_preview_server
 

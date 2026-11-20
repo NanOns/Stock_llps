@@ -57,6 +57,11 @@ _TYPE_BLOCK_INFO = 0x06B9
 _TDXHY_PATH = "T0002/hq_cache/tdxhy.cfg"
 _TDXZS_PATH = "T0002/hq_cache/tdxzs.cfg"
 _INFOHARBOR_PATH = "T0002/hq_cache/infoharbor_block.dat"
+_PARSER_PATH_BY_REMOTE_NAME = {
+    "tdxhy.cfg": _TDXHY_PATH,
+    "tdxzs.cfg": _TDXZS_PATH,
+    "infoharbor_block.dat": _INFOHARBOR_PATH,
+}
 _LOCAL_TDX_CONFIG_SOURCE = "LOCAL_TDX_CONFIG:connect.cfg#HQHOST"
 _PYTDX_LIST_SOURCE = f"PYTDX_PUBLIC_LIST:{PYTDX_SERVER_LIST_URL}"
 _LEGACY_FALLBACK_SOURCE = "LEGACY_FALLBACK:DEFAULT_REMOTE_SECTOR_HOSTS"
@@ -1166,12 +1171,37 @@ def fetch_remote_sector_files(
 
 
 def _parse_candidate_files(host: str, files: Mapping[str, SourceFileEvidence]):
-    inputs = SectorSourceInputs(
-        root=f"TDX_REMOTE_SERVER/{host}:{REMOTE_SECTOR_PORT}",
-        files={item.relative_path: item for item in files.values()},
-    )
+    inputs = remote_sector_source_inputs(host=host, files=files)
     return parse_remote_sector_source_inputs_with_status(
         inputs, observed_at=datetime.now(timezone.utc)
+    )
+
+
+def remote_sector_source_inputs(
+    *,
+    host: str,
+    files: Mapping[str, SourceFileEvidence],
+) -> SectorSourceInputs:
+    """映射远端短文件名到成员解析器登记的标准相对路径。"""
+    normalized: dict[str, SourceFileEvidence] = {}
+    for evidence in files.values():
+        raw_path = str(evidence.relative_path).replace("\\", "/")
+        name = raw_path.rsplit("/", 1)[-1].lower()
+        parser_path = _PARSER_PATH_BY_REMOTE_NAME.get(name)
+        if parser_path is None:
+            raise TdxRemoteSectorError(
+                "REMOTE_SOURCE_PATH_UNREGISTERED",
+                "TDX远端文件名不在行业/GN解析合同中",
+            )
+        if parser_path in normalized:
+            raise TdxRemoteSectorError(
+                "REMOTE_SOURCE_PATH_DUPLICATE",
+                "TDX远端同类文件路径重复，拒绝静默覆盖",
+            )
+        normalized[parser_path] = evidence
+    return SectorSourceInputs(
+        root=f"TDX_REMOTE_SERVER/{host}:{REMOTE_SECTOR_PORT}",
+        files=normalized,
     )
 
 
@@ -1351,6 +1381,7 @@ __all__ = [
     "RemoteSectorFiles",
     "TdxRemoteSectorError",
     "fetch_remote_sector_files",
+    "remote_sector_source_inputs",
     "parse_pytdx_server_candidates",
     "validate_remote_sector_files",
 ]

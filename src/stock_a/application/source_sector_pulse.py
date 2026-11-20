@@ -10,6 +10,7 @@ from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.application.source_sector_change_research import (
     read_retrospective_rotation,
 )
+from stock_a.application.pg_research import read_source_version_context
 from stock_a.storage.postgres.sector_pulse_facts import (
     persist_source_sector_pulse_day,
     read_source_sector_pulse_day,
@@ -18,7 +19,6 @@ from stock_a.storage.postgres.sector_pulse_transitions import (
     persist_source_sector_pulse_transitions,
     read_source_sector_pulse_transitions,
 )
-from stock_a.storage.postgres.source_raw import read_source_version_context
 from stock_a.storage.postgres.tdx_sector_members import (
     query_tdx_sector_source_snapshot_catalog,
     read_rotation_snapshot_members,
@@ -302,12 +302,12 @@ def run_source_sector_pulse_day(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     industry_snapshot_id: int,
     concept_snapshot_id: int,
 ) -> dict[str, Any]:
-    """读取精确已存Raw，单次扫描全池并原子保存行业与GN概念全集。"""
+    """读取精确BaoStock paired capture，扫描全池并原子保存行业与GN概念全集。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
@@ -330,11 +330,19 @@ def run_source_sector_pulse_day(
     source_version = read_source_version_context(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
     )
-    if source_version.get("status") != "AVAILABLE":
+    if (
+        source_version.get("status") != "AVAILABLE"
+        or source_version.get("version_status") != "COMPLETE"
+        or source_version.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or source_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
+    ):
         raise SourceSectorPulseError(
-            "SECTOR_PULSE_RAW_SOURCE_UNAVAILABLE", "目标日没有唯一闭合的已存Raw来源"
+            "SECTOR_PULSE_QFQ_SOURCE_UNAVAILABLE",
+            "目标日没有唯一闭合的paired QFQ价格来源",
         )
     industry = read_rotation_snapshot_members(
         config, snapshot_id=industry_snapshot_id, board_kind="INDUSTRY"
@@ -366,7 +374,8 @@ def run_source_sector_pulse_day(
         start_session=target_session,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
         peer_target_only=True,
         peer_snapshot_ids={
             "INDUSTRY": industry_snapshot_id,
@@ -376,7 +385,7 @@ def run_source_sector_pulse_day(
     persisted = persist_source_sector_pulse_day(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         source_version=source_version,
         profile_revision=profile_revision,
         target_result=calculated,
@@ -392,7 +401,6 @@ def run_source_sector_pulse_day(
     return {
         "status": persisted["status"],
         "target_session": target_session.isoformat(),
-        "source_package_id": source_package_id,
         "source_capture_id": source_version["source_capture_id"],
         "source_pool_count": source_version["raw_row_count"],
         "profile_revision": profile_revision,
@@ -410,7 +418,8 @@ def run_source_sector_pulse_day(
         "pulse_state_counts": pulse_counts,
         "pulse_unknown_reason_counts": dict(sorted(unknown_reasons.items())),
         "membership_mode": calculated["membership_mode"],
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "calculation": "EXISTING_CROSS_PERIOD_BOARDS_SINGLE_SOURCE_POOL_SCAN",
         "persistence": persisted,
     }
@@ -422,8 +431,7 @@ def run_source_sector_pulse_transition_day(
     previous_session: date,
     target_session: date,
     research_cutoff: date,
-    previous_source_package_id: int,
-    target_source_package_id: int,
+    source_capture_id: int,
     previous_profile_revision: str,
     target_profile_revision: str,
     industry_snapshot_id: int,
@@ -441,10 +449,8 @@ def run_source_sector_pulse_transition_day(
         any(type(item) is not date for item in inputs)
         or previous_session >= target_session
         or target_session > research_cutoff
-        or type(previous_source_package_id) is not int
-        or previous_source_package_id <= 0
-        or type(target_source_package_id) is not int
-        or target_source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or not _valid_profile_revision(previous_profile_revision)
         or not _valid_profile_revision(target_profile_revision)
         or type(industry_snapshot_id) is not int
@@ -494,30 +500,34 @@ def run_source_sector_pulse_transition_day(
     generated_pulses: dict[str, Any] = {}
 
     def load_exact_day(
-        session: date, source_package_id: int, expected_profile_revision: str
+        session: date, source_capture_id: int, expected_profile_revision: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         source_version = read_source_version_context(
             config,
             target_session=session,
-            source_package_id=source_package_id,
+            research_cutoff=research_cutoff,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
         )
         if (
             source_version.get("status") != "AVAILABLE"
             or source_version.get("version_status") != "COMPLETE"
             or source_version.get("raw_row_count")
             != source_version.get("capture_expected_row_count")
+            or source_version.get("price_coordinate") != "FORWARD_ADJUSTED"
+            or source_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
         ):
             raise SourceSectorPulseError(
-                "SECTOR_PULSE_TRANSITION_RAW_NOT_CLOSED",
-                f"{session}缺少唯一且闭合的精确Raw来源",
+                "SECTOR_PULSE_TRANSITION_CAPTURE_NOT_CLOSED",
+                f"{session}缺少唯一且闭合的BaoStock paired capture",
             )
         pulse = read_source_sector_pulse_day(
             config,
             target_session=session,
-            source_package_id=source_package_id,
-            source_capture_id=source_version["source_capture_id"],
+            source_capture_id=source_capture_id,
             source_pool_count=source_version["raw_row_count"],
             snapshot_ids=snapshots,
+            profile_revision=expected_profile_revision,
         )
         pulse["target_session"] = session.isoformat()
         pulse["source_version"] = source_version
@@ -530,12 +540,12 @@ def run_source_sector_pulse_transition_day(
 
     previous_source, previous_pulse = load_exact_day(
         previous_session,
-        previous_source_package_id,
+        source_capture_id,
         previous_profile_revision,
     )
     target_source, target_pulse = load_exact_day(
         target_session,
-        target_source_package_id,
+        source_capture_id,
         target_profile_revision,
     )
     for session, source_version, pulse, profile_revision in (
@@ -565,14 +575,14 @@ def run_source_sector_pulse_transition_day(
         generated_pulses[session.isoformat()] = run_source_sector_pulse_day(
             config,
             target_session=session,
-            research_cutoff=session,
-            source_package_id=source_version["source_package_id"],
+            research_cutoff=research_cutoff,
+            source_capture_id=source_version["source_capture_id"],
             profile_revision=profile_revision,
             industry_snapshot_id=industry_snapshot_id,
             concept_snapshot_id=concept_snapshot_id,
         )
         _, refreshed = load_exact_day(
-            session, source_version["source_package_id"], profile_revision
+            session, source_version["source_capture_id"], profile_revision
         )
         if refreshed.get("status") != "AVAILABLE":
             raise SourceSectorPulseError(
@@ -610,12 +620,16 @@ def run_source_sector_pulse_transition_day(
         "status": persistence["status"],
         "previous_session": previous_session.isoformat(),
         "target_session": target_session.isoformat(),
+        "source_capture_id": source_capture_id,
+        "previous_source_capture_id": previous_source["source_capture_id"],
+        "target_source_capture_id": target_source["source_capture_id"],
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "calendar_identity": calendar_identity,
         "source_identities": {
             "previous": {
                 key: previous_source[key]
                 for key in (
-                    "source_package_id",
                     "source_capture_id",
                     "raw_row_count",
                 )
@@ -623,7 +637,6 @@ def run_source_sector_pulse_transition_day(
             "target": {
                 key: target_source[key]
                 for key in (
-                    "source_package_id",
                     "source_capture_id",
                     "raw_row_count",
                 )

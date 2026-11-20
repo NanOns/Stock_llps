@@ -63,36 +63,114 @@ export function renderD1Stocks(data, openStock) {
   byId("stockNext").disabled = data.stocks.next_offset == null;
 }
 
-export function renderBaoStockSupplement(data) {
+export function renderBaoStockPriceSource(data) {
   const section = element("section", null, "card");
-  section.append(element("h3", "BaoStock补充来源"));
-  const status = data?.status || "NOT_AVAILABLE";
+  section.append(element("h3", "BaoStock股票价格源"));
+  const row = data?.row && typeof data.row === "object" ? data.row : data;
+  const status = data?.status || row?.status || "NOT_AVAILABLE";
   if (status !== "AVAILABLE") {
     const reason =
-      data?.message || data?.reason_code || "该目标日没有已保存捕获。";
+      data?.message ||
+      data?.reason_code ||
+      "该目标日没有已保存的BaoStock捕获。";
     section.append(
       element(
         "p",
-        `${status} · ${reason}；不回退到其它交易日，不影响TDX价格。`,
+        `${status} · ${reason}；不回退到其它交易日或其它价格来源。`,
         "rule",
       ),
     );
     return section;
   }
 
+  const qfq = row.price_coordinate === "FORWARD_ADJUSTED";
+  const coordinatePrefix = qfq ? "qfq_" : "raw_";
+  const priceQuality = qfq ? "qfq_price_quality" : "price_quality";
+  const priceReason = qfq ? "qfq_price_reason" : "price_reason";
+  const fields = {
+    open: {
+      value: row[`${coordinatePrefix}open`],
+      quality: row[priceQuality],
+      reason: row[priceReason],
+    },
+    high: {
+      value: row[`${coordinatePrefix}high`],
+      quality: row[priceQuality],
+      reason: row[priceReason],
+    },
+    low: {
+      value: row[`${coordinatePrefix}low`],
+      quality: row[priceQuality],
+      reason: row[priceReason],
+    },
+    close: {
+      value: row[`${coordinatePrefix}close`],
+      quality: row[priceQuality],
+      reason: row[priceReason],
+    },
+    volume: {
+      value: qfq ? row.qfq_volume : row.raw_volume,
+      quality: row.volume_quality,
+      reason: row.volume_reason,
+      unit: "股",
+    },
+    amount: {
+      value: qfq ? row.qfq_amount : row.raw_amount,
+      quality: row.amount_quality,
+      reason: row.amount_reason,
+      unit: "元",
+    },
+    turn: {
+      value: qfq ? row.qfq_turn_value : row.raw_turn_value,
+      quality: qfq ? row.qfq_turn_quality : row.raw_turn_quality,
+      reason: qfq ? row.qfq_turn_reason : row.raw_turn_reason,
+    },
+    tradestatus: {
+      value: qfq ? row.qfq_tradestatus_value : row.raw_tradestatus_value,
+      quality: qfq ? row.qfq_tradestatus_quality : row.raw_tradestatus_quality,
+      reason: qfq ? row.qfq_tradestatus_reason : row.raw_tradestatus_reason,
+    },
+    is_st: {
+      value: qfq ? row.qfq_is_st_value : row.raw_is_st_value,
+      quality: qfq ? row.qfq_is_st_quality : row.raw_is_st_quality,
+      reason: qfq ? row.qfq_is_st_reason : row.raw_is_st_reason,
+    },
+  };
+  const source = {
+    ...row,
+    source_capture_id: data?.source_capture_id ?? row.source_capture_id,
+    source_symbol: data?.source_symbol ?? row.source_symbol,
+    target_session: data?.target_session ?? row.session_date,
+    capture_id: data?.source_capture_id ?? row.source_capture_id,
+    captured_at: row.capture_read_started_at,
+    adjustment_flag:
+      row.adjustment_flag ?? (qfq ? row.qfq_adjustflag : row.raw_adjustflag),
+    unit_contract: {
+      version: row.unit_contract_version,
+      close_input_unit: row.close_input_unit,
+      close_to_cny: row.close_to_cny,
+      amount_input_unit: row.amount_input_unit,
+      amount_to_cny: row.amount_to_cny,
+      volume_input_unit: row.volume_input_unit,
+      volume_to_shares: row.volume_to_shares,
+      turn_input_unit: row.turn_input_unit,
+    },
+    fields,
+  };
+
   section.append(
     element(
       "p",
-      `来源代码 ${data.source_symbol || "UNKNOWN"} · 会话 ${data.target_session || "UNKNOWN"} · 捕获 ${data.capture_id || "UNKNOWN"} · 捕获时刻 ${data.captured_at || "UNKNOWN"}`,
+      `来源代码 ${source.source_symbol || "UNKNOWN"} · 会话 ${source.target_session || "UNKNOWN"} · 捕获 ${source.capture_id || "UNKNOWN"} · 捕获时刻 ${source.captured_at || "UNKNOWN"}`,
       "rule",
     ),
     element(
       "p",
-      `${data.pit_status || "NON_PIT"} · ${data.price_coordinate || "RAW_UNADJUSTED"} · adjustflag=${data.adjustment_flag || "UNKNOWN"} · 时钟 ${data.capture_clock_role || "UNKNOWN"}`,
+      `${source.pit_status || "NON_PIT"} · ${source.price_coordinate || "RAW_UNADJUSTED"} · adjustflag=${source.adjustment_flag || "UNKNOWN"} · 时钟 ${source.capture_clock_role || "UNKNOWN"}`,
       "muted",
     ),
   );
-  const contract = data.unit_contract || {};
+  const contract = source.unit_contract || {};
   section.append(
     element(
       "p",
@@ -114,7 +192,7 @@ export function renderBaoStockSupplement(data) {
   };
   const grid = element("div", null, "fact-grid");
   for (const [name, label] of Object.entries(labels)) {
-    const field = data.fields?.[name] || {};
+    const field = source.fields?.[name] || {};
     const quality = field.quality || "UNKNOWN_DATA";
     const value =
       quality === "OBSERVED"

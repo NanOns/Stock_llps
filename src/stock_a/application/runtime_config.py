@@ -9,7 +9,7 @@ import uuid
 from typing import Any
 
 from stock_a.contracts import PROFILE_SEMANTIC_MODULES
-from stock_a.sources.tdx.vipdata import VipdataError, VipdataSourceConfig
+from stock_a.domain.source_policy import validate_baostock_primary_policy
 
 _WORKSPACE = Path("G:/codex work/Stock A")
 
@@ -17,7 +17,7 @@ _CONFIG_ROOT = _WORKSPACE / "config"
 
 _CONFIG_FILE = _CONFIG_ROOT / "runtime.defaults.json"
 
-_CONFIG_CONTRACT = "STOCK-A-RUNTIME-DEFAULTS/R9"
+_CONFIG_CONTRACT = "STOCK-A-RUNTIME-DEFAULTS/R10"
 
 _EXIT_OK = 0
 
@@ -29,9 +29,11 @@ _EXIT_PERMISSION = 4
 
 _EXIT_ENGINEERING = 5
 
-_MAX_BAOSTOCK_LOGIN_BATCHES = 10000
+_MAX_BAOSTOCK_LOGIN_BATCHES = 1000
 
-_MAX_BAOSTOCK_QUERIES_PER_TARGET_SESSION = 10
+_MAX_BAOSTOCK_API_CALLS_PER_BATCH = 100
+
+_MAX_BAOSTOCK_HISTORY_SESSIONS = 250
 
 
 class DiagnosticError(Exception):
@@ -199,13 +201,13 @@ def _validate_config(config: Any) -> None:
             "CONFIG_INVALID", "独立PG部署核验连接必须按唯一安全环境变量合同登记"
         )
     registered = policy.get("public_files")
-    contract_revision = "STOCK-A-PRICE-PROFILE-SEMANTICS/R1"
+    contract_revision = "STOCK-A-PRICE-PROFILE-SEMANTICS/R2"
     expected = {
         (
             "runtime.defaults.json",
             "BUSINESS_RUNTIME_CONFIGURATION",
             _CONFIG_CONTRACT,
-            "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official; single-stock research reads source_policy.baostock_supplement",
+            "application startup / configuration resolver and BaoStock price source request budget",
         ),
         (
             "contracts/price-profile.contract.json",
@@ -250,37 +252,19 @@ def _validate_config(config: Any) -> None:
         or sources.get("all_source_roots_read_only") is not True
     ):
         raise DiagnosticError("CONFIG_INVALID", "TDX来源根必须是绝对路径字符串列表")
-    bao = _require_mapping(
-        sources.get("baostock_supplement"), "source_policy.baostock_supplement"
-    )
-    budget = _require_mapping(
-        bao.get("request_budget"), "source_policy.baostock_supplement.request_budget"
-    )
-    max_logins = budget.get("max_logins")
-    max_queries = budget.get("max_queries_per_target_session")
-    query_timeout = budget.get("query_timeout_seconds")
-    if (
-        bao.get("contract") != "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1"
-        or bao.get("request_policy") != "NOT_REQUESTED"
-        or bao.get("reason_code") != "OPTIONAL_SOURCE_NOT_REQUESTED"
-        or bao.get("required_for_core") is not False
-        or type(max_logins) is not int
-        or not 1 <= max_logins <= _MAX_BAOSTOCK_LOGIN_BATCHES
-        or type(max_queries) is not int
-        or not 1 <= max_queries <= _MAX_BAOSTOCK_QUERIES_PER_TARGET_SESSION
-        or isinstance(query_timeout, bool)
-        or not isinstance(query_timeout, (int, float))
-        or not 0.2 <= float(query_timeout) <= 30.0
-    ):
-        raise DiagnosticError(
-            "CONFIG_INVALID", "BaoStock可选来源策略或本批请求预算不符合合同"
-        )
     try:
-        VipdataSourceConfig.from_mapping(sources.get("vipdata_official"))
-    except VipdataError as error:
+        bao = validate_baostock_primary_policy(sources.get("baostock_primary"))
+    except ValueError as error:
         raise DiagnosticError(
-            "CONFIG_INVALID", f"通达信官网端点配置无效：{error}"
+            "CONFIG_INVALID", f"BaoStock主价格源配置无效：{error}"
         ) from error
+    budget = bao["request_budget"]
+    if (
+        budget["max_login_batches"] > _MAX_BAOSTOCK_LOGIN_BATCHES
+        or budget["max_api_calls_per_batch"] > _MAX_BAOSTOCK_API_CALLS_PER_BATCH
+        or budget["max_history_session_count"] > _MAX_BAOSTOCK_HISTORY_SESSIONS
+    ):
+        raise DiagnosticError("CONFIG_INVALID", "BaoStock请求预算超出软件能力范围")
     app = _require_mapping(root.get("application_identity"), "application_identity")
     numeric_identity = "project_id" in app
     if numeric_identity and (

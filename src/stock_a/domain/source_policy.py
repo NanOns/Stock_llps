@@ -5,25 +5,25 @@ from typing import Any, Mapping
 
 
 _BAOSTOCK_POLICY_REQUIRED_KEYS = frozenset(
-    {
-        "contract",
-        "request_policy",
-        "reason_code",
-        "required_for_core",
-        "request_budget",
-    }
+    {"contract", "request_policy", "required_for_core", "request_budget"}
 )
 _BAOSTOCK_POLICY_OPTIONAL_KEYS = frozenset({"policy_revision"})
 _BAOSTOCK_POLICY_REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-_BAOSTOCK_POLICY_BUDGET = {
-    "max_logins": 1,
-    "max_queries_per_target_session": 10,
-    "query_timeout_seconds": 30,
-}
+_BAOSTOCK_POLICY_BUDGET_KEYS = frozenset(
+    {
+        "max_login_batches",
+        "max_api_calls_per_batch",
+        "query_timeout_seconds",
+        "max_identity_total_seconds",
+        "max_history_session_count",
+        "max_retry_attempts",
+        "retry_backoff_seconds",
+    }
+)
 
 
-def validate_optional_baostock_policy(value: Any) -> dict[str, Any]:
-    """校验当前Bao补充来源策略，保留可独立演进的显式policy_revision。"""
+def validate_baostock_primary_policy(value: Any) -> dict[str, Any]:
+    """校验唯一股票价格来源及其显式请求预算。"""
     if not isinstance(value, Mapping):
         raise ValueError("BaoStock策略必须是对象")
     policy = dict(value)
@@ -34,18 +34,27 @@ def validate_optional_baostock_policy(value: Any) -> dict[str, Any]:
         or not keys.issubset(
             _BAOSTOCK_POLICY_REQUIRED_KEYS | _BAOSTOCK_POLICY_OPTIONAL_KEYS
         )
-        or policy.get("contract") != "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1"
-        or policy.get("request_policy") != "NOT_REQUESTED"
-        or policy.get("reason_code") != "OPTIONAL_SOURCE_NOT_REQUESTED"
-        or policy.get("required_for_core") is not False
+        or policy.get("contract") != "STOCK-A-BAOSTOCK-PRIMARY-PRICE-SOURCE/R1"
+        or policy.get("request_policy") != "MANUAL_BOUNDED_JOB"
+        or policy.get("required_for_core") is not True
         or not isinstance(budget, Mapping)
-        or set(budget) != set(_BAOSTOCK_POLICY_BUDGET)
-        or any(
-            type(budget[key]) is not int or budget[key] != expected
-            for key, expected in _BAOSTOCK_POLICY_BUDGET.items()
-        )
+        or set(budget) != _BAOSTOCK_POLICY_BUDGET_KEYS
+        or type(budget.get("max_login_batches")) is not int
+        or not 1 <= budget["max_login_batches"] <= 1000
+        or type(budget.get("max_api_calls_per_batch")) is not int
+        or not 1 <= budget["max_api_calls_per_batch"] <= 100
+        or type(budget.get("query_timeout_seconds")) is not int
+        or not 1 <= budget["query_timeout_seconds"] <= 30
+        or type(budget.get("max_identity_total_seconds")) is not int
+        or not 30 <= budget["max_identity_total_seconds"] <= 120
+        or type(budget.get("max_history_session_count")) is not int
+        or not 1 <= budget["max_history_session_count"] <= 250
+        or type(budget.get("max_retry_attempts")) is not int
+        or not 0 <= budget["max_retry_attempts"] <= 1
+        or type(budget.get("retry_backoff_seconds")) is not int
+        or not 0 <= budget["retry_backoff_seconds"] <= 10
     ):
-        raise ValueError("BaoStock策略未知或预算不符合现行typed合同")
+        raise ValueError("BaoStock主价格源策略或请求预算不符合现行typed合同")
     revision = policy.get("policy_revision")
     if "policy_revision" in policy and (
         not isinstance(revision, str)

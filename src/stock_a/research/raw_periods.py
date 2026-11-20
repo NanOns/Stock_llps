@@ -1,4 +1,4 @@
-"""来源代码级RAW自然周期价格观察；不构成正式P06周期画像。"""
+"""来源代码级BaoStock坐标自然周期价格观察；历史回看不构成PIT结论。"""
 
 from __future__ import annotations
 
@@ -20,9 +20,17 @@ from stock_a.research.profile import (
 )
 
 
-RAW_PERIOD_ALGORITHM_ID = "R02_SOURCE_SYMBOL_RAW_PERIOD_OHLC_R1"
+RAW_PERIOD_ALGORITHM_ID = "R02_SOURCE_SYMBOL_BAOSTOCK_COORDINATE_PERIOD_OHLC_R2"
 _BAR_STATUSES = {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}
-_PRICE_FIELDS = ("raw_open", "raw_high", "raw_low", "raw_close")
+_PRICE_FIELDS_BY_COORDINATE = {
+    "RAW_UNADJUSTED": ("raw_open", "raw_high", "raw_low", "raw_close"),
+    "FORWARD_ADJUSTED": ("qfq_open", "qfq_high", "qfq_low", "qfq_close"),
+}
+_QUALITY_FIELDS_BY_COORDINATE = {
+    "RAW_UNADJUSTED": ("price_quality", "price_reason"),
+    "FORWARD_ADJUSTED": ("qfq_price_quality", "qfq_price_reason"),
+}
+_COORDINATE_FLAGS = {"RAW_UNADJUSTED": "3", "FORWARD_ADJUSTED": "2"}
 _TREND_RULES = {
     "WEEK": ("PROFILE_CLOSED_WEEK_TREND_R1", "profile.closed_week_trend"),
     "MONTH": ("PROFILE_CLOSED_MONTH_TREND_R1", "profile.closed_month_trend"),
@@ -32,9 +40,10 @@ _TREND_PRODUCER = "stock_a.research.raw_periods:build_source_symbol_raw_periods"
 
 @dataclass(frozen=True)
 class RawDailyBar:
-    """单个官方交易会话在一个精确来源包版本中的价格观察。"""
+    """单个官方会话在paired BaoStock捕获和指定坐标中的价格观察。"""
 
     session: date
+    price_coordinate: str
     bar_status: str
     bar_reason: str | None
     price_quality: str
@@ -45,14 +54,16 @@ class RawDailyBar:
     close: Fraction | None
     valid_price_bar: bool
     source_capture_id: int | None
-    source_package_id: int | None
 
 
 @dataclass(frozen=True)
 class RawPeriodBar:
-    """一个自然周/月的来源代码级RAW价格摘要与覆盖状态。"""
+    """一个自然周/月的BaoStock来源代码价格摘要与覆盖状态。"""
 
     kind: str
+    price_coordinate: str
+    source_capture_id: int | None
+    time_role: str
     key: str
     calendar_ordinal: int
     calendar_start_session: date
@@ -82,9 +93,12 @@ class RawPeriodBar:
 
 @dataclass(frozen=True)
 class RawPeriodTrend:
-    """按现役闭合周/月规则求值的NON_PIT_RAW_DIAGNOSTIC结果。"""
+    """按现役闭合周/月规则求值的NON_PIT价格坐标诊断结果。"""
 
     kind: str
+    price_coordinate: str
+    source_capture_id: int | None
+    time_role: str
     rule_id: str
     status: str
     value: str | None
@@ -134,53 +148,62 @@ def _valid_ohlc(values: tuple[Fraction | None, ...]) -> bool:
     )
 
 
-def _daily_bar(session: date, row: Mapping[str, Any] | None) -> RawDailyBar:
+def _daily_bar(
+    session: date,
+    row: Mapping[str, Any] | None,
+    *,
+    price_coordinate: str,
+) -> RawDailyBar:
     if row is None:
         return RawDailyBar(
-            session,
-            "HISTORY_ROW_NOT_STORED",
-            "PG_HISTORY_SESSION_MISSING",
-            "UNKNOWN",
-            "PG_HISTORY_SESSION_MISSING",
-            None,
-            None,
-            None,
-            None,
-            False,
-            None,
-            None,
+            session=session,
+            price_coordinate=price_coordinate,
+            bar_status="HISTORY_ROW_NOT_STORED",
+            bar_reason="PG_HISTORY_SESSION_MISSING",
+            price_quality="UNKNOWN",
+            price_reason="PG_HISTORY_SESSION_MISSING",
+            open=None,
+            high=None,
+            low=None,
+            close=None,
+            valid_price_bar=False,
+            source_capture_id=None,
         )
     if _session(row.get("session_date")) != session:
         raise ContractError("Raw周期输入行日期错配")
     bar_status = row.get("bar_status")
     if bar_status not in _BAR_STATUSES:
         raise ContractError("Raw周期输入含未登记来源状态")
-    values = tuple(_fraction(row.get(name)) for name in _PRICE_FIELDS)
-    quality = row.get("price_quality")
+    if price_coordinate not in _PRICE_FIELDS_BY_COORDINATE:
+        raise ContractError("Raw周期价格坐标只支持RAW_UNADJUSTED或FORWARD_ADJUSTED")
+    row_coordinate = row.get("price_coordinate")
+    if row_coordinate is not None and row_coordinate != price_coordinate:
+        raise ContractError("Raw周期输入价格坐标与请求不一致")
+    price_fields = _PRICE_FIELDS_BY_COORDINATE[price_coordinate]
+    quality_field, reason_field = _QUALITY_FIELDS_BY_COORDINATE[price_coordinate]
+    values = tuple(_fraction(row.get(name)) for name in price_fields)
+    quality = row.get(quality_field)
+    source_capture_id = row.get("source_capture_id")
+    if source_capture_id is not None and (
+        type(source_capture_id) is not int or source_capture_id <= 0
+    ):
+        raise ContractError("Raw周期来源捕获ID必须是正整数或空值")
     valid = (
         bar_status == "TARGET_PRESENT" and quality == "OBSERVED" and _valid_ohlc(values)
     )
     return RawDailyBar(
         session=session,
+        price_coordinate=price_coordinate,
         bar_status=bar_status,
         bar_reason=row.get("bar_reason"),
         price_quality=str(quality or "UNKNOWN"),
-        price_reason=row.get("price_reason"),
+        price_reason=row.get(reason_field),
         open=values[0],
         high=values[1],
         low=values[2],
         close=values[3],
         valid_price_bar=valid,
-        source_capture_id=(
-            int(row["source_capture_id"])
-            if row.get("source_capture_id") is not None
-            else None
-        ),
-        source_package_id=(
-            int(row["source_package_id"])
-            if row.get("source_package_id") is not None
-            else None
-        ),
+        source_capture_id=source_capture_id,
     )
 
 
@@ -197,6 +220,8 @@ def _period_identity(kind: str, session: date) -> tuple[str, int]:
 def _aggregate_period(
     *,
     kind: str,
+    price_coordinate: str,
+    source_capture_id: int | None,
     key: str,
     ordinal: int,
     expected_sessions: Sequence[date],
@@ -243,7 +268,7 @@ def _aggregate_period(
     else:
         coverage_status = "PARTIAL"
     if not valid_rows:
-        reasons.append("NO_VALID_RAW_PRICE_BAR")
+        reasons.append("NO_VALID_PRICE_COORDINATE_BAR")
 
     first = valid_rows[0] if valid_rows else None
     last = valid_rows[-1] if valid_rows else None
@@ -252,6 +277,9 @@ def _aggregate_period(
     expose_prices = calendar_closed
     return RawPeriodBar(
         kind=kind,
+        price_coordinate=price_coordinate,
+        source_capture_id=source_capture_id,
+        time_role="NON_PIT_RETROSPECTIVE",
         key=key,
         calendar_ordinal=ordinal,
         calendar_start_session=expected_sessions[0],
@@ -288,10 +316,12 @@ def build_source_symbol_raw_periods(
     session_dates: Sequence[date],
     calendar_sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
+    price_coordinate: str,
 ) -> dict[str, tuple[RawPeriodBar, ...]]:
-    """按自然周/月聚合显式PG Raw行，缺Bar不会被压缩或推断成停牌。"""
+    """按显式价格坐标聚合BaoStock日线；缺Bar不合成、不推断停牌。"""
     if (
         type(target_session) is not date
+        or price_coordinate not in _PRICE_FIELDS_BY_COORDINATE
         or not isinstance(session_dates, (tuple, list))
         or not session_dates
         or any(type(day) is not date for day in session_dates)
@@ -319,7 +349,28 @@ def build_source_symbol_raw_periods(
         if day not in session_dates or day in rows_by_session:
             raise ContractError("Raw周期历史行超出窗口或会话重复")
         rows_by_session[day] = row
-    daily = {day: _daily_bar(day, rows_by_session.get(day)) for day in session_dates}
+    capture_ids = {
+        row.get("source_capture_id")
+        for row in rows_by_session.values()
+        if row.get("source_capture_id") is not None
+    }
+    if any(row.get("source_capture_id") is None for row in rows_by_session.values()):
+        raise ContractError("Raw周期历史行缺少paired BaoStock source_capture_id")
+    if any(
+        type(capture_id) is not int or capture_id <= 0 for capture_id in capture_ids
+    ):
+        raise ContractError("Raw周期输入来源捕获ID必须是正整数")
+    if len(capture_ids) > 1:
+        raise ContractError("Raw周期窗口混合了多个paired BaoStock source_capture_id")
+    source_capture_id = next(iter(capture_ids)) if capture_ids else None
+    daily = {
+        day: _daily_bar(
+            day,
+            rows_by_session.get(day),
+            price_coordinate=price_coordinate,
+        )
+        for day in session_dates
+    }
     results: dict[str, tuple[RawPeriodBar, ...]] = {}
     for kind in ("WEEK", "MONTH"):
         grouped: dict[str, list[date]] = {}
@@ -335,6 +386,8 @@ def build_source_symbol_raw_periods(
             periods.append(
                 _aggregate_period(
                     kind=kind,
+                    price_coordinate=price_coordinate,
+                    source_capture_id=source_capture_id,
                     key=key,
                     ordinal=ordinals[key],
                     expected_sessions=expected,
@@ -348,11 +401,15 @@ def build_source_symbol_raw_periods(
 
 
 def summarize_raw_history_rows(
-    *, session_dates: Sequence[date], history_rows: Sequence[Mapping[str, Any]]
-) -> dict[str, int]:
-    """按Raw逐会话状态与OHLC合同动态统计，不使用固定Bar分母。"""
+    *,
+    session_dates: Sequence[date],
+    history_rows: Sequence[Mapping[str, Any]],
+    price_coordinate: str = "FORWARD_ADJUSTED",
+) -> dict[str, Any]:
+    """按选定价格坐标及逐会话状态统计，不使用固定Bar分母。"""
     if (
-        not isinstance(session_dates, (tuple, list))
+        price_coordinate not in _PRICE_FIELDS_BY_COORDINATE
+        or not isinstance(session_dates, (tuple, list))
         or not session_dates
         or any(type(day) is not date for day in session_dates)
         or any(left >= right for left, right in zip(session_dates, session_dates[1:]))
@@ -366,8 +423,30 @@ def summarize_raw_history_rows(
         if day not in session_dates or day in rows_by_session:
             raise ContractError("Raw历史统计行超出窗口或会话重复")
         rows_by_session[day] = row
-    daily = tuple(_daily_bar(day, rows_by_session.get(day)) for day in session_dates)
+    daily = tuple(
+        _daily_bar(
+            day,
+            rows_by_session.get(day),
+            price_coordinate=price_coordinate,
+        )
+        for day in session_dates
+    )
+    capture_ids = {
+        row.source_capture_id for row in daily if row.source_capture_id is not None
+    }
+    if any(
+        row.bar_status != "HISTORY_ROW_NOT_STORED" and row.source_capture_id is None
+        for row in daily
+    ):
+        raise ContractError("Raw历史统计行缺少paired BaoStock source_capture_id")
+    if len(capture_ids) > 1:
+        raise ContractError(
+            "Raw周期统计窗口混合了多个paired BaoStock source_capture_id"
+        )
     return {
+        "price_coordinate": price_coordinate,
+        "source_capture_id": next(iter(capture_ids)) if capture_ids else None,
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "official_session_count": len(session_dates),
         "stored_raw_row_count": sum(
             row.bar_status != "HISTORY_ROW_NOT_STORED" for row in daily
@@ -388,16 +467,34 @@ def summarize_raw_history_rows(
 
 
 def _unknown_trend(
-    kind: str, rule_id: str, minimum: int, complete_count: int, reason: str
+    kind: str,
+    rule_id: str,
+    minimum: int,
+    complete_count: int,
+    reason: str,
+    *,
+    price_coordinate: str,
+    source_capture_id: int | None,
 ) -> RawPeriodTrend:
     return RawPeriodTrend(
-        kind, rule_id, "UNKNOWN", None, reason, minimum, complete_count, ()
+        kind=kind,
+        price_coordinate=price_coordinate,
+        source_capture_id=source_capture_id,
+        time_role="NON_PIT_RETROSPECTIVE",
+        rule_id=rule_id,
+        status="UNKNOWN",
+        value=None,
+        reason=reason,
+        required_period_count=minimum,
+        complete_period_count=complete_count,
+        input_period_keys=(),
     )
 
 
 def evaluate_raw_period_trend(
     *,
     kind: str,
+    price_coordinate: str,
     periods: Sequence[RawPeriodBar],
     target_session: date,
     calendar_id: str,
@@ -406,8 +503,8 @@ def evaluate_raw_period_trend(
     profile_rules: Mapping[str, Mapping[str, Any]],
     field_registry: Sequence[Mapping[str, Any]],
 ) -> RawPeriodTrend:
-    """复用Profile闭合周/月现役规则，输出来源代码NON_PIT诊断层结果。"""
-    if kind not in _TREND_RULES:
+    """按显式BaoStock坐标复用闭合周/月公式，输出NON_PIT诊断结果。"""
+    if kind not in _TREND_RULES or price_coordinate not in _PRICE_FIELDS_BY_COORDINATE:
         raise ContractError("Raw周期趋势只支持自然周或自然月")
     if (
         not isinstance(profile_rules, Mapping)
@@ -433,6 +530,24 @@ def evaluate_raw_period_trend(
     )
     if type(minimum) is not int or minimum < 2:
         raise ContractError("现役闭合周期趋势窗口合同无效")
+    if any(period.price_coordinate != price_coordinate for period in periods):
+        raise ContractError("Raw周期趋势输入混合了不同price_coordinate")
+    source_capture_ids = {
+        period.source_capture_id
+        for period in periods
+        if period.source_capture_id is not None
+    }
+    if len(source_capture_ids) > 1:
+        return _unknown_trend(
+            kind,
+            rule_id,
+            minimum,
+            0,
+            "MIXED_PAIRED_SOURCE_CAPTURE_IDS",
+            price_coordinate=price_coordinate,
+            source_capture_id=None,
+        )
+    source_capture_id = next(iter(source_capture_ids)) if source_capture_ids else None
     closed_periods = tuple(
         period
         for period in periods
@@ -444,6 +559,16 @@ def evaluate_raw_period_trend(
             break
         trailing_complete.append(period)
     trailing_complete.reverse()
+    if trailing_complete and source_capture_id is None:
+        return _unknown_trend(
+            kind,
+            rule_id,
+            minimum,
+            0,
+            "SOURCE_CAPTURE_ID_UNBOUND",
+            price_coordinate=price_coordinate,
+            source_capture_id=None,
+        )
     if len(trailing_complete) < minimum:
         return _unknown_trend(
             kind,
@@ -451,6 +576,8 @@ def evaluate_raw_period_trend(
             minimum,
             len(trailing_complete),
             f"INSUFFICIENT_COMPLETE_CLOSED_PERIODS:{len(trailing_complete)}/{minimum}",
+            price_coordinate=price_coordinate,
+            source_capture_id=source_capture_id,
         )
     selected = tuple(trailing_complete[-minimum:])
     ordinals = tuple(period.calendar_ordinal for period in selected)
@@ -461,6 +588,8 @@ def evaluate_raw_period_trend(
             minimum,
             len(trailing_complete),
             "CLOSED_PERIOD_CALENDAR_SEQUENCE_GAP",
+            price_coordinate=price_coordinate,
+            source_capture_id=source_capture_id,
         )
 
     definition = next(
@@ -478,7 +607,8 @@ def evaluate_raw_period_trend(
             "field_id": diagnostic_input_id,
             "producer_symbol": diagnostic_producer,
             "value_type": "closed_prices",
-            "unit": "RAW_UNADJUSTED_OHLC",
+            "unit": f"{price_coordinate}_OHLC",
+            "coordinate_role": price_coordinate,
             "expression_ref": RAW_PERIOD_ALGORITHM_ID,
             "algorithm_version": RAW_PERIOD_ALGORITHM_ID,
             "parameter_version": RAW_PERIOD_ALGORITHM_ID,
@@ -486,8 +616,8 @@ def evaluate_raw_period_trend(
                 "context.target_session",
                 "context.source_cutoff",
                 "context.calendar_ref",
-                "context.action_revision",
-                "context.coordinate_contract_version",
+                "context.source_capture_id",
+                "context.price_coordinate_contract",
             ],
         }
     )
@@ -509,22 +639,28 @@ def evaluate_raw_period_trend(
         for name, operand in source_rule["operands"].items()
     }
     window = WindowIdentity(
-        contract=diagnostic_definition.get("window_contract", "CLOSED_PERIOD_R1"),
+        contract=diagnostic_definition.get("window_contract", "CLOSED_PERIOD_R2"),
         first_endpoint=selected[0].calendar_start_session,
         last_endpoint=selected[-1].calendar_end_session,
         selected_sessions=tuple(
             row.session for period in selected for row in period.daily_rows
         ),
         calendar_revision=calendar_revision,
-        status_revision="RAW_PERIOD_STATUS_R1",
+        status_revision="PRICE_COORDINATE_PERIOD_STATUS_R2",
     )
-    coordinate_id = "TDX_RAW_UNADJUSTED_SOURCE_SYMBOL_NON_PIT"
+    adjustflag = _COORDINATE_FLAGS[price_coordinate]
+    coordinate_id = (
+        f"BAOSTOCK_CAPTURE_{source_capture_id}_ADJUSTFLAG_{adjustflag}_"
+        f"{price_coordinate}_NON_PIT"
+    )
     context = {
         "context.target_session": target_session,
         "context.source_cutoff": source_cutoff,
         "context.calendar_ref": f"{calendar_id}:{calendar_revision}",
-        "context.action_revision": "UNKNOWN_ACTION_SELECTION_NOT_BOUND",
-        "context.coordinate_contract_version": "RAW_UNADJUSTED_NON_PIT_DIAGNOSTIC_R1",
+        "context.source_capture_id": source_capture_id,
+        "context.price_coordinate_contract": (
+            f"BAOSTOCK_ADJUSTFLAG_{adjustflag}_{price_coordinate}_NON_PIT_R2"
+        ),
     }
     field_value = ClosedPrices(
         closes=tuple(FieldValue(period.close) for period in selected if period.close),
@@ -569,6 +705,9 @@ def evaluate_raw_period_trend(
     )
     return RawPeriodTrend(
         kind=kind,
+        price_coordinate=price_coordinate,
+        source_capture_id=source_capture_id,
+        time_role="NON_PIT_RETROSPECTIVE",
         rule_id=rule_id,
         status=result.quality,
         value=str(result.value) if result.quality == "OBSERVED" else None,
@@ -597,6 +736,10 @@ def raw_period_payload(
     period: RawPeriodBar, *, include_daily_prices: bool = True
 ) -> dict[str, Any]:
     """将精确Fraction价格投影为可读且保留分数的JSON对象。"""
+    if any(
+        row.price_coordinate != period.price_coordinate for row in period.daily_rows
+    ):
+        raise ContractError("Raw周期响应混合了不同价格坐标")
     high_row = next(
         (row for row in period.daily_rows if row.session == period.high_session), None
     )
@@ -605,6 +748,9 @@ def raw_period_payload(
     )
     return {
         "kind": period.kind,
+        "price_coordinate": period.price_coordinate,
+        "source_capture_id": period.source_capture_id,
+        "time_role": period.time_role,
         "period_key": period.key,
         "calendar_ordinal": period.calendar_ordinal,
         "calendar_start_session": period.calendar_start_session.isoformat(),
@@ -644,6 +790,7 @@ def raw_period_payload(
         "daily_rows": [
             {
                 "session": row.session.isoformat(),
+                "price_coordinate": row.price_coordinate,
                 "bar_status": row.bar_status,
                 "bar_reason": row.bar_reason,
                 "price_quality": row.price_quality,
@@ -654,7 +801,6 @@ def raw_period_payload(
                 "low": _fraction_payload(row.low) if include_daily_prices else None,
                 "close": _fraction_payload(row.close) if include_daily_prices else None,
                 "source_capture_id": row.source_capture_id,
-                "source_package_id": row.source_package_id,
             }
             for row in period.daily_rows
         ],

@@ -22,12 +22,10 @@ from stock_a.research.core import (
     calculate_seed_missing_core,
 )
 from stock_a.research.breakout import evaluate_raw_breakout_predicate
-from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
 
 from stock_a.research.entry_core.fields import (
     _apply_calendar_coverage_to_core,
     _render_field,
-    _render_raw,
     _render_value,
 )
 from stock_a.research.entry_context.errors import ResearchEntryError
@@ -36,7 +34,10 @@ from stock_a.research.entry_core.profile_preview import (
 )
 from stock_a.research.entry_context.sessions import _load_calendar, _parse_target
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
-from stock_a.research.entry_history.support import _decoded_day_from_pg_raw
+from stock_a.research.entry_history.support import (
+    _core_observation_from_pg_price_row,
+    _field_from_pg_raw,
+)
 
 
 @dataclass(frozen=True)
@@ -355,9 +356,10 @@ def _source_d1_preview_for_target(
     target: date,
     sessions: tuple[date, ...],
     normalized: str,
+    source_capture_id: int,
+    price_coordinate: str,
     coordinate_id: str,
     rows_by_session: Mapping[date, Mapping[str, Any]],
-    decoded_by_session: Mapping[date, DecodedDay],
     observations_by_session: Mapping[date, CoreObservation],
     row_facts: Mapping[date, _SourceD1RowFacts],
     context: _SourceD1PreviewContext,
@@ -381,16 +383,7 @@ def _source_d1_preview_for_target(
         core, history, calendar_metadata[-1]["coverage_context"]
     )
     target_row = rows_by_session.get(target)
-    target_bar = decoded_by_session.get(target)
-    close_field = (
-        target_bar.raw_close
-        if target_bar is not None
-        else unknown(
-            "UNKNOWN_HISTORY_SESSION_NOT_STORED"
-            if target_row is None
-            else "TARGET_BAR_MISSING"
-        )
-    )
+    close_field = observations_by_session[target].close
     evaluation = evaluate_raw_breakout_predicate(
         close_field,
         core["core.prior_high20"],
@@ -404,22 +397,23 @@ def _source_d1_preview_for_target(
     return {
         "symbol": normalized,
         "target_session": target.isoformat(),
+        "source_capture_id": source_capture_id,
         "identity_status": "SOURCE_SYMBOL_ONLY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": price_coordinate,
         "structure_core_fields": {
             name: _render_field(core[name])
             for name in ("core.atr20", "core.ma_slope20_atr", "core.clv")
         },
         "target_bar_status": {
-            "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
-            "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
-            "READ_FAILED": "TDX_READ_FAILED",
+            "TARGET_PRESENT": "BAOSTOCK_TARGET_BAR_PRESENT",
+            "TARGET_MISSING": "BAOSTOCK_TARGET_BAR_MISSING",
+            "READ_FAILED": "BAOSTOCK_READ_FAILED",
             "HISTORY_ROW_NOT_STORED": "HISTORY_ROW_NOT_STORED",
         }[target_row["bar_status"] if target_row else "HISTORY_ROW_NOT_STORED"],
         "raw_d1_breakout_predicate": {
-            "scope": "SOURCE_SYMBOL_ONLY_RAW_UNADJUSTED_NON_PIT_RETROSPECTIVE",
+            "scope": "SOURCE_SYMBOL_ONLY_QFQ_NON_PIT_RETROSPECTIVE",
             "target_session": target.isoformat(),
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": price_coordinate,
             "coordinate_id": coordinate_id,
             "core_producer_symbol": "stock_a.research.core:calculate_core",
             "core_producer_algorithm_version": context.core_algorithm_version,
@@ -464,19 +458,41 @@ def research_stock_pg_d1_history_previews(
     event_sessions: Sequence[date],
     followup_session: date,
     session_dates: Sequence[date],
-    source_package_id: int,
     history_rows: Sequence[Mapping[str, Any]],
     context: _SourceD1PreviewContext,
-    _decoded_by_session: Mapping[date, Any] | None = None,
+    source_capture_id: int | None = None,
+    price_coordinate: str | None = None,
+    **legacy_source_identity: Any,
 ) -> dict[date, dict[str, Any]]:
-    """一次解码同源历史，只计算D1会话及真实D1事件所需的目标后继。"""
+    """按paired BaoStock捕获和QFQ坐标计算D1会话与所需后继。"""
     events = tuple(event_sessions)
     sessions = tuple(session_dates)
     normalized = _normalize_symbol(symbol)[0]
-    if type(source_package_id) is not int or source_package_id <= 0:
-        raise ResearchEntryError(
-            "PG_HISTORY_BINDING_INVALID", "PG历史预览缺少数字来源包ID"
-        )
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        return {
+            day: {
+                "status": "NOT_COMPUTED",
+                "reason_code": "PG_BAOSTOCK_CAPTURE_REQUIRED",
+                "symbol": normalized,
+                "target_session": day.isoformat(),
+                "price_coordinate": price_coordinate,
+                "time_role": "NON_PIT_RETROSPECTIVE",
+            }
+            for day in events
+        }
+    if price_coordinate != "FORWARD_ADJUSTED":
+        return {
+            day: {
+                "status": "NOT_COMPUTED",
+                "reason_code": "D1_REQUIRES_QFQ_PRICE_COORDINATE",
+                "symbol": normalized,
+                "target_session": day.isoformat(),
+                "source_capture_id": source_capture_id,
+                "price_coordinate": price_coordinate,
+                "time_role": "NON_PIT_RETROSPECTIVE",
+            }
+            for day in events
+        }
     if (
         not events
         or tuple(sorted(set(events))) != events
@@ -505,86 +521,28 @@ def research_stock_pg_d1_history_previews(
         )
     if any(
         row.get("source_symbol") != normalized
-        or row.get("source_package_id") != source_package_id
+        or row.get("source_capture_id") != source_capture_id
         for row in rows
     ):
         raise ResearchEntryError(
             "PG_HISTORY_REVISION_MISMATCH",
-            "PG历史行混入不同来源代码或来源包ID",
+            "PG历史行混入不同来源代码或paired捕获ID",
         )
 
     rows_by_session = {row["session_date"]: row for row in rows}
-    if _decoded_by_session is None:
-        decoded_by_session = {
-            row["session_date"]: decoded
-            for row in rows
-            if (decoded := _decoded_day_from_pg_raw(row)) is not None
-        }
-    else:
-        decoded_by_session = dict(_decoded_by_session)
-        if any(day not in rows_by_session for day in decoded_by_session) or any(
-            row.get("bar_status") == "TARGET_PRESENT"
-            and row["session_date"] not in decoded_by_session
-            for row in rows
-        ):
-            raise ResearchEntryError(
-                "PG_HISTORY_DECODE_BINDING_INVALID",
-                "共享Raw解码与历史行身份或目标Bar不匹配",
-            )
-    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
+    )
     observations_by_session: dict[date, CoreObservation] = {}
     for day in sessions:
         row = rows_by_session.get(day)
-        if row is None:
-            observations_by_session[day] = CoreObservation(
-                session=day,
-                state="UNKNOWN",
-                coordinate_id=coordinate_id,
-                open=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
-                high=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
-                low=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
-                close=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
-                amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-                volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-            )
-            continue
-        state = row.get("bar_status")
-        if state == "TARGET_PRESENT":
-            decoded = decoded_by_session[day]
-            observations_by_session[day] = CoreObservation(
-                session=day,
-                state="ACTUAL",
-                coordinate_id=coordinate_id,
-                open=decoded.raw_open,
-                high=decoded.raw_high,
-                low=decoded.raw_low,
-                close=decoded.raw_close,
-                amount=decoded.amount,
-                volume=decoded.volume,
-                native_amount=decoded.raw_amount,
-                native_volume=decoded.raw_volume,
-            )
-        elif state in {"TARGET_MISSING", "READ_FAILED"}:
-            reason = row.get("bar_reason") or (
-                "TARGET_SESSION_BAR_MISSING"
-                if state == "TARGET_MISSING"
-                else "SOURCE_ENTRY_READ_FAILED"
-            )
-            observations_by_session[day] = CoreObservation(
-                session=day,
-                state="UNKNOWN",
-                coordinate_id=coordinate_id,
-                open=unknown(reason),
-                high=unknown(reason),
-                low=unknown(reason),
-                close=unknown(reason),
-                amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-                volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-            )
-        else:
-            raise ResearchEntryError(
-                "PG_HISTORY_STATUS_INVALID", "PG历史行含未登记的Raw来源状态"
-            )
+        observations_by_session[day] = _core_observation_from_pg_price_row(
+            row,
+            session=day,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+            coordinate_id=coordinate_id,
+        )
 
     row_facts = {
         day: _source_d1_row_facts(observation)
@@ -597,9 +555,10 @@ def research_stock_pg_d1_history_previews(
             target=day,
             sessions=sessions,
             normalized=normalized,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
             coordinate_id=coordinate_id,
             rows_by_session=rows_by_session,
-            decoded_by_session=decoded_by_session,
             observations_by_session=observations_by_session,
             context=context,
             row_facts=row_facts,
@@ -614,9 +573,10 @@ def research_stock_pg_d1_history_previews(
             target=followup_session,
             sessions=sessions,
             normalized=normalized,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
             coordinate_id=coordinate_id,
             rows_by_session=rows_by_session,
-            decoded_by_session=decoded_by_session,
             observations_by_session=observations_by_session,
             context=context,
             row_facts=row_facts,
@@ -628,191 +588,183 @@ def research_stock_pg_history_preview(
     *,
     symbol: str,
     target_session: str,
-    source_package_id: int,
     session_dates: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
+    source_capture_id: int | None = None,
+    price_coordinate: str | None = None,
     missing_history_sessions: Sequence[date] | None = None,
-    profile_contract: dict[str, Any],
+    profile_contract: dict[str, Any] | None = None,
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     include_profile_preview: bool = True,
     selected_profile_fields: frozenset[str] | None = None,
     seed_core_inputs: Mapping[str, FieldValue] | None = None,
     include_raw_breakout: bool = False,
     allow_missing_target_row: bool = False,
+    **legacy_source_identity: Any,
 ) -> dict[str, Any]:
-    """把明确PG Raw窗口适配至现役Core和Profile11研究预览。"""
+    """把同一paired BaoStock捕获的QFQ窗口接到Core、Profile与D1预览。"""
     target = _parse_target(target_session)
     normalized = _normalize_symbol(symbol)[0]
-    if type(source_package_id) is not int or source_package_id <= 0:
-        raise ResearchEntryError(
-            "PG_HISTORY_BINDING_INVALID", "PG历史预览缺少数字来源包ID"
+
+    def not_computed(reason_code: str, message: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "contract": "STOCK_A_PG_BAOSTOCK_CORE_PROFILE_PREVIEW_R2",
+            "status": "NOT_COMPUTED",
+            "reason_code": reason_code,
+            "reason": message,
+            "symbol": normalized,
+            "target_session": target.isoformat(),
+            "source_capture_id": source_capture_id
+            if type(source_capture_id) is int and source_capture_id > 0
+            else None,
+            "price_coordinate": price_coordinate,
+            "time_role": "NON_PIT_RETROSPECTIVE",
+            "source": {"provider": "BAOSTOCK"},
+            "database_write": False,
+        }
+
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        return not_computed(
+            "PG_BAOSTOCK_CAPTURE_REQUIRED",
+            "历史Core/Profile读取必须显式绑定paired BaoStock source_capture_id；不回退TDX或包键。",
         )
+    if price_coordinate != "FORWARD_ADJUSTED":
+        return not_computed(
+            "CORE_REQUIRES_QFQ_PRICE_COORDINATE",
+            "跨日Core、MA、ATR、趋势和D1输入必须使用BaoStock QFQ坐标。",
+        )
+    if include_profile_preview and profile_contract is None:
+        return not_computed(
+            "PRICE_PROFILE_CONTRACT_REQUIRED", "Profile预览缺少已加载的R2价格字段合同。"
+        )
+    if (
+        not isinstance(session_dates, (tuple, list))
+        or not session_dates
+        or len(session_dates) > 250
+        or any(type(day) is not date for day in session_dates)
+        or tuple(sorted(set(session_dates))) != tuple(session_dates)
+        or session_dates[-1] != target
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_CALENDAR_INVALID",
+            "PG历史窗口必须是目标日截止的1至250个官方会话。",
+        )
+
     calendar_payload, calendar_metadata, calendar_revision, all_calendar_sessions = (
         _load_calendar(target)
     )
     coverage_context = calendar_metadata[-1]["coverage_context"]
     expected_sessions = tuple(session_dates)
-    if (
-        not expected_sessions
-        or any(type(day) is not date for day in expected_sessions)
-        or tuple(sorted(set(expected_sessions))) != expected_sessions
-        or expected_sessions[-1] != target
-        or any(day not in all_calendar_sessions for day in expected_sessions)
-    ):
-        raise ResearchEntryError(
-            "PG_HISTORY_CALENDAR_INVALID", "PG历史窗口未与版本化官方日历严格绑定"
-        )
     official_window = tuple(
         day for day in all_calendar_sessions if expected_sessions[0] <= day <= target
     )
     if expected_sessions != official_window:
         raise ResearchEntryError(
-            "CALENDAR_SESSION_GAP", "PG历史窗口遗漏版本化官方日历中的交易会话"
+            "CALENDAR_SESSION_GAP", "PG历史窗口遗漏版本化官方日历中的交易会话。"
         )
 
     rows = tuple(history_rows)
+    if any(not isinstance(row, Mapping) for row in rows):
+        raise ResearchEntryError(
+            "PG_HISTORY_ROW_INVALID", "PG价格历史行必须是字段映射。"
+        )
     row_dates = tuple(row.get("session_date") for row in rows)
     if (
         len(set(row_dates)) != len(row_dates)
         or any(day not in expected_sessions for day in row_dates)
         or row_dates != tuple(sorted(row_dates))
+        or any(
+            row.get("source_symbol") != normalized
+            or row.get("source_capture_id") != source_capture_id
+            for row in rows
+        )
     ):
         raise ResearchEntryError(
-            "PG_HISTORY_SESSION_ORDER_INVALID", "PG历史Raw行重复、越界或未按会话递增"
+            "PG_HISTORY_CAPTURE_BINDING_INVALID",
+            "PG历史行必须绑定相同BaoStock来源代码、paired capture和递增会话。",
         )
-    present_dates = set(row_dates)
-    missing_dates = tuple(day for day in expected_sessions if day not in present_dates)
+    if any(row.get("price_coordinate") not in (None, price_coordinate) for row in rows):
+        raise ResearchEntryError(
+            "PG_HISTORY_COORDINATE_MISMATCH", "PG历史行含不同价格坐标。"
+        )
+    rows_by_session = {row["session_date"]: row for row in rows}
+    missing_dates = tuple(
+        day for day in expected_sessions if day not in rows_by_session
+    )
     if (
         missing_history_sessions is not None
         and tuple(missing_history_sessions) != missing_dates
     ):
         raise ResearchEntryError(
             "PG_HISTORY_MISSING_SESSION_BINDING_INVALID",
-            "PG历史缺失会话清单与实际Raw行不一致",
+            "PG历史缺失会话清单与实际QFQ行不一致。",
         )
-    if target not in present_dates and not allow_missing_target_row:
-        raise ResearchEntryError(
-            "PG_HISTORY_TARGET_ROW_MISSING", "PG历史Raw没有精确目标日行，拒绝跨日回退"
+    if target not in rows_by_session and not allow_missing_target_row:
+        return not_computed(
+            "PG_HISTORY_TARGET_ROW_MISSING",
+            "QFQ历史没有精确目标日行；不回退RAW或最近日期。",
         )
-    if any(
-        row.get("source_symbol") != normalized
-        or row.get("source_package_id") != source_package_id
-        for row in rows
-    ):
-        raise ResearchEntryError(
-            "PG_HISTORY_REVISION_MISMATCH", "PG历史行混入不同来源代码或来源包ID"
+
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
+    )
+    history = tuple(
+        _core_observation_from_pg_price_row(
+            rows_by_session.get(session),
+            session=session,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+            coordinate_id=coordinate_id,
         )
-    rows_by_session = {row["session_date"]: row for row in rows}
-    target_row = rows_by_session.get(target)
-    target_bar = _decoded_day_from_pg_raw(target_row) if target_row else None
-    if target_row is None:
-        target_row = {"bar_status": "HISTORY_ROW_NOT_STORED"}
-    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
-    history: list[CoreObservation] = []
+        for session in expected_sessions
+    )
     status_counts = {
         "TARGET_PRESENT": 0,
         "TARGET_MISSING": 0,
         "READ_FAILED": 0,
         "HISTORY_ROW_NOT_STORED": 0,
     }
-    price_quality_counts: dict[str, int] = {}
-    raw_amount_quality_counts: dict[str, int] = {}
-    raw_volume_quality_counts: dict[str, int] = {}
     for session in expected_sessions:
         row = rows_by_session.get(session)
-        if row is None:
-            status_counts["HISTORY_ROW_NOT_STORED"] += 1
-            history.append(
-                CoreObservation(
-                    session=session,
-                    state="UNKNOWN",
-                    coordinate_id=coordinate_id,
-                    open=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
-                    high=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
-                    low=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
-                    close=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
-                    amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-                    volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-                )
-            )
-            continue
-        state = row.get("bar_status")
-        status_counts[state] = status_counts.get(state, 0) + 1
-        for counter, key in (
-            (price_quality_counts, "price_quality"),
-            (raw_amount_quality_counts, "raw_amount_quality"),
-            (raw_volume_quality_counts, "raw_volume_quality"),
-        ):
-            quality = str(row.get(key) or "UNKNOWN")
-            counter[quality] = counter.get(quality, 0) + 1
-        if state == "TARGET_PRESENT":
-            decoded = _decoded_day_from_pg_raw(row)
-            assert decoded is not None
-            history.append(
-                CoreObservation(
-                    session=row["session_date"],
-                    state="ACTUAL",
-                    coordinate_id=coordinate_id,
-                    open=decoded.raw_open,
-                    high=decoded.raw_high,
-                    low=decoded.raw_low,
-                    close=decoded.raw_close,
-                    amount=decoded.amount,
-                    volume=decoded.volume,
-                    native_amount=decoded.raw_amount,
-                    native_volume=decoded.raw_volume,
-                )
-            )
-        elif state in {"TARGET_MISSING", "READ_FAILED"}:
-            reason = row.get("bar_reason") or (
-                "TARGET_SESSION_BAR_MISSING"
-                if state == "TARGET_MISSING"
-                else "SOURCE_ENTRY_READ_FAILED"
-            )
-            history.append(
-                CoreObservation(
-                    session=row["session_date"],
-                    state="UNKNOWN",
-                    open=unknown(reason),
-                    high=unknown(reason),
-                    low=unknown(reason),
-                    close=unknown(reason),
-                    amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-                    volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-                )
-            )
-        else:
+        status = row.get("bar_status") if row is not None else "HISTORY_ROW_NOT_STORED"
+        if status not in status_counts:
             raise ResearchEntryError(
-                "PG_HISTORY_STATUS_INVALID", "PG历史行含未登记的Raw来源状态"
+                "PG_HISTORY_STATUS_INVALID", "PG行含未登记价格状态。"
             )
-    if sum(status_counts.values()) != len(expected_sessions):
-        raise ResearchEntryError(
-            "PG_HISTORY_PARTITION_INCOMPLETE", "PG历史目标行状态分母未闭合"
-        )
+        status_counts[status] += 1
 
-    bounded_calendar = MarketSessionCalendar(
-        calendar_id=calendar_payload["calendar_id"],
-        revision=calendar_revision,
-        sessions=expected_sessions,
-    )
+    target_row = rows_by_session.get(target)
+    target_observation = history[-1]
     if seed_core_inputs is None:
-        core = calculate_core(tuple(history), official_calendar=bounded_calendar)
+        core = calculate_core(
+            history,
+            official_calendar=MarketSessionCalendar(
+                calendar_id=calendar_payload["calendar_id"],
+                revision=calendar_revision,
+                sessions=expected_sessions,
+            ),
+        )
     else:
         if include_raw_breakout or selected_profile_fields != frozenset(
             {"profile.compression", "profile.extension", "profile.ma_structure"}
         ):
             raise ResearchEntryError(
-                "PG_SEED_CORE_SCOPE_INVALID", "已存Core复用仅适用于Seed所需画像"
+                "PG_SEED_CORE_SCOPE_INVALID", "已存Core复用仅适用于Seed所需画像。"
             )
         core = dict(seed_core_inputs)
         core.update(
             calculate_seed_missing_core(
-                tuple(history),
-                official_calendar=bounded_calendar,
+                history,
+                official_calendar=MarketSessionCalendar(
+                    calendar_id=calendar_payload["calendar_id"],
+                    revision=calendar_revision,
+                    sessions=expected_sessions,
+                ),
                 saved_atr20=core["core.atr20"],
             )
         )
-    _apply_calendar_coverage_to_core(core, tuple(history), coverage_context)
+    _apply_calendar_coverage_to_core(core, history, coverage_context)
     rendered_core = {name: _render_field(value) for name, value in sorted(core.items())}
     unknown_reasons: dict[str, int] = {}
     for value in core.values():
@@ -824,70 +776,78 @@ def research_stock_pg_history_preview(
             "PG_CORE_FIELD_COUNT_INVALID", f"Core现役字段数异常：{len(core)}"
         )
 
-    captures_by_session = []
+    raw_field_specs = {
+        "open": ("raw_open", "price_quality", "price_reason"),
+        "high": ("raw_high", "price_quality", "price_reason"),
+        "low": ("raw_low", "price_quality", "price_reason"),
+        "close": ("raw_close", "price_quality", "price_reason"),
+        "preclose": ("raw_preclose", "raw_preclose_quality", "raw_preclose_reason"),
+        "amount": ("raw_amount", "amount_quality", "amount_reason"),
+        "volume": ("raw_volume", "volume_quality", "volume_reason"),
+        "turn": ("raw_turn_value", "raw_turn_quality", "raw_turn_reason"),
+        "tradestatus": (
+            "raw_tradestatus_value",
+            "raw_tradestatus_quality",
+            "raw_tradestatus_reason",
+        ),
+        "is_st": ("raw_is_st_value", "raw_is_st_quality", "raw_is_st_reason"),
+    }
+    raw_fields = {
+        name: _render_field(
+            _field_from_pg_raw(target_row, value, quality, reason)
+            if target_row is not None
+            else unknown("TARGET_BAR_MISSING")
+        )
+        for name, (value, quality, reason) in raw_field_specs.items()
+    }
+    qfq_fields = {
+        name: _render_field(
+            _field_from_pg_raw(
+                target_row, column, "qfq_price_quality", "qfq_price_reason"
+            )
+            if target_row is not None
+            else unknown("TARGET_BAR_MISSING")
+        )
+        for name, column in (
+            ("open", "qfq_open"),
+            ("high", "qfq_high"),
+            ("low", "qfq_low"),
+            ("close", "qfq_close"),
+        )
+    }
+    actual_bars = sum(row.state == "ACTUAL" for row in history)
+    qfq_price_quality_counts: dict[str, int] = {}
+    raw_price_quality_counts: dict[str, int] = {}
+    raw_amount_quality_counts: dict[str, int] = {}
+    raw_volume_quality_counts: dict[str, int] = {}
     for row in rows:
-        captures_by_session.append(
-            {
-                "session_date": row["session_date"].isoformat(),
-                "source_capture_id": row["source_capture_id"],
-                "capture_read_started_at": row["capture_read_started_at"].isoformat(),
-                "capture_validated_at": row["capture_validated_at"].isoformat(),
-                "capture_normalized_count": row["capture_normalized_count"],
-            }
-        )
-
-    source_cutoff = f"TDX_PACKAGE:{source_package_id}:THROUGH:{target.isoformat()}"
-    profile_preview = None
-    if include_profile_preview:
-        profile_preview = _build_profile_preview(
-            selected_fields=selected_profile_fields,
-            symbol=normalized,
-            target_session=target,
-            source_last_session=target,
-            source_cutoff=source_cutoff,
-            target_bar=target_bar,
-            history=tuple(history),
-            core=core,
-            calendar_revision=calendar_revision,
-            contract=profile_contract,
-            closed_period_bars=closed_period_bars,
-            source_snapshot_role="PG_CAPTURE_HISTORY_ID_NOT_CAPTURED_AVAILABLE_AT",
-        )
-        profile_components = profile_preview.get("components", [])
-        if (
-            len(profile_components) != 11
-            if selected_profile_fields is None
-            else {item["field_id"] for item in profile_components}
-            != selected_profile_fields
+        for counts, key in (
+            (qfq_price_quality_counts, "qfq_price_quality"),
+            (raw_price_quality_counts, "price_quality"),
+            (raw_amount_quality_counts, "raw_amount_quality"),
+            (raw_volume_quality_counts, "raw_volume_quality"),
         ):
-            raise ResearchEntryError(
-                "PG_PROFILE_RULE_COUNT_INVALID", "Profile现役规则数异常"
-            )
-    actual_bars = status_counts["TARGET_PRESENT"]
-    gaps = sum(status_counts.values()) - status_counts["TARGET_PRESENT"]
-    target_bar_status = {
-        "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
-        "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
-        "READ_FAILED": "TDX_READ_FAILED",
-        "HISTORY_ROW_NOT_STORED": "HISTORY_ROW_NOT_STORED",
-    }[target_row["bar_status"]]
-    price_window_sessions = expected_sessions[-21:]
-    ma20_window_sessions = expected_sessions[-20:]
+            quality = str(row.get(key) or "UNKNOWN")
+            counts[quality] = counts.get(quality, 0) + 1
 
-    def has_valid_price_bar(session: date) -> bool:
-        row = rows_by_session.get(session)
-        return bool(
-            row is not None
-            and row.get("bar_status") == "TARGET_PRESENT"
-            and row.get("price_quality") == "OBSERVED"
-            and all(
-                row.get(name) is not None
-                for name in ("raw_open", "raw_high", "raw_low", "raw_close")
-            )
+    ma20_sessions = expected_sessions[-20:]
+    atr20_sessions = expected_sessions[-21:]
+    ma20_actual = sum(
+        rows_by_session.get(session, {}).get("qfq_price_quality") == "OBSERVED"
+        and all(
+            rows_by_session[session].get(column) is not None
+            for column in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
         )
-
-    ma20_actual_bars = sum(has_valid_price_bar(day) for day in ma20_window_sessions)
-    atr20_actual_bars = sum(has_valid_price_bar(day) for day in price_window_sessions)
+        for session in ma20_sessions
+    )
+    atr20_actual = sum(
+        rows_by_session.get(session, {}).get("qfq_price_quality") == "OBSERVED"
+        and all(
+            rows_by_session[session].get(column) is not None
+            for column in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
+        )
+        for session in atr20_sessions
+    )
     core_ma20 = core.get("core.ma20")
     core_atr20 = core.get("core.atr20")
     price_window_usable = bool(
@@ -896,79 +856,103 @@ def research_stock_pg_history_preview(
         and core_ma20.quality == "OBSERVED"
         and core_atr20.quality == "OBSERVED"
     )
-    if price_window_usable:
-        price_window_status = "USABLE"
-        price_window_reason = None
-    elif target_row["bar_status"] == "TARGET_MISSING":
-        price_window_status = "TARGET_MISSING"
-        price_window_reason = (
-            target_row.get("bar_reason") or "TARGET_SESSION_BAR_MISSING"
-        )
-    elif target_row["bar_status"] == "READ_FAILED":
-        price_window_status = "READ_FAILED"
-        price_window_reason = target_row.get("bar_reason") or "SOURCE_ENTRY_READ_FAILED"
-    elif any(day not in rows_by_session for day in price_window_sessions):
-        price_window_status = "HISTORY_ROW_NOT_STORED"
-        price_window_reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
-    elif ma20_actual_bars < 20 or atr20_actual_bars < 21:
-        price_window_status = "INSUFFICIENT_VALID_BARS"
-        price_window_reason = (
+    price_window_status = "USABLE" if price_window_usable else "UNKNOWN_DATA"
+    price_window_reason = (
+        None
+        if price_window_usable
+        else (
             core_atr20.reason
-            if core_atr20 is not None and core_atr20.reason
+            if core_atr20 and core_atr20.reason
             else core_ma20.reason
-            if core_ma20 is not None
-            else "PRICE_WINDOW_UNAVAILABLE"
+            if core_ma20
+            else "QFQ_PRICE_WINDOW_UNAVAILABLE"
         )
-    else:
-        price_window_status = "PRICE_FIELDS_UNKNOWN"
-        price_window_reason = (
-            core_atr20.reason
-            if core_atr20 is not None and core_atr20.reason
-            else core_ma20.reason
-            if core_ma20 is not None
-            else "PRICE_WINDOW_UNAVAILABLE"
-        )
-    history_records_complete = not missing_dates
-    history_records_status = (
-        "RECORDS_COMPLETE" if history_records_complete else "HISTORY_ROW_NOT_STORED"
     )
-    result = {
+    profile_preview = None
+    if include_profile_preview and profile_contract is not None:
+        profile_preview = _build_profile_preview(
+            selected_fields=selected_profile_fields,
+            symbol=normalized,
+            target_session=target,
+            source_last_session=target,
+            source_cutoff=(
+                f"BAOSTOCK_CAPTURE:{source_capture_id}:{price_coordinate}:THROUGH:{target.isoformat()}"
+            ),
+            target_bar=target_row,
+            history=history,
+            core=core,
+            calendar_revision=calendar_revision,
+            contract=profile_contract,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+            closed_period_bars=closed_period_bars,
+            source_snapshot_role="BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
+        )
+        components = profile_preview.get("components", [])
+        if (
+            len(components) != 11
+            if selected_profile_fields is None
+            else {item["field_id"] for item in components} != selected_profile_fields
+        ):
+            raise ResearchEntryError(
+                "PG_PROFILE_RULE_COUNT_INVALID", "Profile规则数异常。"
+            )
+
+    target_status = (
+        target_row.get("bar_status") if target_row else "HISTORY_ROW_NOT_STORED"
+    )
+    target_bar_status = {
+        "TARGET_PRESENT": "BAOSTOCK_TARGET_BAR_PRESENT",
+        "TARGET_MISSING": "BAOSTOCK_TARGET_BAR_MISSING",
+        "READ_FAILED": "BAOSTOCK_READ_FAILED",
+        "HISTORY_ROW_NOT_STORED": "HISTORY_ROW_NOT_STORED",
+    }[target_status]
+    captures_by_session = [
+        {
+            "session_date": row["session_date"].isoformat(),
+            "source_capture_id": source_capture_id,
+            "price_coordinate": price_coordinate,
+            "capture_read_started_at": row.get("observed_started_at"),
+            "capture_read_completed_at": row.get("observed_completed_at"),
+        }
+        for row in rows
+    ]
+    result: dict[str, Any] = {
         "ok": True,
-        "contract": "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1",
+        "contract": "STOCK_A_PG_BAOSTOCK_CORE_PROFILE_PREVIEW_R2",
         "status": "RESEARCH_PREVIEW_NON_PIT",
         "symbol": normalized,
         "target_session": target.isoformat(),
-        "research_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
+        "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
-        "source_object_status": "TDX_SOURCE_SYMBOL_OBSERVED",
+        "stable_security_id_issued": False,
+        "source_object_status": "BAOSTOCK_CAPTURE_OBSERVED",
         "target_bar_status": target_bar_status,
         "price_research_status": "AVAILABLE"
-        if target_row.get("price_quality") == "OBSERVED"
+        if target_observation.close.quality == "OBSERVED"
         else "UNKNOWN_DATA",
-        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
-        "listing_status": "LISTING_STATUS_UNKNOWN",
-        "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
-        "official_listing_universe_status": "UNKNOWN",
         "pit_status": "NON_PIT_RETROSPECTIVE",
-        "history_status": history_records_status,
-        "history_records_complete": history_records_complete,
-        "history_records_status": history_records_status,
-        "price_window_usable": price_window_usable,
-        "price_window_status": price_window_status,
-        "price_window_reason": price_window_reason,
-        "price_window_valid_bar_count": atr20_actual_bars,
-        "price_window_expected_bar_count": len(price_window_sessions),
-        "ma20_window_valid_bar_count": ma20_actual_bars,
-        "ma20_window_expected_bar_count": len(ma20_window_sessions),
+        "history_status": "RECORDS_COMPLETE"
+        if not missing_dates
+        else "HISTORY_ROW_NOT_STORED",
+        "history_records_complete": not missing_dates,
         "missing_history_sessions": [day.isoformat() for day in missing_dates],
         "source": {
-            "storage": "POSTGRESQL_TYPED_SOURCE_RAW",
-            "dataset_id": target_row.get("dataset_id"),
-            "source_package_id": source_package_id,
-            "target_source_capture_id": target_row.get("source_capture_id"),
-            "source_clock_role": target_row.get("capture_clock_role"),
-            "source_time_quality": target_row.get("capture_time_quality"),
+            "provider": "BAOSTOCK",
+            "source_capture_id": source_capture_id,
+            "price_coordinate": price_coordinate,
+            "price_coordinates_in_capture": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+            "source_clock_role": (
+                target_row.get("source_clock_role") if target_row else None
+            ),
+            "source_observed_started_at": (
+                target_row.get("observed_started_at") if target_row else None
+            ),
+            "source_observed_completed_at": (
+                target_row.get("observed_completed_at") if target_row else None
+            ),
             "source_available_at": None,
             "capture_revisions": captures_by_session,
         },
@@ -980,47 +964,35 @@ def research_stock_pg_history_preview(
             "requested_sessions": len(expected_sessions),
             "evaluated_sessions": len(rows),
             "stored_sessions": len(rows),
-            "missing_history_sessions": [day.isoformat() for day in missing_dates],
-            "history_complete": history_records_complete,
-            "history_status": history_records_status,
-            "history_records_complete": history_records_complete,
-            "history_records_status": history_records_status,
+            "real_bar_count": actual_bars,
+            "gap_count": len(expected_sessions) - actual_bars,
+            "session_status_counts": status_counts,
+            "future_session_rows_used": 0,
             "price_window_usable": price_window_usable,
             "price_window_status": price_window_status,
             "price_window_reason": price_window_reason,
-            "price_window_valid_bar_count": atr20_actual_bars,
-            "price_window_expected_bar_count": len(price_window_sessions),
-            "ma20_window_valid_bar_count": ma20_actual_bars,
-            "ma20_window_expected_bar_count": len(ma20_window_sessions),
-            "real_bar_count": actual_bars,
-            "gap_count": gaps,
-            "source_bar_gap_count": status_counts["TARGET_MISSING"]
-            + status_counts["READ_FAILED"],
-            "unavailable_history_row_count": status_counts["HISTORY_ROW_NOT_STORED"],
-            "session_status_counts": status_counts,
-            "unknown_session_dates": [
-                session.isoformat()
-                for session in expected_sessions
-                if session not in present_dates
-                or rows_by_session[session]["bar_status"] != "TARGET_PRESENT"
-            ],
-            "future_session_rows_used": 0,
+            "price_window_valid_bar_count": atr20_actual,
+            "price_window_expected_bar_count": len(atr20_sessions),
+            "ma20_window_valid_bar_count": ma20_actual,
+            "ma20_window_expected_bar_count": len(ma20_sessions),
         },
-        "raw": _render_raw(
-            target_bar,
-            UnitContract("TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1", None, None),
-        ),
+        "raw": raw_fields,
+        "qfq": qfq_fields,
         "quality": {
-            "price_quality_counts": dict(sorted(price_quality_counts.items())),
+            "qfq_price_quality_counts": dict(sorted(qfq_price_quality_counts.items())),
+            "raw_price_quality_counts": dict(sorted(raw_price_quality_counts.items())),
             "raw_amount_quality_counts": dict(
                 sorted(raw_amount_quality_counts.items())
             ),
             "raw_volume_quality_counts": dict(
                 sorted(raw_volume_quality_counts.items())
             ),
-            "amount_unit_status": "UNIT_UNVERIFIED",
-            "volume_unit_status": "UNIT_UNVERIFIED",
-            "unit_dependent_core_reason": "UNIT_AUTHORITY_NOT_VERIFIED",
+            "amount_unit_status": target_row.get("amount_unit_status")
+            if target_row
+            else None,
+            "volume_unit_status": target_row.get("volume_unit_status")
+            if target_row
+            else None,
         },
         "core": {
             "field_count": len(core),
@@ -1034,25 +1006,12 @@ def research_stock_pg_history_preview(
             "fields": rendered_core,
         },
         "profile_preview": profile_preview,
-        "execution": {
-            "source_zip_opened": False,
-            "source_scan_performed": False,
-            "source_recalculated": False,
-            "ddl_executed": False,
-            "database_write": False,
-            "network_access": False,
-        },
+        "database_write": False,
+        "source_file_read": False,
+        "network_access": False,
     }
     if include_raw_breakout:
-        close_field = (
-            target_bar.raw_close
-            if target_bar is not None
-            else unknown(
-                "UNKNOWN_HISTORY_SESSION_NOT_STORED"
-                if target not in present_dates
-                else "TARGET_BAR_MISSING"
-            )
-        )
+        close_field = target_observation.close
         evaluation = evaluate_raw_breakout_predicate(
             close_field,
             core["core.prior_high20"],
@@ -1065,41 +1024,18 @@ def research_stock_pg_history_preview(
                 for key, value in predicate["evidence"].items()
             }
         result["raw_d1_breakout_predicate"] = {
-            "scope": "SOURCE_SYMBOL_ONLY_RAW_UNADJUSTED_NON_PIT_RETROSPECTIVE",
+            "scope": "SOURCE_SYMBOL_ONLY_QFQ_NON_PIT_RETROSPECTIVE",
             "target_session": target.isoformat(),
-            "price_coordinate": "RAW_UNADJUSTED",
+            "source_capture_id": source_capture_id,
+            "price_coordinate": price_coordinate,
             "coordinate_id": coordinate_id,
             "core_producer_symbol": "stock_a.research.core:calculate_core",
-            "core_producer_algorithm_version": "STOCK_A_CORE_R1",
-            "core_producer_role": "SEMANTIC_CORE_CONTRACT_SOURCE",
-            "execution_adapter_symbol": (
-                "stock_a.research.entry_history.history_preview:"
-                "_calculate_core_d1_inputs"
-            ),
-            "execution_adapter_version": "SOURCE_D1_PREVIEW_R1",
-            "execution_adapter_role": "ACTUAL_D1_FAST_CALCULATION_ADAPTER",
-            "core_field_ids": [
-                "core.prior_high20",
-                "core.atr20",
-                "core.clv",
-            ],
+            "core_field_ids": ["core.prior_high20", "core.atr20", "core.clv"],
             "inputs": {
                 "C": _render_field(close_field),
                 "core.prior_high20": _render_field(core["core.prior_high20"]),
                 "core.atr20": _render_field(core["core.atr20"]),
                 "core.clv": _render_field(core["core.clv"]),
-            },
-            "official_dependency_window": {
-                "calendar_id": calendar_payload["calendar_id"],
-                "calendar_revision": calendar_revision,
-                "start_session": expected_sessions[0].isoformat(),
-                "end_session": expected_sessions[-1].isoformat(),
-                "official_session_count": len(expected_sessions),
-                "prior_high20_actual_bars": 20,
-                "prior_high20_excludes_target": True,
-                "atr20_true_ranges": 20,
-                "atr20_dependency_actual_bars": 21,
-                "clv_target_bar_only": True,
             },
             "predicates": evaluation,
         }

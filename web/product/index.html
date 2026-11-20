@@ -228,7 +228,7 @@
                   <span class="section-kicker">PROFILE CHANGES</span>
                   <h3>相邻会话画像变化</h3>
                   <p>
-                    仅展示精确画像修订间的 Raw 观察变化，独立于上方 D1 统计；
+                    仅展示精确画像修订间的价格画像变化，独立于上方 D1 统计；
                     NON_PIT，不代表正式选股。
                   </p>
                 </div>
@@ -659,7 +659,8 @@
                 在个股研究打开该代码
               </button>
               <div id="focusStockStatus" role="status">
-                输入六位股票代码后可独立读取 Raw 观察；正式 Focus 未计算。
+                输入六位股票代码后可独立读取 BaoStock 行情观察；正式 Focus
+                未计算。
               </div>
               <div id="focusStockResult"></div>
               <div id="cohortSummary"></div>
@@ -760,7 +761,7 @@
                   初始化范围
                   <select id="dataInitMode">
                     <option value="REUSE_RAW">
-                      复用已有Raw，补算或重算派生结果
+                      复用已有BaoStock行情，补算或重算派生结果
                     </option>
                     <option value="RESET_ALL_BUSINESS_FACTS">
                       清空本项目全部业务事实后重新初始化
@@ -775,7 +776,7 @@
                   ></select>
                 </label>
                 <label>
-                  基础Raw历史会话数
+                  BaoStock未复权行情历史会话数
                   <input
                     id="dataInitHistory"
                     type="number"
@@ -816,10 +817,10 @@
                 </div>
               </div>
               <p class="muted">
-                默认读取最近200个官方会话作为基础Raw和预热输入；画像及每个已实现算法分别默认只保存最近5个输出会话，可在模块项中单独调整。
+                默认读取最近200个官方会话作为基础BaoStock行情和预热输入；画像及每个已实现算法分别默认只保存最近5个输出会话，可在模块项中单独调整。
               </p>
               <p id="dataInitProfileHistoryHelp" class="muted">
-                此窗口单独控制Core/Profile逐个输出日读取的历史长度，不随Raw总量或输出会话数变化；初始值取当前Profile窗口配置，若没有该值则取Core最大实际回看窗口。
+                此窗口单独控制Core/Profile逐个输出日读取的历史长度，不随基础行情输入量或输出会话数变化；初始值取当前Profile窗口配置，若没有该值则取Core最大实际回看窗口。
               </p>
               <div
                 id="dataInitModules"
@@ -840,7 +841,7 @@
                 </label>
               </div>
               <p class="muted">
-                基础Raw窗口用于来源读取与必要预热；每个已选模块只保存其指定的最近N个官方输出会话。“复用Raw”模式只补算或清理预览中的派生事实；整库清理必须选择上方的显式重初始化模式。
+                基础行情窗口用于来源读取与必要预热；每个已选模块只保存其指定的最近N个官方输出会话。“复用现有行情”模式只补算或清理预览中的派生事实；整库清理必须选择上方的显式重初始化模式。
               </p>
               <p id="dataInitResetNotice" class="job-reset-notice" hidden>
                 整库重初始化会清除预览中列出的本项目业务事实，并保留数据库结构、迁移记录、运行身份和必要配置。必须通过来源与范围预检，再逐步确认后提交一个可跟踪任务。
@@ -866,7 +867,7 @@
                 </button>
               </div>
               <div id="dataInitPlan" class="job-plan" role="status">
-                选择范围后检查官方日历与截止内PG Raw覆盖。
+                选择范围后检查官方日历与截止内 BaoStock 未复权行情覆盖。
               </div>
             </section>
             <section class="card">
@@ -983,7 +984,8 @@
               </p>
               <div id="marketResult">正在读取当前日期。</div>
               <p>
-                宽度与成交参与按同一来源包和捕获读取；趋势、压力及综合标签只在合法输入齐备时显示，缺少证据时保留未知状态。
+                宽度与成交参与按同一 BaoStock 价格捕获读取；行业与 GN
+                成员按各自真实板块快照读取。趋势、压力及综合标签只在合法输入齐备时显示，缺少证据时保留未知状态。
               </p>
             </section>
             <section class="card market-d0-card">

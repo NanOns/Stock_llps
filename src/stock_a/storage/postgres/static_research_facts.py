@@ -65,7 +65,6 @@ _SEED_COLUMNS = (
     "source_symbol",
     "market",
     "board",
-    "source_package_id",
     "source_capture_id",
     "profile_revision",
     "producer_contract",
@@ -126,7 +125,6 @@ _SEED_COLUMNS = (
 _D0_COLUMNS = (
     "target_session",
     "source_symbol",
-    "source_package_id",
     "source_capture_id",
     "parser_contract",
     "scenario",
@@ -155,7 +153,6 @@ _D0_COLUMNS = (
 _D0_KEY = (
     "target_session",
     "source_symbol",
-    "source_package_id",
     "source_capture_id",
     "scenario",
     "producer_version",
@@ -164,7 +161,6 @@ _D0_KEY = (
 _SEED_KEY = (
     "target_session",
     "source_symbol",
-    "source_package_id",
     "source_capture_id",
     "profile_revision",
     "producer_version",
@@ -279,7 +275,6 @@ def _d0_rows(
                 (
                     date.fromisoformat(page["target_session"]),
                     symbol,
-                    source["source_package_id"],
                     source["source_capture_id"],
                     source["parser_contract"],
                     scenario,
@@ -303,7 +298,7 @@ def _d0_rows(
                     expected_calendar["calendar_id"],
                     expected_calendar["calendar_revision"],
                     "NON_PIT_RETROSPECTIVE",
-                    "RAW_UNADJUSTED",
+                    "FORWARD_ADJUSTED",
                 )
             )
     if not scenarios or (require_complete and set(scenarios) != set(_D0_PREDICATES)):
@@ -441,7 +436,6 @@ def _seed_rows(
             "source_symbol": symbol,
             "market": raw["market"],
             "board": raw["board"],
-            "source_package_id": source["source_package_id"],
             "source_capture_id": source["source_capture_id"],
             "profile_revision": profile_revision,
             "producer_contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
@@ -455,7 +449,7 @@ def _seed_rows(
             "source_clock_role": source["source_clock_role"],
             "source_available_at": source["source_available_at"],
             "research_mode": "NON_PIT_RETROSPECTIVE",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
         }
         for name in _CORE_MEASURES:
             field = _field(
@@ -588,17 +582,20 @@ def _seed_rows(
 def _scope_predicate(
     table: str, columns: Sequence[str], row: Sequence[Any]
 ) -> tuple[str, tuple[Any, ...]]:
+    if len(columns) != len(row):
+        raise StaticResearchPgError(
+            "STATIC_ROW_SHAPE_MISMATCH",
+            f"静态研究表{table}行宽{len(row)}与列合同{len(columns)}不一致",
+        )
     names = dict(zip(columns, row, strict=True))
     scope = (
         (
             "target_session",
-            "source_package_id",
             "source_capture_id",
         )
         if table == _D0_TABLE
         else (
             "target_session",
-            "source_package_id",
             "source_capture_id",
             "profile_revision",
             "producer_version",
@@ -771,11 +768,22 @@ def read_source_d0_scenario_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     scenario: str,
+    price_coordinate: str = "FORWARD_ADJUSTED",
+    research_cutoff: date | None = None,
 ) -> dict[str, Any]:
     """以完整单日分母读取已保存D0场景，不回退Raw重算。"""
-    if scenario not in _D0_PREDICATES:
+    cutoff = research_cutoff or target_session
+    if (
+        scenario not in _D0_PREDICATES
+        or type(target_session) is not date
+        or type(cutoff) is not date
+        or target_session > cutoff
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or price_coordinate != "FORWARD_ADJUSTED"
+    ):
         raise StaticResearchPgError("STATIC_D0_SCENARIO_INVALID", "D0场景未登记")
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
@@ -783,8 +791,27 @@ def read_source_d0_scenario_day(
         _connection_identity,
     ):
         cursor.execute(
-            f"SELECT {', '.join(_D0_COLUMNS)} FROM {_D0_TABLE} WHERE target_session=%s AND source_package_id=%s AND scenario=%s ORDER BY source_symbol, producer_version, calendar_revision",
-            (target_session, source_package_id, scenario),
+            f"""SELECT d.{", d.".join(_D0_COLUMNS)}
+                FROM {_D0_TABLE} d
+                JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
+                WHERE d.target_session=%s AND d.target_session<=%s
+                  AND d.source_capture_id=%s AND d.scenario=%s
+                  AND d.price_coordinate=%s AND c.provider='BAOSTOCK'
+                  AND c.range_start_session<=d.target_session
+                  AND d.target_session<=c.range_end_session
+                  AND c.range_end_session<=%s
+                  AND c.price_coordinates @> ARRAY[
+                      'RAW_UNADJUSTED','FORWARD_ADJUSTED'
+                  ]::text[]
+                ORDER BY d.source_symbol,d.producer_version,d.calendar_revision""",
+            (
+                target_session,
+                cutoff,
+                source_capture_id,
+                scenario,
+                price_coordinate,
+                cutoff,
+            ),
         )
         rows = cursor.fetchall()
     if not rows:
@@ -798,7 +825,6 @@ def read_source_d0_scenario_day(
                 tuple(
                     dict(zip(_D0_COLUMNS, row, strict=True))[name]
                     for name in (
-                        "source_package_id",
                         "source_capture_id",
                         "parser_contract",
                         "producer_version",
@@ -868,6 +894,7 @@ def read_source_d0_scenario_day(
                 "source_symbol": item["source_symbol"],
                 "target_session": target_session.isoformat(),
                 "scenario": scenario,
+                "price_coordinate": price_coordinate,
                 "scenario_raw": item["scenario_state"],
                 "quality": (
                     "UNKNOWN" if item["scenario_state"] == "UNKNOWN" else "OBSERVED"
@@ -882,6 +909,7 @@ def read_source_d0_scenario_day(
     }
     return {
         "scenario": scenario,
+        "price_coordinate": price_coordinate,
         "target_session": target_session.isoformat(),
         "history_window_start": first["history_window_start"],
         "history_session_count": first["history_session_count"],
@@ -890,7 +918,6 @@ def read_source_d0_scenario_day(
         "session_contract": first["session_contract"],
         "official_calendar": calendar,
         "source_version": {
-            "source_package_id": first["source_package_id"],
             "source_capture_id": first["source_capture_id"],
             "parser_contract": first["parser_contract"],
             "source_time_quality": first["source_time_quality"],
@@ -910,25 +937,52 @@ def read_source_pool_seed_facts(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    research_cutoff: date,
     source_capture_id: int,
+    price_coordinate: str,
     profile_revision: str,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
 ) -> list[dict[str, Any]]:
-    """按精确R6语义读取Seed事实全池行。"""
+    """按BaoStock capture、QFQ坐标及显式截止读取Seed事实全池行。"""
+    if (
+        type(target_session) is not date
+        or type(research_cutoff) is not date
+        or target_session > research_cutoff
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or price_coordinate != "FORWARD_ADJUSTED"
+    ):
+        raise StaticResearchPgError(
+            "STATIC_SEED_READ_SCOPE_INVALID",
+            "Seed读取必须绑定截止内BaoStock捕获和FORWARD_ADJUSTED坐标",
+        )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
         _connection_identity,
     ):
         cursor.execute(
-            f"SELECT {', '.join(_SEED_COLUMNS)} FROM {_SEED_TABLE} WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s AND profile_revision=%s AND producer_version=%s ORDER BY source_symbol",
+            f"""SELECT {", ".join("s." + name for name in _SEED_COLUMNS)}
+                FROM {_SEED_TABLE} s
+                JOIN stock.source_captures c ON c.capture_id=s.source_capture_id
+                WHERE s.target_session=%s AND s.target_session<=%s
+                  AND s.source_capture_id=%s AND s.profile_revision=%s
+                  AND s.producer_version=%s AND s.price_coordinate=%s
+                  AND c.provider='BAOSTOCK' AND c.range_start_session<=s.target_session
+                  AND s.target_session<=c.range_end_session
+                  AND c.range_end_session<=%s
+                  AND c.price_coordinates @> ARRAY[
+                      'RAW_UNADJUSTED','FORWARD_ADJUSTED'
+                  ]::text[]
+                ORDER BY s.source_symbol""",
             (
                 target_session,
-                source_package_id,
+                research_cutoff,
                 source_capture_id,
                 profile_revision,
                 producer_version,
+                price_coordinate,
+                research_cutoff,
             ),
         )
         rows = cursor.fetchall()
@@ -948,19 +1002,19 @@ def read_source_pool_seed_forward_scope(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     expected_source_count: int,
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """读取唯一闭合Seed范围，供已存T0来源池的后继生产复用。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(expected_source_count) is not int
         or expected_source_count <= 0
+        or profile_revision is not None
+        and (not isinstance(profile_revision, str) or not profile_revision)
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_FORWARD_KEY_INVALID", "后继生产Seed键或完整分母无效"
@@ -970,6 +1024,11 @@ def read_source_pool_seed_forward_scope(
         cursor,
         _,
     ):
+        scope_predicate = "target_session=%s AND source_capture_id=%s"
+        scope_parameters: tuple[Any, ...] = (target_session, source_capture_id)
+        if profile_revision is not None:
+            scope_predicate += " AND profile_revision=%s"
+            scope_parameters = (*scope_parameters, profile_revision)
         cursor.execute(
             f"""SELECT profile_revision, producer_contract, producer_version,
                        history_session_count, calendar_id, calendar_revision,
@@ -979,13 +1038,12 @@ def read_source_pool_seed_forward_scope(
                        count(*) FILTER (WHERE s2_state='FALSE')::bigint,
                        count(*) FILTER (WHERE s2_state='UNKNOWN')::bigint
                 FROM {_SEED_TABLE}
-                WHERE target_session=%s AND source_package_id=%s
-                  AND source_capture_id=%s
+                WHERE {scope_predicate}
                 GROUP BY profile_revision, producer_contract, producer_version,
                          history_session_count, calendar_id, calendar_revision,
                          research_mode, price_coordinate
                 ORDER BY profile_revision, producer_version""",
-            (target_session, source_package_id, source_capture_id),
+            scope_parameters,
         )
         scopes = cursor.fetchall()
         if not scopes:
@@ -1004,7 +1062,7 @@ def read_source_pool_seed_forward_scope(
         if (
             scope[2] != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
             or scope[6] != "NON_PIT_RETROSPECTIVE"
-            or scope[7] != "RAW_UNADJUSTED"
+            or scope[7] != "FORWARD_ADJUSTED"
         ):
             raise StaticResearchPgError(
                 "STATIC_SEED_SCOPE_UNSUPPORTED",
@@ -1012,13 +1070,12 @@ def read_source_pool_seed_forward_scope(
             )
         cursor.execute(
             f"""SELECT source_symbol FROM {_SEED_TABLE}
-                WHERE target_session=%s AND source_package_id=%s
-                  AND source_capture_id=%s AND profile_revision=%s
+                WHERE target_session=%s AND source_capture_id=%s
+                   AND profile_revision=%s
                   AND producer_version=%s
                 ORDER BY source_symbol""",
             (
                 target_session,
-                source_package_id,
                 source_capture_id,
                 scope[0],
                 scope[2],
@@ -1052,7 +1109,6 @@ def read_source_stock_seed_fact(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     profile_revision: str,
     source_symbol: str,
@@ -1062,8 +1118,6 @@ def read_source_stock_seed_fact(
     """按完整来源身份核验分区后，只读取单股行；分母须来自已闭合的Raw版本目录。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or not isinstance(profile_revision, str)
@@ -1085,15 +1139,14 @@ def read_source_stock_seed_fact(
     ):
         cursor.execute(
             f"""SELECT count(*)::bigint AS stored_rows,
-       count(DISTINCT source_package_id)::bigint AS content_count,
-       min(source_package_id) AS source_package_id
+       count(DISTINCT source_capture_id)::bigint AS content_count,
+       min(source_capture_id) AS source_capture_id
 FROM {_SEED_TABLE}
 WHERE target_session=%s::date
-  AND source_package_id=%s AND source_capture_id=%s
+  AND source_capture_id=%s
   AND profile_revision=%s AND producer_version=%s""",
             (
                 target_session,
-                source_package_id,
                 source_capture_id,
                 profile_revision,
                 producer_version,
@@ -1106,13 +1159,12 @@ WHERE target_session=%s::date
                 f"""SELECT EXISTS (
     SELECT 1 FROM {_SEED_TABLE}
     WHERE target_session=%s::date
-      AND source_package_id=%s AND source_capture_id=%s
+      AND source_capture_id=%s
       AND profile_revision<>%s AND producer_version=%s
     LIMIT 1
 )""",
                 (
                     target_session,
-                    source_package_id,
                     source_capture_id,
                     profile_revision,
                     producer_version,
@@ -1143,7 +1195,7 @@ WHERE target_session=%s::date
         if (
             selected_rows != expected_source_count
             or selected_contents != 1
-            or int(selected_content) != source_package_id
+            or int(selected_content) != source_capture_id
         ):
             return {
                 "status": "INCOMPLETE",
@@ -1161,8 +1213,7 @@ WHERE target_session=%s::date
 FROM {_SEED_TABLE} s
 JOIN source_symbol_price_profiles p
   ON p.target_session=s.target_session
- AND p.source_symbol=s.source_symbol AND p.source_package_id=s.source_package_id
- AND p.source_capture_id=s.source_capture_id
+ AND p.source_symbol=s.source_symbol AND p.source_capture_id=s.source_capture_id
  AND p.profile_revision=s.profile_revision
  AND p.history_window_start=s.history_window_start
  AND p.history_window_end=s.history_window_end
@@ -1175,14 +1226,13 @@ JOIN source_symbol_price_profiles p
  )
  AND p.price_coordinate=s.price_coordinate
 WHERE s.target_session=%s::date
-  AND s.source_symbol=%s AND s.source_package_id=%s
-  AND s.source_capture_id=%s AND s.profile_revision=%s
+  AND s.source_symbol=%s AND s.source_capture_id=%s
+  AND s.profile_revision=%s
   AND s.producer_version=%s
 LIMIT 2""",
             (
                 target_session,
                 source_symbol,
-                source_package_id,
                 source_capture_id,
                 profile_revision,
                 producer_version,
@@ -1245,9 +1295,8 @@ LIMIT 2""",
             for name in quality_fields
         )
         or row["research_mode"] != "NON_PIT_RETROSPECTIVE"
-        or row["price_coordinate"] != "RAW_UNADJUSTED"
+        or row["price_coordinate"] != "FORWARD_ADJUSTED"
         or row["source_capture_id"] != source_capture_id
-        or row["source_package_id"] != source_package_id
         or row["history_window_end"] != target_session
         or not row["history_window_start"] <= target_session
         or not 1 <= row["history_session_count"] <= 32767
@@ -1278,7 +1327,6 @@ def read_seed_profile_returns(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     profile_revision: str,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
@@ -1299,17 +1347,16 @@ def read_seed_profile_returns(
 FROM {_SEED_TABLE} s
 JOIN source_symbol_price_profiles p
   ON p.target_session=s.target_session
- AND p.source_symbol=s.source_symbol AND p.source_package_id=s.source_package_id
- AND p.profile_revision=s.profile_revision AND p.source_capture_id=s.source_capture_id
+ AND p.source_symbol=s.source_symbol AND p.source_capture_id=s.source_capture_id
+ AND p.profile_revision=s.profile_revision
  AND p.history_window_start=s.history_window_start AND p.history_window_end=s.history_window_end
  AND p.history_requested_session_count=s.history_session_count
  AND p.history_calendar_id=s.calendar_id
  AND p.price_coordinate=s.price_coordinate
-WHERE s.target_session=%s AND s.source_package_id=%s AND s.source_capture_id=%s
+WHERE s.target_session=%s AND s.source_capture_id=%s
   AND s.profile_revision=%s AND s.producer_version=%s ORDER BY s.source_symbol""",
             (
                 target_session,
-                source_package_id,
                 source_capture_id,
                 profile_revision,
                 producer_version,

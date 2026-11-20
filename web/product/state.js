@@ -53,7 +53,7 @@ export function buildD1MaterialRequest(context, board, offsets, symbol = null) {
   return {
     target_session: context.target_session,
     research_cutoff: context.research_cutoff,
-    source_package_id: context.source_package_id,
+    source_capture_id: context.source_capture_id,
     d1_history_session_count: context.d1_history_session_count,
     industry_snapshot_id: context.industry_snapshot_id,
     concept_snapshot_id: context.concept_snapshot_id,

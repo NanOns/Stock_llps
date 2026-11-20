@@ -4,17 +4,17 @@ function relationDetailQueryKey(query, relationData, sourceSymbol) {
   if (!query || !relationData || !sourceSymbol) return null;
   const snapshotIdentity = (snapshot) => ({
     target_session: snapshot?.target_session,
-    source_package_id: snapshot?.source_package_id,
+    source_capture_id: snapshot?.source_capture_id,
     profile_revision: snapshot?.profile_revision,
   });
   const before = snapshotIdentity(query.before);
   const after = snapshotIdentity(query.after);
   if (
     !before.target_session ||
-    !before.source_package_id ||
+    !before.source_capture_id ||
     !before.profile_revision ||
     !after.target_session ||
-    !after.source_package_id ||
+    !after.source_capture_id ||
     !after.profile_revision
   )
     return null;
@@ -25,6 +25,7 @@ function relationDetailQueryKey(query, relationData, sourceSymbol) {
     source_symbol: sourceSymbol,
     relation_field: query.relation_field,
     transition_type: query.transition_type,
+    price_coordinate: "FORWARD_ADJUSTED",
     ma20_direction: query.ma20_direction,
     end_position_filters: (query.end_position_filters || []).map((item) => [
       item.field,
@@ -59,10 +60,11 @@ function relationDetailResponseMatches(
 ) {
   const sameSnapshot = (actual, expected) =>
     actual?.target_session === expected?.target_session &&
-    actual?.source_package_id === expected?.source_package_id &&
+    actual?.source_capture_id === expected?.source_capture_id &&
     actual?.profile_revision === expected?.profile_revision;
   return (
     data?.source_symbol === sourceSymbol &&
+    data?.price_coordinate === "FORWARD_ADJUSTED" &&
     (data?.item?.source_symbol === undefined ||
       data?.item?.source_symbol === sourceSymbol) &&
     sameSnapshot(data?.before_snapshot, query?.before) &&
@@ -99,7 +101,7 @@ function clearRelationScreen(message = "请选择两个完整PG画像快照。")
   $("priceRelationLast").disabled = true;
 }
 function relationSnapshotParams(params, prefix, snapshot) {
-  params.set(prefix + "_source_package_id", snapshot.source_package_id);
+  params.set(prefix + "_source_capture_id", snapshot.source_capture_id);
   params.set(prefix + "_profile_revision", snapshot.profile_revision);
 }
 function relationValueText(item, field, side) {
@@ -240,17 +242,17 @@ function renderRelationScreen(data, requestId) {
     (reasonText || "本字段无UNKNOWN端点") +
     "。起始 " +
     data.before_snapshot.target_session +
-    " / 来源包ID " +
-    data.before_snapshot.source_package_id +
+    " / 来源捕获ID " +
+    data.before_snapshot.source_capture_id +
     " / revision " +
     data.before_snapshot.profile_revision +
     "；结束 " +
     data.after_snapshot.target_session +
-    " / 来源包ID " +
-    data.after_snapshot.source_package_id +
+    " / 来源捕获ID " +
+    data.after_snapshot.source_capture_id +
     " / revision " +
     data.after_snapshot.profile_revision +
-    "。来源代码级RAW_UNADJUSTED · NON_PIT；上市总体未知。";
+    "。来源代码级FORWARD_ADJUSTED · NON_PIT_RETROSPECTIVE；上市总体未知。";
   const root = $("priceRelationScreenRows");
   root.replaceChildren();
   if (!data.rows.length) {
@@ -271,11 +273,11 @@ function renderRelationScreen(data, requestId) {
     const identity =
       item.source_symbol +
       " · " +
-      item.before_source_package_id +
+      item.before_source_capture_id +
       " / " +
       item.before_profile_revision +
       " → " +
-      item.after_source_package_id +
+      item.after_source_capture_id +
       " / " +
       item.after_profile_revision;
     cell(row, identity);
@@ -420,6 +422,7 @@ async function runPriceRelations(requestId) {
   const query = {
     before,
     after,
+    price_coordinate: "FORWARD_ADJUSTED",
     relation_field: relationField,
     transition_type: transitionType,
     ma20_direction: ma20Direction,
@@ -432,7 +435,7 @@ async function runPriceRelations(requestId) {
   state.relationData = null;
   $("priceRelationScreenCount").textContent = "完整来源池查询中";
   $("priceRelationScreenSummary").textContent =
-    "在同一只读一致视图中计算双日MA20方向、三字段RAW关系、结束日条件、完整分母与SQL分页。";
+    "在同一只读一致视图中计算双日MA20方向、三字段前复权关系、结束日条件、完整分母与SQL分页。";
   $("priceRelationScreenRows").replaceChildren();
   tableRow($("priceRelationScreenRows"), [
     "读取完整来源集合…",
@@ -447,6 +450,7 @@ async function runPriceRelations(requestId) {
   const params = new URLSearchParams({
     before_session: before.target_session,
     after_session: after.target_session,
+    price_coordinate: "FORWARD_ADJUSTED",
     relation_field: relationField,
     transition_type: transitionType,
     ma20_direction: ma20Direction,
@@ -467,6 +471,8 @@ async function runPriceRelations(requestId) {
       "/api/source-symbol-price-profile-relation-screen?" + params,
     );
     if (requestId !== state.relationRequest) return;
+    if (data.price_coordinate !== "FORWARD_ADJUSTED")
+      throw new Error("价格关系响应未回显FORWARD_ADJUSTED坐标。");
     state.relationData = data;
     state.relationTotal = data.page.total;
     renderRelationScreen(data, requestId);
@@ -474,7 +480,7 @@ async function runPriceRelations(requestId) {
     if (requestId !== state.relationRequest) return;
     $("priceRelationScreenCount").textContent = "关系筛选失败";
     $("priceRelationScreenSummary").textContent =
-      "RAW关系查询未完成：" + error.message;
+      "前复权关系查询未完成：" + error.message;
     $("priceRelationScreenRows").replaceChildren();
     tableRow($("priceRelationScreenRows"), [error.message, "", "", "", "", ""]);
     $("priceRelationScreenPage").textContent = "查询失败";
@@ -503,6 +509,7 @@ async function openRelationDetail(relationRow) {
     before_session: query.before.target_session,
     after_session: query.after.target_session,
     symbol: relationRow.source_symbol,
+    price_coordinate: query.price_coordinate,
   });
   relationSnapshotParams(params, "before", query.before);
   relationSnapshotParams(params, "after", query.after);
@@ -539,7 +546,7 @@ async function openRelationDetail(relationRow) {
       appendText(
         root,
         "p",
-        "持久双日画像行当前不可用；原RAW关系结果仍保留，未推断上市/退市或选股状态。",
+        "持久双日画像行当前不可用；原前复权关系结果仍保留，未推断上市/退市或选股状态。",
         "message",
       );
       return;

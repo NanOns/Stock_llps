@@ -122,11 +122,14 @@ from stock_a.application.source_tdx_sector_membership import (
 )
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
-    read_raw_daily_catalog,
-    read_raw_daily_page,
-    read_raw_daily_stock,
-    read_raw_daily_history_stock,
-    resolve_raw_stock_code,
+)
+from stock_a.storage.postgres.baostock_price_facts import (
+    BaoStockPriceFactsError,
+    read_baostock_price_catalog,
+    read_baostock_price_detail,
+    read_baostock_price_history,
+    read_baostock_price_page,
+    resolve_baostock_stock_code,
 )
 from stock_a.storage.postgres.data_jobs import DataJobPgError
 from stock_a.research import core as research_core
@@ -153,6 +156,7 @@ _D1_MATERIAL_FACTS_CACHE_TTL_SECONDS = 30
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SYMBOL_SEARCH = re.compile(r"^[A-Za-z0-9.]{1,9}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_PRICE_COORDINATES = frozenset({"RAW_UNADJUSTED", "FORWARD_ADJUSTED"})
 _DIAGNOSTIC_ROUTES = frozenset(
     {
         "/api/preview/catalog",
@@ -183,7 +187,6 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/source-symbol-price-profiles",
         "/api/source-symbol-price-profiles/snapshots",
         "/api/source-symbol/raw-periods",
-        "/api/source-symbol/adjusted-history",
     }
 )
 # 只登记运行代码当前实际提供的能力边界。阶段名称、输入、产物和消费者始终来自机器合同。
@@ -567,7 +570,7 @@ def _iso_date(value: Any, field: str = "target_session") -> date:
     return parsed
 
 
-def _package_id(value: Any) -> int:
+def _positive_id(value: Any, code: str, label: str) -> int:
     if (type(value) is int and value > 0) or (
         isinstance(value, str)
         and value.isdecimal()
@@ -575,9 +578,11 @@ def _package_id(value: Any) -> int:
         and int(value) > 0
     ):
         return int(value)
-    raise PreviewHttpError(
-        400, "PREVIEW_PACKAGE_ID_INVALID", "来源包ID必须是正数BIGINT"
-    )
+    raise PreviewHttpError(400, code, f"{label}必须是正数BIGINT")
+
+
+def _capture_id(value: Any) -> int:
+    return _positive_id(value, "PREVIEW_CAPTURE_ID_INVALID", "来源捕获ID")
 
 
 def _profile_revision(value: Any) -> str:
@@ -591,8 +596,18 @@ def _profile_revision(value: Any) -> str:
     return value
 
 
+def _price_coordinate(value: Any) -> str:
+    if not isinstance(value, str) or value not in _PRICE_COORDINATES:
+        raise PreviewHttpError(
+            400,
+            "PRICE_COORDINATE_INVALID",
+            "价格坐标只能是RAW_UNADJUSTED或FORWARD_ADJUSTED",
+        )
+    return value
+
+
 def _snapshot_id(value: Any) -> int:
-    return _package_id(value)
+    return _positive_id(value, "PREVIEW_SNAPSHOT_ID_INVALID", "板块快照ID")
 
 
 def _symbol(value: Any) -> str:
@@ -677,31 +692,31 @@ def _query(path: str, allowed: set[str]) -> dict[str, str]:
     return {name: items[0] for name, items in values.items()}
 
 
-def _raw_public_fields(row: Mapping[str, Any]) -> dict[str, Any]:
-    raw_names = (
-        "raw_open",
-        "raw_high",
-        "raw_low",
-        "raw_close",
-        "raw_amount",
-        "raw_volume",
+def _raw_public_fields(
+    row: Mapping[str, Any], *, price_coordinate: str
+) -> dict[str, Any]:
+    if price_coordinate not in _PRICE_COORDINATES:
+        raise PreviewHttpError(
+            400, "PRICE_COORDINATE_INVALID", "价格坐标不在现役坐标集合中"
+        )
+    values = row.get("ohlc")
+    if not isinstance(values, Mapping):
+        prefix = "raw_" if price_coordinate == "RAW_UNADJUSTED" else "qfq_"
+        values = {
+            name: row.get(f"{prefix}{name}")
+            for name in ("open", "high", "low", "close")
+        }
+    quality_key = (
+        "price_quality" if price_coordinate == "RAW_UNADJUSTED" else "qfq_price_quality"
     )
-    quality_names = (
-        "bar_status",
-        "bar_reason",
-        "price_quality",
-        "price_reason",
-        "raw_amount_quality",
-        "raw_amount_reason",
-        "amount_quality",
-        "amount_reason",
-        "amount_unit_status",
-        "raw_volume_quality",
-        "raw_volume_reason",
-        "volume_quality",
-        "volume_reason",
-        "volume_unit_status",
+    reason_key = (
+        "price_reason" if price_coordinate == "RAW_UNADJUSTED" else "qfq_price_reason"
     )
+    quality = row.get(quality_key)
+    price_reason = row.get(reason_key)
+    values_public = {
+        name: _json_value(values.get(name)) for name in ("open", "high", "low", "close")
+    }
     return {
         "session_date": row["session_date"].isoformat(),
         "source_symbol": row["source_symbol"],
@@ -710,26 +725,37 @@ def _raw_public_fields(row: Mapping[str, Any]) -> dict[str, Any]:
         "bar_status": row["bar_status"],
         "bar_reason": row["bar_reason"],
         "values": {
-            name.removeprefix("raw_"): _json_value(row.get(name)) for name in raw_names
+            **values_public,
+            "amount": _json_value(row.get("raw_amount")),
+            "volume": _json_value(row.get("raw_volume")),
+            "turn": _json_value(row.get("raw_turn_value")),
         },
-        "quality": {name: _json_value(row.get(name)) for name in quality_names},
+        "quality": {
+            "price_quality": _json_value(quality),
+            "price_reason": _json_value(price_reason),
+            "amount_quality": _json_value(row.get("amount_quality")),
+            "amount_reason": _json_value(row.get("amount_reason")),
+            "volume_quality": _json_value(row.get("volume_quality")),
+            "volume_reason": _json_value(row.get("volume_reason")),
+            "turn_quality": _json_value(row.get("turn_quality")),
+            "turn_reason": _json_value(row.get("turn_reason")),
+        },
         "source": {
-            "dataset_id": row.get("dataset_id"),
-            "source_package_id": row.get("source_package_id"),
-            "source_record_count": row.get("source_record_count"),
-            "first_source_date": _json_value(row.get("first_source_date")),
-            "last_source_date": _json_value(row.get("last_source_date")),
-            "source_clock_role": row.get("capture_clock_role"),
-            "source_time_quality": row.get("capture_time_quality"),
-            "observed_started_at": _json_value(row.get("capture_read_started_at")),
-            "observed_validated_at": _json_value(row.get("capture_validated_at")),
+            "provider": "BAOSTOCK",
+            "source_capture_id": row.get("source_capture_id"),
+            "captured_at": _json_value(
+                row.get("captured_at", row.get("capture_read_started_at"))
+            ),
+            "capture_clock_role": row.get("capture_clock_role"),
+            "source_time_quality": row.get("source_time_quality"),
             "source_available_at": _json_value(row.get("source_available_at")),
+            "unit_contract_version": row.get("unit_contract_version"),
         },
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "source_object_status": row.get(
-            "source_object_status", "TDX_SOURCE_SYMBOL_OBSERVED"
+            "source_object_status", "BAOSTOCK_SOURCE_SYMBOL_OBSERVED"
         ),
-        "target_bar_status": row.get("target_bar_status"),
+        "target_bar_status": row.get("target_bar_status", row.get("bar_status")),
         "stable_security_id_status": row.get(
             "stable_security_id_status", "STABLE_SECURITY_ID_UNVERIFIED"
         ),
@@ -737,22 +763,26 @@ def _raw_public_fields(row: Mapping[str, Any]) -> dict[str, Any]:
         "suspension_status": row.get("suspension_status", "SUSPENSION_STATUS_UNKNOWN"),
         "official_listing_universe_status": "UNKNOWN",
         "pit_status": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": price_coordinate,
+        "source_capture_id": row.get("source_capture_id"),
     }
 
 
-def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
+def _page_public_fields(
+    page: Mapping[str, Any], *, price_coordinate: str
+) -> dict[str, Any]:
+    price_prefix = "raw_" if price_coordinate == "RAW_UNADJUSTED" else "qfq_"
     candidates = [
         {
             "source_symbol": row["source_symbol"],
             "market": row["market"],
             "board": row["board"],
             "bar_status": row["bar_status"],
-            "price_quality": row.get("price_quality"),
-            "price_reason": row.get("price_reason"),
+            "price_quality": row.get(f"{price_prefix}price_quality"),
+            "price_reason": row.get(f"{price_prefix}price_reason"),
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "source_object_status": row.get(
-                "source_object_status", "TDX_SOURCE_SYMBOL_OBSERVED"
+                "source_object_status", "BAOSTOCK_SOURCE_SYMBOL_OBSERVED"
             ),
             "target_bar_status": row.get("target_bar_status"),
             "stable_security_id_status": row.get(
@@ -769,7 +799,7 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
     expected = page.get("version_expected_row_count")
     return {
         "target_session": page["target_session"],
-        "source_package_id": page["source_package_id"],
+        "source_capture_id": page["source_capture_id"],
         "offset": page["offset"],
         "limit": page["limit"],
         "page_count": page["page_count"],
@@ -780,7 +810,7 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
         "bar_status_counts": page["bar_status_counts"],
         "source_version": {
             "status": page["version_status"],
-            "stored_raw_rows": actual,
+            "stored_price_rows": actual,
             "capture_expected_rows": expected,
             "all_stored_rows_classified": page["partition_closed"],
         },
@@ -791,7 +821,7 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
         "results": candidates,
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "source_object_status": page.get(
-            "source_object_status", "TDX_SOURCE_SYMBOL_OBSERVED"
+            "source_object_status", "BAOSTOCK_SOURCE_SYMBOL_OBSERVED"
         ),
         "stable_security_id_status": page.get(
             "stable_security_id_status", "STABLE_SECURITY_ID_UNVERIFIED"
@@ -802,29 +832,159 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
             "official_listing_universe_status", "UNKNOWN"
         ),
         "pit_status": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
-        "source_zip_opened": False,
-        "source_recalculated": False,
+        "price_coordinate": price_coordinate,
         "ddl_executed": False,
         "database_write": False,
     }
 
 
-def _preview_source_context(
+def _baostock_source_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: str,
-    target_raw_rows: Sequence[Mapping[str, Any]],
-    expected_raw_row_count: int | None = None,
+    research_cutoff: date,
+    source_capture_id: int,
+    target_price_rows: Sequence[Mapping[str, Any]],
+    price_coordinate: str,
 ) -> dict[str, Any]:
-    """按Raw捕获事实绑定请求版本与当前返回行。"""
-    return read_source_version_context(
+    """用BaoStock捕获目录核对RAW/QFQ共用捕获及目标行身份。"""
+    catalog = read_baostock_price_catalog(
         config,
+        cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+    )
+    versions = [
+        item
+        for item in catalog["price_coordinate_versions"]
+        if item["session_date"] == target_session.isoformat()
+        and item["source_capture_id"] == source_capture_id
+    ]
+    by_coordinate = {item["price_coordinate"]: item for item in versions}
+    raw_version = by_coordinate.get("RAW_UNADJUSTED")
+    qfq_version = by_coordinate.get("FORWARD_ADJUSTED")
+    if not raw_version or not qfq_version:
+        raise PreviewHttpError(
+            409,
+            "BAOSTOCK_CAPTURE_COVERAGE_INCOMPLETE",
+            "目标日缺少同一BaoStock捕获的RAW/QFQ双坐标价格目录事实",
+        )
+    rows = [
+        row
+        for row in target_price_rows
+        if row.get("source_capture_id") == source_capture_id
+        and row.get("session_date") in (target_session, target_session.isoformat())
+    ]
+    if any(row.get("source_symbol") is None for row in rows):
+        raise PreviewHttpError(
+            409,
+            "BAOSTOCK_TARGET_ROW_IDENTITY_INVALID",
+            "BaoStock目标价格行缺少来源代码",
+        )
+    first = rows[0] if rows else {}
+    complete = (
+        raw_version.get("coverage_status") == "COMPLETE"
+        and qfq_version.get("coverage_status") == "COMPLETE"
+    )
+    return {
+        "status": "AVAILABLE",
+        "coverage_status": "COMPLETE" if complete else "INCOMPLETE",
+        "target_session": target_session.isoformat(),
+        "source_capture_id": source_capture_id,
+        "provider": "BAOSTOCK",
+        "price_coordinate": price_coordinate,
+        "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+        "source_capture_expected_row_count": raw_version.get("expected_row_count"),
+        "raw_price_row_count": raw_version.get("row_count"),
+        "qfq_price_row_count": qfq_version.get("row_count"),
+        "raw_coverage_status": raw_version.get("coverage_status"),
+        "qfq_coverage_status": qfq_version.get("coverage_status"),
+        "source_time_quality": first.get("source_time_quality"),
+        "source_clock_role": first.get("capture_clock_role"),
+        "capture_started_at": _json_value(first.get("capture_read_started_at")),
+        "capture_validated_at": _json_value(first.get("capture_validated_at")),
+        "source_available_at": _json_value(first.get("capture_available_at")),
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "database_write": False,
+        "ddl_executed": False,
+        "source_io_attempted": False,
+    }
+
+
+def _baostock_history_payload(
+    history: Mapping[str, Any],
+    *,
+    sessions: Sequence[date],
+    price_coordinate: str,
+) -> dict[str, Any]:
+    rows = list(history.get("rows") or [])
+    present_dates = {row["session_date"] for row in rows}
+    missing = [
+        session.isoformat() for session in sessions if session not in present_dates
+    ]
+    return {
+        **history,
+        "history_rows": rows,
+        "missing_history_sessions": missing,
+        "price_coordinate": price_coordinate,
+        "saved_session_range": [
+            min(present_dates).isoformat() if present_dates else None,
+            max(present_dates).isoformat() if present_dates else None,
+        ],
+        "history_complete": not missing,
+        "history_status": "COMPLETE" if not missing else "UNKNOWN_HISTORY",
+        "source_io_attempted": False,
+        "database_write_attempted": False,
+        "ddl_executed": False,
+    }
+
+
+def _read_baostock_history(
+    config: Mapping[str, Any],
+    *,
+    source_symbol: str,
+    target_session: date,
+    sessions: Sequence[date],
+    cutoff: date,
+    price_coordinate: str,
+    source_capture_id: int | None,
+    starts_at_target: bool = False,
+) -> dict[str, Any]:
+    if source_capture_id is None:
+        detail = read_baostock_price_detail(
+            config,
+            source_symbol=source_symbol,
+            target_session=target_session,
+            research_cutoff=cutoff,
+        )
+        if detail.get("status") == "AMBIGUOUS_CAPTURE":
+            raise PreviewHttpError(
+                409,
+                "PRICE_CAPTURE_ID_REQUIRED",
+                "目标日存在多个BaoStock捕获；请求必须指定source_capture_id",
+            )
+        if detail.get("status") != "AVAILABLE":
+            raise PreviewHttpError(
+                404,
+                "PG_SOURCE_NO_MATCH",
+                "PG中没有所选目标日与来源代码的BaoStock价格事实",
+            )
+        source_capture_id = _capture_id(detail.get("source_capture_id"))
+    history = read_baostock_price_history(
+        config,
+        source_symbol=source_symbol,
         target_session=target_session,
-        source_package_id=source_package_id,
-        target_raw_rows=target_raw_rows,
-        expected_raw_row_count=expected_raw_row_count,
+        sessions=sessions,
+        cutoff=cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
+        starts_at_target=starts_at_target,
+    )
+    return _baostock_history_payload(
+        history,
+        sessions=sessions,
+        price_coordinate=price_coordinate,
     )
 
 
@@ -1103,7 +1263,8 @@ class _PreviewState:
         self,
         *,
         target_session: str,
-        source_package_id: str,
+        source_capture_id: str,
+        price_coordinate: str = "FORWARD_ADJUSTED",
         session_count: int | None = None,
         session_start: str | None = None,
         calendar_revision: str | None = None,
@@ -1112,9 +1273,9 @@ class _PreviewState:
             "identity_type": "PREVIEW_SNAPSHOT_IDENTITY_NON_PIT",
             "application_id": "STOCK_A",
             "target_session": target_session,
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "preview_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": price_coordinate,
             "core_algorithm_version": "STOCK_A_CORE_R1",
             "research_entry_version": "STOCK_A_RESEARCH_ENTRY_R1",
             "profile_contract": (
@@ -1140,6 +1301,38 @@ def _duplicate_free_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("JSON对象含重复字段")
         result[key] = value
     return result
+
+
+def _legacy_price_identity(value: Any, path: str = "$") -> str | None:
+    """拒绝重新出现的TDX行情包身份或文件来源语义。"""
+    retired_keys = {
+        "source_package_id",
+        "before_source_package_id",
+        "after_source_package_id",
+        "package_sha256",
+    }
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            key_text = str(key)
+            child_path = f"{path}.{key_text}"
+            if key_text in retired_keys:
+                return child_path
+            if (
+                key_text in {"dataset_id", "source_dataset_id"}
+                and child == "TDX_VIPDATA_PACKAGE"
+            ):
+                return child_path
+            found = _legacy_price_identity(child, child_path)
+            if found:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            found = _legacy_price_identity(child, f"{path}[{index}]")
+            if found:
+                return found
+    elif isinstance(value, str) and value.startswith("TDX_PACKAGE:"):
+        return path
+    return None
 
 
 def _reject_constant(_value: str) -> None:
@@ -1248,6 +1441,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             payload = decorate_api_source_symbols(
                 self.preview_server.state.config, payload
             )
+        retired_path = _legacy_price_identity(payload)
+        if retired_path:
+            status = 500
+            payload = {
+                "ok": False,
+                "code": "RETIRED_PRICE_IDENTITY_REJECTED",
+                "message": f"响应含已退役的TDX行情包身份（{retired_path}）；需要BaoStock捕获身份。",
+            }
         body = json.dumps(
             _json_value(payload),
             ensure_ascii=False,
@@ -1406,7 +1607,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         before_session: date,
         target_session: date,
         research_cutoff: date,
-        source_package_id: int,
+        before_source_capture_id: int | None,
+        source_capture_id: int,
         industry_snapshot_id: int | None,
         concept_snapshot_id: int | None,
         offset: int,
@@ -1423,23 +1625,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         before_source = read_source_version_context(
             config,
             target_session=before_session,
-            source_package_id=source_package_id,
+            source_capture_id=before_source_capture_id,
+            research_cutoff=research_cutoff,
         )
         after_source = read_source_version_context(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            research_cutoff=research_cutoff,
         )
         if (
             before_source.get("status") != "AVAILABLE"
             or after_source.get("status") != "AVAILABLE"
-            or before_source.get("source_package_id") != source_package_id
-            or after_source.get("source_package_id") != source_package_id
+            or (
+                before_source_capture_id is not None
+                and before_source.get("source_capture_id") != before_source_capture_id
+            )
+            or after_source.get("source_capture_id") != source_capture_id
         ):
             raise PreviewHttpError(
                 409,
                 "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
-                "相邻Raw来源包或捕获不完整，不能读取来源观察分页",
+                "相邻BaoStock价格捕获不完整，不能读取来源观察分页",
             )
         board_snapshot_id = (
             industry_snapshot_id
@@ -1467,7 +1674,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 config,
                 before_session=before_session,
                 target_session=target_session,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 before_capture_id=before_source["source_capture_id"],
                 target_capture_id=after_source["source_capture_id"],
                 expected_source_count=after_source["capture_expected_row_count"],
@@ -1493,7 +1700,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             raise PreviewHttpError(
                 409,
                 "SOURCE_LAUNCH_WATCH_PARTITION_INCOMPLETE",
-                "目标Raw来源池或互斥观察分组未闭合，已拒绝显示局部总数",
+                "目标BaoStock来源池或互斥观察分组未闭合，已拒绝显示局部总数",
             )
 
         page_rows = page_result["results"]
@@ -1505,7 +1712,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         formal_admission_day = read_source_formal_admission_day(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
             source_capture_id=after_source["source_capture_id"],
             expected_source_count=after_source["capture_expected_row_count"],
             source_symbols=sorted(page_symbols),
@@ -1519,7 +1725,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             read_source_t0_early_triage_summaries_for_symbols(
                 config,
                 target_session=target_session,
-                source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
                 source_symbols=page_symbols,
             )
@@ -1531,7 +1736,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             evidence = read_source_launch_watch_evidence(
                 config,
                 target_session=target_session,
-                source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
                 expected_source_count=after_source["capture_expected_row_count"],
                 source_symbols=page_symbols,
@@ -1596,7 +1800,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     config,
                     before_session=before_session,
                     target_session=target_session,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     before_capture_id=before_source["source_capture_id"],
                     target_capture_id=after_source["source_capture_id"],
                     expected_source_count=after_source["capture_expected_row_count"],
@@ -1659,7 +1863,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         pulse = read_source_sector_pulse_for_boards(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
             source_capture_id=after_source["source_capture_id"],
             source_pool_count=after_source["capture_expected_row_count"],
             boards=list(page_boards.values()),
@@ -1670,7 +1873,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             previous_pulse = read_source_sector_pulse_for_boards(
                 config,
                 target_session=before_session,
-                source_package_id=source_package_id,
                 source_capture_id=before_source["source_capture_id"],
                 source_pool_count=before_source["capture_expected_row_count"],
                 boards=list(page_boards.values()),
@@ -1711,7 +1913,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         target_pulse_ids=target_ids,
                         previous_session=before_session,
                         target_session=target_session,
-                        source_package_id=source_package_id,
                         previous_source_capture_id=before_source["source_capture_id"],
                         target_source_capture_id=after_source["source_capture_id"],
                         previous_profile_revision=next(iter(previous_revisions)),
@@ -1727,7 +1928,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "snapshot_id": target_fact.get("snapshot_id"),
                             "research_mode": "NON_PIT_RETROSPECTIVE",
                             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                            "price_coordinate": "RAW_UNADJUSTED",
+                            "price_coordinate": "FORWARD_ADJUSTED",
                             "formal_rotation_state": "NOT_EVALUATED",
                             "previous_profile_revision": next(iter(previous_revisions)),
                             "target_profile_revision": next(iter(target_revisions)),
@@ -1748,7 +1949,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "snapshot_id": target_fact.get("snapshot_id"),
                             "research_mode": "NON_PIT_RETROSPECTIVE",
                             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                            "price_coordinate": "RAW_UNADJUSTED",
+                            "price_coordinate": "FORWARD_ADJUSTED",
                             "formal_rotation_state": "NOT_EVALUATED",
                         }
         pulse_followup_by_board: dict[str, dict[str, Any]] = {}
@@ -1787,7 +1988,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             pulse_day = read_source_sector_pulse_day(
                 config,
                 target_session=target_session,
-                source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
                 source_pool_count=after_source["capture_expected_row_count"],
                 snapshot_ids={
@@ -1805,7 +2005,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "target_session": target_session.isoformat(),
                     "profile_revision": pulse_day["profile_revision"],
                     "source_version": {
-                        "source_package_id": source_package_id,
                         "source_capture_id": after_source["source_capture_id"],
                     },
                     "by_kind": {},
@@ -1862,7 +2061,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "reader_executed": True,
                         "reader_status": followup_read.get("status"),
                         "t0_session": target_session.isoformat(),
-                        "source_package_id": source_package_id,
                         "source_capture_id": after_source["source_capture_id"],
                         "calendar_revision": calendar["calendar_revision"],
                     }
@@ -1896,7 +2094,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             {
                                 "research_mode": "NON_PIT_RETROSPECTIVE",
                                 "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                                "price_coordinate": "RAW_UNADJUSTED",
+                                "price_coordinate": "FORWARD_ADJUSTED",
                             }
                         )
                         pulse_followup_by_board[f"{board_kind}:{board_native_id}"] = (
@@ -1912,7 +2110,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "horizons": [],
                             "research_mode": "NON_PIT_RETROSPECTIVE",
                             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                            "price_coordinate": "RAW_UNADJUSTED",
+                            "price_coordinate": "FORWARD_ADJUSTED",
                         }
                     if isinstance(selected_group.get("comparison"), Mapping):
                         pulse_followup_comparison[board_kind] = selected_group[
@@ -1977,7 +2175,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                     ),
                                     "research_mode": "NON_PIT_RETROSPECTIVE",
                                     "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                                    "price_coordinate": "RAW_UNADJUSTED",
+                                    "price_coordinate": "FORWARD_ADJUSTED",
                                 }
                             )
                             fallback_boards.append(
@@ -2045,7 +2243,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "research_cutoff": research_cutoff.isoformat(),
                         "research_mode": "NON_PIT_RETROSPECTIVE",
                         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                        "price_coordinate": "RAW_UNADJUSTED",
+                        "price_coordinate": "FORWARD_ADJUSTED",
                         "total_board_count": len(fallback_boards),
                         "pulse_state_counts": dict(pulse_state_counts),
                         "t1_status_counts": dict(t1_status_counts),
@@ -2065,7 +2263,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "horizons": [],
                         "research_mode": "NON_PIT_RETROSPECTIVE",
                         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                        "price_coordinate": "RAW_UNADJUSTED",
+                        "price_coordinate": "FORWARD_ADJUSTED",
                     }
                 elif pulse_directory_fallback:
                     pulse_followup_directory = {
@@ -2131,7 +2329,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             board_comparison = read_source_launch_watch_board_rps_comparison(
                 config,
                 target_session=target_session,
-                source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
                 source_symbols=page_symbols,
                 seed_scope=page_result["seed_scope"],
@@ -2149,8 +2346,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         enrollment_by_symbol = read_enrollments_for_symbols(
             config,
             target=target_session,
-            package=source_package_id,
-            capture=after_source["source_capture_id"],
+            source_capture_id=source_capture_id,
+            target_capture_id=after_source["source_capture_id"],
             before=before_session,
             before_capture=before_source["source_capture_id"],
             include_d0=page_result["scope_status"]["d0"] == "AVAILABLE",
@@ -2182,7 +2379,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
             source_capture_id=after_source["source_capture_id"],
             expected_source_count=after_source["capture_expected_row_count"],
             source_symbols=page_symbols,
@@ -2343,19 +2539,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 else "NOT_COMPUTED"
             )
             source_version = {
-                "source_package_id": source_package_id,
                 "source_capture_id": after_source["source_capture_id"],
                 "target_session": target_session.isoformat(),
                 "raw_row_count": after_source["raw_row_count"],
                 "source_time_quality": after_source["source_time_quality"],
                 "source_clock_role": after_source["source_clock_role"],
-                "parser_contract": after_source["parser_contract"],
+                "provider": after_source["provider"],
+                "price_coordinates": after_source["price_coordinates"],
             }
             formal_d0_admission = present_source_formal_admission(
                 stored_day=formal_admission_day,
                 source_symbol=symbol,
                 target_session=target_session,
-                source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
                 d0_evidence=item_evidence.get("d0"),
             )
@@ -2388,7 +2583,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "followup_status": followup_status,
                         "followup_reason": followup_reason,
                         "target_session": target_session.isoformat(),
-                        "source_package_id": source_package_id,
                         "source_capture_id": after_source["source_capture_id"],
                         "profile_revision": (page_result.get("seed_scope") or {}).get(
                             "profile_revision"
@@ -2397,7 +2591,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "rule_version"
                         ),
                         "scope": "NON_PIT_EXPLORATORY",
-                        "price_coordinate": "RAW_UNADJUSTED",
+                        "price_coordinate": "FORWARD_ADJUSTED",
                         "research_only": True,
                         "formal_d0_admission": formal_d0_admission,
                     },
@@ -2452,7 +2646,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "horizons": [],
                             "research_mode": "NON_PIT_RETROSPECTIVE",
                             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                            "price_coordinate": "RAW_UNADJUSTED",
+                            "price_coordinate": "FORWARD_ADJUSTED",
                         },
                     ),
                 }
@@ -2464,14 +2658,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "before_session": before_session.isoformat(),
                 "target_session": target_session.isoformat(),
                 "research_cutoff": research_cutoff.isoformat(),
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
                 "industry_snapshot_id": industry_snapshot_id,
                 "concept_snapshot_id": concept_snapshot_id,
             },
             "source_change_status": {
                 "transition_scope": "SAVED_SOURCE_D0_ADJACENT_FACTS",
                 "status": page_result["scope_status"]["d0"],
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": "FORWARD_ADJUSTED",
                 "pit_status": "NON_PIT_RETROSPECTIVE",
                 "source_key_set": {
                     "after_count": page_result["target_source_count"],
@@ -2519,7 +2713,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "counts": formal_admission_day.get("counts"),
                 "identity_scope": "SOURCE_SYMBOL_ONLY",
                 "research_mode": "NON_PIT_EXPLORATORY",
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": "FORWARD_ADJUSTED",
             },
             "pagination": {
                 "offset": offset,
@@ -2617,7 +2811,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target_session=target_session,
                 endpoint_session=successor_sessions[0] if successor_sessions else None,
                 research_cutoff=research_cutoff,
-                source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
             )
         except SourceS2T1CohortReadError as error:
@@ -2631,14 +2824,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         return response
 
     def _source_t0_early_observations(self, body: Any) -> dict[str, Any]:
-        """用户展开单股时，按精确来源版本读取全部已存T0板内事实。"""
+        """用户展开单股时，按捕获和板块快照读取已存T0板内事实。"""
         required = {
             "symbol",
             "target_session",
-            "source_package_id",
             "source_capture_id",
         }
-        history_fields = {"board_kind", "board_native_id"}
+        history_fields = {
+            "board_kind",
+            "board_native_id",
+            "membership_snapshot_id",
+        }
         if not isinstance(body, dict) or frozenset(body) not in {
             frozenset(required),
             frozenset(required | history_fields),
@@ -2646,26 +2842,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             raise PreviewHttpError(
                 400,
                 "T0_EARLY_DETAIL_FIELDS_INVALID",
-                "T0板内详情必须显式绑定来源代码、目标日、来源包和捕获ID；跨会话读取还须成对提供板类与板块ID",
+                "T0板内详情必须绑定来源代码、目标日和捕获ID；跨会话读取还须提供板类、板块ID和真实成员快照ID",
             )
         symbol = _symbol(body["symbol"])
         target = _iso_date(body["target_session"])
         _require_research_cutoff(target, self.preview_server.state.research_cutoff)
-        package = _package_id(body["source_package_id"])
-        capture = _package_id(body["source_capture_id"])
+        source_capture_id = _capture_id(body["source_capture_id"])
         source = read_source_version_context(
             self.preview_server.state.config,
             target_session=target,
-            source_package_id=package,
+            source_capture_id=source_capture_id,
+            research_cutoff=self.preview_server.state.research_cutoff,
         )
         if (
             source.get("status") != "AVAILABLE"
-            or source.get("source_capture_id") != capture
+            or source.get("source_capture_id") != source_capture_id
         ):
             raise PreviewHttpError(
                 409,
                 "T0_EARLY_DETAIL_SOURCE_MISMATCH",
-                "T0板内详情来源包或捕获与已存Raw版本不一致",
+                "T0板内详情捕获与已存BaoStock价格版本不一致",
             )
         from stock_a.storage.postgres.t0_early_observations import (
             read_source_t0_early_observations_for_symbols,
@@ -2675,16 +2871,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         contexts = read_source_t0_early_observations_for_symbols(
             self.preview_server.state.config,
             target_session=target,
-            source_package_id=package,
-            source_capture_id=capture,
+            source_capture_id=source_capture_id,
             source_symbols=[symbol],
         ).get(symbol, [])
         triage_summary = _bind_t0_followup_status(
             read_source_t0_early_triage_summaries_for_symbols(
                 self.preview_server.state.config,
                 target_session=target,
-                source_package_id=package,
-                source_capture_id=capture,
+                source_capture_id=source_capture_id,
                 source_symbols=[symbol],
             )[symbol],
             target_session=target,
@@ -2692,8 +2886,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         )
         if any(
             context.get("target_session") != target
-            or context.get("source_package_id") != package
-            or context.get("source_capture_id") != capture
+            or context.get("source_capture_id") != source_capture_id
             for context in contexts
         ):
             raise PreviewHttpError(
@@ -2709,15 +2902,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "ok": True,
             "symbol": symbol,
             "target_session": target.isoformat(),
-            "source_package_id": package,
-            "source_capture_id": capture,
+            "source_capture_id": source_capture_id,
             "status": "AVAILABLE" if contexts else "NO_STORED_FACT",
             "triage_summary": triage_summary,
             "registration_count": len(by_enrollment),
             "relation_count": len(contexts),
             "by_enrollment": by_enrollment,
             "scope": "NON_PIT_EXPLORATORY",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "execution": {
                 "database_write_attempted": False,
                 "ddl_executed": False,
@@ -2729,6 +2921,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         if history_fields.issubset(body):
             board_kind = body["board_kind"]
             board_native_id = body["board_native_id"]
+            membership_snapshot_id = _snapshot_id(body["membership_snapshot_id"])
             if (
                 not isinstance(board_kind, str)
                 or board_kind not in {"INDUSTRY", "CONCEPT"}
@@ -2751,9 +2944,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target_session=target,
                         research_cutoff=self.preview_server.state.research_cutoff,
-                        source_package_id=package,
-                        source_capture_id=capture,
+                        source_capture_id=source_capture_id,
                         source_symbol=symbol,
+                        membership_snapshot_id=membership_snapshot_id,
                         board_kind=board_kind,
                         board_native_id=board_native_id,
                     )
@@ -2772,7 +2965,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "before_session",
             "target_session",
             "research_cutoff",
-            "source_package_id",
+            "source_capture_id",
             "industry_snapshot_id",
             "concept_snapshot_id",
             "offset",
@@ -2781,11 +2974,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         board_fields = {"board_kind", "board_native_id"}
         evidence_fields = {"d1_history_session_count"}
         watch_fields = {"watch_group"}
+        before_capture_field = {"before_source_capture_id"}
         if not isinstance(body, dict) or not required.issubset(body):
             raise PreviewHttpError(
                 400,
                 "SOURCE_LAUNCH_WATCH_FIELDS_INVALID",
-                "请求必须显式绑定双日期、研究截止、来源包ID、双板块快照和分页",
+                "请求必须显式绑定双日期、研究截止、目标捕获、双板块快照和分页",
             )
         body_fields = frozenset(body)
         allowed_body_fields = {
@@ -2794,10 +2988,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 | (board_fields if has_board else set())
                 | (evidence_fields if has_evidence else set())
                 | (watch_fields if has_watch else set())
+                | (before_capture_field if has_before_capture else set())
             )
             for has_board in (False, True)
             for has_evidence in (False, True)
             for has_watch in (False, True)
+            for has_before_capture in (False, True)
         }
         if body_fields not in allowed_body_fields:
             raise PreviewHttpError(
@@ -2824,7 +3020,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "before_session必须早于target_session",
             )
 
-        source_package_id = _package_id(body["source_package_id"])
+        source_capture_id = _capture_id(body["source_capture_id"])
+        before_source_capture_id = (
+            _capture_id(body["before_source_capture_id"])
+            if body.get("before_source_capture_id") is not None
+            else None
+        )
         industry_snapshot_id = (
             _snapshot_id(body["industry_snapshot_id"])
             if body["industry_snapshot_id"] is not None
@@ -2917,7 +3118,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             before_session=before_session,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            before_source_capture_id=before_source_capture_id,
+            source_capture_id=source_capture_id,
             industry_snapshot_id=industry_snapshot_id,
             concept_snapshot_id=concept_snapshot_id,
             offset=offset,
@@ -2932,7 +3134,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         required = {
             "target_session",
             "research_cutoff",
-            "source_package_id",
+            "source_capture_id",
             "d1_history_session_count",
             "industry_snapshot_id",
             "concept_snapshot_id",
@@ -2949,7 +3151,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
         _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
         _require_research_cutoff(target, cutoff)
-        package = _package_id(body["source_package_id"])
+        source_capture_id = _capture_id(body["source_capture_id"])
         history_count = _positive_int(
             body["d1_history_session_count"], "d1_history_session_count", 32767
         )
@@ -2998,7 +3200,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             result = read_source_board_comparison(
                 self.preview_server.state.config,
                 target_session=target,
-                source_package_id=package,
+                source_capture_id=source_capture_id,
                 d1_history_session_count=history_count,
                 snapshot_ids=snapshots,
                 board_a_kind=board_a[0],
@@ -3014,7 +3216,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         required = {
             "target_session",
             "research_cutoff",
-            "source_package_id",
+            "source_capture_id",
             "d1_history_session_count",
             "industry_snapshot_id",
             "concept_snapshot_id",
@@ -3049,7 +3251,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
         _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
         _require_research_cutoff(target, cutoff)
-        source_package_id = _package_id(body["source_package_id"])
+        source_capture_id = _capture_id(body["source_capture_id"])
         d1_history_session_count = _d1_material_int(
             body["d1_history_session_count"],
             "d1_history_session_count",
@@ -3185,7 +3387,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         cache_key = (
             target.isoformat(),
             cutoff.isoformat(),
-            source_package_id,
+            source_capture_id,
             d1_history_session_count,
             snapshots["industry_snapshot_id"],
             snapshots["concept_snapshot_id"],
@@ -3199,7 +3401,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     target_session=target,
                     research_cutoff=cutoff,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     d1_history_session_count=d1_history_session_count,
                     industry_snapshot_id=snapshots["industry_snapshot_id"],
                     concept_snapshot_id=snapshots["concept_snapshot_id"],
@@ -3209,7 +3411,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self.preview_server.state.config,
                 target_session=target,
                 research_cutoff=cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 d1_history_session_count=d1_history_session_count,
                 industry_snapshot_id=snapshots["industry_snapshot_id"],
                 concept_snapshot_id=snapshots["concept_snapshot_id"],
@@ -3245,7 +3447,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "qualification_scope": result["qualification_scope"],
             "target_session": result["target_session"],
             "research_cutoff": result["research_cutoff"],
-            "source_package_id": result["source_package_id"],
+            "source_capture_id": result["source_capture_id"],
             "profile_revision": result["profile_revision"],
             "d1_history_session_count": result["d1_history_session_count"],
             "d1_history_start": result["d1_history_start"],
@@ -3253,7 +3455,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "source": {
                 key: result["source"].get(key)
                 for key in (
-                    "source_package_id",
+                    "source_capture_id",
                     "raw_row_count",
                     "capture_expected_row_count",
                     "capture_read_started_at",
@@ -3302,7 +3504,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         required = {
             "target_session",
             "research_cutoff",
-            "source_package_id",
+            "source_capture_id",
+            "price_coordinate",
             "profile_revision",
             "industry_snapshot_id",
             "concept_snapshot_id",
@@ -3365,13 +3568,38 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
         _require_research_cutoff(target, cutoff)
         _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
-        source_package_id = _package_id(body["source_package_id"])
+        source_capture_id = _capture_id(body["source_capture_id"])
+        price_coordinate = _price_coordinate(body["price_coordinate"])
+        if price_coordinate != "FORWARD_ADJUSTED":
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_PRICE_COORDINATE_INVALID",
+                "D0/D1及跨会话结构观察固定使用BaoStock FORWARD_ADJUSTED坐标",
+            )
         profile_revision = (
             None if d1_only else _profile_revision(body["profile_revision"])
         )
         event_window_start = _iso_date(body["event_window_start"], "event_window_start")
+        source_policy = self.preview_server.state.config.get("source_policy", {})
+        baostock_policy = (
+            source_policy.get("baostock_primary", {})
+            if isinstance(source_policy, Mapping)
+            else {}
+        )
+        request_budget = (
+            baostock_policy.get("request_budget", {})
+            if isinstance(baostock_policy, Mapping)
+            else {}
+        )
+        history_limit = (
+            request_budget.get("max_history_session_count")
+            if isinstance(request_budget, Mapping)
+            else None
+        )
+        if type(history_limit) is not int or not 1 <= history_limit <= 250:
+            history_limit = 250
         history_session_count = _positive_int(
-            body["pg_history_session_count"], "pg_history_session_count", 75
+            body["pg_history_session_count"], "pg_history_session_count", history_limit
         )
         d0_before_session = None
         if read_d0:
@@ -3524,7 +3752,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     item
                     for item in profile_catalog["snapshots"]
                     if item.get("target_session") == target.isoformat()
-                    and item.get("source_package_id") == source_package_id
+                    and item.get("source_capture_id") == source_capture_id
                     and item.get("profile_revision") == profile_revision
                     and item.get("complete") is True
                 ]
@@ -3532,7 +3760,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         409,
                         "SECTOR_CHANGE_PROFILE_REVISION_UNAVAILABLE",
-                        "所选日期、来源包和画像修订没有唯一完整的PG版本",
+                        "所选日期、来源捕获和画像修订没有唯一完整的PG版本",
                     )
                 catalog = read_tdx_sector_source_snapshot_catalog(config)
                 snapshots = {item["snapshot_id"]: item for item in catalog["snapshots"]}
@@ -3557,7 +3785,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             cache_key = (
                 target.isoformat(),
                 cutoff.isoformat(),
-                source_package_id,
+                source_capture_id,
+                price_coordinate,
                 profile_revision,
                 industry_snapshot_id,
                 concept_snapshot_id,
@@ -3586,12 +3815,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     cutoff,
                     d1_sessions,
                     d1_calendar_revision,
-                    source_package_id,
+                    source_capture_id,
                     event_window_start,
                     0,
                     1,
                     include_symbol_details=True,
                     source_symbol=explain_symbol,
+                    price_coordinate=price_coordinate,
                 )
                 exact_details = discovery["complete_symbol_details"]
                 detail = (
@@ -3606,7 +3836,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "scope": "SOURCE_SYMBOL_ONLY_D1_SUPPORT_EXPLANATION",
                     "target_session": target.isoformat(),
                     "research_cutoff": cutoff.isoformat(),
-                    "source_package_id": source_package_id,
+                    "source_capture_id": source_capture_id,
+                    "price_coordinate": price_coordinate,
                     "source_pool_count": discovery["source_pool_count"],
                     "evaluated_source_symbol_count": discovery[
                         "evaluated_source_symbol_count"
@@ -3653,7 +3884,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 source_version_context = read_source_version_context(
                     config,
                     target_session=target,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    research_cutoff=cutoff,
+                    price_coordinate=price_coordinate,
                 )
                 resolved_target, d1_sessions, d1_calendar_revision = (
                     resolve_pg_history_window(target.isoformat(), history_session_count)
@@ -3670,10 +3903,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             source_version_context=source_version_context,
                             target_session=target,
                             research_cutoff=cutoff,
-                            source_package_id=source_package_id,
+                            source_capture_id=source_capture_id,
                             sessions=d1_sessions,
                             calendar_revision=d1_calendar_revision,
                             event_window_start=event_window_start,
+                            price_coordinate=price_coordinate,
                         )
                     except PgResearchBindingError:
                         inputs = None
@@ -3682,8 +3916,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 source_d1_cache_key = (
                     target.isoformat(),
                     cutoff.isoformat(),
-                    source_package_id,
-                    source_version_context["source_package_id"],
+                    source_capture_id,
+                    source_version_context["source_capture_id"],
                     str(source_version_context["source_capture_id"]),
                     source_version_context["raw_row_count"],
                     source_version_context["capture_expected_row_count"],
@@ -3692,7 +3926,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     event_window_start.isoformat(),
                     history_session_count,
                     "SOURCE_SYMBOL_ONLY",
-                    "RAW_UNADJUSTED",
+                    price_coordinate,
                     "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY",
                     self.preview_server.state.source_d1_algorithm_version,
                 )
@@ -3705,22 +3939,24 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         cutoff,
                         d1_sessions,
                         d1_calendar_revision,
-                        source_package_id,
+                        source_capture_id,
                         event_window_start,
                         0,
                         1,
                         include_symbol_details=True,
                         source_version_context=source_version_context,
+                        price_coordinate=price_coordinate,
                     )
                     validate_source_d1_discovery_fact(
                         discovery,
                         source_version_context=source_version_context,
                         target_session=target,
                         research_cutoff=cutoff,
-                        source_package_id=source_package_id,
+                        source_capture_id=source_capture_id,
                         sessions=d1_sessions,
                         calendar_revision=d1_calendar_revision,
                         event_window_start=event_window_start,
+                        price_coordinate=price_coordinate,
                     )
                     return discovery
 
@@ -3735,10 +3971,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     source_version_context=source_version_context,
                     target_session=target,
                     research_cutoff=cutoff,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     sessions=d1_sessions,
                     calendar_revision=d1_calendar_revision,
                     event_window_start=event_window_start,
+                    price_coordinate=price_coordinate,
                 )
                 inputs, cache_hit = (
                     self.preview_server.state.source_sector_change_inputs(
@@ -3750,7 +3987,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             research_cutoff=cutoff,
                             industry_snapshot_id=industry_snapshot_id,
                             concept_snapshot_id=concept_snapshot_id,
-                            source_package_id=source_package_id,
+                            source_capture_id=source_capture_id,
                             profile_revision=profile_revision,
                             event_window_start=event_window_start,
                             pg_history_session_count=history_session_count,
@@ -3758,6 +3995,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             d0_before_session=d0_before_session,
                             source_d1_discovery=source_d1_discovery,
                             source_version_context=source_version_context,
+                            price_coordinate=price_coordinate,
                         ),
                     )
                 )
@@ -3814,6 +4052,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 status = 503
             raise PreviewHttpError(status, error.code, str(error)) from error
         result["observation_mode"] = observation_mode
+        result["price_coordinate"] = price_coordinate
+        result["time_role"] = "NON_PIT_RETROSPECTIVE"
         result["cache"] = {
             "reused_exact_inputs": cache_hit,
             "reused_source_d1_discovery": source_d1_cache_hit,
@@ -3897,7 +4137,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.path,
                     {
                         "target_session",
-                        "source_package_id",
+                        "source_capture_id",
                         "d1_history_session_count",
                         "offset",
                         "limit",
@@ -3913,14 +4153,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 required = {
                     "target_session",
-                    "source_package_id",
+                    "source_capture_id",
                     "d1_history_session_count",
                 }
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "QUERY_REQUIRED",
-                        "须提供目标会话、来源包和D1窗口会话数",
+                        "须提供目标会话、来源捕获和D1窗口会话数",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
@@ -3950,7 +4190,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     result = read_source_research_day(
                         self.preview_server.state.config,
                         target_session=target,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
                         d1_history_session_count=_positive_int(
                             _nonnegative_int(
                                 values["d1_history_session_count"],
@@ -4000,6 +4240,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                 ):
                     board_kind = values["board_kind"]
+                    source_capture_id = _capture_id(values["source_capture_id"])
                     snapshot_value = values.get(
                         "industry_snapshot_id"
                         if board_kind == "INDUSTRY"
@@ -4014,14 +4255,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 board_native_id=values["board_native_id"],
                                 target_session=target,
                                 research_cutoff=self.preview_server.state.research_cutoff,
-                                source_package_id=_package_id(
-                                    values["source_package_id"]
-                                ),
-                                profile_revision=(
-                                    _profile_revision(values["profile_revision"])
-                                    if "profile_revision" in values
-                                    else None
-                                ),
+                                source_capture_id=source_capture_id,
+                                profile_revision=values.get("profile_revision"),
                                 offset=_nonnegative_int(
                                     values.get("offset", "0"), "offset"
                                 ),
@@ -4061,11 +4296,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         and selected_board.get("membership_only") is True
                     )
                 ):
-                    source_package_id = _package_id(values["source_package_id"])
+                    source_capture_id = _capture_id(values["source_capture_id"])
                     source_context = read_source_version_context(
                         self.preview_server.state.config,
                         target_session=target,
-                        source_package_id=source_package_id,
+                        source_capture_id=source_capture_id,
+                        research_cutoff=self.preview_server.state.research_cutoff,
                     )
                     if source_context.get("status") == "AVAILABLE":
                         from stock_a.storage.postgres.t0_early_observations import (
@@ -4083,7 +4319,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             read_source_t0_early_observations_for_symbols(
                                 self.preview_server.state.config,
                                 target_session=target,
-                                source_package_id=source_package_id,
                                 source_capture_id=source_context["source_capture_id"],
                                 source_symbols=sorted(set(symbols)),
                                 board_kind=values["board_kind"],
@@ -4096,7 +4331,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             read_source_t0_early_triage_summaries_for_symbols(
                                 self.preview_server.state.config,
                                 target_session=target,
-                                source_package_id=source_package_id,
                                 source_capture_id=source_context["source_capture_id"],
                                 source_symbols=sorted(set(symbols)),
                             )
@@ -4133,10 +4367,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/market":
-                values = _query(self.path, {"target_session", "source_package_id"})
-                if set(values) != {"target_session", "source_package_id"}:
+                values = _query(self.path, {"target_session", "source_capture_id"})
+                if set(values) != {"target_session", "source_capture_id"}:
                     raise PreviewHttpError(
-                        400, "QUERY_REQUIRED", "须提供目标日与来源包"
+                        400, "QUERY_REQUIRED", "须提供目标日与来源捕获"
                     )
                 target = _iso_date(values["target_session"])
                 cutoff = self.preview_server.state.research_cutoff
@@ -4146,7 +4380,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target_session=target,
                         research_cutoff=cutoff,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
                     )
                 except SourceMarketContextError as error:
                     if error.code not in {
@@ -4188,7 +4422,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 allowed = {
                     "target_session",
                     "research_cutoff",
-                    "source_package_id",
+                    "source_capture_id",
                     "profile_revision",
                     "snapshot_id",
                     "board_kind",
@@ -4199,7 +4433,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "SECTOR_PULSE_HISTORY_QUERY_INVALID",
-                        "须提供目标会话、来源包、画像修订、快照与板块身份",
+                        "须提供目标会话、来源捕获、画像修订、快照与板块身份",
                     )
                 target = _iso_date(values["target_session"])
                 cutoff = _iso_date(values["research_cutoff"])
@@ -4246,8 +4480,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target_session=target,
                         research_cutoff=cutoff,
-                        target_source_package_id=_package_id(
-                            values["source_package_id"]
+                        target_source_capture_id=_capture_id(
+                            values["source_capture_id"]
                         ),
                         profile_revision=_profile_revision(values["profile_revision"]),
                         snapshot_id=_positive_int(
@@ -4276,7 +4510,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 allowed = {
                     "target_session",
                     "research_cutoff",
-                    "source_package_id",
+                    "source_capture_id",
                     "profile_revision",
                     "industry_snapshot_id",
                     "concept_snapshot_id",
@@ -4291,7 +4525,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "SECTOR_PULSE_DIRECTORY_QUERY_INVALID",
-                        "须提供日期、来源包、画像修订、双快照与板块类型",
+                        "须提供日期、来源捕获、画像修订、双快照与板块类型",
                     )
                 target = _iso_date(values["target_session"])
                 cutoff = _iso_date(values["research_cutoff"])
@@ -4366,7 +4600,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     source = read_source_version_context(
                         self.preview_server.state.config,
                         target_session=target,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
+                        research_cutoff=self.preview_server.state.research_cutoff,
                     )
                     if (
                         source.get("status") != "AVAILABLE"
@@ -4387,7 +4622,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target_session=target,
                         research_cutoff=cutoff,
-                        source_package_id=source["source_package_id"],
                         source_capture_id=source["source_capture_id"],
                         source_pool_count=source["raw_row_count"],
                         profile_revision=_profile_revision(values["profile_revision"]),
@@ -4415,26 +4649,31 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/resolve-stock-code":
-                allowed = {"target_session", "source_package_id", "stock_code"}
+                allowed = {"target_session", "source_capture_id", "stock_code"}
                 values = _query(self.path, allowed)
-                if set(values) != allowed:
+                if not {"target_session", "stock_code"}.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "QUERY_REQUIRED",
-                        "须提供目标交易日、来源包和六位股票代码",
+                        "须提供目标交易日、来源捕获和六位股票代码",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
                 try:
-                    resolved = resolve_raw_stock_code(
+                    resolved = resolve_baostock_stock_code(
                         self.preview_server.state.config,
                         stock_code=values["stock_code"],
                         target_session=target,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        research_cutoff=self.preview_server.state.research_cutoff,
+                        source_capture_id=(
+                            _capture_id(values["source_capture_id"])
+                            if values.get("source_capture_id")
+                            else None
+                        ),
                     )
-                except RawSourcePgError as error:
+                except (RawSourcePgError, BaoStockPriceFactsError) as error:
                     if error.code == "STOCK_CODE_INVALID":
                         status = 400
                     elif error.code == "STOCK_CODE_NOT_FOUND":
@@ -4450,21 +4689,21 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "status": "AVAILABLE", **resolved})
                 return
             if parsed.path == "/api/product/cohort-keys":
-                values = _query(self.path, {"target_session", "source_package_id"})
-                if set(values) != {"target_session", "source_package_id"}:
+                values = _query(self.path, {"target_session", "source_capture_id"})
+                if set(values) != {"target_session", "source_capture_id"}:
                     raise PreviewHttpError(
-                        400, "QUERY_REQUIRED", "须提供目标日和来源包"
+                        400, "QUERY_REQUIRED", "须提供目标日和来源捕获"
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                package = _package_id(values["source_package_id"])
+                source_capture_id = _capture_id(values["source_capture_id"])
                 keys = read_persisted_cohort_keys(
                     self.preview_server.state.config,
                     target=target,
                     research_cutoff=self.preview_server.state.research_cutoff,
-                    source_package_id=package,
+                    source_capture_id=source_capture_id,
                 )
                 if any(key["capture_count"] != 1 for key in keys):
                     raise PreviewHttpError(
@@ -4490,7 +4729,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/product/cohort":
                 allowed = {
                     "target_session",
-                    "source_package_id",
+                    "source_capture_id",
                     "profile_revision",
                     "rule",
                     "history",
@@ -4569,7 +4808,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target=target,
                         research_cutoff=cutoff,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
                         profile_revision=_profile_revision(values["profile_revision"]),
                         history_session_count=_positive_int(
                             _nonnegative_int(values["history"], "history", 500),
@@ -4627,7 +4866,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/product/cohort-enrollment-lifecycle":
                 allowed = {
                     "target_session",
-                    "source_package_id",
+                    "source_capture_id",
                     "profile_revision",
                     "history",
                     "d1_history",
@@ -4639,7 +4878,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "COHORT_ENROLLMENT_QUERY_INVALID",
-                        "须提供完整T0、来源包、画像窗口及冻结规则键",
+                        "须提供完整T0、来源捕获、画像窗口及冻结规则键",
                     )
                 target = _iso_date(values["target_session"])
                 cutoff = self.preview_server.state.research_cutoff
@@ -4649,7 +4888,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target=target,
                         research_cutoff=cutoff,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
                         profile_revision=_profile_revision(values["profile_revision"]),
                         history_session_count=_positive_int(
                             _nonnegative_int(values["history"], "history", 500),
@@ -4678,7 +4917,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 allowed = {
                     "as_of",
                     "research_cutoff",
-                    "source_package_id",
+                    "source_capture_id",
                     "rule",
                     "status",
                     "event",
@@ -4692,12 +4931,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 if not {
                     "as_of",
                     "research_cutoff",
-                    "source_package_id",
+                    "source_capture_id",
                 }.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "SOURCE_OBSERVATION_SEGMENT_QUERY_INVALID",
-                        "须提供明确观察日期、研究截止和来源包ID",
+                        "须提供明确观察日期、研究截止和来源捕获ID",
                     )
                 as_of = _iso_date(values["as_of"])
                 cutoff = _iso_date(values["research_cutoff"])
@@ -4727,7 +4966,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         as_of=as_of,
                         research_cutoff=cutoff,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
                         rule_id=rule_id,
                         status=status,
                         event_code=event_code,
@@ -4768,13 +5007,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/product/cohort-date-comparison":
                 values = _query(
                     self.path,
-                    {"source_package_id", "rule", "horizon"},
+                    {"source_capture_id", "rule", "horizon"},
                 )
-                if set(values) != {"source_package_id", "rule", "horizon"}:
+                if set(values) != {"source_capture_id", "rule", "horizon"}:
                     raise PreviewHttpError(
                         400,
                         "COHORT_DATE_COMPARISON_QUERY_INVALID",
-                        "须提供来源包、冻结规则和期限",
+                        "须提供来源捕获、冻结规则和期限",
                     )
                 if values["horizon"] not in {"1", "3", "5"}:
                     raise PreviewHttpError(
@@ -4790,7 +5029,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     result = read_cohort_date_comparison(
                         self.preview_server.state.config,
                         research_cutoff=self.preview_server.state.research_cutoff,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
                         rule=values["rule"],
                         horizon=int(values["horizon"]),
                     )
@@ -4803,13 +5042,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/product/fep-baseline":
                 values = _query(
                     self.path,
-                    {"source_package_id", "rule", "horizon", "lane"},
+                    {"source_capture_id", "rule", "horizon", "lane"},
                 )
-                if set(values) != {"source_package_id", "rule", "horizon", "lane"}:
+                if set(values) != {"source_capture_id", "rule", "horizon", "lane"}:
                     raise PreviewHttpError(
                         400,
                         "FEP_BASELINE_QUERY_INVALID",
-                        "须提供来源包、冻结规则、期限及ENTRY、DAILY_LANDMARK或REENTRY lane",
+                        "须提供来源捕获、冻结规则、期限及ENTRY、DAILY_LANDMARK或REENTRY lane",
                     )
                 if values["horizon"] not in {"1", "3", "5"}:
                     raise PreviewHttpError(
@@ -4831,7 +5070,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     result = read_fep_baseline(
                         self.preview_server.state.config,
                         research_cutoff=self.preview_server.state.research_cutoff,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
                         rule_id=values["rule"],
                         horizon=int(values["horizon"]),
                         lane=values["lane"],
@@ -4845,7 +5084,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/product/cohort-symbol-forward":
                 allowed = {
                     "target_session",
-                    "source_package_id",
+                    "source_capture_id",
                     "profile_revision",
                     "history",
                     "d1_history",
@@ -4882,7 +5121,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target=target,
                         research_cutoff=cutoff,
-                        source_package_id=_package_id(values["source_package_id"]),
+                        source_capture_id=_capture_id(values["source_capture_id"]),
                         profile_revision=_profile_revision(values["profile_revision"]),
                         history_session_count=_positive_int(
                             _nonnegative_int(values["history"], "history", 500),
@@ -4908,29 +5147,46 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/preview/sector-change-context":
-                values = _query(self.path, {"target_session", "source_package_id"})
-                if "target_session" not in values:
+                values = _query(
+                    self.path,
+                    {"target_session", "source_capture_id", "price_coordinate"},
+                )
+                if not {
+                    "target_session",
+                    "source_capture_id",
+                    "price_coordinate",
+                }.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "SECTOR_CHANGE_CONTEXT_QUERY_INVALID",
-                        "板块变化目录须显式提供target_session",
+                        "板块变化目录须精确提供target_session、source_capture_id和price_coordinate",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
+                price_coordinate = _price_coordinate(values["price_coordinate"])
+                if price_coordinate != "FORWARD_ADJUSTED":
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_CHANGE_PRICE_COORDINATE_INVALID",
+                        "板块变化及跨会话画像固定使用BaoStock FORWARD_ADJUSTED坐标",
+                    )
+                requested_source_capture_id = _capture_id(values["source_capture_id"])
                 catalog = read_tdx_sector_source_snapshot_catalog(
                     self.preview_server.state.config
                 )
                 profile_observation = None
                 history_session_count = 75
                 d1_history_session_count = None
-                if "source_package_id" in values:
-                    source_package_id = _package_id(values["source_package_id"])
+                if "source_capture_id" in values:
+                    source_capture_id = requested_source_capture_id
                     source_context = read_source_version_context(
                         self.preview_server.state.config,
                         target_session=target,
-                        source_package_id=source_package_id,
+                        source_capture_id=source_capture_id,
+                        research_cutoff=self.preview_server.state.research_cutoff,
+                        price_coordinate=price_coordinate,
                     )
                     try:
                         profile_observation = (
@@ -4938,7 +5194,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 self.preview_server.state.config,
                                 self.preview_server.state.profile_contract,
                                 target_session=target,
-                                source_package_id=source_package_id,
                                 source_capture_id=source_context["source_capture_id"],
                             )
                         )
@@ -4987,7 +5242,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         d1_scope = read_source_research_day_scope(
                             self.preview_server.state.config,
                             target_session=target,
-                            source_package_id=source_package_id,
+                            source_capture_id=source_capture_id,
                         )
                     except ResearchDayPgError as error:
                         raise PreviewHttpError(409, error.code, str(error)) from error
@@ -5038,6 +5293,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "target_session": target.isoformat(),
                         "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
+                        "source_capture_id": requested_source_capture_id,
+                        "price_coordinate": price_coordinate,
+                        "time_role": "NON_PIT_RETROSPECTIVE",
                         "official_calendar_revision": calendar_revision,
                         "previous_session": sessions[-2].isoformat(),
                         "source_history_start": sessions[0].isoformat(),
@@ -5071,29 +5329,90 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         raise PreviewHttpError(
                             400, "PREVIEW_PARAMETER_INVALID", "year必须在1900至9998之间"
                         )
-                catalog = read_raw_daily_catalog(
+                catalog = read_baostock_price_catalog(
                     self.preview_server.state.config,
-                    max_target_session=self.preview_server.state.research_cutoff,
-                    year=year,
-                    offset=offset,
-                    limit=limit,
+                    cutoff=self.preview_server.state.research_cutoff,
                 )
+                grouped: dict[tuple[str, int], dict[str, Mapping[str, Any]]] = {}
+                for item in catalog.get("price_coordinate_versions", []):
+                    session_text = item.get("session_date")
+                    if not isinstance(session_text, str):
+                        continue
+                    if year is not None and int(session_text[:4]) != year:
+                        continue
+                    key = (session_text, int(item["source_capture_id"]))
+                    grouped.setdefault(key, {})[item["price_coordinate"]] = item
+                all_versions = []
+                for (session_text, capture_id), coordinates in sorted(grouped.items()):
+                    raw_version = coordinates.get("RAW_UNADJUSTED", {})
+                    qfq_version = coordinates.get("FORWARD_ADJUSTED", {})
+                    expected_rows = raw_version.get("expected_row_count")
+                    all_versions.append(
+                        {
+                            "session_date": session_text,
+                            "source_capture_id": capture_id,
+                            "price_coordinate": "RAW_UNADJUSTED",
+                            "price_coordinates": [
+                                "RAW_UNADJUSTED",
+                                "FORWARD_ADJUSTED",
+                            ],
+                            "version_status": (
+                                "CLOSED"
+                                if raw_version.get("coverage_status") == "COMPLETE"
+                                and qfq_version.get("coverage_status") == "COMPLETE"
+                                else "INCOMPLETE"
+                            ),
+                            "row_count": raw_version.get("row_count", 0),
+                            "expected_row_count": expected_rows or 0,
+                            "qfq_row_count": qfq_version.get("row_count", 0),
+                            "qfq_expected_row_count": qfq_version.get(
+                                "expected_row_count", 0
+                            ),
+                            "raw_observed_value_row_count": raw_version.get(
+                                "observed_value_row_count", 0
+                            ),
+                            "qfq_observed_value_row_count": qfq_version.get(
+                                "observed_value_row_count", 0
+                            ),
+                            "bar_status_counts": {
+                                "TARGET_PRESENT": raw_version.get("row_count", 0),
+                                "TARGET_MISSING": 0,
+                            },
+                        }
+                    )
+                total_version_count = len(all_versions)
+                versions = all_versions[offset : offset + limit]
+                for version in versions:
+                    if (
+                        not isinstance(version, Mapping)
+                        or version.get("price_coordinates")
+                        != ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"]
+                        or version.get("source_capture_id") is None
+                    ):
+                        raise PreviewHttpError(
+                            503,
+                            "PRICE_CAPTURE_CATALOG_IDENTITY_INCOMPLETE",
+                            "BaoStock价格目录缺少真实捕获ID或坐标",
+                        )
+                    _capture_id(version["source_capture_id"])
                 self._send_json(
                     200,
                     {
                         "ok": True,
-                        "offset": catalog["offset"],
-                        "limit": catalog["limit"],
-                        "page_count": catalog["page_count"],
-                        "total_version_count": catalog["total_version_count"],
-                        "next_offset": catalog["next_offset"],
-                        "versions": catalog["versions"],
+                        "offset": offset,
+                        "limit": limit,
+                        "page_count": len(versions),
+                        "total_version_count": total_version_count,
+                        "next_offset": (
+                            offset + len(versions)
+                            if offset + len(versions) < total_version_count
+                            else None
+                        ),
+                        "versions": versions,
                         "identity_status": "SOURCE_SYMBOL_ONLY",
                         "pit_status": "NON_PIT_RETROSPECTIVE",
                         "database_write": False,
                         "ddl_executed": False,
-                        "source_zip_opened": False,
-                        "source_recalculated": False,
                     },
                 )
                 return
@@ -5116,6 +5435,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
                         "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
                         "snapshots": snapshots["snapshots"],
+                        "price_coordinate": "FORWARD_ADJUSTED",
                         "database_write": False,
                         "ddl_executed": False,
                     },
@@ -5127,9 +5447,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_source_package_id",
+                        "before_source_capture_id",
                         "before_profile_revision",
-                        "after_source_package_id",
+                        "after_source_capture_id",
                         "after_profile_revision",
                         "offset",
                         "limit",
@@ -5141,13 +5461,27 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "profile_change_kind",
                         "before_bias20_atr_state",
                         "after_bias20_atr_state",
+                        "price_coordinate",
                     },
                 )
-                if not {"before_session", "after_session"}.issubset(values):
+                if not {
+                    "before_session",
+                    "after_session",
+                    "price_coordinate",
+                }.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_CHANGE_QUERY_REQUIRED",
                         "变化查询必须显式提供前后两个画像日期",
+                    )
+                price_coordinate = _price_coordinate(
+                    values.get("price_coordinate", "FORWARD_ADJUSTED")
+                )
+                if price_coordinate != "FORWARD_ADJUSTED":
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_PRICE_COORDINATE_INVALID",
+                        "Core/Profile变化查询固定使用BaoStock FORWARD_ADJUSTED坐标",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -5183,15 +5517,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_bias20_atr_state", "ALL"
                     ),
                     after_bias20_atr_state=values.get("after_bias20_atr_state", "ALL"),
-                    before_source_package_id=values.get("before_source_package_id"),
+                    before_source_capture_id=values.get("before_source_capture_id"),
                     before_profile_revision=values.get("before_profile_revision"),
-                    after_source_package_id=values.get("after_source_package_id"),
+                    after_source_capture_id=values.get("after_source_capture_id"),
                     after_profile_revision=values.get("after_profile_revision"),
+                    price_coordinate=price_coordinate,
                 )
                 result.update(
                     {
                         "ok": True,
                         "research_mode": "ACCEPTED_PG_PROFILE_CHANGE_OBSERVATION",
+                        "price_coordinate": price_coordinate,
                         "database_write": False,
                         "ddl_executed": False,
                     }
@@ -5204,9 +5540,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_source_package_id",
+                        "before_source_capture_id",
                         "before_profile_revision",
-                        "after_source_package_id",
+                        "after_source_capture_id",
                         "after_profile_revision",
                         "relation_field",
                         "transition_type",
@@ -5220,22 +5556,31 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "symbol",
                         "after_amount_ratio20_min",
                         "after_volume_ratio20_min",
+                        "price_coordinate",
                     },
                 )
                 required = {
                     "before_session",
                     "after_session",
-                    "before_source_package_id",
+                    "before_source_capture_id",
                     "before_profile_revision",
-                    "after_source_package_id",
+                    "after_source_capture_id",
                     "after_profile_revision",
                     "relation_field",
+                    "price_coordinate",
                 }
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_RELATION_QUERY_REQUIRED",
-                        "RAW关系查询必须绑定前后日期、来源包ID、画像修订和关系字段",
+                        "RAW关系查询必须绑定前后日期、来源捕获ID、画像修订和关系字段",
+                    )
+                price_coordinate = _price_coordinate(values["price_coordinate"])
+                if price_coordinate != "FORWARD_ADJUSTED":
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_PRICE_COORDINATE_INVALID",
+                        "Core价格关系筛选固定使用BaoStock FORWARD_ADJUSTED坐标",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -5271,25 +5616,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         if values.get("symbol")
                         else None
                     ),
-                    before_source_package_id=_package_id(
-                        values["before_source_package_id"]
+                    before_source_capture_id=_capture_id(
+                        values["before_source_capture_id"]
                     ),
                     before_profile_revision=_profile_revision(
                         values["before_profile_revision"]
                     ),
-                    after_source_package_id=_package_id(
-                        values["after_source_package_id"]
+                    after_source_capture_id=_capture_id(
+                        values["after_source_capture_id"]
                     ),
                     after_profile_revision=_profile_revision(
                         values["after_profile_revision"]
                     ),
+                    price_coordinate=price_coordinate,
                 )
                 result.update(
                     {
                         "ok": True,
+                        "price_coordinate": price_coordinate,
                         "database_write": False,
                         "ddl_executed": False,
-                        "source_zip_opened": False,
                         "core_recalculated": False,
                     }
                 )
@@ -5301,25 +5647,36 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_source_package_id",
+                        "before_source_capture_id",
                         "before_profile_revision",
-                        "after_source_package_id",
+                        "after_source_capture_id",
                         "after_profile_revision",
+                        "price_coordinate",
                     },
                 )
                 required = {
                     "before_session",
                     "after_session",
-                    "before_source_package_id",
+                    "before_source_capture_id",
                     "before_profile_revision",
-                    "after_source_package_id",
+                    "after_source_capture_id",
                     "after_profile_revision",
+                    "price_coordinate",
                 }
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_BREADTH_QUERY_REQUIRED",
-                        "来源池广度必须精确提供前后日期、来源包ID和画像修订",
+                        "来源池广度必须精确提供前后日期、来源捕获ID和画像修订",
+                    )
+                price_coordinate = _price_coordinate(
+                    values.get("price_coordinate", "FORWARD_ADJUSTED")
+                )
+                if price_coordinate != "FORWARD_ADJUSTED":
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_PRICE_COORDINATE_INVALID",
+                        "来源池广度固定使用BaoStock FORWARD_ADJUSTED坐标",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -5334,26 +5691,27 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     before_session=before_session,
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    before_source_package_id=_package_id(
-                        values["before_source_package_id"]
+                    before_source_capture_id=_capture_id(
+                        values["before_source_capture_id"]
                     ),
                     before_profile_revision=_profile_revision(
                         values["before_profile_revision"]
                     ),
-                    after_source_package_id=_package_id(
-                        values["after_source_package_id"]
+                    after_source_capture_id=_capture_id(
+                        values["after_source_capture_id"]
                     ),
                     after_profile_revision=_profile_revision(
                         values["after_profile_revision"]
                     ),
+                    price_coordinate=price_coordinate,
                 )
                 result.update(
                     {
                         "ok": True,
                         "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE_BREADTH",
+                        "price_coordinate": price_coordinate,
                         "database_write": False,
                         "ddl_executed": False,
-                        "source_zip_opened": False,
                         "core_recalculated": False,
                     }
                 )
@@ -5365,10 +5723,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_source_package_id",
+                        "before_source_capture_id",
                         "before_profile_revision",
-                        "after_source_package_id",
+                        "after_source_capture_id",
                         "after_profile_revision",
+                        "price_coordinate",
                         "mode",
                         "side",
                         "relation",
@@ -5381,10 +5740,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 base = {
                     "before_session",
                     "after_session",
-                    "before_source_package_id",
+                    "before_source_capture_id",
                     "before_profile_revision",
-                    "after_source_package_id",
+                    "after_source_capture_id",
                     "after_profile_revision",
+                    "price_coordinate",
                     "mode",
                 }
                 mode = values.get("mode")
@@ -5406,6 +5766,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PROFILE_BREADTH_MEMBER_QUERY_INVALID",
                         "广度明细必须提供精确快照和与mode匹配的筛选参数",
                     )
+                price_coordinate = _price_coordinate(values["price_coordinate"])
+                if price_coordinate != "FORWARD_ADJUSTED":
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_PRICE_COORDINATE_INVALID",
+                        "来源池广度成员固定使用BaoStock FORWARD_ADJUSTED坐标",
+                    )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
                 _require_research_cutoff(
@@ -5419,18 +5786,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     before_session=before_session,
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    before_source_package_id=_package_id(
-                        values["before_source_package_id"]
+                    before_source_capture_id=_capture_id(
+                        values["before_source_capture_id"]
                     ),
                     before_profile_revision=_profile_revision(
                         values["before_profile_revision"]
                     ),
-                    after_source_package_id=_package_id(
-                        values["after_source_package_id"]
+                    after_source_capture_id=_capture_id(
+                        values["after_source_capture_id"]
                     ),
                     after_profile_revision=_profile_revision(
                         values["after_profile_revision"]
                     ),
+                    price_coordinate=price_coordinate,
                     mode=mode,
                     side=values.get("side"),
                     relation=values.get("relation"),
@@ -5447,9 +5815,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE_BREADTH_MEMBERS",
+                        "price_coordinate": price_coordinate,
                         "database_write": False,
                         "ddl_executed": False,
-                        "source_zip_opened": False,
                         "core_recalculated": False,
                     }
                 )
@@ -5462,27 +5830,30 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_session",
                         "after_session",
                         "symbol",
-                        "before_source_package_id",
+                        "before_source_capture_id",
                         "before_profile_revision",
-                        "after_source_package_id",
+                        "after_source_capture_id",
                         "after_profile_revision",
+                        "price_coordinate",
                     },
                 )
                 required = {
                     "before_session",
                     "after_session",
                     "symbol",
-                    "before_source_package_id",
+                    "before_source_capture_id",
                     "before_profile_revision",
-                    "after_source_package_id",
+                    "after_source_capture_id",
                     "after_profile_revision",
+                    "price_coordinate",
                 }
                 if set(values) != required:
                     raise PreviewHttpError(
                         400,
                         "PROFILE_PAIR_QUERY_REQUIRED",
-                        "双日代码对照必须精确提供前后日期、来源包ID、画像修订和来源代码",
+                        "双日代码对照必须精确提供前后日期、来源捕获ID、画像修订和来源代码",
                     )
+                price_coordinate = _price_coordinate(values["price_coordinate"])
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
                 _require_research_cutoff(
@@ -5497,27 +5868,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
                     source_symbol=_symbol(values["symbol"]),
-                    before_source_package_id=_package_id(
-                        values["before_source_package_id"]
+                    before_source_capture_id=_capture_id(
+                        values["before_source_capture_id"]
                     ),
                     before_profile_revision=_profile_revision(
                         values["before_profile_revision"]
                     ),
-                    after_source_package_id=_package_id(
-                        values["after_source_package_id"]
+                    after_source_capture_id=_capture_id(
+                        values["after_source_capture_id"]
                     ),
                     after_profile_revision=_profile_revision(
                         values["after_profile_revision"]
                     ),
+                    price_coordinate=price_coordinate,
                 )
                 result.update(
                     {
                         "ok": True,
                         "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE_PAIR",
+                        "price_coordinate": price_coordinate,
                         "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
                         "database_write": False,
                         "ddl_executed": False,
-                        "source_zip_opened": False,
                         "core_recalculated": False,
                     }
                 )
@@ -5528,7 +5900,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.path,
                     {
                         "target_session",
-                        "source_package_id",
+                        "source_capture_id",
                         "profile_revision",
                         "offset",
                         "limit",
@@ -5553,24 +5925,38 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "position_2_field",
                         "position_2_status",
                         "bias20_atr_band",
+                        "price_coordinate",
                     },
                 )
                 required = {
                     "target_session",
-                    "source_package_id",
                     "profile_revision",
+                    "price_coordinate",
                 }
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_QUERY_REQUIRED",
-                        "画像查询必须显式绑定日期、来源包ID和画像修订",
+                        "画像查询必须显式绑定日期和画像修订；capture可按日期唯一解析",
+                    )
+                price_coordinate = _price_coordinate(
+                    values.get("price_coordinate", "FORWARD_ADJUSTED")
+                )
+                if price_coordinate != "FORWARD_ADJUSTED":
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_PRICE_COORDINATE_INVALID",
+                        "价格画像固定使用BaoStock FORWARD_ADJUSTED坐标",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                source_package_id = _package_id(values["source_package_id"])
+                source_capture_id = (
+                    _capture_id(values["source_capture_id"])
+                    if values.get("source_capture_id")
+                    else None
+                )
                 offset = _nonnegative_int(values.get("offset", "0"), "offset")
                 limit = _positive_int(
                     _nonnegative_int(values.get("limit", "100"), "limit", 100) or 0,
@@ -5582,7 +5968,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     target_session=target,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     profile_revision=values["profile_revision"],
                     offset=offset,
                     limit=limit,
@@ -5615,14 +6001,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     position_2_field=values.get("position_2_field"),
                     position_2_status=values.get("position_2_status"),
                     bias20_atr_band=values.get("bias20_atr_band", "ALL"),
+                    price_coordinate=price_coordinate,
                 )
                 result.update(
                     {
                         "ok": True,
                         "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE",
+                        "price_coordinate": price_coordinate,
                         "database_write": False,
                         "ddl_executed": False,
-                        "source_zip_opened": False,
                         "baostock_called": False,
                     }
                 )
@@ -5630,48 +6017,76 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/preview/raw":
                 values = _query(
-                    self.path, {"target_session", "source_package_id", "symbol"}
+                    self.path, {"target_session", "source_capture_id", "symbol"}
                 )
-                required = {"target_session", "source_package_id", "symbol"}
-                if set(values) != required:
+                required = {"target_session", "symbol"}
+                if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PREVIEW_QUERY_REQUIRED",
-                        "Raw查询必须显式提供日期、数字来源包ID和来源代码",
+                        "未复权行情查询必须提供日期和来源代码；捕获ID可选",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                source_package_id = _package_id(values["source_package_id"])
+                requested_capture_id = (
+                    _capture_id(values["source_capture_id"])
+                    if values.get("source_capture_id")
+                    else None
+                )
                 symbol = _symbol(values["symbol"])
-                row = read_raw_daily_stock(
+                detail = read_baostock_price_detail(
                     self.preview_server.state.config,
                     source_symbol=symbol,
                     target_session=target,
-                    source_package_id=source_package_id,
+                    research_cutoff=self.preview_server.state.research_cutoff,
+                    source_capture_id=requested_capture_id,
                 )
-                if row is None:
+                if detail.get("status") == "AMBIGUOUS_CAPTURE":
+                    raise PreviewHttpError(
+                        409,
+                        "PRICE_CAPTURE_ID_REQUIRED",
+                        "目标日存在多个BaoStock捕获；请求必须明确指定source_capture_id",
+                    )
+                row = detail.get("row")
+                if detail.get("status") != "AVAILABLE" or row is None:
                     raise PreviewHttpError(
                         404,
                         "PG_SOURCE_NO_MATCH",
-                        "PG中没有该明确日期、来源包ID与来源代码的Raw记录",
+                        "PG中没有该明确日期、来源捕获ID与来源代码的BaoStock双坐标价格事实",
                     )
-                source_context = _preview_source_context(
+                source_capture_id = _capture_id(row.get("source_capture_id"))
+                if (
+                    requested_capture_id is not None
+                    and source_capture_id != requested_capture_id
+                ):
+                    raise PreviewHttpError(
+                        409,
+                        "PRICE_CAPTURE_IDENTITY_MISMATCH",
+                        "未复权行情捕获与请求不一致",
+                    )
+                source_context = _baostock_source_context(
                     self.preview_server.state.config,
                     target_session=target,
-                    source_package_id=source_package_id,
-                    target_raw_rows=(row,),
+                    research_cutoff=self.preview_server.state.research_cutoff,
+                    source_capture_id=source_capture_id,
+                    target_price_rows=(row,),
+                    price_coordinate="RAW_UNADJUSTED",
                 )
-                raw = _raw_public_fields(row)
+                raw = _raw_public_fields(row, price_coordinate="RAW_UNADJUSTED")
                 identity = self.preview_server.state.snapshot_identity(
                     target_session=target.isoformat(),
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    price_coordinate="RAW_UNADJUSTED",
                 )
                 self._send_json(
                     200,
                     {
                         "ok": True,
+                        "symbol": symbol,
+                        "target_session": target.isoformat(),
+                        "source_capture_id": source_capture_id,
                         "snapshot_identity": identity,
                         "raw": raw,
                         "source_version": source_context,
@@ -5682,30 +6097,42 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/source-symbol/raw-periods":
                 values = _query(
                     self.path,
-                    {"target_session", "source_package_id", "symbol", "session_count"},
+                    {
+                        "target_session",
+                        "source_capture_id",
+                        "symbol",
+                        "session_count",
+                        "price_coordinate",
+                    },
                 )
                 self._raw_period_request_context = {
                     "target_session": values.get("target_session"),
                     "symbol": values.get("symbol"),
-                    "source_package_id": values.get("source_package_id"),
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "source_capture_id": values.get("source_capture_id"),
+                    "price_coordinate": values.get("price_coordinate"),
                     "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
                     "identity_status": "REQUEST_NOT_RESOLVED",
                 }
-                required = {"target_session", "source_package_id", "symbol"}
+                required = {"target_session", "symbol", "price_coordinate"}
                 if not required.issubset(values) or set(values) - required - {
-                    "session_count"
+                    "source_capture_id",
+                    "session_count",
                 }:
                     raise PreviewHttpError(
                         400,
-                        "RAW_PERIOD_QUERY_REQUIRED",
-                        "RAW周期查询须提供日期、数字来源包ID和来源代码",
+                        "PRICE_PERIOD_QUERY_REQUIRED",
+                        "周期查询须提供日期、来源代码和价格坐标",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                source_package_id = _package_id(values["source_package_id"])
+                requested_capture_id = (
+                    _capture_id(values["source_capture_id"])
+                    if values.get("source_capture_id")
+                    else None
+                )
+                price_coordinate = _price_coordinate(values["price_coordinate"])
                 symbol = _symbol(values["symbol"])
                 session_count = _positive_int(
                     _nonnegative_int(
@@ -5724,18 +6151,35 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_DATE_INVALID",
                         "目标日期未通过官方交易日历校验",
                     )
-                history = read_raw_daily_history_stock(
+                history = _read_baostock_history(
                     self.preview_server.state.config,
                     source_symbol=symbol,
                     target_session=target,
-                    source_package_id=source_package_id,
+                    source_capture_id=requested_capture_id,
+                    price_coordinate=price_coordinate,
                     sessions=sessions,
+                    cutoff=self.preview_server.state.research_cutoff,
                 )
-                source_context = _preview_source_context(
+                source_capture_id = _capture_id(history.get("source_capture_id"))
+                if (
+                    requested_capture_id is not None
+                    and source_capture_id != requested_capture_id
+                ) or history.get("price_coordinate") != price_coordinate:
+                    self._raw_period_request_context["identity_status"] = (
+                        "REQUEST_IDENTITY_MISMATCH"
+                    )
+                    raise PreviewHttpError(
+                        409,
+                        "PRICE_PERIOD_IDENTITY_MISMATCH",
+                        "BaoStock周期捕获或价格坐标与请求不一致",
+                    )
+                source_context = _baostock_source_context(
                     self.preview_server.state.config,
                     target_session=target,
-                    source_package_id=source_package_id,
-                    target_raw_rows=history["history_rows"],
+                    research_cutoff=self.preview_server.state.research_cutoff,
+                    source_capture_id=source_capture_id,
+                    target_price_rows=history["history_rows"],
+                    price_coordinate=price_coordinate,
                 )
                 if source_context["status"] != "AVAILABLE":
                     self._raw_period_request_context.update(
@@ -5746,7 +6190,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         409,
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
-                        "周期返回的Raw来源包或捕获记录与请求不一致",
+                        "周期返回的BaoStock捕获与请求不一致",
                     )
                 calendar_payload, _metadata, _year_revision, calendar_sessions = (
                     research_entry._load_calendar(target)
@@ -5756,10 +6200,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     session_dates=sessions,
                     calendar_sessions=calendar_sessions,
                     history_rows=history["history_rows"],
+                    price_coordinate=price_coordinate,
+                )
+                qfq_period_bars = (
+                    period_bars
+                    if price_coordinate == "FORWARD_ADJUSTED"
+                    else build_source_symbol_raw_periods(
+                        target_session=target,
+                        session_dates=sessions,
+                        calendar_sessions=calendar_sessions,
+                        history_rows=tuple(
+                            {**row, "price_coordinate": "FORWARD_ADJUSTED"}
+                            for row in history["history_rows"]
+                        ),
+                        price_coordinate="FORWARD_ADJUSTED",
+                    )
                 )
                 history_summary = summarize_raw_history_rows(
                     session_dates=sessions,
                     history_rows=history["history_rows"],
+                    price_coordinate=price_coordinate,
                 )
                 profile_contract = self.preview_server.state.profile_contract
                 profile_rules = profile_contract.get("profile_expression_registry", {})
@@ -5767,30 +6227,85 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 trends = {
                     kind.lower(): evaluate_raw_period_trend(
                         kind=kind,
-                        periods=period_bars[kind],
+                        periods=qfq_period_bars[kind],
                         target_session=target,
                         calendar_id=calendar_payload["calendar_id"],
                         calendar_revision=calendar_revision,
                         source_cutoff=(
-                            f"TDX_PACKAGE:{source_package_id}:THROUGH:{target.isoformat()}"
+                            f"BAOSTOCK_CAPTURE:{source_capture_id}:FORWARD_ADJUSTED:THROUGH:{target.isoformat()}"
                         ),
                         profile_rules=profile_rules,
                         field_registry=field_registry,
+                        price_coordinate="FORWARD_ADJUSTED",
                     )
                     for kind in ("WEEK", "MONTH")
                 }
 
                 def trend_payload(item):
+                    item_capture_id = _capture_id(item.source_capture_id)
+                    item_coordinate = _price_coordinate(item.price_coordinate)
+                    time_role = item.time_role
+                    if (
+                        item_capture_id != source_capture_id
+                        or item_coordinate != "FORWARD_ADJUSTED"
+                        or not isinstance(time_role, str)
+                        or not time_role.strip()
+                    ):
+                        raise PreviewHttpError(
+                            409,
+                            "PRICE_PERIOD_TREND_IDENTITY_MISMATCH",
+                            "周月趋势必须绑定同一paired capture的QFQ坐标和有效time_role",
+                        )
                     return {
                         "kind": item.kind,
                         "rule_id": item.rule_id,
                         "status": item.status,
                         "value": item.value,
                         "reason": item.reason,
+                        "source_capture_id": item_capture_id,
+                        "price_coordinate": item_coordinate,
+                        "time_role": time_role,
                         "required_period_count": item.required_period_count,
                         "complete_period_count": item.complete_period_count,
                         "input_period_keys": list(item.input_period_keys),
                     }
+
+                def period_payload(item, kind: str):
+                    payload = raw_period_payload(item)
+                    if not isinstance(payload, dict):
+                        raise PreviewHttpError(
+                            500,
+                            "PRICE_PERIOD_PAYLOAD_INVALID",
+                            "周期价格Reader未返回对象",
+                        )
+                    returned_coordinate = payload.get("price_coordinate")
+                    returned_capture = payload.get("source_capture_id")
+                    returned_time_role = payload.get("time_role")
+                    trend = trends[kind.lower()]
+                    time_role = trend.time_role
+                    if (
+                        (
+                            returned_coordinate is not None
+                            and returned_coordinate != price_coordinate
+                        )
+                        or (
+                            returned_capture is not None
+                            and _capture_id(returned_capture) != source_capture_id
+                        )
+                        or (
+                            returned_time_role is not None
+                            and returned_time_role != time_role
+                        )
+                    ):
+                        raise PreviewHttpError(
+                            409,
+                            "PRICE_PERIOD_IDENTITY_MISMATCH",
+                            "周期价格条目的捕获或坐标与请求不一致",
+                        )
+                    payload["price_coordinate"] = price_coordinate
+                    payload["source_capture_id"] = source_capture_id
+                    payload["time_role"] = time_role
+                    return payload
 
                 rows = history["history_rows"]
                 if history_summary["missing_history_count"] != len(
@@ -5803,7 +6318,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                 identity = self.preview_server.state.snapshot_identity(
                     target_session=target.isoformat(),
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
                     session_count=len(sessions),
                     session_start=sessions[0].isoformat(),
                     calendar_revision=calendar_revision,
@@ -5812,26 +6328,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     200,
                     {
                         "ok": True,
-                        "research_mode": "NON_PIT_RAW_DIAGNOSTIC",
+                        "research_mode": "NON_PIT_RETROSPECTIVE",
                         "identity_status": "SOURCE_SYMBOL_ONLY",
                         "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
                         "listing_status": "LISTING_STATUS_UNKNOWN",
                         "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
                         "official_listing_universe_status": "UNKNOWN",
                         "pit_status": "NON_PIT_RETROSPECTIVE",
-                        "price_coordinate": "RAW_UNADJUSTED",
-                        "adjustment_status": "UNKNOWN_NOT_ADJUSTED",
-                        "corporate_action_status": "UNKNOWN_NOT_BOUND",
+                        "price_coordinate": price_coordinate,
+                        "time_role": "NON_PIT_RETROSPECTIVE",
                         "target_session": target.isoformat(),
                         "source_symbol": symbol,
                         "symbol": symbol,
-                        "source_package_id": source_package_id,
+                        "source_capture_id": source_capture_id,
                         "snapshot_identity": identity,
                         "source_version": source_context,
                         "selection": {
                             "source_symbol": symbol,
                             "target_session": target.isoformat(),
-                            "source_package_id": source_package_id,
+                            "source_capture_id": source_capture_id,
+                            "price_coordinate": price_coordinate,
                         },
                         "calendar_id": calendar_payload["calendar_id"],
                         "calendar_revision": calendar_revision,
@@ -5845,11 +6361,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         },
                         "periods": {
                             "week": [
-                                raw_period_payload(period)
+                                period_payload(period, "WEEK")
                                 for period in period_bars["WEEK"]
                             ],
                             "month": [
-                                raw_period_payload(period)
+                                period_payload(period, "MONTH")
                                 for period in period_bars["MONTH"]
                             ],
                         },
@@ -5859,100 +6375,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "formal_period_profile": {
                             "closed_week": "UNKNOWN",
                             "closed_month": "UNKNOWN",
-                            "reason": "NON_PIT_RAW_SOURCE_SYMBOL_NOT_FORMAL_CANONICAL_SELECTION",
-                        },
-                        "source_zip_opened": False,
-                        "source_recalculated": False,
-                        "database_write": False,
-                        "ddl_executed": False,
-                    },
-                )
-                return
-            if parsed.path == "/api/source-symbol/adjusted-history":
-                values = _query(self.path, {"symbol", "target_session"})
-                if set(values) != {"symbol", "target_session"}:
-                    raise PreviewHttpError(
-                        400,
-                        "ADJUSTED_HISTORY_QUERY_REQUIRED",
-                        "复权历史查询须提供来源代码和目标交易日",
-                    )
-                symbol = _symbol(values["symbol"])
-                target = _iso_date(values["target_session"])
-                _require_research_cutoff(
-                    target, self.preview_server.state.research_cutoff
-                )
-                from stock_a.storage.postgres.adjusted_prices import (
-                    read_adjusted_history,
-                )
-
-                result = read_adjusted_history(
-                    self.preview_server.state.config,
-                    source_symbol=symbol,
-                    target_session=target,
-                )
-                if not isinstance(result, Mapping):
-                    raise PreviewHttpError(
-                        500,
-                        "ADJUSTED_HISTORY_READER_INVALID",
-                        "复权历史Reader未返回结构化结果",
-                    )
-                status = result.get("status")
-                if status not in {"READY", "NOT_COMPUTED", "INCOMPLETE"}:
-                    raise PreviewHttpError(
-                        500,
-                        "ADJUSTED_HISTORY_STATUS_INVALID",
-                        "复权历史Reader返回了未知状态",
-                    )
-                if (
-                    result.get("source_symbol", symbol) != symbol
-                    or result.get("target_session", target.isoformat())
-                    != target.isoformat()
-                    or result.get("price_coordinate") != "ADJUSTED"
-                    or result.get("research_mode") != "RETROSPECTIVE_NON_PIT"
-                ):
-                    raise PreviewHttpError(
-                        409,
-                        "ADJUSTED_HISTORY_IDENTITY_INVALID",
-                        "复权历史身份、坐标或后验研究范围与请求不一致",
-                    )
-                points = result.get("points", [])
-                if not isinstance(points, list):
-                    raise PreviewHttpError(
-                        500,
-                        "ADJUSTED_HISTORY_POINTS_INVALID",
-                        "复权历史Reader的日线结果格式无效",
-                    )
-                if status == "READY" and not points:
-                    status = "INCOMPLETE"
-                periods = result.get("periods", {})
-                if not isinstance(periods, Mapping):
-                    periods = {}
-                self._send_json(
-                    200,
-                    {
-                        "ok": True,
-                        "status": status,
-                        "source_symbol": symbol,
-                        "target_session": target.isoformat(),
-                        "price_coordinate": "ADJUSTED",
-                        "research_mode": "RETROSPECTIVE_NON_PIT",
-                        "algorithm_version": result.get("algorithm_version"),
-                        "source": result.get("source"),
-                        "event_refs": result.get("event_refs", []),
-                        "coverage": result.get("coverage", {}),
-                        "reason": result.get("reason")
-                        or ("调整价格状态未闭合。" if status == "INCOMPLETE" else None),
-                        "points": points if status == "READY" else [],
-                        "periods": {
-                            "week": periods.get("week", [])
-                            if status == "READY"
-                            else [],
-                            "month": periods.get("month", [])
-                            if status == "READY"
-                            else [],
+                            "reason": "PERIOD_PROFILE_NOT_COMPUTED_FOR_EXACT_CAPTURE",
                         },
                         "database_write": False,
-                        "source_io": False,
                         "ddl_executed": False,
                     },
                 )
@@ -5962,24 +6387,30 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.path,
                     {
                         "target_session",
-                        "source_package_id",
+                        "source_capture_id",
+                        "price_coordinate",
                         "offset",
                         "limit",
                         "market",
                         "board",
                     },
                 )
-                if not {"target_session", "source_package_id"}.issubset(values):
+                if not {"target_session", "price_coordinate"}.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PREVIEW_QUERY_REQUIRED",
-                        "候选分页必须显式提供目标日期和来源包ID",
+                        "候选分页必须显式提供目标日期和价格坐标",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                source_package_id = _package_id(values["source_package_id"])
+                price_coordinate = _price_coordinate(values["price_coordinate"])
+                requested_capture_id = (
+                    _capture_id(values["source_capture_id"])
+                    if values.get("source_capture_id")
+                    else None
+                )
                 offset = _nonnegative_int(values.get("offset", "0"), "offset")
                 limit = _nonnegative_int(
                     values.get("limit", "20"), "limit", _MAX_PAGE_SIZE
@@ -5990,46 +6421,70 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                 market = values.get("market", "ALL")
                 board = values.get("board", "ALL")
-                if market not in {"ALL", "SH", "SZ"} or board not in {
+                if market not in {"ALL", "SH", "SZ", "BJ"} or board not in {
                     "ALL",
                     "MAIN_BOARD",
                     "GEM",
+                    "STAR_BOARD",
+                    "BEIJING_BOARD",
                 }:
                     raise PreviewHttpError(
                         400, "PREVIEW_FILTER_INVALID", "市场或板别筛选无效"
                     )
-                page = read_raw_daily_page(
+                page = read_baostock_price_page(
                     self.preview_server.state.config,
                     target_session=target,
-                    source_package_id=source_package_id,
+                    cutoff=self.preview_server.state.research_cutoff,
+                    source_capture_id=requested_capture_id,
+                    price_coordinate=price_coordinate,
                     offset=offset,
                     limit=limit,
                     market=market,
                     board=board,
                 )
+                if page.get("status") == "AMBIGUOUS_CAPTURE":
+                    raise PreviewHttpError(
+                        409,
+                        "PRICE_CAPTURE_ID_REQUIRED",
+                        "该目标日存在多个BaoStock捕获；候选分页必须明确source_capture_id",
+                    )
                 if page["version_status"] == "EMPTY":
                     raise PreviewHttpError(
                         404,
                         "PG_SOURCE_NO_MATCH",
-                        "PG中没有该明确日期和数字来源包ID的Raw来源版本",
+                        "PG中没有该日期和价格坐标对应的BaoStock来源版本",
                     )
-                source_context = _preview_source_context(
+                source_capture_id = _capture_id(page.get("source_capture_id"))
+                if (
+                    requested_capture_id is not None
+                    and source_capture_id != requested_capture_id
+                ) or page.get("price_coordinate") != price_coordinate:
+                    raise PreviewHttpError(
+                        409,
+                        "PRICE_PAGE_IDENTITY_MISMATCH",
+                        "候选页捕获或坐标与请求不一致",
+                    )
+                source_context = _baostock_source_context(
                     self.preview_server.state.config,
                     target_session=target,
-                    source_package_id=source_package_id,
-                    target_raw_rows=page["rows"],
-                    expected_raw_row_count=page["version_row_count"],
+                    research_cutoff=self.preview_server.state.research_cutoff,
+                    source_capture_id=source_capture_id,
+                    target_price_rows=page["rows"],
+                    price_coordinate=price_coordinate,
                 )
                 identity = self.preview_server.state.snapshot_identity(
                     target_session=target.isoformat(),
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
                 )
                 self._send_json(
                     200,
                     {
                         "ok": True,
                         "snapshot_identity": identity,
-                        "page": _page_public_fields(page),
+                        "page": _page_public_fields(
+                            page, price_coordinate=price_coordinate
+                        ),
                         "source_version": source_context,
                     },
                 )
@@ -6174,6 +6629,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 raise PreviewHttpError(
                     400, "PREVIEW_JSON_INVALID", "请求体不是有效UTF-8 JSON或含重复字段"
                 ) from error
+            retired_path = _legacy_price_identity(body)
+            if retired_path:
+                raise PreviewHttpError(
+                    400,
+                    "RETIRED_PRICE_IDENTITY_REJECTED",
+                    f"请求含已退役的TDX行情包身份（{retired_path}）；请使用BaoStock捕获ID和板块快照ID。",
+                )
             if post_path == "/api/preview/source-launch-watch":
                 self._send_json(200, self._source_launch_watch(body))
                 return
@@ -6220,9 +6682,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             ):
                 required = {
                     "post_signal_price_facts",
+                    "price_coordinate",
                     "symbol",
                     "target_session",
-                    "source_package_id",
+                    "source_capture_id",
                     "research_cutoff",
                     "session_count",
                 }
@@ -6233,13 +6696,20 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "后续价格事实请求字段不完整或含额外字段",
                     )
                 symbol = _symbol(body["symbol"])
+                post_signal_coordinate = _price_coordinate(body["price_coordinate"])
+                if post_signal_coordinate != "FORWARD_ADJUSTED":
+                    raise PreviewHttpError(
+                        400,
+                        "PRICE_COORDINATE_INVALID",
+                        "跨会话后续价格观察固定使用BaoStock FORWARD_ADJUSTED坐标",
+                    )
                 target = _iso_date(body["target_session"])
                 cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
                 _require_research_cutoff(target, cutoff)
                 _require_research_cutoff(
                     cutoff, self.preview_server.state.research_cutoff
                 )
-                package = _package_id(body["source_package_id"])
+                source_capture_id = _capture_id(body["source_capture_id"])
                 count = _positive_int(body["session_count"], "session_count", 10)
                 calendar = _official_calendar(cutoff)
                 all_sessions = calendar["sessions"]
@@ -6250,14 +6720,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 sessions = tuple(
                     day for day in all_sessions if target <= day <= cutoff
                 )[: count + 1]
-                history = read_raw_daily_history_stock(
+                history = _read_baostock_history(
                     self.preview_server.state.config,
                     source_symbol=symbol,
                     target_session=target,
-                    source_package_id=package,
+                    source_capture_id=source_capture_id,
                     sessions=sessions,
+                    cutoff=cutoff,
+                    price_coordinate="FORWARD_ADJUSTED",
                     starts_at_target=True,
-                    research_cutoff=cutoff,
                 )
                 result = post_signal_price_facts(
                     sessions, history["history_rows"], count
@@ -6267,7 +6738,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "symbol": symbol,
                         "target_session": target.isoformat(),
                         "research_cutoff": cutoff.isoformat(),
-                        "source_package_id": package,
+                        "source_capture_id": source_capture_id,
+                        "price_coordinate": post_signal_coordinate,
                         "calendar_revision": calendar["calendar_revision_chain"],
                         "saved_session_range": history["saved_session_range"],
                         "database_write": False,
@@ -6285,11 +6757,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "source_observation_only",
                     "symbol",
                     "target_session",
-                    "source_package_id",
+                    "source_capture_id",
+                    "price_coordinate",
                     "research_cutoff",
                 }
                 membership_fields = {"industry_snapshot_id", "concept_snapshot_id"}
-                optional_observation_fields = membership_fields | {"diagnostic_scope"}
+                optional_observation_fields = membership_fields | {
+                    "diagnostic_scope",
+                    "before_source_capture_id",
+                }
                 if not required_observation_fields <= set(body) <= (
                     required_observation_fields | optional_observation_fields
                 ) or (
@@ -6308,7 +6784,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 _require_research_cutoff(
                     cutoff, self.preview_server.state.research_cutoff
                 )
-                package = _package_id(body["source_package_id"])
+                source_capture_id = _capture_id(body["source_capture_id"])
+                price_coordinate = _price_coordinate(body["price_coordinate"])
+                if price_coordinate != "FORWARD_ADJUSTED":
+                    raise PreviewHttpError(
+                        400,
+                        "PRICE_COORDINATE_INVALID",
+                        "D0跨会话观察必须绑定BaoStock FORWARD_ADJUSTED坐标",
+                    )
+                before_source_capture_id = (
+                    _capture_id(body["before_source_capture_id"])
+                    if body.get("before_source_capture_id") is not None
+                    else None
+                )
                 diagnostic_scope = body.get("diagnostic_scope", "LAUNCH")
                 if not isinstance(diagnostic_scope, str) or diagnostic_scope not in {
                     "BOTH",
@@ -6329,8 +6817,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             before_session=pair[0],
                             target_session=target,
                             research_cutoff=cutoff,
-                            before_source_package_id=package,
-                            source_package_id=package,
+                            before_source_capture_id=before_source_capture_id,
+                            source_capture_id=source_capture_id,
+                            price_coordinate=price_coordinate,
                             symbol=symbol,
                             transition="ALL",
                             offset=0,
@@ -6348,12 +6837,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     rps_error = None
                     try:
                         rps, _ = self.preview_server.state.source_pool_rps(
-                            (target, cutoff, package),
+                            (target, cutoff, source_capture_id),
                             lambda: read_source_pool_rps(
                                 self.preview_server.state.config,
                                 target_session=target,
                                 research_cutoff=cutoff,
-                                source_package_id=package,
+                                source_capture_id=source_capture_id,
                             ),
                         )
                     except ValueError as error:
@@ -6365,7 +6854,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         action="current",
                         target_session=target,
                         research_cutoff=cutoff,
-                        source_package_id=package,
+                        source_capture_id=source_capture_id,
+                        price_coordinate=price_coordinate,
                         symbol=symbol,
                         offset=0,
                         limit=1,
@@ -6428,6 +6918,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "source_symbol": symbol,
                         "target_session": target.isoformat(),
+                        "source_capture_id": source_capture_id,
+                        "price_coordinate": price_coordinate,
+                        "time_role": "NON_PIT_RETROSPECTIVE",
                         "d0_change": launch_change,
                         "recovery": next(iter(recovery["results"]), None)
                         if recovery
@@ -6443,19 +6936,20 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             expected = {
                 "symbol",
                 "target_session",
-                "source_package_id",
                 "session_count",
             }
-            allowed_timeline = expected
+            capture_field = {"source_capture_id"}
+            coordinate_field = {"price_coordinate"}
+            timeline_fields = expected | coordinate_field
             source_change_required = {
                 "include_source_change_context",
                 "before_session",
-                "before_source_package_id",
                 "industry_snapshot_id",
                 "concept_snapshot_id",
             }
             source_change_optional = {
                 "research_cutoff",
+                "before_source_capture_id",
                 "before_profile_revision",
                 "after_profile_revision",
             }
@@ -6474,8 +6968,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "PREVIEW_PROFILE_REVISIONS_MUST_BE_PAIRED",
                     "before_profile_revision与after_profile_revision必须同时提供",
                 )
-            source_change_body = expected | source_change_required
-            source_change_allowed = source_change_body | source_change_optional
+            source_change_body = timeline_fields | source_change_required
+            source_change_allowed = (
+                source_change_body | source_change_optional | capture_field
+            )
             stock_seed_fields = {"profile_revision"}
             stock_evidence_fields = {"industry_snapshot_id", "concept_snapshot_id"}
             stock_d1_evidence_field = {"d1_history_session_count"}
@@ -6483,11 +6979,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if valid_body and post_path == "/api/preview/stock":
                 allowed_stock_bodies = {
                     frozenset(expected),
+                    frozenset(expected | capture_field),
                     frozenset(expected | stock_seed_fields),
+                    frozenset(expected | stock_seed_fields | capture_field),
                     frozenset(expected | stock_evidence_fields),
+                    frozenset(expected | stock_evidence_fields | capture_field),
                     frozenset(expected | stock_seed_fields | stock_evidence_fields),
                     frozenset(
+                        expected
+                        | stock_seed_fields
+                        | stock_evidence_fields
+                        | capture_field
+                    ),
+                    frozenset(
                         expected | stock_evidence_fields | stock_d1_evidence_field
+                    ),
+                    frozenset(
+                        expected
+                        | stock_evidence_fields
+                        | stock_d1_evidence_field
+                        | capture_field
                     ),
                     frozenset(
                         expected
@@ -6495,33 +7006,51 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         | stock_evidence_fields
                         | stock_d1_evidence_field
                     ),
+                    frozenset(
+                        expected
+                        | stock_seed_fields
+                        | stock_evidence_fields
+                        | stock_d1_evidence_field
+                        | capture_field
+                    ),
                 }
                 valid_body = frozenset(body) in allowed_stock_bodies
             elif valid_body:
-                valid_body = (
-                    set(body) == expected
-                    or (
-                        post_path == "/api/preview/stock-timeline"
-                        and set(body) == allowed_timeline
-                    )
-                    or (
-                        post_path == "/api/preview/stock-timeline"
-                        and source_change_body <= set(body) <= source_change_allowed
-                    )
+                valid_body = set(body) in {
+                    frozenset(timeline_fields),
+                    frozenset(timeline_fields | capture_field),
+                } or (
+                    post_path == "/api/preview/stock-timeline"
+                    and source_change_body <= set(body) <= source_change_allowed
                 )
             if not valid_body:
                 raise PreviewHttpError(
                     400,
                     "PREVIEW_BODY_FIELDS_INVALID",
-                    "请求体须包含symbol、target_session、数字source_package_id、session_count；可显式启用单股变化上下文",
+                    "请求体须包含symbol、target_session、session_count；日线轨迹还须指定price_coordinate，可选提供source_capture_id",
                 )
             symbol = _symbol(body["symbol"])
             target_text = body["target_session"]
             target = _iso_date(target_text)
             _require_research_cutoff(target, self.preview_server.state.research_cutoff)
-            source_package_id = _package_id(body["source_package_id"])
+            requested_source_capture_id = (
+                _capture_id(body["source_capture_id"])
+                if body.get("source_capture_id") is not None
+                else None
+            )
+            price_coordinate = (
+                _price_coordinate(body["price_coordinate"])
+                if post_path == "/api/preview/stock-timeline"
+                else "FORWARD_ADJUSTED"
+            )
             session_count = _positive_int(body["session_count"], "session_count", 75)
             source_change_opt_in = source_change_required <= set(body)
+            if source_change_opt_in and price_coordinate != "FORWARD_ADJUSTED":
+                raise PreviewHttpError(
+                    400,
+                    "SOURCE_CHANGE_PRICE_COORDINATE_INVALID",
+                    "板块/个股D0/D1跨会话来源上下文必须使用FORWARD_ADJUSTED坐标",
+                )
             research_cutoff = self.preview_server.state.research_cutoff
             if source_change_opt_in and "research_cutoff" in body:
                 research_cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
@@ -6533,9 +7062,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                 _require_research_cutoff(target, research_cutoff)
             before_target: date | None = None
-            before_source_package_id: int | None = None
-            industry_snapshot_id: str | None = None
-            concept_snapshot_id: str | None = None
+            before_source_capture_id: int | None = None
+            industry_snapshot_id: int | None = None
+            concept_snapshot_id: int | None = None
             before_profile_revision: str | None = None
             after_profile_revision: str | None = None
             if source_change_opt_in:
@@ -6553,13 +7082,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_CHANGE_DATE_INVALID",
                         "before_session必须早于target_session",
                     )
-                before_source_package_id = _package_id(body["before_source_package_id"])
-                if before_source_package_id != source_package_id:
-                    raise PreviewHttpError(
-                        409,
-                        "PREVIEW_SOURCE_CHANGE_PACKAGE_MISMATCH",
-                        "前后研究请求必须使用相同数字来源包ID",
-                    )
+                before_source_capture_id = (
+                    _capture_id(body["before_source_capture_id"])
+                    if body.get("before_source_capture_id") is not None
+                    else None
+                )
                 industry_snapshot_id = _snapshot_id(body["industry_snapshot_id"])
                 concept_snapshot_id = _snapshot_id(body["concept_snapshot_id"])
                 if source_change_optional <= set(body):
@@ -6628,18 +7155,40 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_CHANGE_SESSIONS_NOT_ADJACENT",
                         "前后日期必须是同一日历版本中的相邻官方会话",
                     )
-            history = read_raw_daily_history_stock(
+            history = _read_baostock_history(
                 self.preview_server.state.config,
                 source_symbol=symbol,
                 target_session=target,
-                source_package_id=source_package_id,
+                source_capture_id=requested_source_capture_id,
+                price_coordinate=price_coordinate,
                 sessions=sessions,
+                cutoff=self.preview_server.state.research_cutoff,
             )
+            source_capture_id = _capture_id(history.get("source_capture_id"))
+            if (
+                requested_source_capture_id is not None
+                and source_capture_id != requested_source_capture_id
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "PRICE_HISTORY_CAPTURE_MISMATCH",
+                    "个股价格历史捕获与请求不一致",
+                )
+            if (
+                post_path == "/api/preview/stock-timeline"
+                and history.get("price_coordinate") != price_coordinate
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "PRICE_HISTORY_COORDINATE_MISMATCH",
+                    "个股价格历史坐标与请求不一致",
+                )
             if post_path == "/api/preview/stock-timeline":
                 result = research_entry.research_stock_pg_history_timeline(
                     symbol=symbol,
                     target_session=target.isoformat(),
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
                     session_dates=sessions,
                     history_rows=history["history_rows"],
                     missing_history_sessions=tuple(
@@ -6648,18 +7197,57 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ),
                     profile_contract=self.preview_server.state.profile_contract,
                 )
-                source_context = _preview_source_context(
+                source_context = _baostock_source_context(
                     self.preview_server.state.config,
                     target_session=target,
-                    source_package_id=source_package_id,
-                    target_raw_rows=history["history_rows"],
+                    research_cutoff=self.preview_server.state.research_cutoff,
+                    source_capture_id=source_capture_id,
+                    target_price_rows=history["history_rows"],
+                    price_coordinate=price_coordinate,
                 )
                 if source_context["status"] != "AVAILABLE":
                     raise PreviewHttpError(
                         409,
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
-                        "轨迹返回的Raw包ID或捕获记录与变化快照不一致",
+                        "轨迹返回的价格捕获ID或捕获记录与变化快照不一致",
                     )
+                if (
+                    result.get("price_coordinate") != price_coordinate
+                    or result.get("source_capture_id") != source_capture_id
+                    or result.get("time_role") != "NON_PIT_RETROSPECTIVE"
+                ):
+                    raise PreviewHttpError(
+                        409,
+                        "PRICE_HISTORY_COORDINATE_MISMATCH",
+                        "日线Reader返回坐标与请求不一致",
+                    )
+                points = result.get("points")
+                if not isinstance(points, list) or any(
+                    not isinstance(point, Mapping) for point in points
+                ):
+                    raise PreviewHttpError(
+                        500,
+                        "PRICE_TIMELINE_POINTS_INVALID",
+                        "日线Reader未返回坐标明确的价格点列表",
+                    )
+                normalized_points = []
+                for point in points:
+                    point = dict(point)
+                    if (
+                        point.get("price_coordinate") != price_coordinate
+                        or _capture_id(point.get("source_capture_id"))
+                        != source_capture_id
+                        or point.get("time_role") != "NON_PIT_RETROSPECTIVE"
+                    ):
+                        raise PreviewHttpError(
+                            409,
+                            "PRICE_HISTORY_IDENTITY_MISMATCH",
+                            "日线价格点捕获或坐标与请求不一致",
+                        )
+                    normalized_points.append(point)
+                result["points"] = normalized_points
+                result["price_coordinate"] = price_coordinate
+                result["source_capture_id"] = source_capture_id
                 if source_change_opt_in:
                     try:
                         membership = read_tdx_sector_symbol_membership(
@@ -6674,8 +7262,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             before_session=before_target,
                             target_session=target,
                             research_cutoff=research_cutoff,
-                            before_source_package_id=before_source_package_id,
-                            source_package_id=source_package_id,
+                            before_source_capture_id=before_source_capture_id,
+                            source_capture_id=source_capture_id,
                             symbol=symbol,
                             before_profile_revision=before_profile_revision,
                             after_profile_revision=after_profile_revision,
@@ -6691,7 +7279,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     }
                 identity = self.preview_server.state.snapshot_identity(
                     target_session=target.isoformat(),
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
                     session_count=session_count,
                     session_start=sessions[0].isoformat(),
                     calendar_revision=calendar_revision,
@@ -6701,13 +7290,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 result["selection"] = {
                     "source_symbol": symbol,
                     "target_session": target.isoformat(),
-                    "source_package_id": source_package_id,
+                    "source_capture_id": source_capture_id,
                     "session_count": session_count,
                     "calendar_revision": calendar_revision,
+                    "price_coordinate": price_coordinate,
                 }
                 relation_history = result.get("price_relation_history")
                 if isinstance(relation_history, dict):
-                    relation_history["source_package_id"] = source_package_id
+                    relation_history["source_capture_id"] = source_capture_id
                 direction_history = result.get("ma20_direction_history")
                 if isinstance(direction_history, dict):
                     binding = direction_history.get("binding")
@@ -6717,23 +7307,23 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 "source_capture_id": source_context[
                                     "source_capture_id"
                                 ],
-                                "source_package_id": source_context[
-                                    "source_package_id"
-                                ],
                             }
                         )
                 self._send_json(200, result)
                 return
-            source_context = _preview_source_context(
+            source_context = _baostock_source_context(
                 self.preview_server.state.config,
                 target_session=target,
-                source_package_id=source_package_id,
-                target_raw_rows=history["history_rows"],
+                research_cutoff=self.preview_server.state.research_cutoff,
+                source_capture_id=source_capture_id,
+                target_price_rows=history["history_rows"],
+                price_coordinate=price_coordinate,
             )
             result = research_entry.research_stock_pg_history_preview(
                 symbol=symbol,
                 target_session=target.isoformat(),
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
                 session_dates=sessions,
                 history_rows=history["history_rows"],
                 missing_history_sessions=tuple(
@@ -6744,19 +7334,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             )
             identity = self.preview_server.state.snapshot_identity(
                 target_session=target.isoformat(),
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
                 session_count=session_count,
                 session_start=sessions[0].isoformat(),
                 calendar_revision=calendar_revision,
             )
             result["snapshot_identity"] = identity
             result["source_version"] = source_context
+            result["source_capture_id"] = source_capture_id
+            result["price_coordinate"] = "FORWARD_ADJUSTED"
+            result["time_role"] = "NON_PIT_RETROSPECTIVE"
+            result["price_coordinates"] = {
+                "absolute_spot": "RAW_UNADJUSTED",
+                "cross_session_research": "FORWARD_ADJUSTED",
+            }
             result["selection"] = {
                 "source_symbol": symbol,
                 "target_session": target.isoformat(),
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
                 "session_count": session_count,
                 "calendar_revision": calendar_revision,
+                "price_coordinate": "FORWARD_ADJUSTED",
             }
             result["population_status"] = {
                 "source_candidates": "PG_SOURCE_CANDIDATES_NON_PIT",
@@ -6766,11 +7365,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             result["source_seed"] = query_source_stock_seed_context(
                 self.preview_server.state.config,
                 target_session=target,
-                source_package_id=source_package_id,
                 source_capture_id=source_context["source_capture_id"],
                 source_symbol=symbol,
                 profile_revision=profile_revision,
-                expected_source_count=source_context["capture_expected_row_count"],
+                expected_source_count=source_context[
+                    "source_capture_expected_row_count"
+                ],
                 source_time_quality=source_context["source_time_quality"],
                 source_clock_role=source_context["source_clock_role"],
                 source_available_at=source_context["source_available_at"],
@@ -6783,9 +7383,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 saved_evidence = read_source_launch_watch_evidence(
                     self.preview_server.state.config,
                     target_session=target,
-                    source_package_id=source_package_id,
                     source_capture_id=source_context["source_capture_id"],
-                    expected_source_count=source_context["capture_expected_row_count"],
+                    expected_source_count=source_context[
+                        "source_capture_expected_row_count"
+                    ],
                     source_symbols=(symbol,),
                     d1_history_session_count=d1_history_session_count,
                     single_symbol_only=True,
@@ -6818,9 +7419,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     target_session=target,
                     research_cutoff=research_cutoff,
-                    source_package_id=source_package_id,
                     source_capture_id=source_context["source_capture_id"],
-                    expected_source_count=source_context["capture_expected_row_count"],
+                    expected_source_count=source_context[
+                        "source_capture_expected_row_count"
+                    ],
                     source_symbols=(symbol,),
                     successor_sessions=successor_sessions,
                 )[symbol]
@@ -6845,7 +7447,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     read_source_version_context(
                         config,
                         target_session=before,
-                        source_package_id=source_package_id,
+                        source_capture_id=None,
+                        research_cutoff=self.preview_server.state.research_cutoff,
                     )
                     if before is not None
                     else {}
@@ -6855,8 +7458,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     entries = read_enrollments_for_symbols(
                         config,
                         target=target,
-                        package=source_package_id,
-                        capture=source_context["source_capture_id"],
+                        source_capture_id=source_context["source_capture_id"],
+                        target_capture_id=source_context["source_capture_id"],
                         before=before,
                         before_capture=before_source["source_capture_id"],
                         include_d0=True,
@@ -6926,7 +7529,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 triage_summary = read_source_t0_early_triage_summaries_for_symbols(
                     config,
                     target_session=target,
-                    source_package_id=source_package_id,
                     source_capture_id=source_context["source_capture_id"],
                     source_symbols=[symbol],
                 )[symbol]
@@ -6987,12 +7589,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "followup_status": followup_status,
                     "followup_reason": followup_reason,
                     "target_session": target.isoformat(),
-                    "source_package_id": source_package_id,
                     "source_capture_id": source_context["source_capture_id"],
                     "profile_revision": (saved_evidence.get("rule_scope") or {}).get(
                         "profile_revision"
                     ),
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "price_coordinate": "FORWARD_ADJUSTED",
                     "scope": "NON_PIT_EXPLORATORY",
                 }
                 from stock_a.storage.postgres.formal_admission import (
@@ -7002,16 +7603,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 formal_admission_day = read_source_formal_admission_day(
                     config,
                     target_session=target,
-                    source_package_id=source_package_id,
                     source_capture_id=source_context["source_capture_id"],
-                    expected_source_count=source_context["capture_expected_row_count"],
+                    expected_source_count=source_context[
+                        "source_capture_expected_row_count"
+                    ],
                     source_symbols=[symbol],
                 )
                 formal_d0_admission = present_source_formal_admission(
                     stored_day=formal_admission_day,
                     source_symbol=symbol,
                     target_session=target,
-                    source_package_id=source_package_id,
                     source_capture_id=source_context["source_capture_id"],
                     d0_evidence=single_evidence.get("d0"),
                 )
@@ -7021,26 +7622,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     formal_d0_admission
                 )
                 try:
-                    from stock_a.application.source_baostock_detail import (
-                        read_baostock_detail,
+                    from stock_a.storage.postgres.baostock_price_facts import (
+                        read_baostock_price_detail,
                     )
 
-                    result["baostock_supplement"] = read_baostock_detail(
+                    result["baostock_price_source"] = read_baostock_price_detail(
                         config,
                         source_symbol=symbol,
                         target_session=target,
                         research_cutoff=research_cutoff,
+                        source_capture_id=source_context["source_capture_id"],
                     )
                 except Exception as error:
-                    result["baostock_supplement"] = {
+                    result["baostock_price_source"] = {
                         "status": "UNKNOWN",
                         "reason_code": getattr(error, "code", type(error).__name__),
-                        "message": "BaoStock补充来源读取失败；TDX核心结果保持可用。",
+                        "message": "BaoStock价格来源读回失败；没有替换为其它价格来源。",
                         "source": "BAOSTOCK",
                         "source_symbol": symbol,
                         "target_session": target.isoformat(),
                         "research_cutoff": research_cutoff.isoformat(),
                         "price_coordinate": "RAW_UNADJUSTED",
+                        "source_capture_id": source_capture_id,
                         "pit_status": "NON_PIT",
                         "source_network_called": False,
                         "database_write_attempted": False,

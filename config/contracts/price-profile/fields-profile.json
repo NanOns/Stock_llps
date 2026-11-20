@@ -1791,7 +1791,7 @@
         "expression_ref": "ALG-09",
         "input_fields": [
           "core.ret5",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session"
         ],
         "window_contract": "CROSS_SESSION_R1",
@@ -1804,7 +1804,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -1827,7 +1827,7 @@
         "expression_ref": "ALG-10",
         "input_fields": [
           "core.ret5",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session",
           "coordinate.id",
           "adjusted.close",
@@ -1843,7 +1843,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -1866,7 +1866,7 @@
         "expression_ref": "ALG-10",
         "input_fields": [
           "core.ret5",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session",
           "coordinate.id",
           "adjusted.close",
@@ -1882,7 +1882,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -1905,7 +1905,7 @@
         "expression_ref": "ALG-09",
         "input_fields": [
           "core.ret20",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session"
         ],
         "window_contract": "CROSS_SESSION_R1",
@@ -1918,7 +1918,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -1941,7 +1941,7 @@
         "expression_ref": "ALG-10",
         "input_fields": [
           "core.ret20",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session",
           "coordinate.id",
           "adjusted.close",
@@ -1957,7 +1957,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -1980,7 +1980,7 @@
         "expression_ref": "ALG-10",
         "input_fields": [
           "core.ret20",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session",
           "coordinate.id",
           "adjusted.close",
@@ -1996,7 +1996,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -2019,7 +2019,7 @@
         "expression_ref": "ALG-11",
         "input_fields": [
           "core.ret1",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session"
         ],
         "window_contract": "CROSS_SESSION_R1",
@@ -2032,7 +2032,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -2055,7 +2055,7 @@
         "expression_ref": "ALG-11",
         "input_fields": [
           "core.ret3",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session"
         ],
         "window_contract": "CROSS_SESSION_R1",
@@ -2068,7 +2068,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -2091,7 +2091,7 @@
         "expression_ref": "ALG-11",
         "input_fields": [
           "core.ret5",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session"
         ],
         "window_contract": "CROSS_SESSION_R1",
@@ -2104,7 +2104,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -2127,7 +2127,7 @@
         "expression_ref": "ALG-11",
         "input_fields": [
           "core.ret20",
-          "identity.entity_id",
+          "identity.source_symbol",
           "identity.session"
         ],
         "window_contract": "CROSS_SESSION_R1",
@@ -2140,7 +2140,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "cross_input_version"
         ],
@@ -2191,7 +2191,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2234,7 +2234,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2278,7 +2278,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2326,7 +2326,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2371,7 +2371,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2415,7 +2415,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2460,7 +2460,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2501,7 +2501,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2541,7 +2541,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2580,7 +2580,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],
@@ -2621,7 +2621,7 @@
           ]
         },
         "business_key": [
-          "entity_id",
+          "source_symbol",
           "session_date",
           "profile_input_version"
         ],

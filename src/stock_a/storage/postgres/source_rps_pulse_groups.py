@@ -53,7 +53,6 @@ _INSERT_COLUMNS = (
     "source_t0_fact_id",
     "target_session",
     "previous_session",
-    "source_package_id",
     "source_capture_id",
     "previous_source_capture_id",
     "enrollment_id",
@@ -86,16 +85,18 @@ _INSERT_COLUMNS = (
 )
 
 
-def _read_latest_mapped_t0(cursor: Any, *, target: date, package: int):
+def _read_latest_mapped_t0(
+    cursor: Any, *, target: date, source_capture_id: int
+) -> list[tuple[Any, ...]]:
     cursor.execute(
         f"""WITH latest AS (
                SELECT DISTINCT ON (o.enrollment_id,o.board_context_key) o.*
                FROM source_t0_early_observation_facts o
-               WHERE o.target_session=%s AND o.source_package_id=%s
+               WHERE o.target_session=%s AND o.source_capture_id=%s
                ORDER BY o.enrollment_id,o.board_context_key,
                         o.recorded_at DESC,o.id DESC
            )
-           SELECT o.id,o.target_session,o.source_package_id,o.source_capture_id,
+           SELECT o.id,o.target_session,o.source_capture_id,
                   o.enrollment_id,o.source_symbol,o.board_kind,o.board_native_id,
                   o.membership_snapshot_id,o.catalog_id,o.rule_fact_id,
                   COALESCE(r.rule_id,'UNSCOPED'),
@@ -114,7 +115,7 @@ def _read_latest_mapped_t0(cursor: Any, *, target: date, package: int):
              AND o.membership_snapshot_id IS NOT NULL
              AND o.catalog_id IS NOT NULL AND o.board_native_id IS NOT NULL
            ORDER BY o.source_capture_id,o.id""",
-        (target, package),
+        (target, source_capture_id),
     )
     rows = cursor.fetchall()
     if len(rows) > _MAX_RELATION_ROWS:
@@ -127,80 +128,157 @@ def _read_source_context(
     *,
     target: date,
     previous: date,
-    package: int,
-    current_capture: int,
+    source_capture_id: int,
+    research_cutoff: date,
 ):
+    """核对单个覆盖多个会话的BaoStock paired capture及逐日请求分母。"""
     cursor.execute(
-        """SELECT target_session,capture_id,normalized_count,
-                  source_time_quality,source_clock_role
+        """SELECT provider,range_start_session,range_end_session,
+                  price_coordinates,source_time_quality,source_clock_role,
+                  source_available_at
            FROM source_captures
-           WHERE source_package_id=%s AND target_session IN (%s,%s)
-           ORDER BY target_session,capture_id""",
-        (package, previous, target),
+           WHERE capture_id=%s AND range_end_session<=%s""",
+        (source_capture_id, research_cutoff),
     )
-    capture_rows = cursor.fetchall()
-    captures_by_day: dict[date, list[tuple]] = defaultdict(list)
-    for row in capture_rows:
-        captures_by_day[row[0]].append(row)
-
     reasons: list[str] = []
-    current_matches = [
-        row for row in captures_by_day.get(target, []) if row[1] == current_capture
-    ]
-    if len(current_matches) != 1:
-        reasons.append("T0_SOURCE_CAPTURE_NOT_UNIQUE")
-    previous_rows = captures_by_day.get(previous, [])
-    previous_capture = previous_rows[0][1] if len(previous_rows) == 1 else None
-    if not previous_rows:
-        reasons.append("PREVIOUS_SOURCE_CAPTURE_NOT_COMPUTED")
-    elif len(previous_rows) != 1:
-        reasons.append("PREVIOUS_SOURCE_CAPTURE_AMBIGUOUS")
-
-    exact_captures = [
-        row for row in current_matches + previous_rows if row[1] is not None
-    ]
-    if any(row[3] in {"UNKNOWN", "NOT_COMPUTED"} for row in exact_captures):
+    capture = cursor.fetchone()
+    if capture is None:
+        return {
+            "previous_source_capture_id": None,
+            "status": "NOT_COMPUTED",
+            "reason_codes": ["PAIRED_CAPTURE_NOT_FOUND"],
+            "previous_scope": None,
+            "current_scope": None,
+        }
+    (
+        provider,
+        range_start,
+        range_end,
+        price_coordinates,
+        source_time_quality,
+        source_clock_role,
+        source_available_at,
+    ) = capture
+    if (
+        provider != "BAOSTOCK"
+        or range_start is None
+        or range_end is None
+        or range_start > previous
+        or range_end < target
+        or range_end > research_cutoff
+        or set(price_coordinates or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or source_available_at is not None
+    ):
+        reasons.append("PAIRED_CAPTURE_SCOPE_INVALID")
+    if source_clock_role != "BAOSTOCK_QUERY_CAPTURED_NON_PIT":
+        reasons.append("SOURCE_CAPTURE_CLOCK_ROLE_INVALID")
+    if source_time_quality in {"UNKNOWN", "NOT_COMPUTED"}:
         reasons.append("SOURCE_TIME_QUALITY_UNKNOWN")
-    raw_by_key: dict[tuple[date, int], tuple] = {}
-    if exact_captures:
-        cursor.execute(
-            """SELECT session_date,source_capture_id,count(*)::integer,
-                      count(DISTINCT source_symbol)::integer,
-                      array_agg(source_symbol ORDER BY source_symbol)
-               FROM source_raw_daily
-               WHERE source_package_id=%s AND (
-                   (session_date=%s AND source_capture_id=%s)
-                   OR (session_date=%s AND source_capture_id=ANY(%s))
-               )
-               GROUP BY session_date,source_capture_id""",
-            (
-                package,
-                target,
-                current_capture,
-                previous,
-                [row[1] for row in previous_rows],
-            ),
-        )
-        raw_by_key = {(row[0], row[1]): row[2:] for row in cursor.fetchall()}
 
-    for capture_row in current_matches + previous_rows:
-        session, capture_id, expected_count, _, _ = capture_row
-        raw = raw_by_key.get((session, capture_id))
-        if raw is None:
+    # 60-session capture identity spans both endpoints; requests and eligible
+    # windows determine the per-session denominator instead of target_session
+    # on the capture header.
+    cursor.execute(
+        """SELECT source_code,adjustment_flag,eligible_start_session,
+                  eligible_end_session,request_status,completed_through_session
+           FROM source_capture_requests
+           WHERE capture_id=%s AND range_end_session<=%s
+           ORDER BY source_code,adjustment_flag""",
+        (source_capture_id, research_cutoff),
+    )
+    request_rows = cursor.fetchall()
+    requests_by_code: dict[str, dict[str, tuple]] = defaultdict(dict)
+    duplicate_request_keys: set[str] = set()
+    for row in request_rows:
+        code = str(row[0]).upper()
+        flag = str(row[1])
+        if flag in requests_by_code[code]:
+            duplicate_request_keys.add(code)
+        requests_by_code[code][flag] = row
+
+    def eligible_codes(session: date) -> set[str]:
+        result: set[str] = set()
+        for code, coordinate_rows in requests_by_code.items():
+            rows = [row for flag, row in coordinate_rows.items() if flag in {"2", "3"}]
+            if len(rows) != 2 or any(
+                row[2] is None or row[3] is None or row[2] > session or row[3] < session
+                for row in rows
+            ):
+                continue
+            result.add(code)
+        return result
+
+    def incomplete_request_codes(session: date) -> set[str]:
+        incomplete = set(duplicate_request_keys)
+        for code in eligible_codes(session):
+            coordinate_rows = requests_by_code[code]
+            if set(coordinate_rows) != {"2", "3"}:
+                incomplete.add(code)
+                continue
+            if any(
+                row[4] not in {"COMPLETED", "NO_DATA"}
+                or row[4] == "COMPLETED"
+                and (row[5] is None or row[5] < row[3])
+                for row in coordinate_rows.values()
+            ):
+                incomplete.add(code)
+        return incomplete
+
+    expected_symbols_by_day = {
+        session: eligible_codes(session) for session in (previous, target)
+    }
+    for session, codes in expected_symbols_by_day.items():
+        if not codes:
             reasons.append(
-                "T0_RAW_PARTITION_NOT_CLOSED"
-                if session == target
-                else "PREVIOUS_RAW_PARTITION_NOT_CLOSED"
+                "PREVIOUS_REQUEST_ROSTER_EMPTY"
+                if session == previous
+                else "T0_REQUEST_ROSTER_EMPTY"
             )
-        elif raw[0] != expected_count or raw[1] != expected_count:
+        if incomplete_request_codes(session):
             reasons.append(
-                "T0_RAW_PARTITION_NOT_CLOSED"
-                if session == target
-                else "PREVIOUS_RAW_PARTITION_NOT_CLOSED"
+                "PREVIOUS_RAW_REQUESTS_INCOMPLETE"
+                if session == previous
+                else "T0_RAW_REQUESTS_INCOMPLETE"
             )
+
+    raw_by_key: dict[date, tuple] = {}
+    if any(expected_symbols_by_day.values()):
+        cursor.execute(
+            """SELECT session_date,count(*)::integer,
+                      count(DISTINCT source_symbol)::integer,
+                      array_agg(source_symbol ORDER BY source_symbol),
+                      count(*) FILTER (WHERE price_quality='OBSERVED')::integer,
+                      count(*) FILTER (
+                          WHERE qfq_price_quality='OBSERVED'
+                      )::integer
+               FROM source_raw_daily
+               WHERE source_capture_id=%s AND session_date=ANY(%s::date[])
+               GROUP BY session_date""",
+            (source_capture_id, [previous, target]),
+        )
+        raw_by_key = {row[0]: row[1:] for row in cursor.fetchall()}
+
+    source_symbols_by_day: dict[date, tuple[str, ...]] = {}
+    for session, expected_symbols in expected_symbols_by_day.items():
+        raw = raw_by_key.get(session)
+        if (
+            raw is None
+            or int(raw[0]) != len(expected_symbols)
+            or int(raw[1]) != len(expected_symbols)
+            or int(raw[3]) != int(raw[0])
+            or int(raw[4]) != int(raw[0])
+            or set(raw[2]) != expected_symbols
+        ):
+            reasons.append(
+                "T0_RAW_REQUEST_PARTITION_NOT_CLOSED"
+                if session == target
+                else "PREVIOUS_RAW_REQUEST_PARTITION_NOT_CLOSED"
+            )
+        else:
+            source_symbols_by_day[session] = tuple(raw[2])
 
     scopes_by_day: dict[date, list[tuple]] = defaultdict(list)
-    if current_matches and previous_capture is not None:
+    if not reasons and source_symbols_by_day:
         cursor.execute(
             """SELECT DISTINCT target_session,source_capture_id,
                       profile_revision,producer_contract,producer_version,
@@ -208,12 +286,9 @@ def _read_source_context(
                       research_mode,price_coordinate,history_window_start,
                       history_window_end,source_time_quality,source_clock_role
                FROM source_pool_seed_day_facts
-               WHERE source_package_id=%s AND (
-                   (target_session=%s AND source_capture_id=%s)
-                   OR (target_session=%s AND source_capture_id=%s)
-               )
+               WHERE source_capture_id=%s AND target_session=ANY(%s::date[])
                ORDER BY target_session,source_capture_id""",
-            (package, previous, previous_capture, target, current_capture),
+            (source_capture_id, [previous, target]),
         )
         for row in cursor.fetchall():
             scopes_by_day[row[0]].append(row)
@@ -232,7 +307,7 @@ def _read_source_context(
             reasons.append("ADJACENT_SEED_SCOPE_CHANGED")
         if current[8] != "NON_PIT_RETROSPECTIVE":
             reasons.append("RESEARCH_MODE_UNSUPPORTED")
-        if current[9] != "RAW_UNADJUSTED":
+        if current[9] != "FORWARD_ADJUSTED":
             reasons.append("PRICE_COORDINATE_UNSUPPORTED")
         if before[11] != previous or current[11] != target:
             reasons.append("HISTORY_WINDOW_END_MISMATCH")
@@ -240,15 +315,10 @@ def _read_source_context(
         if not count_contiguous:
             reasons.append("HISTORY_WINDOW_NOT_CONTIGUOUS")
 
-    if previous_capture is not None and current_matches:
-        before_raw = raw_by_key.get((previous, previous_capture))
-        current_raw = raw_by_key.get((target, current_capture))
-        if (
-            before_raw is not None
-            and current_raw is not None
-            and before_raw[2] != current_raw[2]
-        ):
-            reasons.append("SOURCE_POOL_MEMBERS_CHANGED")
+    if source_symbols_by_day and source_symbols_by_day.get(
+        previous
+    ) != source_symbols_by_day.get(target):
+        reasons.append("SOURCE_POOL_MEMBERS_CHANGED")
 
     not_computed_reasons = {
         "PREVIOUS_SOURCE_CAPTURE_NOT_COMPUTED",
@@ -267,7 +337,9 @@ def _read_source_context(
         status = "UNKNOWN"
 
     return {
-        "previous_source_capture_id": previous_capture,
+        "previous_source_capture_id": source_capture_id
+        if source_symbols_by_day.get(previous)
+        else None,
         "status": status,
         "reason_codes": sorted(set(reasons)),
         "previous_scope": before_scopes[0] if len(before_scopes) == 1 else None,
@@ -280,9 +352,8 @@ def _read_ranked_relation_metrics(
     *,
     target: date,
     previous: date,
-    package: int,
-    current_capture: int,
-    previous_capture: int,
+    source_capture_id: int,
+    research_cutoff: date,
     previous_scope: tuple,
     current_scope: tuple,
 ):
@@ -308,12 +379,12 @@ def _read_ranked_relation_metrics(
         """WITH latest AS (
                SELECT DISTINCT ON (o.enrollment_id,o.board_context_key) o.*
                FROM source_t0_early_observation_facts o
-               WHERE o.target_session=%s AND o.source_package_id=%s
+               WHERE o.target_session=%s AND o.source_capture_id=%s
                ORDER BY o.enrollment_id,o.board_context_key,
                         o.recorded_at DESC,o.id DESC
            ), selected AS MATERIALIZED (
                SELECT o.* FROM latest o
-               WHERE o.source_capture_id=%s AND o.membership_status='MAPPED'
+               WHERE o.membership_status='MAPPED'
                  AND o.board_kind IN ('INDUSTRY','CONCEPT')
                  AND o.membership_snapshot_id IS NOT NULL
                  AND o.catalog_id IS NOT NULL AND o.board_native_id IS NOT NULL
@@ -333,12 +404,17 @@ def _read_ranked_relation_metrics(
                SELECT %s::date,%s::bigint,'T0',%s::text,%s::text,%s::text,
                       %s::smallint,%s::text,%s::text,%s::text,%s::text,
                       %s::text,%s::text
+           ), raw_counts AS MATERIALIZED (
+               SELECT session_date,count(*)::integer AS expected_source_count
+               FROM source_raw_daily
+               WHERE source_capture_id=%s AND session_date=ANY(%s::date[])
+               GROUP BY session_date
            ), peer_metrics AS MATERIALIZED (
                SELECT b.membership_snapshot_id,b.catalog_id,b.board_kind,
                       b.board_native_id,ss.role,ss.session_date,
                       m.source_symbol,s.id AS seed_fact_id,
                       v.metric,v.numerator,v.denominator,v.quality,v.reason,
-                      c.normalized_count AS expected_source_count
+                      raw_counts.expected_source_count
                FROM boards b
                JOIN tdx_sector_catalog catalog
                  ON catalog.id=b.catalog_id
@@ -349,15 +425,20 @@ def _read_ranked_relation_metrics(
                  AND m.board_kind=b.board_kind
                  AND m.board_native_id=b.board_native_id
                CROSS JOIN session_specs ss
-               JOIN source_captures c ON c.target_session=ss.session_date
-                 AND c.source_package_id=%s AND c.capture_id=ss.capture_id
+               JOIN source_captures c ON c.capture_id=ss.capture_id
+                 AND c.provider='BAOSTOCK'
+                 AND c.range_end_session<=%s
+                 AND c.price_coordinates @> ARRAY[
+                     'RAW_UNADJUSTED','FORWARD_ADJUSTED'
+                 ]::text[]
+               JOIN raw_counts ON raw_counts.session_date=ss.session_date
                JOIN source_raw_daily raw ON raw.session_date=ss.session_date
-                 AND raw.source_package_id=%s
                  AND raw.source_capture_id=ss.capture_id
+                 AND raw.qfq_price_quality IS NOT NULL
                  AND raw.source_symbol=m.source_symbol
                LEFT JOIN source_pool_seed_day_facts s
                  ON s.target_session=ss.session_date
-                AND s.source_package_id=%s AND s.source_capture_id=ss.capture_id
+                AND s.source_capture_id=ss.capture_id
                 AND s.source_symbol=m.source_symbol
                 AND s.profile_revision=ss.profile_revision
                 AND s.producer_contract=ss.producer_contract
@@ -455,7 +536,7 @@ def _read_ranked_relation_metrics(
                WHERE before.role='PREVIOUS'
            ), relation_metrics AS (
                SELECT o.id AS source_t0_fact_id,o.target_session,
-                      o.source_package_id,o.source_capture_id,o.enrollment_id,
+                      o.source_capture_id,o.enrollment_id,
                       o.source_symbol,o.board_kind,o.board_native_id,
                       o.membership_snapshot_id,o.catalog_id,o.rule_fact_id,
                       o.pulse_status,o.pulse_state,o.membership_mode,
@@ -521,8 +602,8 @@ def _read_ranked_relation_metrics(
                 AND context.board_native_id=o.board_native_id
                 AND context.metric=v.metric
            )
-           SELECT source_t0_fact_id,target_session,source_package_id,
-                  source_capture_id,enrollment_id,source_symbol,board_kind,
+           SELECT source_t0_fact_id,target_session,source_capture_id,
+                  enrollment_id,source_symbol,board_kind,
                   board_native_id,membership_snapshot_id,catalog_id,rule_fact_id,
                   pulse_status,pulse_state,membership_mode,research_mode,
                   price_coordinate,metric,current_quality,current_reason,
@@ -535,12 +616,11 @@ def _read_ranked_relation_metrics(
            ORDER BY source_t0_fact_id,metric""",
         (
             target,
-            package,
-            current_capture,
+            source_capture_id,
             *specs,
-            package,
-            package,
-            package,
+            source_capture_id,
+            [previous, target],
+            research_cutoff,
         ),
     )
     rows = cursor.fetchall()
@@ -549,18 +629,20 @@ def _read_ranked_relation_metrics(
     return rows
 
 
-def _read_latest_unmapped_count(cursor: Any, *, target: date, package: int) -> int:
+def _read_latest_unmapped_count(
+    cursor: Any, *, target: date, source_capture_id: int
+) -> int:
     cursor.execute(
         """WITH latest AS (
                SELECT DISTINCT ON (o.enrollment_id,o.board_context_key) o.*
                FROM source_t0_early_observation_facts o
-               WHERE o.target_session=%s AND o.source_package_id=%s
+               WHERE o.target_session=%s AND o.source_capture_id=%s
                ORDER BY o.enrollment_id,o.board_context_key,
                         o.recorded_at DESC,o.id DESC
            )
            SELECT count(*)::integer
            FROM latest WHERE membership_status<>'MAPPED'""",
-        (target, package),
+        (target, source_capture_id),
     )
     return int(cursor.fetchone()[0])
 
@@ -571,7 +653,7 @@ def persist_source_rps_pulse_t0_change_facts(
     target_session: date,
     previous_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
 ) -> dict[str, Any]:
     """单日事务内读取已存前态/Seed/T0并幂等保存关系级RPS变化事实。"""
     if (
@@ -579,10 +661,10 @@ def persist_source_rps_pulse_t0_change_facts(
         or type(previous_session) is not date
         or type(research_cutoff) is not date
         or not previous_session < target_session <= research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
-        raise ValueError("RPS×PULSE离线生产的T0、前态、截止或来源包无效")
+        raise ValueError("RPS×PULSE离线生产的T0、前态、截止或捕获ID无效")
 
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
@@ -590,10 +672,10 @@ def persist_source_rps_pulse_t0_change_facts(
         _,
     ):
         latest_rows = _read_latest_mapped_t0(
-            cursor, target=target_session, package=source_package_id
+            cursor, target=target_session, source_capture_id=source_capture_id
         )
         unmapped_rows = _read_latest_unmapped_count(
-            cursor, target=target_session, package=source_package_id
+            cursor, target=target_session, source_capture_id=source_capture_id
         )
         if not latest_rows:
             return {
@@ -607,7 +689,7 @@ def persist_source_rps_pulse_t0_change_facts(
 
         by_capture: dict[int, list[tuple]] = defaultdict(list)
         for row in latest_rows:
-            by_capture[int(row[3])].append(row)
+            by_capture[int(row[2])].append(row)
 
         expected_rows: list[tuple] = []
         for current_capture, relation_rows in sorted(by_capture.items()):
@@ -615,8 +697,8 @@ def persist_source_rps_pulse_t0_change_facts(
                 cursor,
                 target=target_session,
                 previous=previous_session,
-                package=source_package_id,
-                current_capture=current_capture,
+                source_capture_id=source_capture_id,
+                research_cutoff=research_cutoff,
             )
             metrics_by_fact: dict[int, dict[str, tuple]] = defaultdict(dict)
             if (
@@ -629,15 +711,14 @@ def persist_source_rps_pulse_t0_change_facts(
                     cursor,
                     target=target_session,
                     previous=previous_session,
-                    package=source_package_id,
-                    current_capture=current_capture,
-                    previous_capture=source_context["previous_source_capture_id"],
+                    source_capture_id=source_capture_id,
+                    research_cutoff=research_cutoff,
                     previous_scope=source_context["previous_scope"],
                     current_scope=source_context["current_scope"],
                 )
                 for row in ranked_rows:
                     fact_id = int(row[0])
-                    metric = row[16]
+                    metric = row[15]
                     if (
                         metric not in {"RPS5", "RPS20"}
                         or metric in metrics_by_fact[fact_id]
@@ -656,7 +737,6 @@ def persist_source_rps_pulse_t0_change_facts(
                 (
                     fact_id,
                     target,
-                    package,
                     capture,
                     enrollment_id,
                     symbol,
@@ -688,7 +768,6 @@ def persist_source_rps_pulse_t0_change_facts(
                     "source_t0_fact_id": fact_id,
                     "target_session": target,
                     "previous_session": previous_session,
-                    "source_package_id": package,
                     "source_capture_id": capture,
                     "previous_source_capture_id": source_context[
                         "previous_source_capture_id"
@@ -742,14 +821,14 @@ def persist_source_rps_pulse_t0_change_facts(
                         order_exact = False
                         current_match = False
                     else:
-                        previous_seed_id = metric[22]
-                        previous_quality = metric[23]
-                        previous_first = metric[25] if metric[29] else None
-                        previous_last = metric[26] if metric[29] else None
-                        previous_count = metric[27] if metric[29] else None
-                        equal = bool(metric[28])
-                        order_exact = bool(metric[29])
-                        current_match = bool(metric[30])
+                        previous_seed_id = metric[21]
+                        previous_quality = metric[22]
+                        previous_first = metric[24] if metric[28] else None
+                        previous_last = metric[25] if metric[28] else None
+                        previous_count = metric[26] if metric[28] else None
+                        equal = bool(metric[27])
+                        order_exact = bool(metric[28])
+                        current_match = bool(metric[29])
                     state, reasons = classify_rank_change(
                         source_pool_status=source_context["status"],
                         member_sets_equal=equal,
@@ -763,8 +842,8 @@ def persist_source_rps_pulse_t0_change_facts(
                         current_rank_matches=current_match,
                     )
                     if state in {"UNKNOWN", "NOT_COMPARABLE", "NOT_COMPUTED"}:
-                        if metric is not None and metric[24]:
-                            reasons.append(f"PREVIOUS_SEED_REASON:{metric[24]}")
+                        if metric is not None and metric[23]:
+                            reasons.append(f"PREVIOUS_SEED_REASON:{metric[23]}")
                         if current_values[4]:
                             reasons.append(f"T0_SEED_REASON:{current_values[4]}")
                     metric_outputs[name] = {
@@ -837,7 +916,7 @@ def persist_source_rps_pulse_t0_change_facts(
         fact_ids = [row[0] for row in expected_rows]
         cursor.execute(
             """SELECT source_t0_fact_id,target_session,previous_session,
-                      source_package_id,source_capture_id,previous_source_capture_id,
+                      source_capture_id,previous_source_capture_id,
                       enrollment_id,source_symbol,board_kind,board_native_id,
                       membership_snapshot_id,catalog_id,rule_fact_id,rule_id,
                       rule_version,rule_state,calculation_version,source_pool_status,
@@ -862,14 +941,14 @@ def persist_source_rps_pulse_t0_change_facts(
         "status": "PERSISTED",
         "target_session": target_session.isoformat(),
         "previous_session": previous_session.isoformat(),
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "rows_expected": len(expected_rows),
         "rows_inserted_or_updated": inserted_or_updated,
         "readback_rows": len(readback),
         "unmapped_t0_rows": unmapped_rows,
-        "source_status_counts": dict(Counter(row[17] for row in expected_rows)),
-        "rps5_change_counts": dict(Counter(row[20] for row in expected_rows)),
-        "rps20_change_counts": dict(Counter(row[25] for row in expected_rows)),
+        "source_status_counts": dict(Counter(row[16] for row in expected_rows)),
+        "rps5_change_counts": dict(Counter(row[19] for row in expected_rows)),
+        "rps20_change_counts": dict(Counter(row[24] for row in expected_rows)),
         "transaction": "SERIALIZABLE",
         "database_write_attempted": True,
         "ddl_executed": False,
@@ -891,7 +970,7 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
     cursor: Any,
     *,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     rule_id: str,
     sessions: list[date],
 ):
@@ -907,7 +986,7 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
                       s.history_session_count,s.d1_history_session_count,
                       s.event_window_start,s.calendar_revision
                FROM source_cohort_group_stats s
-               WHERE s.research_cutoff=%s AND s.source_package_id=%s
+               WHERE s.research_cutoff=%s AND s.source_capture_id=%s
                  AND s.rule_id=%s AND s.rule_version=%s
                  AND s.path_rule_version=%s AND s.horizon=%s
                  AND s.target_session<=%s
@@ -932,11 +1011,11 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
                           o.target_session,o.enrollment_id,o.board_context_key
                       )
                       o.id,o.target_session,o.source_capture_id,
-                      o.source_package_id,o.enrollment_id,o.board_context_key,
+                      o.enrollment_id,o.board_context_key,
                       o.rule_fact_id,o.membership_status,o.board_kind,
                       o.pulse_status,o.pulse_state
                FROM source_t0_early_observation_facts o
-               WHERE o.source_package_id=%s
+               WHERE o.source_capture_id=%s
                  AND o.target_session IN (
                      SELECT target_session FROM cohort_scopes
                  )
@@ -953,7 +1032,6 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
            JOIN source_rule_evaluations r
              ON r.id=o.rule_fact_id
             AND r.target_session=o.target_session
-            AND r.source_package_id=o.source_package_id
             AND r.source_capture_id=o.source_capture_id
             AND r.rule_version=%s AND r.rule_id=%s
             AND r.profile_revision=s.profile_revision
@@ -964,7 +1042,6 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
            JOIN source_rps_pulse_t0_change_facts c
              ON c.source_t0_fact_id=o.id
             AND c.target_session=o.target_session
-            AND c.source_package_id=o.source_package_id
             AND c.source_capture_id=o.source_capture_id
             AND c.rule_fact_id=r.id
             AND c.rule_id=r.rule_id AND c.rule_version=r.rule_version
@@ -977,13 +1054,13 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
                     r.state,r.rule_id,r.rule_version""",
         (
             research_cutoff,
-            source_package_id,
+            source_capture_id,
             rule_id,
             RULE_VERSION,
             PATH_VERSION,
             5,
             research_cutoff,
-            source_package_id,
+            source_capture_id,
             RULE_VERSION,
             rule_id,
             _CALCULATION_VERSION,
@@ -1049,7 +1126,6 @@ def read_rps_pulse_forward_groups_cursor(
     *,
     target: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     profile_revision: str,
     history_session_count: int,
@@ -1095,7 +1171,7 @@ def read_rps_pulse_forward_groups_cursor(
         f"""WITH latest AS (
                SELECT DISTINCT ON (o.enrollment_id,o.board_context_key) o.*
                FROM source_t0_early_observation_facts o
-               WHERE o.target_session=%s AND o.source_package_id=%s
+               WHERE o.target_session=%s AND o.source_capture_id=%s
                ORDER BY o.enrollment_id,o.board_context_key,
                         o.recorded_at DESC,o.id DESC
            )
@@ -1109,9 +1185,8 @@ def read_rps_pulse_forward_groups_cursor(
            LEFT JOIN source_rps_pulse_t0_change_facts c
              ON c.source_t0_fact_id=o.id
             AND c.calculation_version=%s
-           WHERE o.target_session=%s AND o.source_package_id=%s
-             AND o.source_capture_id=%s AND r.target_session=o.target_session
-             AND r.source_package_id=o.source_package_id
+           WHERE o.target_session=%s AND o.source_capture_id=%s
+             AND r.target_session=o.target_session
              AND r.source_capture_id=o.source_capture_id
              AND r.rule_version=%s AND r.rule_id=%s
              AND r.profile_revision=%s AND r.history_session_count=%s
@@ -1122,10 +1197,9 @@ def read_rps_pulse_forward_groups_cursor(
            GROUP BY 1,2,3,4,5""",
         (
             target,
-            source_package_id,
+            source_capture_id,
             _CALCULATION_VERSION,
             target,
-            source_package_id,
             source_capture_id,
             RULE_VERSION,
             rule_id,
@@ -1235,7 +1309,7 @@ def read_rps_pulse_forward_groups_cursor(
         f"""WITH latest AS (
                SELECT DISTINCT ON (o.enrollment_id,o.board_context_key) o.*
                FROM source_t0_early_observation_facts o
-               WHERE o.target_session=%s AND o.source_package_id=%s
+               WHERE o.target_session=%s AND o.source_capture_id=%s
                ORDER BY o.enrollment_id,o.board_context_key,
                         o.recorded_at DESC,o.id DESC
            )
@@ -1262,19 +1336,17 @@ def read_rps_pulse_forward_groups_cursor(
            CROSS JOIN (VALUES (1::smallint),(3::smallint),(5::smallint)) h(horizon)
            LEFT JOIN source_forward_path_facts p
              ON p.target_session=o.target_session
-            AND p.source_package_id=o.source_package_id
             AND p.source_capture_id=o.source_capture_id
             AND p.source_symbol=o.source_symbol
             AND p.horizon=h.horizon
             AND p.path_rule_version=%s
             AND p.calendar_revision=r.calendar_revision
-            AND p.price_coordinate='RAW_UNADJUSTED'
+            AND p.price_coordinate='FORWARD_ADJUSTED'
             AND p.scope='NON_PIT_EXPLORATORY'
             AND p.endpoint_session<=%s
-           WHERE o.target_session=%s AND o.source_package_id=%s
-             AND o.source_capture_id=%s AND o.rule_fact_id IS NOT NULL
+           WHERE o.target_session=%s AND o.source_capture_id=%s
+             AND o.rule_fact_id IS NOT NULL
              AND r.target_session=o.target_session
-             AND r.source_package_id=o.source_package_id
              AND r.source_capture_id=o.source_capture_id
              AND r.rule_version=%s AND r.rule_id=%s
              AND r.profile_revision=%s
@@ -1287,12 +1359,11 @@ def read_rps_pulse_forward_groups_cursor(
            ORDER BY o.id,h.horizon""",
         (
             target,
-            source_package_id,
+            source_capture_id,
             _CALCULATION_VERSION,
             PATH_VERSION,
             research_cutoff,
             target,
-            source_package_id,
             source_capture_id,
             RULE_VERSION,
             rule_id,
@@ -1314,7 +1385,7 @@ def read_rps_pulse_forward_groups_cursor(
         f"""WITH latest AS MATERIALIZED (
                SELECT DISTINCT ON (o.enrollment_id,o.board_context_key) o.*
                FROM source_t0_early_observation_facts o
-               WHERE o.target_session=%s AND o.source_package_id=%s
+               WHERE o.target_session=%s AND o.source_capture_id=%s
                ORDER BY o.enrollment_id,o.board_context_key,
                         o.recorded_at DESC,o.id DESC
            )
@@ -1333,18 +1404,17 @@ def read_rps_pulse_forward_groups_cursor(
            LEFT JOIN latest o ON o.enrollment_id=e.id
              AND o.rule_fact_id=r.id
              AND o.source_capture_id=r.source_capture_id
-           WHERE r.target_session=%s AND r.source_package_id=%s
-             AND r.source_capture_id=%s AND r.rule_version=%s AND r.rule_id=%s
+           WHERE r.target_session=%s AND r.source_capture_id=%s
+             AND r.rule_version=%s AND r.rule_id=%s
              AND r.profile_revision=%s AND r.history_session_count=%s
              AND r.d1_history_session_count=%s AND r.event_window_start=%s
              AND r.calendar_revision=%s {rule_state_clause}""",
         (
             target,
-            source_package_id,
+            source_capture_id,
             board_kind,
             board_kind,
             target,
-            source_package_id,
             source_capture_id,
             RULE_VERSION,
             rule_id,
@@ -1360,7 +1430,7 @@ def read_rps_pulse_forward_groups_cursor(
     independent_t0_date_counts = _read_saved_rps_pulse_t0_date_counts_cursor(
         cursor,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         rule_id=rule_id,
         sessions=sessions,
     )
@@ -1664,7 +1734,6 @@ def read_rps_pulse_forward_groups_cursor(
             if formatted_groups
             else "NO_NONEMPTY_GROUPS"
         ),
-        "source_package_id": source_package_id,
         "source_capture_id": source_capture_id,
         "target_session": target.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
@@ -1690,6 +1759,6 @@ def read_rps_pulse_forward_groups_cursor(
         "groups": formatted_groups,
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
         "research_mode": "NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "independence_note": "板块关系、同股多板及跨日登记可重叠；证券和T0日期分母分别列示。",
     }

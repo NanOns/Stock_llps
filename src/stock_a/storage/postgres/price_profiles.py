@@ -15,7 +15,7 @@ from typing import Any, Mapping, Sequence
 from .source_raw import RawSourcePgError, _transaction
 
 
-MAX_PROFILE_ROWS_PER_BATCH = 5000
+MAX_PROFILE_ROWS_PER_BATCH = 10000
 MAX_PROFILE_OBSERVATION_REVISIONS = 16
 MAX_PROFILE_OBSERVATION_QUALITY_ROWS = 800
 INSERT_CHUNK_SIZE = 50
@@ -46,7 +46,6 @@ _PROFILE_COLUMNS = (
     "market",
     "board",
     "target_session",
-    "source_package_id",
     "profile_revision",
     "calculation_scope",
     "producer_contract",
@@ -230,7 +229,7 @@ _BIAS20_ATR_UNKNOWN_SQL = """(
     OR p.bias20_atr_exact_numerator IS NULL
     OR p.bias20_atr_exact_denominator IS NULL
     OR p.bias20_atr_exact_denominator <= 0
-    OR p.price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+    OR p.price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
     OR p.ma20_quality IS DISTINCT FROM 'OBSERVED'
     OR p.ma20 IS NULL
     OR p.atr20_quality IS DISTINCT FROM 'OBSERVED'
@@ -248,8 +247,8 @@ _BIAS20_ATR_UNKNOWN_REASON_SQL = """CASE
       OR p.bias20_atr_exact_denominator IS NULL
       OR p.bias20_atr_exact_denominator <= 0
       THEN 'BIAS20_ATR_EXACT_VALUE_UNAVAILABLE'
-    WHEN p.price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-      THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+    WHEN p.price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+      THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'
     WHEN p.ma20_quality IS DISTINCT FROM 'OBSERVED' OR p.ma20 IS NULL
       THEN COALESCE(p.ma20_reason, 'MA20_QUALITY_OR_VALUE_UNAVAILABLE')
     WHEN p.atr20_quality IS DISTINCT FROM 'OBSERVED'
@@ -274,7 +273,7 @@ def _profile_ma20_direction(row: Mapping[str, Any]) -> tuple[str, str | None]:
     after_coordinate = row["after_price_coordinate"]
     if before_coordinate != after_coordinate:
         return "UNKNOWN", "PRICE_COORDINATE_MISMATCH"
-    if before_coordinate != "RAW_UNADJUSTED":
+    if before_coordinate != "FORWARD_ADJUSTED":
         return (
             "UNKNOWN",
             f"PRICE_COORDINATE_UNSUPPORTED:{before_coordinate or 'UNKNOWN'}",
@@ -309,10 +308,10 @@ _PROFILE_MA20_DIRECTION_REASON_SQL = """CASE
     WHEN NOT after_present THEN 'AFTER_PROFILE_MISSING'
     WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
       THEN 'PRICE_COORDINATE_MISMATCH'
-    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+    WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
       THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
            COALESCE(before_price_coordinate, 'UNKNOWN')
-    WHEN after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+    WHEN after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
       THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
            COALESCE(after_price_coordinate, 'UNKNOWN')
     WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPARABLE'
@@ -344,7 +343,7 @@ def _price_position_status_expression(
     left = fields["left_value_sql"]
     right = fields["right_value_sql"]
     return f"""CASE
-WHEN {coordinate_sql} IS DISTINCT FROM 'RAW_UNADJUSTED'
+WHEN {coordinate_sql} IS DISTINCT FROM 'FORWARD_ADJUSTED'
   OR {fields["left_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
   OR {left} IS NULL
   OR {fields["right_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
@@ -358,8 +357,8 @@ def _price_position_reason_expression(
     fields: Mapping[str, str], *, coordinate_sql: str
 ) -> str:
     return f"""CASE
-WHEN {coordinate_sql} IS DISTINCT FROM 'RAW_UNADJUSTED'
-  THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+WHEN {coordinate_sql} IS DISTINCT FROM 'FORWARD_ADJUSTED'
+  THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'
 WHEN {fields["left_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
   THEN '{fields["left_field"]}_quality=' || COALESCE({fields["left_quality_sql"]}, 'UNKNOWN')
     || '; reason=' || COALESCE({fields["left_reason_sql"]}, 'REASON_NOT_PROVIDED')
@@ -439,21 +438,19 @@ def validate_profile_batch_size(row_count: int) -> None:
 
 
 def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    if frozenset(record) != frozenset(_PROFILE_COLUMNS):
+    if set(record) != set(_PROFILE_COLUMNS):
         raise PriceProfilePgError(
             "PROFILE_RECORD_FIELDS_INVALID", "价格画像写入字段与typed表合同不一致"
         )
-    normalized = dict(record)
+    normalized = {name: record[name] for name in _PROFILE_COLUMNS}
     if (
-        type(normalized.get("source_package_id")) is not int
-        or normalized["source_package_id"] <= 0
-        or type(normalized.get("source_capture_id")) is not int
+        type(normalized.get("source_capture_id")) is not int
         or normalized["source_capture_id"] <= 0
         or type(normalized.get("source_raw_id")) is not int
         or normalized["source_raw_id"] <= 0
     ):
         raise PriceProfilePgError(
-            "PROFILE_REFERENCE_INVALID", "画像Raw父ID、来源包ID与捕获ID必须为正BIGINT"
+            "PROFILE_REFERENCE_INVALID", "画像Raw父ID与来源捕获ID必须为正BIGINT"
         )
     if type(normalized.get("target_session")) is not date:
         raise PriceProfilePgError("PROFILE_TARGET_DATE_INVALID", "画像目标日期无效")
@@ -512,10 +509,17 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
         )
     if (
         not isinstance(normalized.get("source_symbol"), str)
-        or re.fullmatch(r"(SH|SZ)\.[0-9]{6}", normalized["source_symbol"]) is None
+        or re.fullmatch(r"(SH|SZ|BJ)\.[0-9]{6}", normalized["source_symbol"]) is None
+        or normalized.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or normalized.get("source_time_quality") != "NON_PIT_OBSERVED"
+        or normalized.get("pit_status") != "NON_PIT_RETROSPECTIVE"
+        or normalized.get("amount_unit_status") != "CNY_VERIFIED"
+        or normalized.get("volume_unit_status") != "SHARES_VERIFIED"
+        or normalized.get("source_available_at") is not None
     ):
         raise PriceProfilePgError(
-            "PROFILE_BUSINESS_KEY_INVALID", "画像来源代码不符合直接业务键格式"
+            "PROFILE_BUSINESS_KEY_INVALID",
+            "画像来源代码、BaoStock前复权坐标或NON_PIT时钟合同无效",
         )
     for name in _CORE_COLUMN_NAMES:
         value = normalized.get(name)
@@ -655,17 +659,17 @@ def _persist_profile_records_once(
     first = prepared[0]
     batch_key = (
         first["target_session"],
-        first["source_package_id"],
+        first["source_capture_id"],
         first["profile_revision"],
     )
     for item in prepared:
         if (
             item["target_session"],
-            item["source_package_id"],
+            item["source_capture_id"],
             item["profile_revision"],
         ) != batch_key:
             raise PriceProfilePgError(
-                "PROFILE_BATCH_KEY_MIXED", "单次画像写入混入不同来源版本"
+                "PROFILE_BATCH_KEY_MIXED", "单次画像写入混入不同来源捕获"
             )
     capture_ids = {item["source_capture_id"] for item in prepared}
     if len(capture_ids) != 1:
@@ -678,11 +682,10 @@ def _persist_profile_records_once(
         cursor.execute(
             """SELECT id, source_symbol, market, board, source_capture_id
 FROM source_raw_daily
-WHERE session_date=%s AND source_package_id=%s AND source_capture_id=%s
+WHERE session_date=%s AND source_capture_id=%s
 ORDER BY source_symbol""",
             (
                 first["target_session"],
-                first["source_package_id"],
                 source_capture_id,
             ),
         )
@@ -713,7 +716,7 @@ ORDER BY source_symbol""",
         cursor.execute(
             f"""SELECT {", ".join(_PROFILE_COLUMNS)}
 FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_package_id=%s AND profile_revision=%s
+WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
 ORDER BY source_symbol""",
             batch_key,
         )
@@ -739,16 +742,15 @@ ORDER BY source_symbol""",
         if inserted:
             cursor.execute(
                 """DELETE FROM source_market_participation_days
-WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s""",
+WHERE target_session=%s AND source_capture_id=%s""",
                 (
                     first["target_session"],
-                    first["source_package_id"],
                     source_capture_id,
                 ),
             )
         cursor.execute(
             """SELECT count(*)::bigint FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_package_id=%s AND profile_revision=%s""",
+WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s""",
             batch_key,
         )
         row_count_after = int(cursor.fetchone()[0])
@@ -759,7 +761,7 @@ WHERE target_session=%s AND source_package_id=%s AND profile_revision=%s""",
         cursor.execute(
             f"""SELECT {", ".join(_PROFILE_COLUMNS)}
 FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_package_id=%s AND profile_revision=%s
+WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
 ORDER BY source_symbol""",
             batch_key,
         )
@@ -778,7 +780,7 @@ ORDER BY source_symbol""",
     return {
         "status": "PERSISTED" if inserted else "IDEMPOTENT_READBACK",
         "target_session": first["target_session"].isoformat(),
-        "source_package_id": first["source_package_id"],
+        "source_capture_id": source_capture_id,
         "profile_revision": first["profile_revision"],
         "requested_count": len(prepared),
         "inserted_count": len(inserted),
@@ -791,57 +793,57 @@ ORDER BY source_symbol""",
 def list_profile_snapshots(
     config: Mapping[str, Any], *, max_target_session: date
 ) -> dict[str, Any]:
+    """列出截止日内按唯一source_capture_id闭合的画像快照。"""
     if type(max_target_session) is not date:
         raise PriceProfilePgError(
             "PROFILE_SNAPSHOT_CUTOFF_REQUIRED", "画像目录必须绑定显式研究截止日期"
         )
     with _transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT p.target_session, p.source_package_id, min(p.source_capture_id),
-       p.profile_revision, p.history_window_start, p.history_window_end,
-       p.history_requested_session_count, count(*)::bigint,
-       min(r.raw_row_count),
-       count(*)=min(r.raw_row_count)
-         AND min(r.raw_symbol_count)=min(r.raw_row_count)
-         AND min(r.capture_count)=1
-         AND count(DISTINCT p.source_capture_id)=1
-         AND min(p.source_capture_id)=min(r.raw_capture_id),
-       p.history_calendar_id, p.history_calendar_revision, p.price_coordinate
-FROM source_symbol_price_profiles p
-LEFT JOIN (
-    SELECT session_date, source_package_id,
-           count(*)::bigint AS raw_row_count,
-           count(DISTINCT source_symbol)::bigint AS raw_symbol_count,
-           count(DISTINCT source_capture_id)::bigint AS capture_count,
-           min(source_capture_id) AS raw_capture_id
-    FROM source_raw_daily
-    GROUP BY session_date, source_package_id
-) r ON r.session_date=p.target_session
-  AND r.source_package_id=p.source_package_id
-WHERE p.target_session<=%s
-GROUP BY p.target_session, p.source_package_id, p.profile_revision,
-         p.history_window_start, p.history_window_end,
-         p.history_requested_session_count, p.history_calendar_id,
-         p.history_calendar_revision, p.price_coordinate
-ORDER BY p.target_session DESC, p.source_package_id, p.profile_revision
-LIMIT 2000""",
+            """SELECT p.target_session,p.source_capture_id,p.profile_revision,
+                      p.history_window_start,p.history_window_end,
+                      p.history_requested_session_count,count(*)::bigint AS profile_rows,
+                      min(r.raw_row_count) AS expected_rows,
+                      count(*)=min(r.raw_row_count)
+                        AND min(r.raw_symbol_count)=min(r.raw_row_count)
+                        AND min(r.qfq_quality_row_count)=min(r.raw_row_count)
+                        AND min(p.source_capture_id)=min(r.raw_capture_id) AS complete,
+                      p.history_calendar_id,p.history_calendar_revision,p.price_coordinate
+               FROM stock.source_symbol_price_profiles p
+               LEFT JOIN (
+                   SELECT session_date,source_capture_id,
+                          count(*)::bigint AS raw_row_count,
+                          count(DISTINCT source_symbol)::bigint AS raw_symbol_count,
+                          count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint AS qfq_quality_row_count,
+                          min(source_capture_id) AS raw_capture_id
+                   FROM stock.source_raw_daily
+                   WHERE source_capture_id IS NOT NULL
+                   GROUP BY session_date,source_capture_id
+               ) r ON r.session_date=p.target_session
+                 AND r.source_capture_id=p.source_capture_id
+               WHERE p.target_session<=%s AND p.source_capture_id IS NOT NULL
+               GROUP BY p.target_session,p.source_capture_id,p.profile_revision,
+                        p.history_window_start,p.history_window_end,
+                        p.history_requested_session_count,p.history_calendar_id,
+                        p.history_calendar_revision,p.price_coordinate
+               ORDER BY p.target_session DESC,p.source_capture_id,p.profile_revision
+               LIMIT 2000""",
             (max_target_session,),
         )
         snapshots = [
             {
                 "target_session": row[0].isoformat(),
-                "source_package_id": int(row[1]),
-                "source_capture_id": int(row[2]),
-                "profile_revision": str(row[3]),
-                "window_start": row[4].isoformat(),
-                "window_end": row[5].isoformat(),
-                "history_session_count": int(row[6]),
-                "source_symbol_count": int(row[7]),
-                "expected_source_symbol_count": int(row[8] or 0),
-                "complete": bool(row[9]),
-                "history_calendar_id": row[10],
-                "history_calendar_revision": row[11],
-                "price_coordinate": row[12],
+                "source_capture_id": int(row[1]),
+                "profile_revision": str(row[2]),
+                "window_start": row[3].isoformat(),
+                "window_end": row[4].isoformat(),
+                "history_session_count": int(row[5]),
+                "source_symbol_count": int(row[6]),
+                "expected_source_symbol_count": int(row[7] or 0),
+                "complete": bool(row[8]),
+                "history_calendar_id": row[9],
+                "history_calendar_revision": row[10],
+                "price_coordinate": row[11],
             }
             for row in cursor.fetchall()
         ]
@@ -852,16 +854,17 @@ def read_source_profile_observability(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
+    research_cutoff: date | None = None,
     current_profile_revision: str,
     current_producer_version: str,
 ) -> dict[str, Any]:
-    """按数字来源与捕获ID核验Raw分母、画像版本、代码集合及字段质量。"""
+    """按捕获键核验Raw分母、画像版本、代码集合及字段质量。"""
+    cutoff = research_cutoff or target_session
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(cutoff) is not date
+        or cutoff < target_session
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or not isinstance(current_profile_revision, str)
@@ -871,9 +874,8 @@ def read_source_profile_observability(
     ):
         raise PriceProfilePgError(
             "PROFILE_OBSERVATION_KEY_INVALID",
-            "画像观察必须绑定日期、数字来源/捕获ID及显式修订",
+            "画像观察必须绑定日期、来源捕获ID及显式修订",
         )
-
     core_values = ", ".join(
         f"('core.{name}',p.{name}_quality,p.{name}_reason)"
         for name in _CORE_COLUMN_NAMES
@@ -883,74 +885,101 @@ def read_source_profile_observability(
     )
     with _transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT count(*)::bigint AS raw_rows,
-       count(DISTINCT r.source_symbol)::bigint AS raw_symbols,
-       count(DISTINCT r.source_capture_id)::bigint AS capture_count,
-       min(c.normalized_count), max(c.normalized_count),
-       min(c.target_session), max(c.target_session),
-       min(c.source_package_id), max(c.source_package_id)
-FROM source_raw_daily r
-LEFT JOIN source_captures c ON c.capture_id=r.source_capture_id
-WHERE r.source_capture_id=%s AND r.session_date=%s
-  AND r.source_package_id=%s""",
-            (source_capture_id, target_session, source_package_id),
+            """WITH request_codes AS (
+                   SELECT source_code,
+                          count(*)=2 AND count(DISTINCT adjustment_flag)=2
+                            AND count(DISTINCT eligible_start_session)=1
+                            AND count(DISTINCT eligible_end_session)=1
+                            AND bool_and(request_status IN ('COMPLETED','NO_DATA')
+                              AND (request_status='NO_DATA'
+                                   OR completed_through_session>=range_end_session)) AS complete,
+                          min(eligible_start_session) AS eligible_start,
+                          max(eligible_end_session) AS eligible_end
+                   FROM stock.source_capture_requests
+                   WHERE capture_id=%s AND range_end_session<=%s
+                   GROUP BY source_code
+               ), expected AS (
+                   SELECT count(*)::bigint AS expected_symbols,
+                          count(*) FILTER (WHERE complete)::bigint AS complete_requests
+                   FROM request_codes
+                   WHERE %s BETWEEN eligible_start AND eligible_end
+               )
+               SELECT count(*)::bigint,count(DISTINCT r.source_symbol)::bigint,
+                      count(DISTINCT r.source_capture_id)::bigint,
+                      min(c.range_end_session),max(c.range_end_session),
+                      min(capture.expected_symbols),max(capture.expected_symbols),
+                      min(capture.complete_requests),max(capture.complete_requests),
+                      count(*) FILTER (WHERE r.price_quality IS NOT NULL)::bigint,
+                      count(*) FILTER (WHERE r.qfq_price_quality IS NOT NULL)::bigint
+               FROM stock.source_raw_daily r
+               JOIN stock.source_captures c ON c.capture_id=r.source_capture_id
+               CROSS JOIN expected capture
+               WHERE r.source_capture_id=%s AND r.session_date=%s
+                 AND c.provider='BAOSTOCK' AND c.range_end_session<=%s
+                 AND r.price_quality IS NOT NULL AND r.qfq_price_quality IS NOT NULL""",
+            (
+                source_capture_id,
+                cutoff,
+                target_session,
+                source_capture_id,
+                target_session,
+                cutoff,
+            ),
         )
         (
-            raw_row,
-            raw_symbol_row,
+            raw_rows_value,
+            raw_symbols_value,
             capture_count,
-            expected_count,
-            expected_count_max,
-            capture_session_min,
-            capture_session_max,
-            capture_package_min,
-            capture_package_max,
+            capture_end_min,
+            capture_end_max,
+            expected_symbols_min,
+            expected_symbols_max,
+            complete_requests_min,
+            complete_requests_max,
+            raw_quality_rows,
+            qfq_quality_rows,
         ) = cursor.fetchone()
-        raw_rows = int(raw_row)
-        raw_symbols = int(raw_symbol_row)
+        raw_rows = int(raw_rows_value)
+        raw_symbols = int(raw_symbols_value)
         if (
             not 1 <= raw_rows <= MAX_PROFILE_ROWS_PER_BATCH
             or raw_symbols != raw_rows
             or capture_count != 1
-            or expected_count != raw_rows
-            or expected_count != expected_count_max
-            or capture_session_min != target_session
-            or capture_session_max != target_session
-            or capture_package_min != source_package_id
-            or capture_package_max != source_package_id
+            or capture_end_min is None
+            or capture_end_max != capture_end_min
+            or capture_end_min > cutoff
+            or expected_symbols_min != expected_symbols_max
+            or int(expected_symbols_min or 0) != raw_rows
+            or complete_requests_min != complete_requests_max
+            or int(complete_requests_min or 0) != raw_rows
+            or int(raw_quality_rows) != raw_rows
+            or int(qfq_quality_rows) != raw_rows
         ):
             raise PriceProfilePgError(
                 "PROFILE_OBSERVATION_ROW_BUDGET_EXCEEDED",
                 "画像观察的Raw代码集合与唯一来源捕获分母不一致",
             )
-
         cursor.execute(
-            """SELECT profile_revision::text, producer_contract, producer_version,
-       count(*)::bigint AS stored_rows,
-       count(DISTINCT source_symbol)::bigint AS distinct_source_symbols,
-       count(*) FILTER (WHERE history_records_complete)::bigint AS history_records_complete_rows,
-       count(*) FILTER (WHERE history_stored_session_count>=24
-                         AND history_requested_session_count>=24)::bigint AS history_24_session_eligible_rows,
-       count(*) FILTER (WHERE history_requested_session_count>=24)::bigint AS history_requested_24_plus_rows,
-       min(history_requested_session_count) AS min_history_requested_sessions,
-       max(history_requested_session_count) AS max_history_requested_sessions,
-       min(history_stored_session_count) AS min_history_stored_sessions,
-       max(history_stored_session_count) AS max_history_stored_sessions,
-       count(*) FILTER (WHERE price_window_usable)::bigint AS price_window_usable_rows,
-       array_agg(DISTINCT target_bar_status ORDER BY target_bar_status) AS target_bar_statuses,
-       array_agg(DISTINCT target_price_quality ORDER BY target_price_quality) AS target_price_qualities,
-       array_agg(DISTINCT price_window_status ORDER BY price_window_status) AS price_window_statuses
-FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
-GROUP BY profile_revision,producer_contract,producer_version
-ORDER BY profile_revision
-LIMIT %s""",
-            (
-                target_session,
-                source_package_id,
-                source_capture_id,
-                MAX_PROFILE_OBSERVATION_REVISIONS + 1,
-            ),
+            """SELECT profile_revision::text,producer_contract,producer_version,
+                      count(*)::bigint AS stored_rows,
+                      count(DISTINCT source_symbol)::bigint AS distinct_source_symbols,
+                      count(*) FILTER (WHERE history_records_complete)::bigint AS history_records_complete_rows,
+                      count(*) FILTER (WHERE history_stored_session_count>=24
+                                        AND history_requested_session_count>=24)::bigint AS history_24_session_eligible_rows,
+                      count(*) FILTER (WHERE history_requested_session_count>=24)::bigint AS history_requested_24_plus_rows,
+                      min(history_requested_session_count) AS min_history_requested_sessions,
+                      max(history_requested_session_count) AS max_history_requested_sessions,
+                      min(history_stored_session_count) AS min_history_stored_sessions,
+                      max(history_stored_session_count) AS max_history_stored_sessions,
+                      count(*) FILTER (WHERE price_window_usable)::bigint AS price_window_usable_rows,
+                      array_agg(DISTINCT target_bar_status ORDER BY target_bar_status) AS target_bar_statuses,
+                      array_agg(DISTINCT target_price_quality ORDER BY target_price_quality) AS target_price_qualities,
+                      array_agg(DISTINCT price_window_status ORDER BY price_window_status) AS price_window_statuses
+               FROM stock.source_symbol_price_profiles
+               WHERE target_session=%s AND source_capture_id=%s
+               GROUP BY profile_revision,producer_contract,producer_version
+               ORDER BY profile_revision LIMIT %s""",
+            (target_session, source_capture_id, MAX_PROFILE_OBSERVATION_REVISIONS + 1),
         )
         revision_columns = [column.name for column in cursor.description]
         revisions = [
@@ -959,7 +988,7 @@ LIMIT %s""",
         if len(revisions) > MAX_PROFILE_OBSERVATION_REVISIONS:
             raise PriceProfilePgError(
                 "PROFILE_OBSERVATION_REVISION_BUDGET_EXCEEDED",
-                "精确来源集合画像修订数超过固定上限",
+                "精确捕获画像修订数超过固定上限",
             )
         for revision in revisions:
             revision["profile_revision"] = str(revision["profile_revision"])
@@ -986,15 +1015,15 @@ LIMIT %s""",
             and item["producer_version"] == current_producer_version
         ]
         selected = matching_current[0] if len(matching_current) == 1 else None
-        if len(matching_current) == 1:
-            selection_rule = "UNIQUE_CURRENT_ALGORITHM_AND_INPUT_REVISION"
-        elif len(matching_current) > 1:
-            selection_rule = "AMBIGUOUS_CURRENT_INPUT_REVISIONS"
-        elif revisions:
-            selection_rule = "NO_MATCHING_CURRENT_VERSION"
-        else:
-            selection_rule = "NO_STORED_PROFILE_REVISION"
-
+        selection_rule = (
+            "UNIQUE_CURRENT_ALGORITHM_AND_INPUT_REVISION"
+            if len(matching_current) == 1
+            else "AMBIGUOUS_CURRENT_INPUT_REVISIONS"
+            if len(matching_current) > 1
+            else "NO_MATCHING_CURRENT_VERSION"
+            if revisions
+            else "NO_STORED_PROFILE_REVISION"
+        )
         set_comparison = {
             "raw_row_count": raw_rows,
             "raw_symbol_count": raw_symbols,
@@ -1011,24 +1040,21 @@ LIMIT %s""",
             profile_revision = selected["profile_revision"]
             cursor.execute(
                 """WITH raw_symbols AS (
-    SELECT DISTINCT source_symbol FROM source_raw_daily
-    WHERE source_capture_id=%s AND session_date=%s AND source_package_id=%s
-), profile_symbols AS (
-    SELECT DISTINCT source_symbol FROM source_symbol_price_profiles
-    WHERE target_session=%s AND source_package_id=%s
-      AND source_capture_id=%s AND profile_revision=%s
-)
-SELECT count(r.source_symbol)::bigint, count(p.source_symbol)::bigint,
-       count(*) FILTER (WHERE r.source_symbol IS NOT NULL AND p.source_symbol IS NOT NULL)::bigint,
-       count(*) FILTER (WHERE r.source_symbol IS NOT NULL AND p.source_symbol IS NULL)::bigint,
-       count(*) FILTER (WHERE r.source_symbol IS NULL AND p.source_symbol IS NOT NULL)::bigint
-FROM raw_symbols r FULL OUTER JOIN profile_symbols p USING (source_symbol)""",
+                       SELECT DISTINCT source_symbol FROM stock.source_raw_daily
+                       WHERE source_capture_id=%s AND session_date=%s
+                   ), profile_symbols AS (
+                       SELECT DISTINCT source_symbol FROM stock.source_symbol_price_profiles
+                       WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
+                   )
+                   SELECT count(r.source_symbol)::bigint,count(p.source_symbol)::bigint,
+                          count(*) FILTER (WHERE r.source_symbol IS NOT NULL AND p.source_symbol IS NOT NULL)::bigint,
+                          count(*) FILTER (WHERE r.source_symbol IS NOT NULL AND p.source_symbol IS NULL)::bigint,
+                          count(*) FILTER (WHERE r.source_symbol IS NULL AND p.source_symbol IS NOT NULL)::bigint
+                   FROM raw_symbols r FULL OUTER JOIN profile_symbols p USING (source_symbol)""",
                 (
                     source_capture_id,
                     target_session,
-                    source_package_id,
                     target_session,
-                    source_package_id,
                     source_capture_id,
                     profile_revision,
                 ),
@@ -1051,16 +1077,13 @@ FROM raw_symbols r FULL OUTER JOIN profile_symbols p USING (source_symbol)""",
             )
             cursor.execute(
                 f"""SELECT f.field_id,f.quality,f.reason_code,count(*)::bigint AS row_count
-FROM source_symbol_price_profiles p
-CROSS JOIN LATERAL (VALUES {core_values}) AS f(field_id,quality,reason_code)
-WHERE p.target_session=%s AND p.source_package_id=%s
-  AND p.source_capture_id=%s AND p.profile_revision=%s
-GROUP BY f.field_id,f.quality,f.reason_code
-ORDER BY f.field_id,f.quality,f.reason_code
-LIMIT %s""",
+                   FROM stock.source_symbol_price_profiles p
+                   CROSS JOIN LATERAL (VALUES {core_values}) AS f(field_id,quality,reason_code)
+                   WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
+                   GROUP BY f.field_id,f.quality,f.reason_code
+                   ORDER BY f.field_id,f.quality,f.reason_code LIMIT %s""",
                 (
                     target_session,
-                    source_package_id,
                     source_capture_id,
                     profile_revision,
                     MAX_PROFILE_OBSERVATION_QUALITY_ROWS + 1,
@@ -1078,18 +1101,16 @@ LIMIT %s""",
                 )
             cursor.execute(
                 """SELECT f.field_id,f.status,f.quality,f.reason_code,count(*)::bigint AS row_count
-FROM source_symbol_price_profiles p
-CROSS JOIN LATERAL unnest(
-    p.profile_field_ids,p.profile_statuses,p.profile_qualities,p.profile_reasons
-) AS f(field_id,status,quality,reason_code)
-WHERE p.target_session=%s AND p.source_package_id=%s
-  AND p.source_capture_id=%s AND p.profile_revision=%s
-GROUP BY f.field_id,f.status,f.quality,f.reason_code
-ORDER BY f.field_id,f.status,f.quality,f.reason_code
-LIMIT %s""",
+                   FROM stock.source_symbol_price_profiles p
+                   CROSS JOIN LATERAL unnest(
+                       p.profile_field_ids,p.profile_statuses,
+                       p.profile_qualities,p.profile_reasons
+                   ) AS f(field_id,status,quality,reason_code)
+                   WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
+                   GROUP BY f.field_id,f.status,f.quality,f.reason_code
+                   ORDER BY f.field_id,f.status,f.quality,f.reason_code LIMIT %s""",
                 (
                     target_session,
-                    source_package_id,
                     source_capture_id,
                     profile_revision,
                     MAX_PROFILE_OBSERVATION_QUALITY_ROWS + 1,
@@ -1119,7 +1140,6 @@ LIMIT %s""",
         "status": status,
         "target_session": target_session.isoformat(),
         "source_capture_id": source_capture_id,
-        "source_package_id": source_package_id,
         "profile_revision_selection": {
             "rule": selection_rule,
             "selected_profile_revision": selected["profile_revision"]
@@ -1143,85 +1163,94 @@ def _snapshot_for_session(
     *,
     target_session: date,
     max_target_session: date,
-    source_package_id: int | None = None,
+    source_capture_id: int | None = None,
     profile_revision: str | None = None,
+    price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
-    exact_identity = (source_package_id, profile_revision)
-    if any(value is not None for value in exact_identity):
-        if type(source_package_id) is not int or source_package_id <= 0:
-            raise PriceProfilePgError(
-                "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-                "精确快照须使用正BIGINT source_package_id和显式画像修订",
-            )
-        if (
-            not isinstance(profile_revision, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
-        ):
-            raise PriceProfilePgError(
-                "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-                "精确快照的profile_revision格式无效",
-            )
-
-    predicates = ["p.target_session=%s", "p.target_session<=%s"]
-    parameters: list[Any] = [target_session, max_target_session]
-    if source_package_id is not None:
-        predicates.extend(("p.source_package_id=%s", "p.profile_revision=%s"))
-        parameters.extend((source_package_id, profile_revision))
+    if price_coordinate != "FORWARD_ADJUSTED":
+        raise PriceProfilePgError(
+            "PROFILE_PRICE_COORDINATE_UNSUPPORTED",
+            "现役Core/Profile仅保存BaoStock FORWARD_ADJUSTED坐标",
+        )
+    if (source_capture_id is None) != (profile_revision is None):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
+            "精确画像快照须成对提供source_capture_id与profile_revision",
+        )
+    if source_capture_id is not None and (
+        type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or not isinstance(profile_revision, str)
+        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID", "精确捕获键或画像修订格式无效"
+        )
+    predicates = [
+        "p.target_session=%s",
+        "p.target_session<=%s",
+        "p.price_coordinate=%s",
+    ]
+    parameters: list[Any] = [target_session, max_target_session, price_coordinate]
+    if source_capture_id is not None:
+        predicates.extend(("p.source_capture_id=%s", "p.profile_revision=%s"))
+        parameters.extend((source_capture_id, profile_revision))
     cursor.execute(
-        """SELECT p.target_session, p.source_package_id, min(p.source_capture_id),
-       p.profile_revision, p.history_calendar_id, p.history_calendar_revision,
-       p.history_window_start, p.history_window_end,
-       p.history_requested_session_count, count(*)::bigint,
-       min(r.raw_row_count),
-       count(*)=min(r.raw_row_count)
-         AND min(r.raw_symbol_count)=min(r.raw_row_count)
-         AND min(r.capture_count)=1
-         AND count(DISTINCT p.source_capture_id)=1
-         AND min(p.source_capture_id)=min(r.raw_capture_id)
-FROM source_symbol_price_profiles p
-LEFT JOIN (
-    SELECT session_date, source_package_id,
-           count(*)::bigint AS raw_row_count,
-           count(DISTINCT source_symbol)::bigint AS raw_symbol_count,
-           count(DISTINCT source_capture_id)::bigint AS capture_count,
-           min(source_capture_id) AS raw_capture_id
-    FROM source_raw_daily
-    GROUP BY session_date, source_package_id
-) r ON r.session_date=p.target_session
-  AND r.source_package_id=p.source_package_id
-WHERE """
+        """SELECT p.target_session,p.source_capture_id,p.profile_revision,
+                  p.history_calendar_id,p.history_calendar_revision,
+                  p.history_window_start,p.history_window_end,
+                  p.history_requested_session_count,p.price_coordinate,
+                  count(*)::bigint AS profile_rows,
+                  min(r.raw_row_count) AS expected_rows,
+                  count(*)=min(r.raw_row_count)
+                    AND min(r.raw_symbol_count)=min(r.raw_row_count)
+                    AND min(r.qfq_quality_row_count)=min(r.raw_row_count)
+                    AND p.source_capture_id=min(r.raw_capture_id) AS complete
+           FROM stock.source_symbol_price_profiles p
+           LEFT JOIN (
+               SELECT session_date,source_capture_id,
+                      count(*)::bigint AS raw_row_count,
+                      count(DISTINCT source_symbol)::bigint AS raw_symbol_count,
+                      count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint AS qfq_quality_row_count,
+                      min(source_capture_id) AS raw_capture_id
+               FROM stock.source_raw_daily
+               WHERE source_capture_id IS NOT NULL
+               GROUP BY session_date,source_capture_id
+           ) r ON r.session_date=p.target_session
+             AND r.source_capture_id=p.source_capture_id
+           WHERE """
         + " AND ".join(predicates)
         + """
-GROUP BY p.target_session, p.source_package_id, p.profile_revision,
-         p.history_calendar_id, p.history_calendar_revision,
-         p.history_window_start, p.history_window_end,
-         p.history_requested_session_count
-ORDER BY p.source_package_id, p.profile_revision
-LIMIT %s""",
+           GROUP BY p.target_session,p.source_capture_id,p.profile_revision,
+                    p.history_calendar_id,p.history_calendar_revision,
+                    p.history_window_start,p.history_window_end,p.price_coordinate,
+                    p.history_requested_session_count
+           ORDER BY p.source_capture_id,p.profile_revision
+           LIMIT %s""",
         [*parameters, MAX_PROFILE_OBSERVATION_REVISIONS + 1],
     )
     rows = cursor.fetchall()
     if not rows:
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_MISSING",
-            f"PG中没有截止{max_target_session.isoformat()}范围内{target_session.isoformat()}的完整画像快照",
+            f"PG中没有截止{max_target_session.isoformat()}范围内{target_session.isoformat()}的画像快照",
         )
     if len(rows) != 1:
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_AMBIGUOUS",
-            f"{target_session.isoformat()}仍有多个画像版本；请精确提供该端source_package_id和profile_revision",
+            f"{target_session.isoformat()}仍有多个捕获/画像版本；请精确提供source_capture_id与profile_revision",
         )
     row = rows[0]
     snapshot = {
         "target_session": row[0],
-        "source_package_id": int(row[1]),
-        "source_capture_id": int(row[2]),
-        "profile_revision": str(row[3]),
-        "history_calendar_id": row[4],
-        "history_calendar_revision": row[5],
-        "window_start": row[6],
-        "window_end": row[7],
-        "history_session_count": int(row[8]),
+        "source_capture_id": int(row[1]),
+        "profile_revision": str(row[2]),
+        "history_calendar_id": row[3],
+        "history_calendar_revision": row[4],
+        "window_start": row[5],
+        "window_end": row[6],
+        "price_coordinate": row[8],
+        "history_session_count": int(row[7]),
         "source_symbol_count": int(row[9]),
         "expected_source_symbol_count": int(row[10] or 0),
         "complete": bool(row[11]),
@@ -1243,7 +1272,7 @@ def _bias20_atr_state_expression(side: str) -> str:
           OR {side}_bias20_atr_exact_numerator IS NULL
           OR {side}_bias20_atr_exact_denominator IS NULL
           OR {side}_bias20_atr_exact_denominator <= 0
-          OR {side}_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+          OR {side}_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
           OR {side}_ma20_quality IS DISTINCT FROM 'OBSERVED'
           OR {side}_ma20 IS NULL
           OR {side}_atr20_quality IS DISTINCT FROM 'OBSERVED'
@@ -1280,8 +1309,8 @@ def _bias20_atr_state_reason_expression(side: str) -> str:
           OR {side}_bias20_atr_exact_denominator IS NULL
           OR {side}_bias20_atr_exact_denominator <= 0
           THEN 'BIAS20_ATR_EXACT_VALUE_UNAVAILABLE'
-        WHEN {side}_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-          THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+        WHEN {side}_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+          THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'
         WHEN {side}_ma20_quality IS DISTINCT FROM 'OBSERVED'
           OR {side}_ma20 IS NULL
           THEN COALESCE({side}_ma20_reason,
@@ -1305,8 +1334,8 @@ def _bias20_atr_state_reason_expression(side: str) -> str:
 
 _BIAS20_ATR_PAIR_COMPATIBILITY_SQL = """CASE
     WHEN NOT before_present OR NOT after_present THEN 'SINGLE_SIDE'::text
-    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-      OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+    WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+      OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
       OR NOT core_compatible THEN 'PAIR_INCOMPARABLE'::text
     WHEN before_bias20_atr_state='UNKNOWN'
       OR after_bias20_atr_state='UNKNOWN' THEN 'PAIR_UNKNOWN'::text
@@ -1321,9 +1350,9 @@ _BIAS20_ATR_PAIR_REASON_SQL = """CASE
       THEN 'PRICE_COORDINATE_MISMATCH:' ||
            COALESCE(before_price_coordinate, 'UNKNOWN') || '->' ||
            COALESCE(after_price_coordinate, 'UNKNOWN')
-    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-      OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-      THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED:' ||
+    WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+      OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+      THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED:' ||
            COALESCE(before_price_coordinate, 'UNKNOWN') || '->' ||
            COALESCE(after_price_coordinate, 'UNKNOWN')
     WHEN NOT core_compatible AND before_producer_contract
@@ -1373,15 +1402,27 @@ WITH old_rows AS (
            r.raw_low AS joined_raw_low,
            r.raw_close AS joined_raw_close,
            r.price_quality AS joined_raw_price_quality,
-           r.price_reason AS joined_raw_price_reason
+           r.price_reason AS joined_raw_price_reason,
+           r.qfq_open AS joined_qfq_open,
+           r.qfq_high AS joined_qfq_high,
+           r.qfq_low AS joined_qfq_low,
+           r.qfq_close AS joined_qfq_close,
+           r.qfq_price_quality AS joined_qfq_price_quality,
+           r.qfq_price_reason AS joined_qfq_price_reason,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_open ELSE r.qfq_open END AS joined_selected_open,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_high ELSE r.qfq_high END AS joined_selected_high,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_low ELSE r.qfq_low END AS joined_selected_low,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_close ELSE r.qfq_close END AS joined_selected_close,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_quality ELSE r.qfq_price_quality END AS joined_selected_price_quality,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_reason ELSE r.qfq_price_reason END AS joined_selected_price_reason
     FROM source_symbol_price_profiles p
     LEFT JOIN source_raw_daily r
       ON r.source_symbol=p.source_symbol
-     AND r.session_date=p.target_session AND r.source_package_id=p.source_package_id
-     AND r.source_capture_id=p.source_capture_id
+     AND r.session_date=p.target_session AND r.source_capture_id=p.source_capture_id
     WHERE p.target_session=%s
-      AND p.source_package_id=%s
+      AND p.source_capture_id=%s
       AND p.profile_revision=%s
+      AND p.price_coordinate=%s
 ), new_rows AS (
     SELECT p.*,
            r.source_symbol IS NOT NULL AS joined_raw_present,
@@ -1390,15 +1431,27 @@ WITH old_rows AS (
            r.raw_low AS joined_raw_low,
            r.raw_close AS joined_raw_close,
            r.price_quality AS joined_raw_price_quality,
-           r.price_reason AS joined_raw_price_reason
+           r.price_reason AS joined_raw_price_reason,
+           r.qfq_open AS joined_qfq_open,
+           r.qfq_high AS joined_qfq_high,
+           r.qfq_low AS joined_qfq_low,
+           r.qfq_close AS joined_qfq_close,
+           r.qfq_price_quality AS joined_qfq_price_quality,
+           r.qfq_price_reason AS joined_qfq_price_reason,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_open ELSE r.qfq_open END AS joined_selected_open,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_high ELSE r.qfq_high END AS joined_selected_high,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_low ELSE r.qfq_low END AS joined_selected_low,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_close ELSE r.qfq_close END AS joined_selected_close,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_quality ELSE r.qfq_price_quality END AS joined_selected_price_quality,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_reason ELSE r.qfq_price_reason END AS joined_selected_price_reason
     FROM source_symbol_price_profiles p
     LEFT JOIN source_raw_daily r
       ON r.source_symbol=p.source_symbol
-     AND r.session_date=p.target_session AND r.source_package_id=p.source_package_id
-     AND r.source_capture_id=p.source_capture_id
+     AND r.session_date=p.target_session AND r.source_capture_id=p.source_capture_id
     WHERE p.target_session=%s
-      AND p.source_package_id=%s
+      AND p.source_capture_id=%s
       AND p.profile_revision=%s
+      AND p.price_coordinate=%s
 ), paired AS (
     SELECT COALESCE(o.source_symbol, n.source_symbol) AS source_symbol,
            o.source_symbol IS NOT NULL AS before_present,
@@ -1409,8 +1462,6 @@ WITH old_rows AS (
            n.board AS after_board,
            o.source_capture_id AS before_source_capture_id,
            n.source_capture_id AS after_source_capture_id,
-           o.source_package_id AS before_source_package_id,
-           n.source_package_id AS after_source_package_id,
            o.calculation_scope AS before_calculation_scope,
            n.calculation_scope AS after_calculation_scope,
            o.producer_contract AS before_producer_contract,
@@ -1439,6 +1490,20 @@ WITH old_rows AS (
            n.price_window_reason AS after_window_reason,
            o.joined_raw_close AS before_raw_close,
            n.joined_raw_close AS after_raw_close,
+           o.joined_qfq_close AS before_qfq_close,
+           n.joined_qfq_close AS after_qfq_close,
+           o.joined_selected_open AS before_selected_open,
+           n.joined_selected_open AS after_selected_open,
+           o.joined_selected_high AS before_selected_high,
+           n.joined_selected_high AS after_selected_high,
+           o.joined_selected_low AS before_selected_low,
+           n.joined_selected_low AS after_selected_low,
+           o.joined_selected_close AS before_selected_close,
+           n.joined_selected_close AS after_selected_close,
+           o.joined_selected_price_quality AS before_selected_price_quality,
+           n.joined_selected_price_quality AS after_selected_price_quality,
+           o.joined_selected_price_reason AS before_selected_price_reason,
+           n.joined_selected_price_reason AS after_selected_price_reason,
            o.joined_raw_open AS before_raw_open,
            n.joined_raw_open AS after_raw_open,
            o.joined_raw_high AS before_raw_high,
@@ -1449,6 +1514,10 @@ WITH old_rows AS (
            n.joined_raw_price_quality AS after_raw_price_quality,
            o.joined_raw_price_reason AS before_raw_price_reason,
            n.joined_raw_price_reason AS after_raw_price_reason,
+           o.joined_qfq_price_quality AS before_qfq_price_quality,
+           n.joined_qfq_price_quality AS after_qfq_price_quality,
+           o.joined_qfq_price_reason AS before_qfq_price_reason,
+           n.joined_qfq_price_reason AS after_qfq_price_reason,
            n.amount_ratio20 AS after_amount_ratio20,
            n.amount_ratio20_quality AS after_amount_ratio20_quality,
            n.amount_ratio20_reason AS after_amount_ratio20_reason,
@@ -1581,37 +1650,37 @@ WITH old_rows AS (
     SELECT *,
            CASE WHEN before_present
                   AND before_raw_record_present
-                  AND before_raw_price_quality='OBSERVED'
+                  AND before_selected_price_quality='OBSERVED'
                   AND before_ma20_quality='OBSERVED'
-                  AND before_raw_close IS NOT NULL
+                  AND before_selected_close IS NOT NULL
                   AND before_ma20 IS NOT NULL
                   AND before_calculation_scope IS NOT NULL
                   AND before_producer_contract IS NOT NULL
                   AND before_producer_version IS NOT NULL
                   AND before_producer_contract IS NOT NULL
-                THEN CASE WHEN before_raw_close>before_ma20 THEN 'ABOVE'
-                          WHEN before_raw_close<before_ma20 THEN 'BELOW'
+                THEN CASE WHEN before_selected_close>before_ma20 THEN 'ABOVE'
+                          WHEN before_selected_close<before_ma20 THEN 'BELOW'
                           ELSE 'EQUAL' END END AS before_close_ma20_relation_local,
            CASE WHEN after_present
                   AND after_raw_record_present
-                  AND after_raw_price_quality='OBSERVED'
+                  AND after_selected_price_quality='OBSERVED'
                   AND after_ma20_quality='OBSERVED'
-                  AND after_raw_close IS NOT NULL
+                  AND after_selected_close IS NOT NULL
                   AND after_ma20 IS NOT NULL
                   AND after_calculation_scope IS NOT NULL
                   AND after_producer_contract IS NOT NULL
                   AND after_producer_version IS NOT NULL
                   AND after_producer_contract IS NOT NULL
-                THEN CASE WHEN after_raw_close>after_ma20 THEN 'ABOVE'
-                          WHEN after_raw_close<after_ma20 THEN 'BELOW'
+                THEN CASE WHEN after_selected_close>after_ma20 THEN 'ABOVE'
+                          WHEN after_selected_close<after_ma20 THEN 'BELOW'
                           ELSE 'EQUAL' END END AS after_close_ma20_relation_local
     FROM paired
 ), source_pool_relations AS (
     SELECT *,
-           CASE WHEN before_price_coordinate='RAW_UNADJUSTED'
+           CASE WHEN before_price_coordinate='FORWARD_ADJUSTED'
                 THEN before_close_ma20_relation_local END
                 AS before_source_pool_close_ma20_relation,
-           CASE WHEN after_price_coordinate='RAW_UNADJUSTED'
+           CASE WHEN after_price_coordinate='FORWARD_ADJUSTED'
                 THEN after_close_ma20_relation_local END
                 AS after_source_pool_close_ma20_relation
     FROM endpoint_relations
@@ -1627,13 +1696,13 @@ WITH old_rows AS (
                      AND before_source_pool_close_ma20_relation IS NULL
                 THEN CASE
                     WHEN NOT before_raw_record_present THEN 'RAW_ROW_MISSING'
-                    WHEN before_bar_status='TDX_TARGET_BAR_MISSING'
+                    WHEN before_bar_status='TARGET_MISSING'
                       THEN 'TARGET_BAR_MISSING:' ||
-                           COALESCE(before_raw_price_reason, before_window_reason, 'NO_REASON')
-                    WHEN before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+                           COALESCE(before_selected_price_reason, before_window_reason, 'NO_REASON')
+                    WHEN before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
                       THEN 'RAW_PRICE_QUALITY_UNKNOWN:' ||
-                           COALESCE(before_raw_price_reason, 'NO_REASON')
-                    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+                           COALESCE(before_selected_price_reason, 'NO_REASON')
+                    WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                       THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
                            COALESCE(before_price_coordinate, 'UNKNOWN')
                     WHEN before_calculation_scope IS NULL
@@ -1644,7 +1713,7 @@ WITH old_rows AS (
                     WHEN before_ma20_quality IS DISTINCT FROM 'OBSERVED'
                       THEN 'MA20_QUALITY_UNKNOWN:' ||
                            COALESCE(before_ma20_reason, 'NO_REASON')
-                    WHEN before_raw_close IS NULL OR before_ma20 IS NULL
+                    WHEN before_selected_close IS NULL OR before_ma20 IS NULL
                       THEN 'PRICE_VALUE_MISSING:' ||
                            COALESCE(before_ma20_reason, 'NO_REASON')
                     ELSE 'RELATION_UNKNOWN'
@@ -1653,13 +1722,13 @@ WITH old_rows AS (
                      AND after_source_pool_close_ma20_relation IS NULL
                 THEN CASE
                     WHEN NOT after_raw_record_present THEN 'RAW_ROW_MISSING'
-                    WHEN after_bar_status='TDX_TARGET_BAR_MISSING'
+                    WHEN after_bar_status='TARGET_MISSING'
                       THEN 'TARGET_BAR_MISSING:' ||
-                           COALESCE(after_raw_price_reason, after_window_reason, 'NO_REASON')
-                    WHEN after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+                           COALESCE(after_selected_price_reason, after_window_reason, 'NO_REASON')
+                    WHEN after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
                       THEN 'RAW_PRICE_QUALITY_UNKNOWN:' ||
-                           COALESCE(after_raw_price_reason, 'NO_REASON')
-                    WHEN after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+                           COALESCE(after_selected_price_reason, 'NO_REASON')
+                    WHEN after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                       THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
                            COALESCE(after_price_coordinate, 'UNKNOWN')
                     WHEN after_calculation_scope IS NULL
@@ -1670,7 +1739,7 @@ WITH old_rows AS (
                     WHEN after_ma20_quality IS DISTINCT FROM 'OBSERVED'
                       THEN 'MA20_QUALITY_UNKNOWN:' ||
                            COALESCE(after_ma20_reason, 'NO_REASON')
-                    WHEN after_raw_close IS NULL OR after_ma20 IS NULL
+                    WHEN after_selected_close IS NULL OR after_ma20 IS NULL
                       THEN 'PRICE_VALUE_MISSING:' ||
                            COALESCE(after_ma20_reason, 'NO_REASON')
                     ELSE 'RELATION_UNKNOWN'
@@ -1678,8 +1747,8 @@ WITH old_rows AS (
            COALESCE((before_present AND after_present
             AND before_source_pool_close_ma20_relation IS NOT NULL
             AND after_source_pool_close_ma20_relation IS NOT NULL
-            AND before_price_coordinate='RAW_UNADJUSTED'
-            AND after_price_coordinate='RAW_UNADJUSTED'
+            AND before_price_coordinate='FORWARD_ADJUSTED'
+            AND after_price_coordinate='FORWARD_ADJUSTED'
             AND core_compatible
             AND before_market IS NOT DISTINCT FROM after_market
             AND before_board IS NOT DISTINCT FROM after_board), FALSE)
@@ -1700,7 +1769,7 @@ WITH old_rows AS (
                CASE WHEN before_close_ma20_relation IS NOT NULL
                          AND after_close_ma20_relation IS NOT NULL
                          AND before_close_ma20_relation IS DISTINCT FROM after_close_ma20_relation
-                    THEN 'RAW_CLOSE_VS_MA20_CHANGED'::text END,
+                    THEN 'QFQ_CLOSE_VS_MA20_CHANGED'::text END,
                CASE WHEN profile_compatible AND EXISTS (
                          SELECT 1
                          FROM unnest(before_profile_field_ids) AS field(field_id)
@@ -1823,13 +1892,13 @@ WITH old_rows AS (
            CASE
              WHEN NOT before_present OR NOT after_present THEN 'PAIR_INCOMPARABLE'::text
              WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
-               OR before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-               OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               OR before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+               OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                OR NOT core_compatible THEN 'PAIR_INCOMPARABLE'::text
              WHEN NOT before_raw_record_present OR NOT after_raw_record_present
-               OR before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-               OR after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-               OR before_raw_close IS NULL OR after_raw_close IS NULL
+               OR before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+               OR after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+               OR before_selected_close IS NULL OR after_selected_close IS NULL
                OR before_price_damage_quality IS DISTINCT FROM 'OBSERVED'
                OR after_price_damage_quality IS DISTINCT FROM 'OBSERVED'
                OR before_price_damage IS NULL OR after_price_damage IS NULL
@@ -1841,9 +1910,9 @@ WITH old_rows AS (
              WHEN NOT after_present THEN 'NO_AFTER_PROFILE'::text
              WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
                THEN 'PRICE_COORDINATE_MISMATCH'::text
-             WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-               OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-               THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'::text
+             WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+               OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+               THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'::text
              WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
                OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
                THEN 'HISTORY_CALENDAR_MISMATCH'::text
@@ -1852,10 +1921,10 @@ WITH old_rows AS (
              WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'::text
              WHEN NOT before_raw_record_present THEN 'BEFORE_RAW_ROW_MISSING'::text
              WHEN NOT after_raw_record_present THEN 'AFTER_RAW_ROW_MISSING'::text
-             WHEN before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-               THEN 'BEFORE_RAW_PRICE_UNKNOWN:' || COALESCE(before_raw_price_reason, 'NO_REASON')
-             WHEN after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-               THEN 'AFTER_RAW_PRICE_UNKNOWN:' || COALESCE(after_raw_price_reason, 'NO_REASON')
+             WHEN before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'BEFORE_RAW_PRICE_UNKNOWN:' || COALESCE(before_selected_price_reason, 'NO_REASON')
+             WHEN after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'AFTER_RAW_PRICE_UNKNOWN:' || COALESCE(after_selected_price_reason, 'NO_REASON')
              WHEN before_price_damage_quality IS NULL AND before_price_damage IS NULL
                THEN 'BEFORE_NOT_COMPUTED_FOR_REVISION'::text
              WHEN after_price_damage_quality IS NULL AND after_price_damage IS NULL
@@ -1951,13 +2020,13 @@ WITH old_rows AS (
            CASE
              WHEN NOT before_present OR NOT after_present THEN 'PAIR_INCOMPARABLE'::text
              WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
-               OR before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-               OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               OR before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+               OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                OR NOT core_compatible THEN 'PAIR_INCOMPARABLE'::text
              WHEN NOT before_raw_record_present OR NOT after_raw_record_present
-               OR before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-               OR after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-               OR before_raw_close IS NULL OR after_raw_close IS NULL
+               OR before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+               OR after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+               OR before_selected_close IS NULL OR after_selected_close IS NULL
                OR before_ma_slope20_atr_quality IS DISTINCT FROM 'OBSERVED'
                OR after_ma_slope20_atr_quality IS DISTINCT FROM 'OBSERVED'
                OR before_ma_slope20_atr IS NULL OR after_ma_slope20_atr IS NULL
@@ -1981,9 +2050,9 @@ WITH old_rows AS (
              WHEN NOT after_present THEN 'NO_AFTER_PROFILE'::text
              WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
                THEN 'PRICE_COORDINATE_MISMATCH'::text
-             WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-               OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-               THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'::text
+             WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+               OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+               THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'::text
              WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
                OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
                THEN 'HISTORY_CALENDAR_MISMATCH'::text
@@ -1992,10 +2061,10 @@ WITH old_rows AS (
              WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'::text
              WHEN NOT before_raw_record_present THEN 'BEFORE_RAW_ROW_MISSING'::text
              WHEN NOT after_raw_record_present THEN 'AFTER_RAW_ROW_MISSING'::text
-             WHEN before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-               THEN 'BEFORE_RAW_PRICE_UNKNOWN:' || COALESCE(before_raw_price_reason, 'NO_REASON')
-             WHEN after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-               THEN 'AFTER_RAW_PRICE_UNKNOWN:' || COALESCE(after_raw_price_reason, 'NO_REASON')
+             WHEN before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'BEFORE_RAW_PRICE_UNKNOWN:' || COALESCE(before_selected_price_reason, 'NO_REASON')
+             WHEN after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'AFTER_RAW_PRICE_UNKNOWN:' || COALESCE(after_selected_price_reason, 'NO_REASON')
              WHEN before_ma_slope20_atr_quality IS NULL
                   AND before_ma_slope20_atr_exact_numerator IS NULL
                   AND before_ma_slope20_atr_exact_denominator IS NULL
@@ -2077,9 +2146,9 @@ WHEN NOT before_present THEN 'NO_BEFORE_PROFILE'
 WHEN NOT after_present THEN 'NO_AFTER_PROFILE'
 WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
   THEN 'PRICE_COORDINATE_MISMATCH'
-WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-  OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-  THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+  OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+  THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'
 WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
   OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
   THEN 'HISTORY_CALENDAR_MISMATCH'
@@ -2094,8 +2163,8 @@ ELSE NULL END"""
 WHEN NOT before_present AND after_present THEN 'ONLY_AFTER'
 WHEN before_present AND NOT after_present THEN 'ONLY_BEFORE'
 WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
-  OR before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-  OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+  OR before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+  OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
   OR NOT core_compatible
   OR {before}='UNKNOWN' OR {after}='UNKNOWN' THEN 'NOT_COMPARABLE'
 WHEN {before}={after} THEN 'SAME_RELATION'
@@ -2184,8 +2253,9 @@ MAX_PROFILE_CHANGE_HIGHLIGHTS = 30
 def _profile_change_snapshot_parameters(snapshot: Mapping[str, Any]) -> tuple[Any, ...]:
     return (
         snapshot["target_session"],
-        snapshot["source_package_id"],
+        snapshot["source_capture_id"],
         snapshot["profile_revision"],
+        snapshot["price_coordinate"],
     )
 
 
@@ -2205,10 +2275,11 @@ def read_profile_change_page(
     profile_change_kind: str | None = None,
     before_bias20_atr_state: str = "ALL",
     after_bias20_atr_state: str = "ALL",
-    before_source_package_id: int | None = None,
+    before_source_capture_id: int | None = None,
     before_profile_revision: str | None = None,
-    after_source_package_id: int | None = None,
+    after_source_capture_id: int | None = None,
     after_profile_revision: str | None = None,
+    price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
     """只比较两组精确PG画像；使用稳定SQL分页，不重算Core。"""
     change_types = {
@@ -2217,7 +2288,7 @@ def read_profile_change_page(
         "AFTER_ONLY",
         "TARGET_BAR_STATUS_CHANGED",
         "PRICE_WINDOW_STATUS_CHANGED",
-        "RAW_CLOSE_VS_MA20_CHANGED",
+        "QFQ_CLOSE_VS_MA20_CHANGED",
         "PROFILE_STATE_CHANGED",
         "CORE_QUALITY_CHANGED",
     }
@@ -2227,6 +2298,7 @@ def read_profile_change_page(
         or type(max_target_session) is not date
         or before_session >= after_session
         or after_session > max_target_session
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_DATE_INVALID",
@@ -2303,15 +2375,15 @@ def read_profile_change_page(
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SYMBOL_INVALID", "来源代码搜索只接受字母、数字和点号"
         )
-    if (before_source_package_id is None) != (before_profile_revision is None):
+    if (before_source_capture_id is None) != (before_profile_revision is None):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "起始快照须成对提供source_package_id与profile_revision；存量行键可省略",
+            "起始快照须成对提供source_capture_id与profile_revision；存量行键可省略",
         )
-    if (after_source_package_id is None) != (after_profile_revision is None):
+    if (after_source_capture_id is None) != (after_profile_revision is None):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "结束快照须成对提供source_package_id与profile_revision；存量行键可省略",
+            "结束快照须成对提供source_capture_id与profile_revision；存量行键可省略",
         )
     symbol_search = source_symbol.upper() if source_symbol else None
     with _transaction(config, write=False) as (_connection, cursor, _unused):
@@ -2319,15 +2391,17 @@ def read_profile_change_page(
             cursor,
             target_session=before_session,
             max_target_session=max_target_session,
-            source_package_id=before_source_package_id,
+            source_capture_id=before_source_capture_id,
             profile_revision=before_profile_revision,
+            price_coordinate=price_coordinate,
         )
         after = _snapshot_for_session(
             cursor,
             target_session=after_session,
             max_target_session=max_target_session,
-            source_package_id=after_source_package_id,
+            source_capture_id=after_source_capture_id,
             profile_revision=after_profile_revision,
+            price_coordinate=price_coordinate,
         )
         base_parameters = (
             *_profile_change_snapshot_parameters(before),
@@ -2340,7 +2414,7 @@ def read_profile_change_page(
        count(*) FILTER (WHERE before_present AND NOT after_present)::bigint AS before_only_count,
        count(*) FILTER (WHERE NOT before_present AND after_present)::bigint AS after_only_count,
        count(*) FILTER (WHERE before_present AND after_present
-           AND before_source_package_id IS DISTINCT FROM after_source_package_id)::bigint AS cross_package_pair_count,
+           AND before_source_capture_id IS DISTINCT FROM after_source_capture_id)::bigint AS cross_capture_pair_count,
        count(*) FILTER (WHERE before_present AND after_present
            AND before_price_coordinate IS DISTINCT FROM after_price_coordinate)::bigint AS cross_price_coordinate_pair_count,
        count(*) FILTER (WHERE before_present AND after_present AND NOT core_compatible)::bigint AS core_semantics_incomparable_count,
@@ -2394,7 +2468,7 @@ FROM classified""",
         cursor.execute(
             _PROFILE_CHANGE_HIGHLIGHT_CTES
             + """SELECT source_symbol, before_present, after_present,
-       before_source_package_id, after_source_package_id,
+       before_source_capture_id, after_source_capture_id,
        before_identity_status, after_identity_status,
        before_stable_security_id_status, after_stable_security_id_status,
        before_listing_status, after_listing_status,
@@ -2402,7 +2476,11 @@ FROM classified""",
        before_pit_status, after_pit_status,
        before_bar_status, after_bar_status,
        before_window_status, after_window_status, before_window_reason, after_window_reason,
-       before_raw_close, after_raw_close, before_raw_price_quality, after_raw_price_quality,
+       before_raw_close, after_raw_close,before_qfq_close,after_qfq_close,
+       before_selected_close,after_selected_close,
+       before_selected_price_quality,after_selected_price_quality,
+       before_selected_price_reason,after_selected_price_reason,
+       before_raw_price_quality, after_raw_price_quality,
        before_raw_price_reason, after_raw_price_reason,
        before_ma20, after_ma20, before_ma20_quality, after_ma20_quality,
        before_ma20_reason, after_ma20_reason,
@@ -2526,7 +2604,7 @@ LIMIT %s""",
         cursor.execute(
             _PROFILE_CHANGE_CTES
             + """SELECT source_symbol, before_present, after_present,
-       before_source_package_id, after_source_package_id,
+       before_source_capture_id, after_source_capture_id,
        before_identity_status, after_identity_status,
        before_stable_security_id_status, after_stable_security_id_status,
        before_listing_status, after_listing_status,
@@ -2534,7 +2612,11 @@ LIMIT %s""",
        before_pit_status, after_pit_status,
        before_bar_status, after_bar_status,
        before_window_status, after_window_status, before_window_reason, after_window_reason,
-       before_raw_close, after_raw_close, before_raw_price_quality, after_raw_price_quality,
+       before_raw_close, after_raw_close,before_qfq_close,after_qfq_close,
+       before_selected_close,after_selected_close,
+       before_selected_price_quality,after_selected_price_quality,
+       before_selected_price_reason,after_selected_price_reason,
+       before_raw_price_quality, after_raw_price_quality,
        before_raw_price_reason, after_raw_price_reason,
        before_ma20, after_ma20, before_ma20_quality, after_ma20_quality,
        before_ma20_reason, after_ma20_reason,
@@ -2824,10 +2906,11 @@ def read_profile_relation_screen(
     source_symbol: str | None = None,
     after_amount_ratio20_min: Decimal | str | None = None,
     after_volume_ratio20_min: Decimal | str | None = None,
-    before_source_package_id: int,
+    before_source_capture_id: int,
     before_profile_revision: str,
-    after_source_package_id: int,
+    after_source_capture_id: int,
     after_profile_revision: str,
+    price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
     """在完整两端来源并集上读取关系转移及结束日位置联合筛选。"""
     if (
@@ -2836,6 +2919,7 @@ def read_profile_relation_screen(
         or type(max_target_session) is not date
         or before_session >= after_session
         or after_session > max_target_session
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise PriceProfilePgError(
             "PROFILE_RELATION_DATE_INVALID",
@@ -2933,13 +3017,13 @@ def read_profile_relation_screen(
             "PROFILE_RELATION_END_FILTER_INVALID", "两个结束日位置条件不能重复字段"
         )
     if any(
-        type(package_id) is not int
-        or package_id <= 0
+        type(capture_id) is not int
+        or capture_id <= 0
         or not isinstance(revision, str)
         or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
-        for package_id, revision in (
-            (before_source_package_id, before_profile_revision),
-            (after_source_package_id, after_profile_revision),
+        for capture_id, revision in (
+            (before_source_capture_id, before_profile_revision),
+            (after_source_capture_id, after_profile_revision),
         )
     ):
         raise PriceProfilePgError(
@@ -2952,15 +3036,17 @@ def read_profile_relation_screen(
             cursor,
             target_session=before_session,
             max_target_session=max_target_session,
-            source_package_id=before_source_package_id,
+            source_capture_id=before_source_capture_id,
             profile_revision=before_profile_revision,
+            price_coordinate=price_coordinate,
         )
         after = _snapshot_for_session(
             cursor,
             target_session=after_session,
             max_target_session=max_target_session,
-            source_package_id=after_source_package_id,
+            source_capture_id=after_source_capture_id,
             profile_revision=after_profile_revision,
+            price_coordinate=price_coordinate,
         )
         base_parameters = (
             *_profile_change_snapshot_parameters(before),
@@ -3006,7 +3092,7 @@ def read_profile_relation_screen(
             filters.extend(
                 (
                     "core_compatible",
-                    "after_price_coordinate='RAW_UNADJUSTED'",
+                    "after_price_coordinate='FORWARD_ADJUSTED'",
                     f"{prefix}_quality='OBSERVED'",
                     f"{prefix} IS NOT NULL",
                     f"{prefix}_exact_numerator IS NOT NULL",
@@ -3344,14 +3430,14 @@ _PROFILE_BREADTH_INCOMPARABLE_SQL = """
 SELECT CASE
     WHEN NOT before_raw_record_present OR NOT after_raw_record_present
       THEN 'RAW_ROW_MISSING'
-    WHEN before_bar_status='TDX_TARGET_BAR_MISSING'
-      OR after_bar_status='TDX_TARGET_BAR_MISSING'
+    WHEN before_bar_status='TARGET_MISSING'
+      OR after_bar_status='TARGET_MISSING'
       THEN 'TARGET_BAR_MISSING'
-    WHEN before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-      OR after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-      THEN 'RAW_CLOSE_QUALITY_UNKNOWN'
-    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
-      OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+    WHEN before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+      OR after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
+      THEN 'QFQ_CLOSE_QUALITY_UNKNOWN'
+    WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
+      OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
       OR before_price_coordinate IS DISTINCT FROM after_price_coordinate
       THEN 'PRICE_COORDINATE_INCOMPATIBLE'
     WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'
@@ -3378,10 +3464,11 @@ def read_profile_breadth(
     before_session: date,
     after_session: date,
     max_target_session: date,
-    before_source_package_id: int,
+    before_source_capture_id: int,
     before_profile_revision: str,
-    after_source_package_id: int,
+    after_source_capture_id: int,
     after_profile_revision: str,
+    price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
     """按两份精确画像只读聚合来源池MA20关系。"""
     if (
@@ -3390,21 +3477,22 @@ def read_profile_breadth(
         or type(max_target_session) is not date
         or before_session >= after_session
         or after_session > max_target_session
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_DATE_INVALID",
             "广度对照日期必须递增，且不晚于显式研究截止日",
         )
     identities = (
-        (before_source_package_id, before_profile_revision),
-        (after_source_package_id, after_profile_revision),
+        (before_source_capture_id, before_profile_revision),
+        (after_source_capture_id, after_profile_revision),
     )
     if any(
-        type(package_id) is not int
-        or package_id <= 0
+        type(capture_id) is not int
+        or capture_id <= 0
         or not isinstance(revision, str)
         or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
-        for package_id, revision in identities
+        for capture_id, revision in identities
     ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
@@ -3416,15 +3504,17 @@ def read_profile_breadth(
             cursor,
             target_session=before_session,
             max_target_session=max_target_session,
-            source_package_id=before_source_package_id,
+            source_capture_id=before_source_capture_id,
             profile_revision=before_profile_revision,
+            price_coordinate=price_coordinate,
         )
         after = _snapshot_for_session(
             cursor,
             target_session=after_session,
             max_target_session=max_target_session,
-            source_package_id=after_source_package_id,
+            source_capture_id=after_source_capture_id,
             profile_revision=after_profile_revision,
+            price_coordinate=price_coordinate,
         )
         parameters = (
             *_profile_change_snapshot_parameters(before),
@@ -3604,7 +3694,7 @@ def read_profile_breadth(
             ),
         },
         "research_scope": "SOURCE_SYMBOL_ONLY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
         "database_write": False,
@@ -3619,10 +3709,11 @@ def read_profile_breadth_members(
     before_session: date,
     after_session: date,
     max_target_session: date,
-    before_source_package_id: int,
+    before_source_capture_id: int,
     before_profile_revision: str,
-    after_source_package_id: int,
+    after_source_capture_id: int,
     after_profile_revision: str,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     mode: str,
     offset: int,
     limit: int,
@@ -3638,6 +3729,7 @@ def read_profile_breadth_members(
         or type(max_target_session) is not date
         or before_session >= after_session
         or after_session > max_target_session
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_DATE_INVALID",
@@ -3714,15 +3806,15 @@ def read_profile_breadth_members(
         )
 
     identities = (
-        (before_source_package_id, before_profile_revision),
-        (after_source_package_id, after_profile_revision),
+        (before_source_capture_id, before_profile_revision),
+        (after_source_capture_id, after_profile_revision),
     )
     if any(
-        type(package_id) is not int
-        or package_id <= 0
+        type(capture_id) is not int
+        or capture_id <= 0
         or not isinstance(revision, str)
         or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
-        for package_id, revision in identities
+        for capture_id, revision in identities
     ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
@@ -3734,15 +3826,17 @@ def read_profile_breadth_members(
             cursor,
             target_session=before_session,
             max_target_session=max_target_session,
-            source_package_id=before_source_package_id,
+            source_capture_id=before_source_capture_id,
             profile_revision=before_profile_revision,
+            price_coordinate=price_coordinate,
         )
         after = _snapshot_for_session(
             cursor,
             target_session=after_session,
             max_target_session=max_target_session,
-            source_package_id=after_source_package_id,
+            source_capture_id=after_source_capture_id,
             profile_revision=after_profile_revision,
+            price_coordinate=price_coordinate,
         )
         snapshot_parameters = (
             *_profile_change_snapshot_parameters(before),
@@ -3755,7 +3849,6 @@ def read_profile_breadth_members(
     SELECT source_symbol, before_present, after_present,
            before_market, after_market, before_board, after_board,
            before_source_capture_id, after_source_capture_id,
-           before_source_package_id, after_source_package_id,
            before_profile_revision, after_profile_revision,
            before_identity_status, after_identity_status,
            before_stable_security_id_status, after_stable_security_id_status,
@@ -3769,6 +3862,10 @@ def read_profile_breadth_members(
            before_raw_high, after_raw_high,
            before_raw_low, after_raw_low,
            before_raw_close, after_raw_close,
+           before_qfq_close, after_qfq_close,
+           before_selected_close, after_selected_close,
+           before_selected_price_quality, after_selected_price_quality,
+           before_selected_price_reason, after_selected_price_reason,
            before_raw_price_quality, after_raw_price_quality,
            before_raw_price_reason, after_raw_price_reason,
            before_ma20, after_ma20,
@@ -3788,7 +3885,6 @@ SELECT totals.total,
        page.source_symbol, page.before_present, page.after_present,
        page.before_market, page.after_market, page.before_board, page.after_board,
        page.before_source_capture_id, page.after_source_capture_id,
-       page.before_source_package_id, page.after_source_package_id,
        page.before_profile_revision, page.after_profile_revision,
        page.before_identity_status, page.after_identity_status,
        page.before_stable_security_id_status, page.after_stable_security_id_status,
@@ -3802,6 +3898,10 @@ SELECT totals.total,
        page.before_raw_high, page.after_raw_high,
        page.before_raw_low, page.after_raw_low,
        page.before_raw_close, page.after_raw_close,
+       page.before_qfq_close, page.after_qfq_close,
+       page.before_selected_close, page.after_selected_close,
+       page.before_selected_price_quality, page.after_selected_price_quality,
+       page.before_selected_price_reason, page.after_selected_price_reason,
        page.before_raw_price_quality, page.after_raw_price_quality,
        page.before_raw_price_reason, page.after_raw_price_reason,
        page.before_ma20, page.after_ma20,
@@ -3855,7 +3955,7 @@ ORDER BY page.source_symbol COLLATE "C"
         },
         "rows": rows,
         "research_scope": "SOURCE_SYMBOL_ONLY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
         "database_write": False,
@@ -3986,10 +4086,11 @@ def read_profile_pair(
     after_session: date,
     max_target_session: date,
     source_symbol: str,
-    before_source_package_id: int,
+    before_source_capture_id: int,
     before_profile_revision: str,
-    after_source_package_id: int,
+    after_source_capture_id: int,
     after_profile_revision: str,
+    price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
     """按两端精确封口快照，从现役配对SQL读取单个来源代码。"""
     if (
@@ -3998,6 +4099,7 @@ def read_profile_pair(
         or type(max_target_session) is not date
         or before_session >= after_session
         or after_session > max_target_session
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_DATE_INVALID",
@@ -4018,15 +4120,17 @@ def read_profile_pair(
             cursor,
             target_session=before_session,
             max_target_session=max_target_session,
-            source_package_id=before_source_package_id,
+            source_capture_id=before_source_capture_id,
             profile_revision=before_profile_revision,
+            price_coordinate=price_coordinate,
         )
         after = _snapshot_for_session(
             cursor,
             target_session=after_session,
             max_target_session=max_target_session,
-            source_package_id=after_source_package_id,
+            source_capture_id=after_source_capture_id,
             profile_revision=after_profile_revision,
+            price_coordinate=price_coordinate,
         )
         parameters = (
             *_profile_change_snapshot_parameters(before),
@@ -4230,8 +4334,9 @@ def read_profile_page(
     *,
     target_session: date,
     max_target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     offset: int,
     limit: int,
     market: str = "ALL",
@@ -4264,6 +4369,11 @@ def read_profile_page(
         raise PriceProfilePgError(
             "PROFILE_DATE_AFTER_CUTOFF", "画像目标日期晚于显式研究截止日期"
         )
+    if price_coordinate != "FORWARD_ADJUSTED":
+        raise PriceProfilePgError(
+            "PROFILE_PRICE_COORDINATE_UNSUPPORTED",
+            "现役Core/Profile页面固定读取BaoStock前复权坐标",
+        )
     if type(offset) is not int or offset < 0:
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像查询日期或分页偏移无效")
     if type(limit) is not int or not 1 <= limit <= 100:
@@ -4275,7 +4385,13 @@ def read_profile_page(
         raise PriceProfilePgError(
             "PROFILE_REVISION_INVALID", "画像修订必须是显式完整画像修订标签"
         )
-    if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
+    if market not in {"ALL", "SH", "SZ", "BJ"} or board not in {
+        "ALL",
+        "MAIN_BOARD",
+        "GEM",
+        "STAR_BOARD",
+        "BEIJING_BOARD",
+    }:
         raise PriceProfilePgError("PROFILE_FILTER_INVALID", "市场或板别筛选值无效")
     if bias20_atr_band not in _BIAS20_ATR_BAND_DEFINITIONS:
         raise PriceProfilePgError(
@@ -4387,7 +4503,7 @@ def read_profile_page(
     if source_symbol is not None and (
         not isinstance(source_symbol, str)
         or len(source_symbol) != 9
-        or source_symbol[:2] not in {"SH", "SZ"}
+        or source_symbol[:2] not in {"SH", "SZ", "BJ"}
         or source_symbol[2] != "."
         or not source_symbol[3:].isdecimal()
     ):
@@ -4416,13 +4532,15 @@ def read_profile_page(
 
     conditions = [
         "p.target_session=%s",
-        "p.source_package_id=%s",
+        "p.source_capture_id=%s",
         "p.profile_revision=%s",
+        "p.price_coordinate=%s",
     ]
     parameters: list[Any] = [
         target_session,
-        source_package_id,
+        source_capture_id,
         profile_revision,
+        price_coordinate,
     ]
     if market != "ALL":
         conditions.append("p.market=%s")
@@ -4501,20 +4619,40 @@ def read_profile_page(
             cursor,
             target_session=target_session,
             max_target_session=max_target_session,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             profile_revision=profile_revision,
+            price_coordinate=price_coordinate,
         )
         cursor.execute(
             """SELECT count(*)::bigint,
        count(DISTINCT r.source_symbol)::bigint,
        count(DISTINCT r.source_capture_id)::bigint,
-       min(c.normalized_count), max(c.normalized_count)
+       min(capture.expected_symbol_count), max(capture.expected_symbol_count)
 FROM source_raw_daily r
-LEFT JOIN source_captures c ON c.capture_id=r.source_capture_id
-  AND c.source_package_id=r.source_package_id AND c.target_session=r.session_date
+JOIN stock.source_captures c ON c.capture_id=r.source_capture_id
+JOIN LATERAL (
+    SELECT count(*)::bigint AS expected_symbol_count
+    FROM (
+        SELECT request.source_code
+        FROM stock.source_capture_requests request
+        WHERE request.capture_id=c.capture_id
+          AND request.range_end_session<=%s
+        GROUP BY request.source_code
+        HAVING count(*)=2 AND count(DISTINCT request.adjustment_flag)=2
+          AND count(DISTINCT request.eligible_start_session)=1
+          AND count(DISTINCT request.eligible_end_session)=1
+          AND bool_and(request.request_status IN ('COMPLETED','NO_DATA')
+            AND (request.request_status='NO_DATA'
+                 OR request.completed_through_session>=request.range_end_session))
+          AND r.session_date BETWEEN min(request.eligible_start_session)
+                                 AND max(request.eligible_end_session)
+    ) closed_requests
+) capture ON TRUE
 WHERE r.session_date=%s
-  AND r.source_package_id=%s""",
-            (target_session, source_package_id),
+  AND r.source_capture_id=%s AND c.provider='BAOSTOCK'
+  AND c.range_end_session<=%s
+  AND r.price_quality IS NOT NULL AND r.qfq_price_quality IS NOT NULL""",
+            (max_target_session, target_session, source_capture_id, max_target_session),
         )
         (
             raw_total,
@@ -4538,10 +4676,10 @@ WHERE r.session_date=%s
         cursor.execute(
             """SELECT count(*)::bigint FROM source_symbol_price_profiles
 WHERE target_session=%s
-  AND source_package_id=%s AND profile_revision=%s""",
+  AND source_capture_id=%s AND profile_revision=%s""",
             (
                 target_session,
-                source_package_id,
+                source_capture_id,
                 profile_revision,
             ),
         )
@@ -4556,7 +4694,7 @@ WHERE target_session=%s
             cursor.execute(
                 """SELECT count(*)::bigint
 FROM source_symbol_price_profiles p
-WHERE p.target_session=%s AND p.source_package_id=%s AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
   AND (
     COALESCE(array_ndims(p.profile_field_ids), 0) <> 1
     OR COALESCE(array_length(p.profile_field_ids, 1), 0) <> 11
@@ -4580,7 +4718,7 @@ WHERE p.target_session=%s AND p.source_package_id=%s AND p.profile_revision=%s
   )""",
                 (
                     target_session,
-                    source_package_id,
+                    source_capture_id,
                     profile_revision,
                     profile_ids,
                     profile_ids,
@@ -4599,13 +4737,13 @@ WHERE p.target_session=%s AND p.source_package_id=%s AND p.profile_revision=%s
 FROM source_symbol_price_profiles p
 CROSS JOIN LATERAL generate_subscripts(p.profile_field_ids, 1)
   AS field_index(subscript)
-WHERE p.target_session=%s AND p.source_package_id=%s AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
   AND p.profile_field_ids[field_index.subscript]=%s
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3""",
                 (
                     target_session,
-                    source_package_id,
+                    source_capture_id,
                     profile_revision,
                     profile_field_id,
                 ),
@@ -4661,7 +4799,6 @@ ORDER BY 1, 2, 3""",
         cursor.execute(
             f"""SELECT count(*)::bigint FROM source_symbol_price_profiles p
 LEFT JOIN source_raw_daily r ON r.source_symbol=p.source_symbol AND r.session_date=p.target_session
-  AND r.source_package_id=p.source_package_id
   AND r.source_capture_id=p.source_capture_id
 WHERE {where_sql}""",
             parameters,
@@ -4685,20 +4822,28 @@ WHERE {where_sql}""",
        p.profile_reasons[array_position(p.profile_field_ids,%s)] AS selected_profile_reason"""
             selected_profile_parameters = [profile_field_id] * 4
         cursor.execute(
-            f"""SELECT p.*, r.raw_open AS target_raw_open,
-       r.raw_high AS target_raw_high, r.raw_low AS target_raw_low,
-       r.raw_close AS target_raw_close,
-       COALESCE(r.price_quality, 'UNKNOWN') AS target_raw_price_quality,
+            f"""SELECT p.*,
+       r.raw_open AS target_raw_open,r.raw_high AS target_raw_high,
+       r.raw_low AS target_raw_low,r.raw_close AS target_raw_close,
+       r.price_quality AS target_raw_price_quality,
+       r.price_reason AS target_raw_price_reason,
+       r.qfq_open AS target_qfq_open,r.qfq_high AS target_qfq_high,
+       r.qfq_low AS target_qfq_low,r.qfq_close AS target_qfq_close,
+       r.qfq_price_quality AS target_qfq_price_quality,
+       r.qfq_price_reason AS target_qfq_price_reason,
+       r.qfq_open AS selected_open,r.qfq_high AS selected_high,
+       r.qfq_low AS selected_low,r.qfq_close AS selected_close,
+       r.qfq_price_quality AS selected_price_quality,
+       r.qfq_price_reason AS selected_price_reason,
        CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING'
-            WHEN r.price_quality IS DISTINCT FROM 'OBSERVED'
-              THEN COALESCE(r.price_reason, 'RAW_PRICE_REASON_MISSING')
-            ELSE r.price_reason END AS target_raw_price_reason,
+            WHEN r.qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+              THEN COALESCE(r.qfq_price_reason, 'QFQ_PRICE_REASON_MISSING')
+            ELSE r.qfq_price_reason END AS selected_price_reason_detail,
        {_BIAS20_ATR_UNKNOWN_REASON_SQL} AS bias20_atr_unknown_reason,
        {position_projection},
        {selected_profile_projection}
 FROM source_symbol_price_profiles p
 LEFT JOIN source_raw_daily r ON r.source_symbol=p.source_symbol AND r.session_date=p.target_session
-  AND r.source_package_id=p.source_package_id
   AND r.source_capture_id=p.source_capture_id
 WHERE {where_sql}
 ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
@@ -4811,7 +4956,7 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         if total > 0
         else "NO_MATCH",
         "target_session": target_session.isoformat(),
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "profile_revision": profile_revision,
         "source_pool_total": snapshot_total,
         "ratio_metadata": {

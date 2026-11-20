@@ -25,7 +25,6 @@ _PULSE_STATES = ("TRUE", "FALSE", "UNKNOWN")
 _PULSE_COLUMNS = (
     "id",
     "target_session",
-    "source_package_id",
     "source_capture_id",
     "profile_revision",
     "catalog_id",
@@ -54,7 +53,6 @@ _COLUMNS = (
     "horizon_sessions",
     "target_session",
     "target_source_capture_id",
-    "target_source_package_id",
     "calendar_id",
     "calendar_revision",
     "fixed_member_denominator",
@@ -121,15 +119,15 @@ def _codes(value: Any) -> list[str]:
 
 
 def _pulse_rows(
-    cursor: Any, *, t0_session: date, source_package_id: int
+    cursor: Any, *, t0_session: date, source_capture_id: int
 ) -> list[dict[str, Any]]:
     selected = ["p." + name for name in _PULSE_COLUMNS if name != "snapshot_id"]
     cursor.execute(
         f"SELECT {', '.join(selected)}, c.snapshot_id "
         f"FROM {_PULSE_TABLE} p JOIN tdx_sector_catalog c ON c.id=p.catalog_id "
-        "WHERE p.target_session=%s AND p.source_package_id=%s AND p.algorithm_contract=%s "
+        "WHERE p.target_session=%s AND p.source_capture_id=%s AND p.algorithm_contract=%s "
         'ORDER BY c.board_kind, c.board_native_id COLLATE "C"',
-        (t0_session, source_package_id, _PULSE_ALGORITHM),
+        (t0_session, source_capture_id, _PULSE_ALGORITHM),
     )
     names = [item.name for item in cursor.description]
     rows = [dict(zip(names, values, strict=True)) for values in cursor.fetchall()]
@@ -143,8 +141,7 @@ def _pulse_rows(
             or row["id"] <= 0
             or type(row["source_capture_id"]) is not int
             or row["source_capture_id"] <= 0
-            or type(row["source_package_id"]) is not int
-            or row["source_package_id"] != source_package_id
+            or row["source_capture_id"] != source_capture_id
             or type(row["catalog_id"]) is not int
             or type(row["snapshot_id"]) is not int
             or row["board_kind"] not in _KINDS
@@ -153,7 +150,7 @@ def _pulse_rows(
             or row["calculation_status"] != "COMPLETE"
             or row["research_mode"] != "NON_PIT_RETROSPECTIVE"
             or row["membership_mode"] != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-            or row["price_coordinate"] != "RAW_UNADJUSTED"
+            or row["price_coordinate"] != "FORWARD_ADJUSTED"
             or not str(row["profile_revision"]).startswith("PROFILE_R")
         ):
             raise SectorPulseFollowupPgError(
@@ -163,7 +160,6 @@ def _pulse_rows(
     identities = {
         (
             row["target_session"],
-            row["source_package_id"],
             row["source_capture_id"],
             row["profile_revision"],
             row["source_pool_count"],
@@ -214,81 +210,143 @@ def _transition_rows(cursor: Any, pulse_ids: Sequence[int]) -> list[dict[str, An
 
 
 def _source_version(
-    cursor: Any, *, session: date, source_package_id: int
+    cursor: Any,
+    *,
+    session: date,
+    source_capture_id: int,
+    research_cutoff: date,
 ) -> tuple[str, dict[str, Any] | None]:
-    status, actual, expected = source_raw._page_version_status(
-        cursor, session, source_package_id
-    )
-    if status != "CLOSED":
-        return status, None
     cursor.execute(
-        """SELECT c.capture_id, c.source_package_id, c.normalized_count,
-       c.source_time_quality, c.source_clock_role, c.source_available_at,
-       count(r.id)::bigint, count(DISTINCT r.source_symbol)::bigint,
-       count(DISTINCT r.source_capture_id)::bigint
-FROM source_captures c
-LEFT JOIN source_raw_daily r ON r.source_capture_id=c.capture_id
-  AND r.source_package_id=c.source_package_id AND r.session_date=c.target_session
-WHERE c.source_package_id=%s AND c.target_session=%s
-GROUP BY c.capture_id, c.source_package_id, c.normalized_count,
-         c.source_time_quality, c.source_clock_role, c.source_available_at""",
-        (source_package_id, session),
+        """SELECT capture_id,capture_uuid,provider,range_start_session,
+                  range_end_session,price_coordinates,parser_contract,
+                  source_time_quality,source_clock_role,source_available_at,
+                  read_started_at,validated_at,unit_contract_version
+           FROM source_captures WHERE capture_id=%s""",
+        (source_capture_id,),
     )
-    rows = cursor.fetchall()
-    if len(rows) != 1:
+    capture = cursor.fetchone()
+    if capture is None:
         return "INCOMPLETE", None
-    (
-        capture,
-        package,
-        normalized,
-        quality,
-        role,
-        available,
-        row_count,
-        symbol_count,
-        capture_count,
-    ) = rows[0]
     if (
-        int(package) != source_package_id
-        or actual != expected
-        or int(row_count) != actual
-        or int(symbol_count) != actual
-        or int(capture_count) != 1
-        or int(normalized) != actual
-        or not quality
-        or not role
+        type(research_cutoff) is not date
+        or session > research_cutoff
+        or capture[0] != source_capture_id
+        or capture[2] != "BAOSTOCK"
+        or capture[3] is None
+        or capture[4] is None
+        or not capture[3] <= session <= capture[4] <= research_cutoff
+        or set(capture[5] or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or capture[7] != "NON_PIT_OBSERVED"
+        or capture[8] != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+        or capture[9] is not None
     ):
         return "INCOMPLETE", None
-    return status, {
+
+    cursor.execute(
+        """WITH request_codes AS (
+               SELECT source_code,
+                      count(*)=2 AND count(DISTINCT adjustment_flag)=2
+                        AND count(DISTINCT eligible_start_session)=1
+                        AND count(DISTINCT eligible_end_session)=1
+                        AND bool_and(
+                            request_status IN ('COMPLETED','NO_DATA')
+                            AND (request_status='NO_DATA' OR
+                                 completed_through_session>=range_end_session)
+                        ) AS complete,
+                      min(eligible_start_session) AS eligible_start,
+                      max(eligible_end_session) AS eligible_end
+               FROM source_capture_requests
+               WHERE capture_id=%s AND range_end_session<=%s
+               GROUP BY source_code
+           )
+           SELECT count(*) FILTER (
+                      WHERE %s BETWEEN eligible_start AND eligible_end
+                  )::bigint,
+                  count(*) FILTER (
+                      WHERE %s BETWEEN eligible_start AND eligible_end AND complete
+                  )::bigint
+           FROM request_codes""",
+        (source_capture_id, research_cutoff, session, session),
+    )
+    expected_count, complete_count = (int(value or 0) for value in cursor.fetchone())
+    cursor.execute(
+        """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint,
+                  count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint,
+                  count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint
+           FROM source_raw_daily
+           WHERE session_date=%s AND source_capture_id=%s AND session_date<=%s""",
+        (session, source_capture_id, research_cutoff),
+    )
+    row_count, symbol_count, raw_quality_count, qfq_quality_count = (
+        int(value or 0) for value in cursor.fetchone()
+    )
+    if (
+        expected_count <= 0
+        or expected_count != complete_count
+        or row_count != expected_count
+        or symbol_count != row_count
+        or raw_quality_count != row_count
+        or qfq_quality_count != row_count
+    ):
+        return "INCOMPLETE", None
+    return "CLOSED", {
         "session_date": session,
-        "source_package_id": int(package),
-        "source_capture_id": int(capture),
-        "normalized_count": int(normalized),
-        "source_time_quality": quality,
-        "source_clock_role": role,
-        "source_available_at": available,
-        "row_count": int(row_count),
+        "source_capture_id": source_capture_id,
+        "capture_uuid": str(capture[1]),
+        "provider": capture[2],
+        "range_start_session": capture[3],
+        "range_end_session": capture[4],
+        "price_coordinates": list(capture[5] or ()),
+        "parser_contract": capture[6],
+        "source_time_quality": capture[7],
+        "source_clock_role": capture[8],
+        "source_available_at": capture[9],
+        "read_started_at": capture[10],
+        "validated_at": capture[11],
+        "unit_contract_version": capture[12],
+        "expected_row_count": expected_count,
+        "normalized_count": row_count,
+        "row_count": row_count,
     }
 
 
 def _target_version(
-    cursor: Any, session: date, package_id: int | None = None
+    cursor: Any,
+    session: date,
+    research_cutoff: date,
+    capture_id: int | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
-    """仅在目标会话来源包唯一时选择，不以最新包替代明确修订。"""
-    if package_id is not None:
-        return _source_version(cursor, session=session, source_package_id=package_id)
+    """仅在目标会话paired BaoStock捕获唯一时选择，不以其它捕获回退。"""
+    if capture_id is not None:
+        return _source_version(
+            cursor,
+            session=session,
+            source_capture_id=capture_id,
+            research_cutoff=research_cutoff,
+        )
     cursor.execute(
-        "SELECT DISTINCT c.source_package_id FROM source_captures c "
-        "JOIN source_packages p ON p.source_package_id=c.source_package_id "
-        "WHERE c.target_session=%s AND p.dataset_id=%s ORDER BY c.source_package_id",
-        (session, source_raw._DATASET_ID),
+        """SELECT DISTINCT c.capture_id
+           FROM source_captures c
+           JOIN source_raw_daily r ON r.source_capture_id=c.capture_id
+           WHERE r.session_date=%s AND c.provider='BAOSTOCK'
+             AND c.range_start_session<=%s AND c.range_end_session<=%s
+             AND c.price_coordinates @> ARRAY[
+                 'RAW_UNADJUSTED','FORWARD_ADJUSTED'
+             ]::text[]
+           ORDER BY c.capture_id""",
+        (session, session, research_cutoff),
     )
-    packages = cursor.fetchall()
-    if not packages:
+    captures = cursor.fetchall()
+    if not captures:
         return "EMPTY", None
-    if len(packages) != 1:
+    if len(captures) != 1:
         return "AMBIGUOUS", None
-    return _source_version(cursor, session=session, source_package_id=packages[0][0])
+    return _source_version(
+        cursor,
+        session=session,
+        source_capture_id=captures[0][0],
+        research_cutoff=research_cutoff,
+    )
 
 
 def read_source_sector_pulse_followup_inputs(
@@ -296,20 +354,20 @@ def read_source_sector_pulse_followup_inputs(
     *,
     t0_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     due_targets: Mapping[int, date],
-    target_package_ids: Mapping[int, int] | None = None,
+    target_capture_ids: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
     """在一个只读快照中读T0完整PULSE、固定成员和已闭合后继Raw。"""
     if (
         type(t0_session) is not date
         or type(research_cutoff) is not date
         or t0_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or any(
             h not in _HORIZONS or type(p) is not int or p <= 0
-            for h, p in (target_package_ids or {}).items()
+            for h, p in (target_capture_ids or {}).items()
         )
         or any(
             type(h) is not int
@@ -329,12 +387,15 @@ def read_source_sector_pulse_followup_inputs(
         _identity,
     ):
         pulses = _pulse_rows(
-            cursor, t0_session=t0_session, source_package_id=source_package_id
+            cursor, t0_session=t0_session, source_capture_id=source_capture_id
         )
         transition_rows = _transition_rows(cursor, [row["id"] for row in pulses])
         identity = pulses[0]
         t0_status, t0_source = _source_version(
-            cursor, session=t0_session, source_package_id=source_package_id
+            cursor,
+            session=t0_session,
+            source_capture_id=source_capture_id,
+            research_cutoff=research_cutoff,
         )
         if (
             t0_status != "CLOSED"
@@ -350,11 +411,11 @@ def read_source_sector_pulse_followup_inputs(
             """SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint,
        count(DISTINCT profile_revision)::bigint, min(producer_version), max(producer_version)
 FROM source_pool_seed_day_facts
-WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s AND profile_revision=%s""",
+WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
+  AND price_coordinate='FORWARD_ADJUSTED'""",
             (
                 t0_session,
-                source_package_id,
-                identity["source_capture_id"],
+                source_capture_id,
                 identity["profile_revision"],
             ),
         )
@@ -415,7 +476,10 @@ GROUP BY c.board_native_id,c.board_name ORDER BY c.board_native_id COLLATE "C"
         target_versions, target_statuses = {}, {}
         for horizon, target in sorted(due_targets.items()):
             status, version = _target_version(
-                cursor, target, (target_package_ids or {}).get(horizon)
+                cursor,
+                target,
+                research_cutoff,
+                (target_capture_ids or {}).get(horizon),
             )
             target_statuses[horizon] = {
                 "status": status,
@@ -433,11 +497,17 @@ GROUP BY c.board_native_id,c.board_name ORDER BY c.board_native_id COLLATE "C"
         versions = [t0_source, *target_versions.values()]
         raw_rows = []
         for version in versions:
-            rows = source_raw._read_history_rows(
+            from stock_a.storage.postgres.baostock_price_facts import (
+                read_baostock_price_history_rows_cursor,
+            )
+
+            rows = read_baostock_price_history_rows_cursor(
                 cursor,
                 source_symbols=symbols,
                 sessions=(version["session_date"],),
-                source_package_id=version["source_package_id"],
+                source_capture_id=version["source_capture_id"],
+                cutoff=research_cutoff,
+                price_coordinate="FORWARD_ADJUSTED",
             )
             if any(
                 row["source_capture_id"] != version["source_capture_id"] for row in rows
@@ -453,7 +523,7 @@ GROUP BY c.board_native_id,c.board_name ORDER BY c.board_native_id COLLATE "C"
     return {
         "t0_session": t0_session,
         "research_cutoff": research_cutoff,
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "pulse_rows": pulses,
         "transition_rows": transition_rows,
         "pulse_by_board": pulse_by_board,
@@ -500,15 +570,13 @@ def _prepare_rows(
             or type(target) is not date
             or target_version is None
             or target_version["session_date"] != target
-            or type(target_version.get("source_package_id")) is not int
-            or target_version["source_package_id"] <= 0
             or type(target_version.get("source_capture_id")) is not int
             or target_version["source_capture_id"] <= 0
             or outcome.get("outcome_status") not in {"OBSERVED", "UNKNOWN"}
             or outcome.get("research_mode") != "NON_PIT_RETROSPECTIVE"
             or outcome.get("membership_mode")
             != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-            or outcome.get("price_coordinate") != "RAW_UNADJUSTED"
+            or outcome.get("price_coordinate") != "FORWARD_ADJUSTED"
             or outcome.get("fixed_member_denominator") != pulse["member_count"]
         ):
             raise SectorPulseFollowupPgError(
@@ -542,7 +610,6 @@ def _prepare_rows(
                 horizon,
                 target,
                 target_version["source_capture_id"],
-                target_version["source_package_id"],
                 calendar_id,
                 calendar_revision,
                 int(outcome["fixed_member_denominator"]),
@@ -584,12 +651,11 @@ def _validate_write_scope(cursor: Any, context: Mapping[str, Any]) -> None:
     current = _pulse_rows(
         cursor,
         t0_session=identity["target_session"],
-        source_package_id=identity["source_package_id"],
+        source_capture_id=identity["source_capture_id"],
     )
     stable = (
         "id",
         "source_capture_id",
-        "source_package_id",
         "profile_revision",
         "catalog_id",
         "snapshot_id",
@@ -630,7 +696,10 @@ def _validate_write_scope(cursor: Any, context: Mapping[str, Any]) -> None:
     )
     for session, expected in versions.items():
         status, actual = _source_version(
-            cursor, session=session, source_package_id=expected["source_package_id"]
+            cursor,
+            session=session,
+            source_capture_id=expected["source_capture_id"],
+            research_cutoff=context["research_cutoff"],
         )
         if status != "CLOSED" or actual != expected:
             raise SectorPulseFollowupPgError(
@@ -852,7 +921,7 @@ def read_source_sector_pulse_followups(
     research_cutoff: date,
     horizon_targets: Mapping[int, date | None],
     calendar_identity: Mapping[str, str],
-    target_package_ids: Mapping[int, int] | None = None,
+    target_capture_ids: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
     """批量PG只读已存后继事实，并区分到期、未生产和输入未闭合。"""
     groups = {
@@ -890,16 +959,8 @@ def read_source_sector_pulse_followups(
             "PULSE_FOLLOWUP_SOURCE_BINDING_INVALID", "T0缺少来源捕获上下文"
         )
     t0_session = date.fromisoformat(str(pulse_day.get("target_session")))
-    package_id, capture_id = (
-        source.get("source_package_id"),
-        source.get("source_capture_id"),
-    )
-    if (
-        type(package_id) is not int
-        or package_id <= 0
-        or type(capture_id) is not int
-        or capture_id <= 0
-    ):
+    capture_id = source.get("source_capture_id")
+    if type(capture_id) is not int or capture_id <= 0:
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_SOURCE_BINDING_INVALID", "T0来源包或捕获ID无效"
         )
@@ -920,7 +981,6 @@ def read_source_sector_pulse_followups(
         config,
         target_session=t0_session,
         research_cutoff=research_cutoff,
-        source_package_id=package_id,
         source_capture_id=capture_id,
         profile_revision=profile_revision,
         snapshot_ids=snapshot_ids,
@@ -944,13 +1004,12 @@ def read_source_sector_pulse_followups(
        c.board_kind, c.board_native_id, c.board_name, p.member_count, p.catalog_id
 FROM {_TABLE} f JOIN {_PULSE_TABLE} p ON p.id=f.pulse_fact_id
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
-WHERE p.source_package_id=%s AND p.source_capture_id=%s AND p.profile_revision=%s
+WHERE p.source_capture_id=%s AND p.profile_revision=%s
   AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s::bigint[])
   AND f.followup_contract=%s AND f.calendar_id=%s AND f.calendar_revision=%s
   AND f.target_session<=%s
 ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
             (
-                package_id,
                 capture_id,
                 profile_revision,
                 _PULSE_ALGORITHM,
@@ -964,12 +1023,12 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
         names = [item.name for item in cursor.description]
         saved = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
         for row in saved:
-            selected_package = (target_package_ids or {}).get(
+            selected_capture_id = (target_capture_ids or {}).get(
                 int(row["horizon_sessions"])
             )
             if (
-                selected_package is not None
-                and row["target_source_package_id"] != selected_package
+                selected_capture_id is not None
+                and row["target_source_capture_id"] != selected_capture_id
             ):
                 continue
             bucket = saved_by_board[row["board_kind"]].setdefault(
@@ -989,7 +1048,10 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
             if target is None or target > research_cutoff:
                 continue
             status, version = _target_version(
-                cursor, target, (target_package_ids or {}).get(horizon)
+                cursor,
+                target,
+                research_cutoff,
+                (target_capture_ids or {}).get(horizon),
             )
             target_statuses[horizon] = status
             if version is not None:
@@ -1063,8 +1125,6 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
                         version = target_versions.get(horizon)
                         if (
                             row["target_session"] != target
-                            or row["target_source_package_id"]
-                            != (version or {}).get("source_package_id")
                             or row["target_source_capture_id"]
                             != (version or {}).get("source_capture_id")
                             or row["pulse_state"] != pulse.get("state")
@@ -1105,7 +1165,7 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
                     item.setdefault(
                         "membership_mode", "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
                     )
-                    item.setdefault("price_coordinate", "RAW_UNADJUSTED")
+                    item.setdefault("price_coordinate", "FORWARD_ADJUSTED")
                     horizons.append(item)
                     statuses.append(item["status"])
                 kind_facts[board_id] = {
@@ -1155,6 +1215,5 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
         "dml_executed": False,
         "read_only_transaction": "REPEATABLE READ READ ONLY",
         "profile_revision": profile_revision,
-        "source_package_id": package_id,
         "source_capture_id": capture_id,
     }

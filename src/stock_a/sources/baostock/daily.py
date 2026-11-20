@@ -19,6 +19,7 @@ _SEMANTIC_FIELDS = frozenset(
         "high",
         "low",
         "close",
+        "preclose",
         "volume",
         "amount",
         "turn",
@@ -31,6 +32,7 @@ _INVALID_FIELD_REASONS = {
     "high": "最高价数据非法",
     "low": "最低价数据非法",
     "close": "收盘价数据非法",
+    "preclose": "前收盘价数据非法",
     "volume": "成交量数据非法",
     "amount": "成交金额数据非法",
     "turn": "换手率数据非法",
@@ -98,10 +100,13 @@ class BaoDailyObservation:
     session_date: date
     source_code: str
     unit_contract_version: str
+    adjustment_flag: str
+    price_coordinate: str
     open: FieldValue
     high: FieldValue
     low: FieldValue
     close: FieldValue
+    preclose: FieldValue
     volume: FieldValue
     amount: FieldValue
     turn: FieldValue
@@ -211,6 +216,8 @@ def normalize_daily_row(
     returned_fields: Collection[str],
     field_map: Mapping[str, str],
     units: BaoUnitContract,
+    *,
+    adjustflag: str | int = "3",
 ) -> BaoDailyObservation:
     """规范化单条日线；非法行情值局部隔离，非法日期/来源键拒绝整行。"""
     if not isinstance(row, Mapping):
@@ -238,8 +245,16 @@ def normalize_daily_row(
         raise ContractError("BaoStock实际字段清单不能包含首尾空白")
     if not isinstance(units, BaoUnitContract):
         raise ContractError("缺少BaoStock单位合同")
+    if isinstance(adjustflag, bool):
+        raise ContractError("BaoStock复权参数只支持2前复权或3未复权")
+    if isinstance(adjustflag, int) and adjustflag in (2, 3):
+        adjustflag = str(adjustflag)
+    elif not isinstance(adjustflag, str) or adjustflag not in ("2", "3"):
+        raise ContractError("BaoStock复权参数只支持2前复权或3未复权")
 
     columns = frozenset(returned_fields)
+    if "adjustflag" not in columns or row.get("adjustflag") != adjustflag:
+        raise ContractError("BaoStock响应价格坐标与请求不符")
     raw_date = _required_key(row, columns, field_map["session_date"], "交易日")
     if isinstance(raw_date, date):
         session_date = raw_date
@@ -260,7 +275,7 @@ def normalize_daily_row(
         raise ContractError("BaoStock价格、金额和数量倍率必须是精确有限数") from error
 
     prices: dict[str, FieldValue] = {}
-    for price_name in ("open", "high", "low", "close"):
+    for price_name in ("open", "high", "low", "close", "preclose"):
         value = _field_value(
             row,
             columns,
@@ -272,7 +287,9 @@ def normalize_daily_row(
         if value.quality == "OBSERVED" and value.value == 0:
             value = unknown(_INVALID_FIELD_REASONS[price_name])
         prices[price_name] = value
-    if all(prices[name].quality == "OBSERVED" for name in prices):
+    if all(
+        prices[name].quality == "OBSERVED" for name in ("open", "high", "low", "close")
+    ):
         open_price, high_price, low_price, close_price = (
             exact_number(prices[name].value)
             for name in ("open", "high", "low", "close")
@@ -302,10 +319,15 @@ def normalize_daily_row(
         session_date=session_date,
         source_code=source_code,
         unit_contract_version=units.version,
+        adjustment_flag=adjustflag,
+        price_coordinate=(
+            "RAW_UNADJUSTED" if adjustflag == "3" else "FORWARD_ADJUSTED"
+        ),
         open=prices["open"],
         high=prices["high"],
         low=prices["low"],
         close=prices["close"],
+        preclose=prices["preclose"],
         volume=volume,
         amount=amount,
         turn=turn,

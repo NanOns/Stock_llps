@@ -38,7 +38,6 @@ _SEED_SCOPE_FIELDS = (
 _OBSERVATION_COLUMNS = (
     "enrollment_id",
     "target_session",
-    "source_package_id",
     "source_capture_id",
     "source_symbol",
     "d0_fact_id",
@@ -95,7 +94,6 @@ def read_source_t0_early_observation_inputs(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     expected_source_count: int,
     snapshot_ids: Mapping[str, int],
@@ -105,8 +103,6 @@ def read_source_t0_early_observation_inputs(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(expected_source_count) is not int
@@ -134,12 +130,11 @@ def read_source_t0_early_observation_inputs(
                       s.research_mode,s.price_coordinate,count(*)::bigint,
                       count(DISTINCT s.source_symbol)::bigint
                FROM source_pool_seed_day_facts s
-               WHERE s.target_session=%s AND s.source_package_id=%s
-                 AND s.source_capture_id=%s
+               WHERE s.target_session=%s AND s.source_capture_id=%s
                GROUP BY s.profile_revision,s.producer_contract,s.producer_version,
                         s.history_session_count,s.calendar_id,s.calendar_revision,
                         s.research_mode,s.price_coordinate""",
-            (target_session, source_package_id, source_capture_id),
+            (target_session, source_capture_id),
         )
         seed_scopes = cursor.fetchall()
         if (
@@ -180,9 +175,9 @@ def read_source_t0_early_observation_inputs(
                LEFT JOIN source_d0_launch_day_facts d ON d.id=e.d0_fact_id
                LEFT JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
                WHERE COALESCE(d.target_session,r.target_session)=%s
-                 AND COALESCE(d.source_package_id,r.source_package_id)=%s
+                 AND COALESCE(d.source_capture_id,r.source_capture_id)=%s
                  AND COALESCE(d.target_capture_id,r.source_capture_id)=%s""",
-            (target_session, source_package_id, source_capture_id),
+            (target_session, source_capture_id, source_capture_id),
         )
         expected_registration_count = int(cursor.fetchone()[0])
 
@@ -191,14 +186,14 @@ def read_source_t0_early_observation_inputs(
     SELECT e.id AS enrollment_id,e.enrollment_kind,e.reason_code,
            e.d0_fact_id AS parent_d0_fact_id,e.rule_fact_id,
            COALESCE(d.target_session,r.target_session) AS target_session,
-           COALESCE(d.source_package_id,r.source_package_id) AS source_package_id,
-           COALESCE(d.target_capture_id,r.source_capture_id) AS source_capture_id,
+           COALESCE(d.source_capture_id,r.source_capture_id) AS source_capture_id,
+           COALESCE(d.target_capture_id,r.source_capture_id) AS target_capture_id,
            COALESCE(d.source_symbol,r.source_symbol) AS source_symbol
     FROM source_research_enrollments e
     LEFT JOIN source_d0_launch_day_facts d ON d.id=e.d0_fact_id
     LEFT JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
     WHERE COALESCE(d.target_session,r.target_session)=%s
-      AND COALESCE(d.source_package_id,r.source_package_id)=%s
+      AND COALESCE(d.source_capture_id,r.source_capture_id)=%s
       AND COALESCE(d.target_capture_id,r.source_capture_id)=%s
 ), memberships AS MATERIALIZED (
     SELECT m.source_symbol,c.id AS catalog_id,c.snapshot_id,
@@ -213,13 +208,13 @@ def read_source_t0_early_observation_inputs(
            min(d.id) AS fact_id,min(d.transition) AS transition,
            min(d.before_state) AS before_state,min(d.after_state) AS after_state
     FROM source_d0_launch_day_facts d
-    WHERE d.target_session=%s AND d.source_package_id=%s
+    WHERE d.target_session=%s AND d.source_capture_id=%s
       AND d.target_capture_id=%s
     GROUP BY d.source_symbol
 )
 SELECT p.enrollment_id,p.enrollment_kind,p.reason_code,
        p.parent_d0_fact_id,p.rule_fact_id,p.target_session,
-       p.source_package_id,p.source_capture_id,p.source_symbol,
+       p.source_capture_id,p.target_capture_id,p.source_symbol,
        s.id AS seed_fact_id,s.profile_revision,s.producer_contract,
        s.producer_version,s.history_session_count,s.calendar_id,
        s.calendar_revision,s.research_mode AS seed_research_mode,
@@ -236,7 +231,6 @@ SELECT p.enrollment_id,p.enrollment_kind,p.reason_code,
 FROM parents p
 JOIN source_pool_seed_day_facts s
   ON s.target_session=p.target_session
- AND s.source_package_id=p.source_package_id
  AND s.source_capture_id=p.source_capture_id
  AND s.source_symbol=p.source_symbol
 LEFT JOIN d0_scope d ON d.source_symbol=p.source_symbol
@@ -244,11 +238,11 @@ LEFT JOIN memberships m ON m.source_symbol=p.source_symbol
 ORDER BY p.enrollment_id,m.board_kind,m.board_native_id COLLATE "C" """,
             (
                 target_session,
-                source_package_id,
+                source_capture_id,
                 source_capture_id,
                 [snapshot_ids["INDUSTRY"], snapshot_ids["CONCEPT"]],
                 target_session,
-                source_package_id,
+                source_capture_id,
                 source_capture_id,
             ),
         )
@@ -312,7 +306,6 @@ ORDER BY p.enrollment_id,m.board_kind,m.board_native_id COLLATE "C" """,
 
     return {
         "target_session": target_session,
-        "source_package_id": source_package_id,
         "source_capture_id": source_capture_id,
         "expected_source_count": expected_source_count,
         "seed_scope": seed_scope,
@@ -343,7 +336,6 @@ def read_source_t0_pulse_transition_facts(
     target_pulse_ids: Sequence[int],
     previous_session: date,
     target_session: date,
-    source_package_id: int,
     previous_source_capture_id: int | None,
     target_source_capture_id: int,
     previous_profile_revision: str | None,
@@ -355,8 +347,6 @@ def read_source_t0_pulse_transition_facts(
         type(previous_session) is not date
         or type(target_session) is not date
         or previous_session >= target_session
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(target_source_capture_id) is not int
         or target_source_capture_id <= 0
         or any(type(item) is not int or item <= 0 for item in pulse_ids)
@@ -403,25 +393,21 @@ def read_source_t0_pulse_transition_facts(
                  ON previous.id=t.previous_pulse_id
                WHERE t.target_pulse_id=ANY(%s)
                  AND previous.target_session=%s
-                 AND previous.source_package_id=%s
                  AND previous.source_capture_id=%s
                  AND previous.profile_revision=%s
                  AND target.target_session=%s
-                 AND target.source_package_id=%s
                  AND target.source_capture_id=%s
                  AND target.profile_revision=%s
                  AND t.transition_contract='SOURCE_CROSS_PERIOD_PULSE_TRANSITION_R1'
                  AND t.research_mode='NON_PIT_RETROSPECTIVE'
-                 AND t.price_coordinate='RAW_UNADJUSTED'
+                 AND t.price_coordinate='FORWARD_ADJUSTED'
                ORDER BY t.target_pulse_id,t.id""",
             (
                 list(pulse_ids),
                 previous_session,
-                source_package_id,
                 previous_source_capture_id,
                 previous_profile_revision,
                 target_session,
-                source_package_id,
                 target_source_capture_id,
                 target_profile_revision,
             ),
@@ -522,9 +508,11 @@ def persist_source_t0_early_observation_facts(
         f"VALUES ({placeholders}) ON CONFLICT DO NOTHING"
     )
     readback_columns = ",".join(f"o.{name}" for name in _OBSERVATION_COLUMNS)
+    context_index = _OBSERVATION_COLUMNS.index("board_context_key")
+    revision_index = _OBSERVATION_COLUMNS.index("evidence_revision_key")
     expected_order = sorted(
         normalized,
-        key=lambda item: (item[0], item[12], item[48]),
+        key=lambda item: (item[0], item[context_index], item[revision_index]),
     )
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
@@ -545,8 +533,8 @@ JOIN source_t0_early_observation_facts o
 ORDER BY o.enrollment_id,o.board_context_key COLLATE "C",o.evidence_revision_key COLLATE "C" """,
             (
                 [item[0] for item in expected_order],
-                [item[12] for item in expected_order],
-                [item[48] for item in expected_order],
+                [item[context_index] for item in expected_order],
+                [item[revision_index] for item in expected_order],
             ),
         )
         readback = list(cursor.fetchall())
@@ -577,7 +565,7 @@ _READ_SELECT = """WITH latest AS (
     ORDER BY o.enrollment_id,o.board_context_key,o.recorded_at DESC,o.id DESC
 )
 SELECT o.id,o.enrollment_id,e.enrollment_kind,e.reason_code AS enrollment_reason_code,
-       o.target_session,o.source_package_id,o.source_capture_id,o.source_symbol,
+       o.target_session,o.source_capture_id,o.source_symbol,
        o.d0_fact_id,o.rule_fact_id,r.rule_id,r.rule_version,r.state AS rule_state,
        d.before_state AS d0_before_state,d.after_state AS d0_after_state,
        d.transition AS d0_transition,o.seed_fact_id,
@@ -730,7 +718,6 @@ def read_source_t0_early_observations_for_symbols(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     source_symbols: Sequence[str],
     board_kind: str | None = None,
@@ -740,8 +727,6 @@ def read_source_t0_early_observations_for_symbols(
     symbols = tuple(sorted(set(source_symbols)))
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or isinstance(source_symbols, (str, bytes))
@@ -775,11 +760,11 @@ def read_source_t0_early_observations_for_symbols(
                LEFT JOIN source_d0_launch_day_facts d ON d.id=e.d0_fact_id
                LEFT JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
                WHERE COALESCE(d.target_session,r.target_session)=%s
-                 AND COALESCE(d.source_package_id,r.source_package_id)=%s
+                 AND COALESCE(d.source_capture_id,r.source_capture_id)=%s
                  AND COALESCE(d.target_capture_id,r.source_capture_id)=%s
                  AND COALESCE(d.source_symbol,r.source_symbol)=ANY(%s)
                ORDER BY e.id""",
-            (target_session, source_package_id, source_capture_id, list(symbols)),
+            (target_session, source_capture_id, source_capture_id, list(symbols)),
         )
         enrollment_ids = [int(row[0]) for row in cursor.fetchall()]
         if not enrollment_ids:
@@ -790,10 +775,7 @@ def read_source_t0_early_observations_for_symbols(
     for row in rows:
         if row["target_session"] != target_session:
             continue
-        if (
-            row["source_package_id"] != source_package_id
-            or row["source_capture_id"] != source_capture_id
-        ):
+        if row["source_capture_id"] != source_capture_id:
             continue
         if row["source_symbol"] not in symbols:
             continue
@@ -813,7 +795,6 @@ def read_source_t0_early_triage_summaries_for_symbols(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     source_symbols: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
@@ -821,8 +802,6 @@ def read_source_t0_early_triage_summaries_for_symbols(
     symbols = tuple(sorted(set(source_symbols)))
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or isinstance(source_symbols, (str, bytes))
@@ -862,8 +841,8 @@ def read_source_t0_early_triage_summaries_for_symbols(
            o.rps20_unknown_member_count,o.rps20_out_of_source_pool_member_count,
            o.counter_codes,o.unknown_codes
     FROM source_t0_early_observation_facts o
-    WHERE o.target_session=%s AND o.source_package_id=%s
-      AND o.source_capture_id=%s AND o.source_symbol=ANY(%s)
+    WHERE o.target_session=%s AND o.source_capture_id=%s
+      AND o.source_symbol=ANY(%s)
     ORDER BY o.enrollment_id,o.board_context_key,o.recorded_at DESC,o.id DESC
 ), evidence AS MATERIALIZED (
     SELECT o.*,COALESCE(c.board_name,o.board_native_id) AS board_name,
@@ -1297,7 +1276,7 @@ LEFT JOIN board_examples be USING (source_symbol)
 LEFT JOIN seed_summary sm USING (source_symbol)
 ORDER BY s.source_symbol COLLATE "C"
             """,
-            (target_session, source_package_id, source_capture_id, list(symbols)),
+            (target_session, source_capture_id, list(symbols)),
         )
         rows = cursor.fetchall()
 
@@ -1322,7 +1301,6 @@ ORDER BY s.source_symbol COLLATE "C"
             "membership_mode": membership_mode,
             "scope": research_mode,
             "price_coordinate": price_coordinate,
-            "source_package_id": source_package_id,
             "source_capture_id": source_capture_id,
             "t0_driver_and_earliness": {
                 "version": "T0_DRIVER_AND_EARLINESS_R1",
@@ -1409,7 +1387,6 @@ ORDER BY s.source_symbol COLLATE "C"
                 "triage_state": "NO_T0_FACT",
                 "registration_count": 0,
                 "relation_count": 0,
-                "source_package_id": source_package_id,
                 "source_capture_id": source_capture_id,
             },
         )

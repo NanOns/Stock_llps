@@ -9,7 +9,7 @@ EVENT_VERSION = "SOURCE_D1_ANCHOR_R1"
 EVENT_COLUMNS = (
     "target_session",
     "source_symbol",
-    "source_package_id",
+    "source_capture_id",
     "target_capture_id",
     "event_type",
     "anchor_session",
@@ -40,12 +40,16 @@ def prepare_source_events(
     source,
     calendar_revision,
     frozen,
-    source_package_id,
+    source_capture_id,
     d1_history_session_count,
 ):
     """使用生产者已验证的数字捕获父键，不复制Raw条目摘要。"""
     target_capture = source["source_capture_id"]
-    if type(target_capture) is not int or target_capture <= 0:
+    if (
+        type(target_capture) is not int
+        or target_capture <= 0
+        or target_capture != source_capture_id
+    ):
         raise ValueError("D1目标来源捕获数字ID无效")
     rows = []
     for symbol, item in sorted(frozen.items()):
@@ -53,7 +57,7 @@ def prepare_source_events(
             origin = anchor["source"]
             anchor_capture = origin.get("anchor_capture_id")
             if (
-                origin.get("source_package_id") != source_package_id
+                origin.get("source_capture_id") != source_capture_id
                 or origin.get("target_capture_id") != target_capture
                 or type(anchor_capture) is not int
                 or anchor_capture <= 0
@@ -73,7 +77,7 @@ def prepare_source_events(
                 (
                     target,
                     symbol,
-                    source_package_id,
+                    source_capture_id,
                     target_capture,
                     "SOURCE_D1_BREAKOUT",
                     date.fromisoformat(anchor["support_anchor_session"]),
@@ -108,7 +112,7 @@ def insert_source_events(
     *,
     rows,
     target,
-    source_package_id,
+    source_capture_id,
     target_capture_id,
     profile_revision,
     history_session_count,
@@ -117,18 +121,19 @@ def insert_source_events(
     calendar_revision,
 ):
     """在调用者的T0事务内对照逐股事件数，再按数字父键幂等写锚。"""
-    expected_prefix = (target, source_package_id, target_capture_id)
+    expected_prefix = (target, source_capture_id, target_capture_id)
     if any((r[0], r[2], r[3]) != expected_prefix for r in rows):
         raise ValueError("事件批次混入其他T0或来源捕获")
     cursor.execute(
         """SELECT source_symbol,event_count FROM source_rule_evaluations
-               WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
+               WHERE target_session=%s AND source_capture_id=%s
                  AND rule_id='D1_ANCHOR_WINDOW'
                  AND rule_version='SOURCE_COHORT_RULES_R1' AND profile_revision=%s
                  AND history_session_count=%s AND d1_history_session_count=%s
                  AND event_window_start=%s AND calendar_revision=%s""",
         (
-            *expected_prefix,
+            target,
+            source_capture_id,
             profile_revision,
             history_session_count,
             d1_history_session_count,
@@ -158,7 +163,7 @@ def insert_source_events(
             "d1_history_session_count",
             "calendar_revision",
         ),
-        "target_session=%s AND source_package_id=%s AND target_capture_id=%s",
+        "target_session=%s AND source_capture_id=%s AND target_capture_id=%s",
         expected_prefix,
     )
     return {"inserted_events": inserted, "event_facts": len(rows)}
@@ -168,7 +173,7 @@ def read_source_events(
     config,
     *,
     target,
-    source_package_id,
+    source_capture_id,
     symbol,
     d1_history_session_count,
     calendar_revision,
@@ -183,14 +188,14 @@ def read_source_events(
                       previous_state,previous_quality,target_state,target_quality,
                       change_classification,reason_code,target_capture_id
                FROM source_research_events
-               WHERE target_session=%s AND source_package_id=%s
+               WHERE target_session=%s AND source_capture_id=%s
                  AND source_symbol=%s AND event_type='SOURCE_D1_BREAKOUT'
                  AND event_version=%s AND d1_history_session_count=%s AND calendar_revision=%s
                  AND anchor_session >= %s
                ORDER BY anchor_session""",
             (
                 target,
-                source_package_id,
+                source_capture_id,
                 symbol,
                 EVENT_VERSION,
                 d1_history_session_count,

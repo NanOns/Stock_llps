@@ -15,11 +15,8 @@ _DAY_TABLE = "source_market_breadth_days"
 _SYMBOL_TABLE = "source_market_breadth_symbols"
 _DAY_COLUMNS = (
     "target_session",
-    "source_package_id",
     "source_capture_id",
-    "source_dataset_id",
-    "source_byte_count",
-    "parser_contract",
+    "price_coordinate",
     "source_time_quality",
     "source_available_at",
     "capture_read_started_at",
@@ -40,11 +37,11 @@ _DAY_COLUMNS = (
     "history_row_count",
 )
 _KEY = (
-    "source_package_id",
     "target_session",
     "contract_version",
     "calendar_revision",
     "source_capture_id",
+    "price_coordinate",
 )
 _SYMBOL_COLUMNS = (
     "breadth_day_id",
@@ -103,27 +100,26 @@ def persist_market_breadth(config: Mapping[str, Any], market: Any) -> dict[str, 
 def _persist_market_breadth_once(
     config: Mapping[str, Any], market: Any
 ) -> dict[str, Any]:
-    """一个可重试事务保存日范围及完整逐股分类，同键异内容回滚。"""
+    """一个SERIALIZABLE事务核验捕获并保存完整逐股市场宽度。"""
     cohort = market.cohort
     result = market.calculation
     target_session = market.target_session
-    package_id = cohort.source_package_id
     capture_id = cohort.source_capture_id
     if (
         type(target_session) is not date
         or target_session > market.research_cutoff
-        or type(package_id) is not int
-        or package_id <= 0
         or type(capture_id) is not int
         or capture_id <= 0
+        or cohort.price_coordinate != "FORWARD_ADJUSTED"
         or result.n_source != len(result.symbols)
     ):
         raise MarketBreadthPgError(
-            "MARKET_BREADTH_PARTITION_OPEN", "宽度日期、数字来源身份或来源分母不闭合"
+            "MARKET_BREADTH_PARTITION_OPEN",
+            "宽度日期、BaoStock捕获身份或来源分母未闭合",
         )
     if (
-        result.n_source != cohort.raw_row_count
-        or len({x.source_symbol for x in result.symbols}) != result.n_source
+        result.n_source != cohort.price_row_count
+        or len({item.source_symbol for item in result.symbols}) != result.n_source
     ):
         raise MarketBreadthPgError(
             "MARKET_BREADTH_SYMBOL_SET_INVALID", "宽度来源代码分母不唯一"
@@ -151,51 +147,76 @@ def _persist_market_breadth_once(
             "MARKET_BREADTH_CLASS_PARTITION_OPEN", "逐股分类或未知原因未闭合到汇总"
         )
     window = result.session_window
-    day = (
-        target_session,
-        package_id,
-        capture_id,
-        cohort.source_dataset_id,
-        cohort.source_byte_count,
-        cohort.parser_contract,
-        cohort.source_time_quality,
-        _clock(cohort.source_available_at),
-        _clock(cohort.capture_read_started_at),
-        _clock(cohort.capture_validated_at),
-        cohort.source_clock_role,
-        cohort.calendar_id,
-        cohort.calendar_revision,
-        *window[:4],
-        result.contract_version,
-        result.n_source,
-        result.n_eligible,
-        cohort.target_present_count,
-        cohort.target_missing_count,
-        cohort.read_failed_count,
-        market.pg_result["history_row_count"],
-    )
-    key = tuple(day[_DAY_COLUMNS.index(name)] for name in _KEY)
-    rows = [
-        (
-            *key,
-            item.source_symbol,
-            *_fraction(item.ret1_t),
-            *_fraction(item.ret1_t_minus_3),
-            item.positive_t,
-            item.positive_t_minus_3,
-            item.delta_indicator,
-            item.classification,
-            item.primary_unknown_reason,
-            item.unknown_reason_detail,
-        )
-        for item in sorted(result.symbols, key=lambda x: x.source_symbol)
-    ]
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
         cursor,
         _,
     ):
-        raw_rows = source_raw._read_raw_rows(cursor, target_session, package_id)
+        cursor.execute(
+            """SELECT provider,range_end_session,price_coordinates,
+                      source_time_quality,source_available_at,read_started_at,
+                      validated_at,source_clock_role
+               FROM stock.source_captures WHERE capture_id=%s FOR SHARE""",
+            (capture_id,),
+        )
+        capture = cursor.fetchone()
+        if (
+            capture is None
+            or capture[0] != "BAOSTOCK"
+            or capture[1] > market.research_cutoff
+            or set(capture[2] or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        ):
+            raise MarketBreadthPgError(
+                "MARKET_BREADTH_CAPTURE_INVALID",
+                "市场宽度必须绑定截止内BaoStock双坐标捕获",
+            )
+        day = (
+            target_session,
+            capture_id,
+            cohort.price_coordinate,
+            capture[3],
+            _clock(capture[4]),
+            _clock(capture[5]),
+            _clock(capture[6]),
+            capture[7],
+            cohort.calendar_id,
+            cohort.calendar_revision,
+            *window[:4],
+            result.contract_version,
+            result.n_source,
+            result.n_eligible,
+            cohort.target_present_count,
+            cohort.target_missing_count,
+            cohort.read_failed_count,
+            market.pg_result["history_row_count"],
+        )
+        key = tuple(day[_DAY_COLUMNS.index(name)] for name in _KEY)
+        rows = [
+            (
+                *key,
+                item.source_symbol,
+                *_fraction(item.ret1_t),
+                *_fraction(item.ret1_t_minus_3),
+                item.positive_t,
+                item.positive_t_minus_3,
+                item.delta_indicator,
+                item.classification,
+                item.primary_unknown_reason,
+                item.unknown_reason_detail,
+            )
+            for item in sorted(result.symbols, key=lambda value: value.source_symbol)
+        ]
+        cursor.execute(
+            """SELECT source_symbol,source_capture_id FROM stock.source_raw_daily
+               WHERE session_date=%s AND source_capture_id=%s
+                 AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL
+               ORDER BY source_symbol""",
+            (target_session, capture_id),
+        )
+        raw_rows = [
+            {"source_symbol": row[0], "source_capture_id": row[1]}
+            for row in cursor.fetchall()
+        ]
         if (
             len(raw_rows) != result.n_source
             or {row["source_symbol"] for row in raw_rows}
@@ -204,10 +225,10 @@ def _persist_market_breadth_once(
         ):
             raise MarketBreadthPgError(
                 "MARKET_BREADTH_RAW_MISMATCH",
-                "宽度事实与数字来源包/捕获、证券集合或完整分母不一致",
+                "宽度事实与唯一BaoStock捕获、证券集合或完整分母不一致",
             )
         cursor.execute(
-            f"SELECT id, {', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}",
+            f"SELECT id,{', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}",
             key,
         )
         existing_day = cursor.fetchall()
@@ -215,7 +236,7 @@ def _persist_market_breadth_once(
         if not existing_day:
             _insert_rows(cursor, _DAY_TABLE, _DAY_COLUMNS, _KEY, [day])
             cursor.execute(
-                f"SELECT id, {', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}",
+                f"SELECT id,{', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}",
                 key,
             )
             existing_day = cursor.fetchall()
@@ -241,7 +262,7 @@ def _persist_market_breadth_once(
             ):
                 raise MarketBreadthPgError(
                     "MARKET_BREADTH_CONTENT_CONFLICT",
-                    "既存宽度范围不完整或同一数字业务键对应异内容",
+                    "既存宽度范围不完整或同一捕获业务键对应异内容",
                 )
             inserted = 0
         else:
@@ -267,7 +288,6 @@ def _persist_market_breadth_once(
     return {
         "status": "WRITTEN" if inserted else "IDEMPOTENT_ALREADY_PRESENT",
         "target_session": target_session.isoformat(),
-        "source_package_id": package_id,
         "source_capture_id": capture_id,
         "rows": len(rows),
         "inserted_rows": inserted,
@@ -279,7 +299,7 @@ def read_market_breadth(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     calendar_revision: str,
     contract_version: str,
     include_symbols: bool = False,
@@ -287,14 +307,14 @@ def read_market_breadth(
     """只读完整持久化范围；不按其他版本回退或重算。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or not calendar_revision
         or not contract_version
     ):
         raise MarketBreadthPgError(
             "MARKET_BREADTH_READ_ARGUMENT_INVALID",
-            "市场宽度读取需要日期、数字包ID和显式算法修订",
+            "市场宽度读取需要日期、来源捕获ID和显式算法修订",
         )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
@@ -312,9 +332,9 @@ def read_market_breadth(
             }
         cursor.execute(
             f"SELECT {', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} "
-            "WHERE target_session=%s AND source_package_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s "
             "AND calendar_revision=%s AND contract_version=%s ORDER BY source_capture_id",
-            (target_session, source_package_id, calendar_revision, contract_version),
+            (target_session, source_capture_id, calendar_revision, contract_version),
         )
         days = cursor.fetchall()
         if not days:

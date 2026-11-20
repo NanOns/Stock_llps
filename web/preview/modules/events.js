@@ -131,7 +131,7 @@ $("profileBreadthOpenFull").addEventListener("click", () => {
   const exact = state.profileSnapshots.find(
     (item) =>
       item.target_session === snapshot.target_session &&
-      item.source_package_id === snapshot.source_package_id &&
+      item.source_capture_id === snapshot.source_capture_id &&
       item.profile_revision === snapshot.profile_revision,
   );
   if (!exact) {
@@ -210,7 +210,7 @@ for (const id of ["changeBeforeSelect", "changeAfterSelect"]) {
     state.changeOffset = 0;
     state.relationOffset = 0;
     clearRelationScreen(
-      "两日快照已变化；旧RAW关系结果已清除，正在读取新绑定。",
+      "两日快照已变化；旧前复权关系结果已清除，正在读取新绑定。",
     );
     loadChanges();
     loadPriceRelations();
@@ -223,10 +223,10 @@ $("versionSelect").addEventListener("change", () => {
     binding &&
     (!selected ||
       selected.target_session !== binding.target_session ||
-      selected.source_package_id !== binding.source_package_id)
+      selected.source_capture_id !== binding.source_capture_id)
   )
     clearComparisonBasket(
-      "预览来源日期或来源包ID已切换；旧临时对照已失效并清空。",
+      "预览来源日期或来源捕获ID已切换；旧临时对照已失效并清空。",
     );
 });
 $("compareSymbols").addEventListener("click", compareSelectedSymbols);
@@ -308,7 +308,9 @@ for (const [fieldId, statusId] of [
 }
 $("relationSymbolInput").addEventListener("input", () => {
   state.relationOffset = 0;
-  clearRelationScreen("精确来源代码筛选已变化；点击“查询RAW关系”读取新组合。");
+  clearRelationScreen(
+    "精确来源代码筛选已变化；点击“查询前复权关系”读取新组合。",
+  );
 });
 $("relationSymbolInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {

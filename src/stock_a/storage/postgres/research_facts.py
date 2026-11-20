@@ -44,7 +44,6 @@ RULES = frozenset(
 RULE_COLUMNS = (
     "target_session",
     "source_symbol",
-    "source_package_id",
     "source_capture_id",
     "rule_id",
     "rule_version",
@@ -64,7 +63,6 @@ RULE_COLUMNS = (
 PATH_COLUMNS = (
     "target_session",
     "source_symbol",
-    "source_package_id",
     "source_capture_id",
     "horizon",
     "path_rule_version",
@@ -123,7 +121,7 @@ def prepare_research_rows(
     session_versions,
     frozen,
     outcomes,
-    source_package_id,
+    source_capture_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -136,9 +134,9 @@ def prepare_research_rows(
     if (
         type(capture) is not int
         or capture <= 0
-        or source.get("source_package_id") != source_package_id
+        or source.get("source_capture_id") != source_capture_id
     ):
-        raise ValueError("研究事实缺少真实来源包或捕获数字ID")
+        raise ValueError("研究事实缺少真实BaoStock来源捕获数字ID")
     rules, paths = [], []
     expected_rules = None
     for symbol in sorted(frozen):
@@ -148,7 +146,7 @@ def prepare_research_rows(
             expected_rules = names
         if names != expected_rules or names != RULES:
             raise ValueError("每个来源代码必须具有一致的九个规则")
-        prefix = (target, symbol, source_package_id, capture)
+        prefix = (target, symbol, source_capture_id)
         for rule, fact in sorted(item["rules"].items()):
             state = fact["state"]
             reasons = fact.get("reasons") or []
@@ -192,7 +190,7 @@ def prepare_research_rows(
             endpoint_day = date.fromisoformat(fact["target_session"])
             if endpoint_day.isoformat() not in session_versions:
                 raise ValueError("到期路径缺少来源会话版本")
-            endpoint = fact["endpoint"]["raw_close_relative_change"]
+            endpoint = fact["endpoint"]["qfq_close_relative_change"]
             ep_num, ep_den = _fraction_pair(endpoint.get("value"))
             values = fact.get("path_values") or {}
             mfe = _fraction_pair(values.get("mfe"))
@@ -215,7 +213,7 @@ def prepare_research_rows(
                     *mfe,
                     *mae,
                     *mdd,
-                    "RAW_UNADJUSTED",
+                    "FORWARD_ADJUSTED",
                     SCOPE,
                 )
             )
@@ -229,7 +227,7 @@ def prepare_forward_path_rows(
     calendar_revision,
     session_versions,
     outcomes,
-    source_package_id,
+    source_capture_id,
     horizon,
 ):
     """将现役原始价格路径算法的已到期结果转为共享typed行。"""
@@ -247,11 +245,11 @@ def prepare_forward_path_rows(
     if (
         type(capture) is not int
         or capture <= 0
-        or source.get("source_package_id") != source_package_id
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or source.get("source_capture_id") != source_capture_id
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
-        raise ValueError("后继路径缺少真实T0来源包或捕获ID")
+        raise ValueError("后继路径缺少真实T0 BaoStock paired capture ID")
 
     rows = []
     for symbol in sorted(outcomes):
@@ -267,7 +265,7 @@ def prepare_forward_path_rows(
             or version.get("row_count") != len(outcomes)
         ):
             raise ValueError("已到期后继路径没有完整且同一日历的Raw来源分区")
-        endpoint = fact["endpoint"]["raw_close_relative_change"]
+        endpoint = fact["endpoint"]["qfq_close_relative_change"]
         endpoint_num, endpoint_den = _fraction_pair(endpoint.get("value"))
         values = fact.get("path_values") or {}
         mfe = _fraction_pair(values.get("mfe"))
@@ -277,8 +275,7 @@ def prepare_forward_path_rows(
             (
                 target,
                 symbol,
-                source_package_id,
-                capture,
+                source_capture_id,
                 horizon,
                 PATH_VERSION,
                 calendar_revision,
@@ -293,7 +290,7 @@ def prepare_forward_path_rows(
                 *mfe,
                 *mae,
                 *mdd,
-                "RAW_UNADJUSTED",
+                "FORWARD_ADJUSTED",
                 SCOPE,
             )
         )
@@ -310,7 +307,7 @@ def write_forward_path_rows(
     endpoint_source_capture_id,
     research_cutoff,
 ):
-    """为完整Seed来源池保存共享后继路径；不创建规则、登记或Episode。"""
+    """保存完整T0来源池的QFQ后继事实；本批路径两端使用同一paired capture。"""
     symbols = tuple(sorted(set(source_symbols)))
     if (
         not paths
@@ -319,185 +316,173 @@ def write_forward_path_rows(
         or len(paths) != len(symbols)
         or type(endpoint_source_capture_id) is not int
         or endpoint_source_capture_id <= 0
+        or type(research_cutoff) is not date
     ):
-        raise ValueError("后继路径写入必须绑定非空且唯一的完整来源代码集合")
+        raise ValueError("后继路径写入必须绑定非空来源池、截止日及capture身份")
     first = paths[0]
-    target, _symbol, package, capture = first[:4]
-    horizon, path_version, calendar_revision, endpoint_session = first[4:8]
+    target, _symbol, source_capture_id = first[:3]
+    horizon, path_version, calendar_revision, endpoint_session = first[3:7]
     if (
         type(target) is not date
         or horizon != 1
         or path_version != PATH_VERSION
         or type(endpoint_session) is not date
-        or endpoint_session <= target
+        or target >= endpoint_session
+        or endpoint_session > research_cutoff
+        or endpoint_source_capture_id != source_capture_id
         or not calendar_revision
         or tuple(sorted(row[1] for row in paths)) != symbols
         or any(
-            row[:4] != (target, row[1], package, capture)
-            or row[4:8] != (horizon, path_version, calendar_revision, endpoint_session)
-            or row[21:] != ("RAW_UNADJUSTED", SCOPE)
+            row[:3] != (target, row[1], source_capture_id)
+            or row[3:7] != (horizon, path_version, calendar_revision, endpoint_session)
+            or row[-2:] != ("FORWARD_ADJUSTED", SCOPE)
             for row in paths
         )
     ):
-        raise ValueError("T+1路径行存在日期、来源、坐标、期限或业务键混用")
+        raise ValueError("T+1 QFQ路径行存在日期、capture、坐标、期限或键混用")
 
-    with _transaction(config, write=True, statement_timeout_ms=30000) as (
-        _,
-        cursor,
-        _,
-    ):
+    with _transaction(config, write=True, statement_timeout_ms=30000) as (_, cursor, _):
         cursor.execute(
-            """SELECT target_session, source_package_id, normalized_count,
-                      parser_contract, source_time_quality, source_clock_role,
-                      source_available_at
+            """SELECT capture_uuid,provider,range_start_session,range_end_session,
+                      price_coordinates,source_time_quality,source_clock_role,
+                      source_available_at,read_started_at,validated_at,unit_contract_version
                FROM source_captures WHERE capture_id=%s""",
-            (capture,),
+            (source_capture_id,),
         )
-        t0_capture = cursor.fetchone()
-        cursor.execute(
-            """SELECT target_session, source_package_id, normalized_count,
-                      parser_contract, source_time_quality, source_clock_role,
-                      source_available_at
-               FROM source_captures WHERE capture_id=%s""",
-            (endpoint_source_capture_id,),
-        )
-        endpoint_capture = cursor.fetchone()
-        expected_capture_prefix = (
-            "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT",
-            "NON_PIT_OBSERVED",
-        )
+        capture = cursor.fetchone()
         if (
-            t0_capture is None
-            or endpoint_capture is None
-            or t0_capture[0] != target
-            or endpoint_capture[0] != endpoint_session
-            or t0_capture[1] != package
-            or endpoint_capture[1] != package
-            or t0_capture[2] != len(symbols)
-            or endpoint_capture[2] != len(symbols)
-            or t0_capture[3] != endpoint_capture[3]
-            or t0_capture[4] != expected_capture_prefix[1]
-            or endpoint_capture[4] != expected_capture_prefix[1]
-            or t0_capture[5] != expected_capture_prefix[0]
-            or endpoint_capture[5] != expected_capture_prefix[0]
-            or t0_capture[6] is not None
-            or endpoint_capture[6] is not None
+            capture is None
+            or capture[0] is None
+            or capture[1] != "BAOSTOCK"
+            or capture[2] is None
+            or capture[3] is None
+            or not capture[2]
+            <= target
+            <= endpoint_session
+            <= capture[3]
+            <= research_cutoff
+            or set(capture[4] or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+            or capture[5] != "NON_PIT_OBSERVED"
+            or capture[6] != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+            or capture[7] is not None
+            or not capture[10]
         ):
-            raise ValueError("T0与T+1捕获不完整、非同源或时钟质量不符合研究范围")
+            raise ValueError("T0至T+1路径没有绑定截止内同一BaoStock双坐标NON_PIT捕获")
+
+        for label, session in (("T0", target), ("T+1", endpoint_session)):
+            cursor.execute(
+                """WITH request_codes AS (
+                       SELECT source_code,
+                              count(*)=2 AND count(DISTINCT adjustment_flag)=2
+                                AND count(DISTINCT eligible_start_session)=1
+                                AND count(DISTINCT eligible_end_session)=1
+                                AND bool_and(request_status IN ('COMPLETED','NO_DATA')
+                                  AND (request_status='NO_DATA' OR
+                                       completed_through_session>=range_end_session)) AS complete,
+                              min(eligible_start_session) AS eligible_start,
+                              max(eligible_end_session) AS eligible_end
+                       FROM source_capture_requests WHERE capture_id=%s
+                       GROUP BY source_code
+                   ), expected(source_symbol) AS (
+                       SELECT upper(source_code) FROM request_codes
+                       WHERE %s BETWEEN eligible_start AND eligible_end AND complete
+                   ), stored(source_symbol) AS (
+                       SELECT source_symbol FROM source_raw_daily
+                       WHERE session_date=%s AND source_capture_id=%s
+                         AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL
+                   ), delta AS (
+                       (SELECT source_symbol FROM stored EXCEPT SELECT source_symbol FROM expected)
+                       UNION ALL
+                       (SELECT source_symbol FROM expected EXCEPT SELECT source_symbol FROM stored)
+                   )
+                   SELECT (SELECT count(*) FROM expected),
+                          (SELECT count(*) FROM stored),
+                          (SELECT count(DISTINCT source_symbol) FROM stored),
+                          (SELECT count(*) FROM delta)""",
+                (source_capture_id, session, session, source_capture_id),
+            )
+            expected_count, row_count, distinct_count, difference_count = (
+                cursor.fetchone()
+            )
+            if (
+                int(expected_count),
+                int(row_count),
+                int(distinct_count),
+                int(difference_count),
+            ) != (len(symbols), len(symbols), len(symbols), 0) or tuple(
+                sorted(symbols)
+            ) != tuple(
+                sorted(
+                    row[0]
+                    for row in cursor.execute(
+                        "SELECT source_symbol FROM source_raw_daily WHERE session_date=%s AND source_capture_id=%s ORDER BY source_symbol",
+                        (session, source_capture_id),
+                    ).fetchall()
+                )
+            ):
+                raise ValueError(f"{label} paired QFQ/RAW请求未闭合到固定来源集合")
 
         cursor.execute(
-            """SELECT profile_revision, producer_contract, producer_version,
-                      history_session_count, calendar_id, calendar_revision,
-                      research_mode, price_coordinate, count(*),
-                      count(DISTINCT source_symbol)
+            """SELECT profile_revision,producer_contract,producer_version,
+                      history_session_count,calendar_id,calendar_revision,
+                      research_mode,price_coordinate,count(*),count(DISTINCT source_symbol)
                FROM source_pool_seed_day_facts
-               WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
-               GROUP BY profile_revision, producer_contract, producer_version,
-                        history_session_count, calendar_id, calendar_revision,
-                        research_mode, price_coordinate
-               ORDER BY profile_revision""",
-            (target, package, capture),
+               WHERE target_session=%s AND source_capture_id=%s
+               GROUP BY profile_revision,producer_contract,producer_version,
+                        history_session_count,calendar_id,calendar_revision,
+                        research_mode,price_coordinate""",
+            (target, source_capture_id),
         )
         seed_scopes = cursor.fetchall()
         if (
             len(seed_scopes) != 1
             or seed_scopes[0][5] != calendar_revision
             or seed_scopes[0][6] != "NON_PIT_RETROSPECTIVE"
-            or seed_scopes[0][7] != "RAW_UNADJUSTED"
-            or seed_scopes[0][8] != len(symbols)
-            or seed_scopes[0][9] != len(symbols)
+            or seed_scopes[0][7] != "FORWARD_ADJUSTED"
+            or int(seed_scopes[0][8]) != len(symbols)
+            or int(seed_scopes[0][9]) != len(symbols)
         ):
-            raise ValueError("T0 Seed不是单一、完整且与后继路径同日历的范围")
-
-        for label, session, source_capture_id in (
-            ("T0", target, capture),
-            ("T+1", endpoint_session, endpoint_source_capture_id),
-        ):
-            cursor.execute(
-                """WITH expected(source_symbol) AS (
-                         SELECT unnest(%s::text[])
-                     ), stored(source_symbol) AS (
-                         SELECT source_symbol FROM source_raw_daily
-                         WHERE session_date=%s AND source_package_id=%s
-                           AND source_capture_id=%s
-                     ), delta AS (
-                         (SELECT source_symbol FROM stored
-                          EXCEPT SELECT source_symbol FROM expected)
-                         UNION ALL
-                         (SELECT source_symbol FROM expected
-                          EXCEPT SELECT source_symbol FROM stored)
-                     )
-                     SELECT (SELECT count(*) FROM stored),
-                            (SELECT count(DISTINCT source_symbol) FROM stored),
-                            (SELECT count(*) FROM delta)""",
-                (list(symbols), session, package, source_capture_id),
-            )
-            row_count, distinct_count, difference_count = cursor.fetchone()
-            if (row_count, distinct_count, difference_count) != (
-                len(symbols),
-                len(symbols),
-                0,
-            ):
-                raise ValueError(f"{label}Raw未与T0 Seed来源代码集合精确闭合")
+            raise ValueError("T0 Seed不是单一完整的QFQ来源范围")
 
         cursor.execute(
-            """SELECT source_symbol, endpoint_session
-               FROM source_forward_path_facts
-               WHERE target_session=%s AND source_package_id=%s
-                 AND source_capture_id=%s AND horizon=%s
+            """SELECT source_symbol,endpoint_session FROM source_forward_path_facts
+               WHERE target_session=%s AND source_capture_id=%s AND horizon=%s
                  AND path_rule_version=%s AND calendar_revision=%s
                ORDER BY source_symbol""",
-            (
-                target,
-                package,
-                capture,
-                horizon,
-                path_version,
-                calendar_revision,
-            ),
+            (target, source_capture_id, horizon, path_version, calendar_revision),
         )
         existing_rows = cursor.fetchall()
         if existing_rows and (
             not {row[0] for row in existing_rows}.issubset(symbols)
             or any(row[1] != endpoint_session for row in existing_rows)
         ):
-            raise ResearchFactConflict("同一T+1业务键已有范围外或错期路径行")
-
+            raise ResearchFactConflict("同一T+1 business key已有范围外或错期路径行")
+        selection = (
+            "target_session=%s AND source_capture_id=%s AND horizon=%s "
+            "AND path_rule_version=%s AND calendar_revision=%s AND endpoint_session=%s"
+        )
+        args = (
+            target,
+            source_capture_id,
+            horizon,
+            path_version,
+            calendar_revision,
+            endpoint_session,
+        )
         inserted = _insert_and_compare(
             cursor,
             "source_forward_path_facts",
             PATH_COLUMNS,
             paths,
             PATH_KEY,
-            "target_session=%s AND source_package_id=%s AND source_capture_id=%s "
-            "AND horizon=%s AND path_rule_version=%s AND calendar_revision=%s "
-            "AND endpoint_session=%s",
-            (
-                target,
-                package,
-                capture,
-                horizon,
-                path_version,
-                calendar_revision,
-                endpoint_session,
-            ),
+            selection,
+            args,
         )
         cursor.execute(
-            """SELECT count(*), count(DISTINCT source_symbol)
-               FROM source_forward_path_facts
-               WHERE target_session=%s AND source_package_id=%s
-                 AND source_capture_id=%s AND horizon=%s
-                 AND path_rule_version=%s AND calendar_revision=%s
-                 AND endpoint_session=%s""",
-            (
-                target,
-                package,
-                capture,
-                horizon,
-                path_version,
-                calendar_revision,
-                endpoint_session,
-            ),
+            """SELECT count(*),count(DISTINCT source_symbol) FROM source_forward_path_facts
+               WHERE target_session=%s AND source_capture_id=%s AND horizon=%s
+                 AND path_rule_version=%s AND calendar_revision=%s AND endpoint_session=%s""",
+            args,
         )
         if cursor.fetchone() != (len(symbols), len(symbols)):
             raise ResearchFactConflict("T+1typed结果写入后未闭合T0来源池分母")
@@ -510,8 +495,7 @@ def write_forward_path_rows(
             target_session=target,
             endpoint_session=endpoint_session,
             research_cutoff=research_cutoff,
-            source_package_id=package,
-            source_capture_id=capture,
+            source_capture_id=source_capture_id,
             endpoint_source_capture_id=endpoint_source_capture_id,
             source_symbols=symbols,
             path_rule_version=path_version,
@@ -520,16 +504,13 @@ def write_forward_path_rows(
         )
         if inserted:
             cursor.execute(
-                """DELETE FROM source_cohort_group_stats
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s""",
-                (target, package, capture),
+                "DELETE FROM source_cohort_group_stats WHERE target_session=%s AND source_capture_id=%s",
+                (target, source_capture_id),
             )
     return {
         "target_session": target.isoformat(),
         "endpoint_session": endpoint_session.isoformat(),
-        "source_package_id": package,
-        "source_capture_id": capture,
+        "source_capture_id": source_capture_id,
         "endpoint_source_capture_id": endpoint_source_capture_id,
         "expected_paths": len(paths),
         "inserted_paths": inserted,
@@ -560,11 +541,11 @@ def read_forward_path_scope(
     ):
         raise ValueError("T+1异事务读回必须绑定唯一完整来源代码集合")
     first = expected[0]
-    target, _symbol, package, capture = first[:4]
-    horizon, path_version, calendar_revision, endpoint_session = first[4:8]
+    target, _symbol, source_capture_id = first[:3]
+    horizon, path_version, calendar_revision, endpoint_session = first[3:7]
     if any(
-        row[:4] != (target, row[1], package, capture)
-        or row[4:8] != (horizon, path_version, calendar_revision, endpoint_session)
+        row[:3] != (target, row[1], source_capture_id)
+        or row[3:7] != (horizon, path_version, calendar_revision, endpoint_session)
         for row in expected
     ):
         raise ValueError("T+1异事务读回键跨越多个来源范围")
@@ -577,15 +558,13 @@ def read_forward_path_scope(
         cursor.execute(
             sql.SQL("SELECT {} FROM source_forward_path_facts WHERE ").format(columns)
             + sql.SQL(
-                "target_session=%s AND source_package_id=%s "
-                "AND source_capture_id=%s AND horizon=%s "
+                "target_session=%s AND source_capture_id=%s AND horizon=%s "
                 "AND path_rule_version=%s AND calendar_revision=%s "
                 "AND endpoint_session=%s ORDER BY source_symbol"
             ),
             (
                 target,
-                package,
-                capture,
+                source_capture_id,
                 horizon,
                 path_version,
                 calendar_revision,
@@ -656,10 +635,10 @@ def restate_forward_path_metrics(
             len(expected) != len(PATH_COLUMNS)
             or len(desired) != 8
             or expected[0] > research_cutoff
-            or expected[7] > research_cutoff
-            or expected[21:] != ("RAW_UNADJUSTED", SCOPE)
-            or expected[5] != PATH_VERSION
-            or expected[4] not in {1, 3, 5}
+            or expected[6] > research_cutoff
+            or expected[20:] != ("FORWARD_ADJUSTED", SCOPE)
+            or expected[4] != PATH_VERSION
+            or expected[3] not in {1, 3, 5}
         ):
             raise ValueError("Forward路径纠错越过截止、坐标、版本或期限范围")
         scope = (
@@ -669,7 +648,6 @@ def restate_forward_path_metrics(
             expected[4],
             expected[5],
             expected[6],
-            expected[7],
         )
         grouped.setdefault(scope, {})
         symbol = expected[1]
@@ -680,25 +658,25 @@ def restate_forward_path_metrics(
     columns = sql.SQL(", ").join(map(sql.Identifier, PATH_COLUMNS))
     select_scope = sql.SQL(
         "SELECT {} FROM source_forward_path_facts WHERE target_session=%s "
-        "AND source_package_id=%s AND source_capture_id=%s AND horizon=%s "
+        "AND source_capture_id=%s AND horizon=%s "
         "AND path_rule_version=%s AND calendar_revision=%s AND endpoint_session=%s "
         "AND target_session<=%s AND endpoint_session<=%s "
-        "AND price_coordinate='RAW_UNADJUSTED' AND scope='NON_PIT_EXPLORATORY' "
+        "AND price_coordinate='FORWARD_ADJUSTED' AND scope='NON_PIT_EXPLORATORY' "
         "ORDER BY source_symbol FOR UPDATE"
     ).format(columns)
     select_scope_read = sql.SQL(
         "SELECT {} FROM source_forward_path_facts WHERE target_session=%s "
-        "AND source_package_id=%s AND source_capture_id=%s AND horizon=%s "
+        "AND source_capture_id=%s AND horizon=%s "
         "AND path_rule_version=%s AND calendar_revision=%s AND endpoint_session=%s "
         "AND target_session<=%s AND endpoint_session<=%s "
-        "AND price_coordinate='RAW_UNADJUSTED' AND scope='NON_PIT_EXPLORATORY' "
+        "AND price_coordinate='FORWARD_ADJUSTED' AND scope='NON_PIT_EXPLORATORY' "
         "ORDER BY source_symbol"
     ).format(columns)
     update_sql = sql.SQL(
         "UPDATE source_forward_path_facts SET path_quality=%s,path_reasons=%s,"
         "mfe_numerator=%s,mfe_denominator=%s,mae_numerator=%s,mae_denominator=%s,"
         "mdd_numerator=%s,mdd_denominator=%s WHERE target_session=%s "
-        "AND source_symbol=%s AND source_package_id=%s AND source_capture_id=%s "
+        "AND source_symbol=%s AND source_capture_id=%s "
         "AND horizon=%s AND path_rule_version=%s AND calendar_revision=%s "
         "AND endpoint_session=%s"
     )
@@ -710,13 +688,12 @@ def restate_forward_path_metrics(
         _,
     ):
         for scope, expected_by_symbol in grouped.items():
-            target, package, capture, horizon, version, calendar, endpoint = scope
+            target, source_capture_id, horizon, version, calendar, endpoint = scope
             cursor.execute(
                 select_scope,
                 (
                     target,
-                    package,
-                    capture,
+                    source_capture_id,
                     horizon,
                     version,
                     calendar,
@@ -740,7 +717,7 @@ def restate_forward_path_metrics(
                     raise ResearchFactConflict(
                         "Forward路径纠错前业务行与已读PG事实不一致；事务已回滚"
                     )
-                corrected = actual[:13] + desired + actual[21:]
+                corrected = actual[:12] + desired + actual[20:]
                 after.append(corrected)
                 if corrected != actual:
                     updates.append(
@@ -748,8 +725,7 @@ def restate_forward_path_metrics(
                         + (
                             target,
                             actual[1],
-                            package,
-                            capture,
+                            source_capture_id,
                             horizon,
                             version,
                             calendar,
@@ -762,8 +738,7 @@ def restate_forward_path_metrics(
                 select_scope,
                 (
                     target,
-                    package,
-                    capture,
+                    source_capture_id,
                     horizon,
                     version,
                     calendar,
@@ -785,13 +760,12 @@ def restate_forward_path_metrics(
         _,
     ):
         for scope, expected_by_symbol in grouped.items():
-            target, package, capture, horizon, version, calendar, endpoint = scope
+            target, source_capture_id, horizon, version, calendar, endpoint = scope
             cursor.execute(
                 select_scope_read,
                 (
                     target,
-                    package,
-                    capture,
+                    source_capture_id,
                     horizon,
                     version,
                     calendar,
@@ -804,7 +778,7 @@ def restate_forward_path_metrics(
             expected_after = []
             for symbol in sorted(expected_by_symbol):
                 expected, desired = expected_by_symbol[symbol]
-                expected_after.append(expected[:13] + desired + expected[21:])
+                expected_after.append(expected[:12] + desired + expected[20:])
             if stored != expected_after:
                 raise ResearchFactConflict("Forward路径异事务只读读回不匹配")
             read_back_count += len(stored)
@@ -824,8 +798,8 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
     if not rules:
         raise ValueError("不允许写入空规则来源池")
     first = rules[0]
-    target, _symbol, package, capture = first[:4]
-    if any((r[0], r[2], r[3]) != (target, package, capture) for r in rules + paths):
+    target, source_capture_id = first[0], first[2]
+    if any((row[0], row[2]) != (target, source_capture_id) for row in rules + paths):
         raise ValueError("一个事务只能写入一个T0和来源捕获")
     rule_keys = [
         tuple(row[RULE_COLUMNS.index(name)] for name in RULE_KEY) for row in rules
@@ -838,15 +812,15 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
     with _transaction(config, write=True) as (_, cursor, _):
         cursor.execute(
             """SELECT source_symbol,source_capture_id FROM source_raw_daily
-               WHERE session_date=%s AND source_package_id=%s""",
-            (target, package),
+               WHERE session_date=%s AND source_capture_id=%s""",
+            (target, source_capture_id),
         )
         raw = cursor.fetchall()
         expected = {row[1] for row in rules}
         if (
             len(raw) != len(expected)
             or {row[0] for row in raw} != expected
-            or any(row[1] != capture for row in raw)
+            or any(row[1] != source_capture_id for row in raw)
             or len(rules) != len(expected) * len(RULES)
             or {row[4] for row in rules} != RULES
             or not {row[1] for row in paths}.issubset(expected)
@@ -858,8 +832,8 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
             RULE_COLUMNS,
             rules,
             RULE_KEY,
-            "target_session=%s AND source_package_id=%s AND source_capture_id=%s",
-            (target, package, capture),
+            "target_session=%s AND source_capture_id=%s",
+            (target, source_capture_id),
         )
         count_paths = _insert_and_compare(
             cursor,
@@ -867,22 +841,21 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
             PATH_COLUMNS,
             paths,
             PATH_KEY,
-            "target_session=%s AND source_package_id=%s AND source_capture_id=%s",
-            (target, package, capture),
+            "target_session=%s AND source_capture_id=%s",
+            (target, source_capture_id),
         )
         if count_rules:
             # 新捕获也会改变同一规则键的歧义，旧捕获的摘要不能继续使用。
             cursor.execute(
                 """DELETE FROM source_cohort_group_stats
-                   WHERE target_session=%s AND source_package_id=%s""",
-                (target, package),
+                   WHERE target_session=%s AND source_capture_id=%s""",
+                (target, source_capture_id),
             )
         elif count_paths:
             cursor.execute(
                 """DELETE FROM source_cohort_group_stats
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s""",
-                (target, package, capture),
+                   WHERE target_session=%s AND source_capture_id=%s""",
+                (target, source_capture_id),
             )
         event_result = None
         if events is not None:
@@ -892,13 +865,13 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
                 cursor,
                 rows=events,
                 target=target,
-                source_package_id=package,
-                target_capture_id=capture,
-                profile_revision=first[6],
-                history_session_count=first[7],
-                d1_history_session_count=first[8],
-                event_window_start=first[9],
-                calendar_revision=first[10],
+                source_capture_id=source_capture_id,
+                target_capture_id=source_capture_id,
+                profile_revision=first[5],
+                history_session_count=first[6],
+                d1_history_session_count=first[7],
+                event_window_start=first[8],
+                calendar_revision=first[9],
             )
         from stock_a.storage.postgres.research_enrollment import insert_rule_enrollments
 
@@ -906,14 +879,13 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
             cursor,
             target=target,
             before=previous_session,
-            package=package,
-            capture=capture,
-            rule_version=first[5],
-            profile_revision=first[6],
-            history_count=first[7],
-            d1_history_count=first[8],
-            event_window_start=first[9],
-            calendar_revision=first[10],
+            source_capture_id=source_capture_id,
+            rule_version=first[4],
+            profile_revision=first[5],
+            history_count=first[6],
+            d1_history_count=first[7],
+            event_window_start=first[8],
+            calendar_revision=first[9],
         )
     return {
         "inserted_rules": count_rules,
@@ -927,7 +899,7 @@ def read_research_rows(
     config,
     *,
     target,
-    source_package_id,
+    source_capture_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -944,7 +916,7 @@ def read_research_rows(
         return _read_research_rows_cursor(
             cursor,
             target=target,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             profile_revision=profile_revision,
             history_session_count=history_session_count,
             d1_history_session_count=d1_history_session_count,
@@ -960,7 +932,7 @@ def _read_research_rows_cursor(
     cursor,
     *,
     target,
-    source_package_id,
+    source_capture_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -991,11 +963,11 @@ def _read_research_rows_cursor(
            LEFT JOIN source_forward_path_facts p
              ON p.target_session=r.target_session
             AND p.source_symbol=r.source_symbol
-            AND p.source_package_id=r.source_package_id
-            AND p.source_capture_id=r.source_capture_id AND p.horizon=%s
+            AND p.source_capture_id=r.source_capture_id
+            AND p.horizon=%s
             AND p.path_rule_version=%s AND p.calendar_revision=r.calendar_revision
             AND p.endpoint_session <= %s
-           WHERE r.target_session=%s AND r.source_package_id=%s
+           WHERE r.target_session=%s AND r.source_capture_id=%s
              AND r.rule_id=%s AND r.rule_version=%s AND r.profile_revision=%s
              AND r.history_session_count=%s AND r.d1_history_session_count=%s
              AND r.event_window_start=%s AND r.calendar_revision=%s
@@ -1006,7 +978,7 @@ def _read_research_rows_cursor(
             PATH_VERSION,
             research_cutoff,
             target,
-            source_package_id,
+            source_capture_id,
             rule,
             RULE_VERSION,
             profile_revision,
@@ -1062,7 +1034,7 @@ def read_board_members(config, *, industry_snapshot_id, concept_snapshot_id):
     return snapshots, members
 
 
-def read_research_keys(config, *, target, source_package_id, calendar_revision):
+def read_research_keys(config, *, target, source_capture_id, calendar_revision):
     """列出与现行读取器规则版本和日历修订一致的冻结键。"""
     with _transaction(config, write=False) as (_, cursor, _):
         cursor.execute(
@@ -1070,10 +1042,10 @@ def read_research_keys(config, *, target, source_package_id, calendar_revision):
                       event_window_start, profile_revision, count(*),
                       count(DISTINCT source_capture_id), min(source_capture_id)
                FROM source_rule_evaluations
-               WHERE target_session=%s AND source_package_id=%s
+               WHERE target_session=%s AND source_capture_id=%s
                  AND rule_version=%s AND calendar_revision=%s
                GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5 LIMIT 101""",
-            (target, source_package_id, RULE_VERSION, calendar_revision),
+            (target, source_capture_id, RULE_VERSION, calendar_revision),
         )
         return [
             {

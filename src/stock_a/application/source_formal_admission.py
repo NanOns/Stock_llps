@@ -27,7 +27,6 @@ def prepare_source_d0_launch_formal_admission(
     *,
     entity_id: str,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     raw_fact_id: int,
     raw_state: str,
@@ -56,8 +55,6 @@ def prepare_source_d0_launch_formal_admission(
     if (
         not entity_id
         or type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(raw_fact_id) is not int
@@ -91,7 +88,7 @@ def prepare_source_d0_launch_formal_admission(
         entity_id=entity_id,
         ordinal=session_ordinal,
         next_ordinal=session_ordinal + 1,
-        coordinate_id=f"RAW:TDX_SOURCE_SYMBOL:{entity_id}",
+        coordinate_id=f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{entity_id}",
         scenario="LAUNCH_CONFIRM",
         role=effective_role,
         raw=raw,
@@ -155,7 +152,7 @@ def prepare_source_d0_launch_formal_admission(
         {
             "numerator": line_value.numerator,
             "denominator": line_value.denominator,
-            "coordinate": "RAW_UNADJUSTED",
+            "coordinate": "FORWARD_ADJUSTED",
             "source": "T0_PHC20",
             "source_window_start": window_start.isoformat(),
             "source_window_session_count": 20,
@@ -192,7 +189,7 @@ def prepare_source_d0_launch_formal_admission(
         "d2_status": "NOT_IMPLEMENTED",
         "identity_scope": "SOURCE_SYMBOL_ONLY",
         "research_mode": "NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
     }
 
 
@@ -201,7 +198,6 @@ def present_source_formal_admission(
     stored_day: Mapping[str, Any],
     source_symbol: str,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     d0_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -209,7 +205,6 @@ def present_source_formal_admission(
     if (
         not isinstance(source_symbol, str)
         or type(target_session) is not date
-        or type(source_package_id) is not int
         or type(source_capture_id) is not int
     ):
         raise ValueError("准入页面投影必须绑定来源代码、日期、来源包和捕获")
@@ -299,12 +294,12 @@ def present_source_formal_admission(
         "status": stored_day.get("status", "NOT_COMPUTED"),
         "scope": "SOURCE_SYMBOL_FORMAL_ADMISSION",
         "target_session": target_session.isoformat(),
-        "source_package_id": source_package_id,
         "source_capture_id": source_capture_id,
         "source_symbol": source_symbol,
         "identity_scope": "SOURCE_SYMBOL_ONLY",
         "research_mode": "NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "source_role_boundary": {
             "formal_admission_role": "FORMAL",
             "source_d0_raw_reader_role": "DIAGNOSTIC",

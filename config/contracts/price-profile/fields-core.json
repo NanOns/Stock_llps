@@ -1021,7 +1021,7 @@
   ],
   "defaults": {
     "business_key": [
-      "entity_id",
+      "source_symbol",
       "session_date",
       "core_input_version"
     ],

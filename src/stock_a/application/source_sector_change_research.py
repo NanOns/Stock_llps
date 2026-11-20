@@ -24,11 +24,11 @@ from stock_a.application.source_d0_raw import (
 from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
 )
+from stock_a.application.source_d1_structures import _read_baostock_d1_candidate_page
 from stock_a.application.tdx_sector_change_stocks import (
     combine_sector_strength_and_d1_changes,
 )
 from stock_a.application.tdx_sector_members import (
-    _raw_window_observation,
     TdxSectorMembersApplicationError,
     TdxSectorMembersPgError,
     read_tdx_sector_strength,
@@ -52,14 +52,72 @@ from stock_a.research.core import (
     calculate_core,
     calculate_core_return,
 )
+from stock_a.research.entry_history.support import _core_observation_from_pg_price_row
 from stock_a.research.entry_context.sessions import _load_calendar
-from stock_a.storage.postgres.source_raw import (
-    RawSourcePgError,
-    read_raw_daily_history_page,
-)
+from stock_a.storage.postgres.source_raw import RawSourcePgError
 from stock_a.storage.postgres.tdx_sector_members import read_rotation_snapshot_members
 
 _PROFILE_REVISION = re.compile(PROFILE_REVISION_PATTERN)
+_MAX_HISTORY_SESSION_CAPABILITY = 250
+
+
+def _configured_history_session_limit(config: Mapping[str, Any]) -> int:
+    source_policy = config.get("source_policy", {})
+    primary = (
+        source_policy.get("baostock_primary", {})
+        if isinstance(source_policy, Mapping)
+        else {}
+    )
+    budget = primary.get("request_budget", {}) if isinstance(primary, Mapping) else {}
+    configured = (
+        budget.get("max_history_session_count") if isinstance(budget, Mapping) else None
+    )
+    if configured is None:
+        return _MAX_HISTORY_SESSION_CAPABILITY
+    if (
+        type(configured) is not int
+        or not 1 <= configured <= _MAX_HISTORY_SESSION_CAPABILITY
+    ):
+        raise TdxSectorMembersApplicationError(
+            "BAOSTOCK_HISTORY_BUDGET_INVALID",
+            "BaoStock配置历史会话预算须为1至250之间的整数",
+        )
+    return configured
+
+
+def _capture_session_bounds(
+    config: Mapping[str, Any], *, source_capture_id: int, research_cutoff: date
+) -> tuple[date, date]:
+    from stock_a.storage.postgres.baostock_price_facts import (
+        read_baostock_capture_roster,
+    )
+
+    roster = read_baostock_capture_roster(
+        config, source_capture_id=source_capture_id, cutoff=research_cutoff
+    )
+    if (
+        not isinstance(roster, Mapping)
+        or roster.get("status") != "AVAILABLE"
+        or roster.get("source_capture_id") != source_capture_id
+    ):
+        raise TdxSectorMembersApplicationError(
+            "BAOSTOCK_CAPTURE_ROSTER_UNAVAILABLE",
+            "无法读取指定BaoStock paired capture的会话范围",
+        )
+    try:
+        range_start = date.fromisoformat(str(roster["range_start_session"]))
+        range_end = date.fromisoformat(str(roster["range_end_session"]))
+    except (KeyError, TypeError, ValueError) as error:
+        raise TdxSectorMembersApplicationError(
+            "BAOSTOCK_CAPTURE_RANGE_INVALID",
+            "paired capture返回的官方会话边界无效",
+        ) from error
+    if range_start > range_end or range_end > research_cutoff:
+        raise TdxSectorMembersApplicationError(
+            "BAOSTOCK_CAPTURE_RANGE_INVALID",
+            "paired capture范围超过显式研究截止或起止顺序错误",
+        )
+    return range_start, range_end
 
 
 @dataclass(frozen=True)
@@ -68,7 +126,8 @@ class SourceSectorChangeInputs:
 
     target_session: date
     research_cutoff: date
-    source_package_id: int
+    source_capture_id: int
+    price_coordinate: str
     profile_revision: str | None
     industry_snapshot_id: int
     concept_snapshot_id: int
@@ -86,7 +145,8 @@ def validate_source_d1_discovery_fact(
     source_version_context: Mapping[str, Any],
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str,
     sessions: tuple[date, ...],
     calendar_revision: str,
     event_window_start: date,
@@ -95,7 +155,7 @@ def validate_source_d1_discovery_fact(
     if not isinstance(source_version_context, Mapping):
         raise PgResearchBindingError(
             "D1_SUPPORT_DISCOVERY_SOURCE_CONTEXT_INVALID",
-            "D1事实复用必须提供已读取的Raw来源上下文",
+            "D1事实复用必须提供已读取的BaoStock QFQ捕获上下文",
         )
     source = discovery.get("source") if isinstance(discovery, Mapping) else None
     event_sessions = tuple(
@@ -117,7 +177,7 @@ def validate_source_d1_discovery_fact(
         or discovery.get("scope")
         != "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY"
         or discovery.get("identity_status") != "SOURCE_SYMBOL_ONLY"
-        or discovery.get("price_coordinate") != "RAW_UNADJUSTED"
+        or discovery.get("price_coordinate") != price_coordinate
         or discovery.get("target_session") != target_session.isoformat()
         or discovery.get("research_cutoff") != research_cutoff.isoformat()
         or discovery.get("event_window_start") != event_window_start.isoformat()
@@ -151,11 +211,10 @@ def validate_source_d1_discovery_fact(
         or source.get("status") != "AVAILABLE"
         or source.get("version_status") != "COMPLETE"
         or source.get("target_session") != target_session.isoformat()
-        or source.get("source_package_id") != source_package_id
-        or source.get("source_package_id")
-        != source_version_context.get("source_package_id")
+        or source.get("source_capture_id") != source_capture_id
         or source.get("source_capture_id")
         != source_version_context.get("source_capture_id")
+        or source_version_context.get("price_coordinate") != "FORWARD_ADJUSTED"
         or source.get("raw_row_count") != row_count
         or source.get("capture_expected_row_count") != row_count
         or execution.get("database_write_attempted") is not False
@@ -176,10 +235,11 @@ def prepare_source_sector_change_inputs(
     research_cutoff: date,
     industry_snapshot_id: int,
     concept_snapshot_id: int,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str,
     profile_revision: str | None,
     event_window_start: date,
-    pg_history_session_count: int,
+    pg_history_session_count: int | None,
     include_d0_launch_new: bool = False,
     d0_before_session: date | None = None,
     cross_period_board_kind: str | None = None,
@@ -187,21 +247,28 @@ def prepare_source_sector_change_inputs(
     source_version_context: Mapping[str, Any] | None = None,
 ) -> SourceSectorChangeInputs:
     """从固定PG读取完整行业/GN集合与指定事件窗的D1历史。"""
+    configured_history_limit = _configured_history_session_limit(config)
+    history_session_count = (
+        configured_history_limit
+        if pg_history_session_count is None
+        else pg_history_session_count
+    )
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
         or not isinstance(config_path, str)
         or not config_path
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or price_coordinate != "FORWARD_ADJUSTED"
         or profile_revision is not None
         and (
             not isinstance(profile_revision, str)
             or _PROFILE_REVISION.fullmatch(profile_revision) is None
         )
-        or type(pg_history_session_count) is not int
-        or not 1 <= pg_history_session_count <= 75
+        or type(history_session_count) is not int
+        or not 1 <= history_session_count <= configured_history_limit
         or type(include_d0_launch_new) is not bool
     ):
         raise TdxSectorMembersApplicationError(
@@ -236,10 +303,24 @@ def prepare_source_sector_change_inputs(
 
     try:
         _resolved_target, sessions, calendar_revision = resolve_pg_history_window(
-            target_session.isoformat(), pg_history_session_count
+            target_session.isoformat(), history_session_count
         )
     except ResearchEntryError as error:
         raise TdxSectorMembersApplicationError(error.code, str(error)) from error
+    capture_start, capture_end = _capture_session_bounds(
+        config,
+        source_capture_id=source_capture_id,
+        research_cutoff=research_cutoff,
+    )
+    if (
+        target_session < capture_start
+        or target_session > capture_end
+        or sessions[0] < capture_start
+    ):
+        raise TdxSectorMembersApplicationError(
+            "SECTOR_CHANGE_WINDOW_OUTSIDE_CAPTURE",
+            "行业变化历史窗口必须完整落在当前paired capture的会话范围内",
+        )
     if (
         type(event_window_start) is not date
         or event_window_start not in sessions
@@ -257,10 +338,11 @@ def prepare_source_sector_change_inputs(
             scenario="LAUNCH_CONFIRM",
             action="changes",
             before_session=d0_before_session,
-            before_source_package_id=source_package_id,
+            before_source_capture_id=source_capture_id,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
             transition="ALL",
             offset=0,
             limit=5000,
@@ -280,7 +362,8 @@ def prepare_source_sector_change_inputs(
                     board_native_id=None,
                     target_session=target_session,
                     research_cutoff=research_cutoff,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
                     profile_revision=profile_revision,
                     changed_only=False,
                     sort_by="delta20",
@@ -304,7 +387,8 @@ def prepare_source_sector_change_inputs(
             research_cutoff,
             sessions,
             calendar_revision,
-            source_package_id,
+            source_capture_id,
+            price_coordinate,
             event_window_start,
             0,
             1,
@@ -319,7 +403,8 @@ def prepare_source_sector_change_inputs(
             source_version_context=source_version_context,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
             sessions=sessions,
             calendar_revision=calendar_revision,
             event_window_start=event_window_start,
@@ -327,12 +412,13 @@ def prepare_source_sector_change_inputs(
     return SourceSectorChangeInputs(
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
         profile_revision=profile_revision,
         industry_snapshot_id=industry_snapshot_id,
         concept_snapshot_id=concept_snapshot_id,
         event_window_start=event_window_start,
-        pg_history_session_count=pg_history_session_count,
+        pg_history_session_count=history_session_count,
         config_path=config_path,
         strength_results=tuple(strength_results),
         discovery=discovery,
@@ -395,7 +481,7 @@ def build_source_sector_change_view(
                 config,
                 target_session=inputs.target_session,
                 research_cutoff=inputs.research_cutoff,
-                source_package_id=inputs.source_package_id,
+                source_capture_id=inputs.source_capture_id,
             )
         except SourceMarketContextError as error:
             if error.category != "NOT_EVALUABLE":
@@ -428,6 +514,11 @@ def build_source_sector_change_view(
         {
             "ok": True,
             "operation": "change-stocks",
+            "target_session": inputs.target_session.isoformat(),
+            "research_cutoff": inputs.research_cutoff.isoformat(),
+            "source_capture_id": inputs.source_capture_id,
+            "price_coordinate": inputs.price_coordinate,
+            "time_role": "NON_PIT_RETROSPECTIVE",
             "configuration_path": inputs.config_path,
             "database_io_attempted": True,
             "database_read": {
@@ -495,25 +586,35 @@ def run_source_sector_change_research(
 def read_retrospective_rotation(
     config: Mapping[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str,
     board_native_id: str,
     start_session: date,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     profile_revision: str | None = None,
     profile_contract: dict[str, Any] | None = None,
-    profile_history_session_count: int = 75,
+    profile_history_session_count: int | None = None,
     peer_target_only: bool = False,
-    peer_snapshot_ids: Mapping[str, str] | None = None,
+    peer_snapshot_ids: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """固定后验同类成员，逐会话计算pulse并追踪每个触发日的等权篮子。"""
+    configured_history_limit = _configured_history_session_limit(config)
+    profile_history_count = (
+        configured_history_limit
+        if profile_history_session_count is None
+        else profile_history_session_count
+    )
     if (
         type(start_session) is not date
         or type(target_session) is not date
         or type(research_cutoff) is not date
         or not start_session <= target_session <= research_cutoff
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise TdxSectorMembersApplicationError(
             "ROTATION_REQUEST_INVALID", "Rotation窗口必须绑定不晚于研究截止的官方会话"
@@ -526,8 +627,8 @@ def read_retrospective_rotation(
         )
     if profile_revision is not None and (
         not isinstance(profile_contract, dict)
-        or type(profile_history_session_count) is not int
-        or not 1 <= profile_history_session_count <= 75
+        or type(profile_history_count) is not int
+        or not 1 <= profile_history_count <= configured_history_limit
     ):
         raise TdxSectorMembersApplicationError(
             "ROTATION_PROFILE_INVALID", "Rotation来源模式须绑定画像合同和有界会话数"
@@ -549,6 +650,20 @@ def read_retrospective_rotation(
             "Rotation候选窗须为1至15个会话，且至少有8个前态会话",
         )
     sessions = tuple(all_sessions[start_index - lookback : end_index + 1])
+    capture_start, capture_end = _capture_session_bounds(
+        config,
+        source_capture_id=source_capture_id,
+        research_cutoff=research_cutoff,
+    )
+    if (
+        len(sessions) > configured_history_limit
+        or sessions[0] < capture_start
+        or target_session > capture_end
+    ):
+        raise TdxSectorMembersApplicationError(
+            "ROTATION_WINDOW_EXCEEDS_CAPTURE_RANGE",
+            "Rotation历史窗口不得超出配置预算或当前paired capture的会话范围。",
+        )
     if peer_snapshot_ids is not None and (
         not peer_target_only
         or set(peer_snapshot_ids) != {"INDUSTRY", "CONCEPT"}
@@ -599,58 +714,53 @@ def read_retrospective_rotation(
         for symbol in members
     }
     observations = {}
-    raw_by_symbol = {}
+    qfq_by_symbol = {}
     offset = 0
     while True:
-        page = read_raw_daily_history_page(
+        page = _read_baostock_d1_candidate_page(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
+            research_cutoff=research_cutoff,
             sessions=sessions,
+            source_capture_id=source_capture_id,
             offset=offset,
             limit=100,
-            market="ALL",
-            board="ALL",
-            include_parser_contract=True,
         )
         if (
             page["version_status"] != "CLOSED"
+            or page["source_capture_id"] != source_capture_id
+            or page["price_coordinate"] != price_coordinate
             or page["total_count"] != page["version_expected_row_count"]
         ):
             raise TdxSectorMembersPgError(
                 "ROTATION_SOURCE_IDENTITY_MISMATCH",
-                "Rotation成员与目标Raw来源身份或分母不一致",
+                "Rotation成员与目标BaoStock QFQ捕获身份或分母不一致",
             )
         for candidate in page["candidates"]:
             symbol = candidate["source_symbol"]
             if symbol not in wanted:
                 continue
             rows = candidate["history_rows"]
-            raw = {row["session_date"]: row for row in rows}
+            qfq_rows = {row["session_date"]: row for row in rows}
             if (
-                len(raw) != len(rows)
+                len(qfq_rows) != len(rows)
                 or symbol in observations
-                or target_session not in raw
+                or target_session not in qfq_rows
             ):
                 raise TdxSectorMembersPgError(
-                    "ROTATION_HISTORY_INVALID", "Rotation来源历史重复或目标行缺失"
+                    "ROTATION_HISTORY_INVALID", "Rotation QFQ来源历史重复或目标行缺失"
                 )
-            raw_by_symbol[symbol] = raw
-            by_key = {(symbol, day): row for day, row in raw.items()}
-            counts = {
-                key: {"row_count": 1, "package_count": 1, "capture_count": 1}
-                for key in by_key
-            }
-            capture = raw[target_session]["source_capture_id"]
+            qfq_by_symbol[symbol] = qfq_rows
             observations[symbol] = tuple(
-                _raw_window_observation(
-                    source_symbol=symbol,
+                _core_observation_from_pg_price_row(
+                    qfq_rows.get(day),
                     session=day,
-                    raw_by_key=by_key,
-                    revision_counts=counts,
-                    target_session=target_session,
-                    target_capture_id=capture,
-                )[0]
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
+                    coordinate_id=(
+                        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
+                    ),
+                )
                 for day in sessions
             )
         if page["next_offset"] is None:
@@ -685,17 +795,12 @@ def read_retrospective_rotation(
         return close
 
     def matching_source_versions(symbol, indexes):
-        raw = raw_by_symbol.get(symbol, {})
-        versions = [
-            (
-                raw.get(sessions[i], {}).get("source_package_id"),
-                raw.get(sessions[i], {}).get("parser_contract"),
-            )
+        qfq_rows = qfq_by_symbol.get(symbol, {})
+        return all(
+            qfq_rows.get(sessions[i], {}).get("source_capture_id") == source_capture_id
+            and qfq_rows.get(sessions[i], {}).get("qfq_price_coordinate")
+            == "FORWARD_ADJUSTED"
             for i in indexes
-        ]
-        return (
-            all(package and parser for package, parser in versions)
-            and len(set(versions)) == 1
         )
 
     endpoints = {}
@@ -778,7 +883,7 @@ def read_retrospective_rotation(
                         config,
                         target_session=sessions[index],
                         research_cutoff=research_cutoff,
-                        source_package_id=source_package_id,
+                        source_capture_id=source_capture_id,
                     )["facts"],
                     None,
                 )
@@ -803,10 +908,10 @@ def read_retrospective_rotation(
                     config,
                     target_session=sessions[index],
                     research_cutoff=research_cutoff,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     profile_revision=profile_revision,
                     profile_contract=profile_contract,
-                    history_session_count=profile_history_session_count,
+                    history_session_count=profile_history_count,
                     selected_symbols=frozenset(members),
                 )
                 seed_by_session[index] = (
@@ -854,7 +959,9 @@ def read_retrospective_rotation(
                     "prior_breadth": sessions[-2],
                 },
                 "board_kind": board_kind,
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
+                "price_coordinate": "FORWARD_ADJUSTED",
+                "time_role": "NON_PIT_RETROSPECTIVE",
                 "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
                 "peer_target": all_rotations,
                 "peer_target_by_kind": all_rotations_by_kind,
@@ -1058,7 +1165,7 @@ def read_retrospective_rotation(
             candidate["basket"] = {
                 "membership_mode": "RETROSPECTIVE_FIXED_CURRENT_MEMBERS",
                 "weight": "EQUAL_FIXED_DENOMINATOR",
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": "FORWARD_ADJUSTED",
                 "t0_minus_1": sessions[i - 1].isoformat(),
                 "base_observation": {
                     "session": sessions[i - 1].isoformat(),
@@ -1103,7 +1210,9 @@ def read_retrospective_rotation(
         "snapshot": snapshot["snapshot"],
         "board_kind": board_kind,
         "board_native_id": board_native_id,
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "research_cutoff": research_cutoff.isoformat(),
         "later_session_status": "NOT_AVAILABLE_AFTER_RESEARCH_CUTOFF"
         if target_session == research_cutoff

@@ -1,8 +1,8 @@
 const STATUS_LABELS = {
   AVAILABLE: "可查看",
-  BLOCKED_NOT_AUTHORIZED: "受限：未获行情执行授权",
+  BLOCKED_NOT_AUTHORIZED: "受限：数据服务未开放行情执行",
   BLOCKED_SOURCE_NOT_AVAILABLE: "受限：来源不可用",
-  BLOCKED_BAOSTOCK_REQUEST_NOT_ENABLED: "BaoStock请求未启用；其它来源继续",
+  BLOCKED_BAOSTOCK_REQUEST_NOT_ENABLED: "BaoStock股票价格请求未启用",
   RESET_SOURCE_PREFLIGHT_REQUIRED: "清理前来源核验待执行",
   RESET_PREVIEW_STALE: "清理范围已变化，请重新预览",
   BLOCKED_HISTORY_INSUFFICIENT: "受限：历史会话不足",
@@ -28,8 +28,8 @@ const STATUS_LABELS = {
 
 const STAGE_LABELS = {
   BUSINESS_RESET: "清理业务事实",
-  SOURCE_RAW: "来源与 Raw",
-  SOURCE_BAOSTOCK: "BaoStock补充来源",
+  SOURCE_RAW: "BaoStock股票价格",
+  SOURCE_BAOSTOCK: "BaoStock股票价格",
   SOURCE_SECTOR_MEMBERS: "行业 / GN成员来源",
   CORE_PROFILE: "Core / Profile",
   STATIC_RESEARCH: "静态研究",
@@ -47,12 +47,25 @@ const LAYER_LABELS = {
   BASE: "第二层 · 基础画像与指标",
   RESEARCH: "第三层 · 研究算法",
 };
+const CURRENT_MODULE_CODES = {
+  SOURCE: new Set(["BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"]),
+  BASE: new Set(["CORE_PROFILE", "MARKET_BREADTH", "MARKET_PARTICIPATION"]),
+  RESEARCH: new Set([
+    "D0",
+    "D1",
+    "FOCUS_FORMAL",
+    "SECTOR_PULSE",
+    "SECTOR_TRANSITION",
+    "SECTOR_FOLLOWUP",
+  ]),
+};
 
 const CLOSED_UNIT_STATUSES = [
   "COMPLETED",
   "ALREADY_COMPLETE",
   "NO_CHANGE",
   "CLEARED",
+  "NOT_DUE",
   "SKIPPED_BY_USER",
   "SKIPPED_NOT_IMPLEMENTED",
 ];
@@ -157,7 +170,7 @@ function renderProgress(root, job) {
         : workflowMode === "RESET_ALL_BUSINESS_FACTS"
           ? "清空业务事实后重初始化"
           : workflowMode === "REUSE_RAW"
-            ? "复用Raw补算派生"
+            ? "复用行情补算派生"
             : workflowMode || "";
   const heading = element("div", null, "job-progress-heading");
   heading.append(
@@ -328,7 +341,7 @@ function renderRecent(root, jobs) {
   const tbody = document.createElement("tbody");
   for (const job of jobs) {
     const windowLabel =
-      "Raw " +
+      "未复权行情 " +
       job.history_session_count +
       " · D0 " +
       job.d0_output_session_count +
@@ -341,7 +354,7 @@ function renderRecent(root, jobs) {
         job.mode === "INITIALIZE"
           ? job.initialization_mode === "RESET_ALL_BUSINESS_FACTS"
             ? "重置后初始化"
-            : "复用Raw初始化"
+            : "复用BaoStock行情初始化"
           : job.daily_mode || "手动日更",
       ),
       element("td", job.target_session || "未知"),
@@ -465,15 +478,35 @@ export function mountDataJobPages(api) {
           ...item,
         })),
       ];
-    if (Array.isArray(raw)) return raw;
-    if (raw && typeof raw === "object") {
-      return Object.entries(raw).flatMap(([layer, entries]) =>
+    let modules = raw;
+    if (raw && !Array.isArray(raw) && typeof raw === "object") {
+      modules = Object.entries(raw).flatMap(([layer, entries]) =>
         Array.isArray(entries)
           ? entries.map((entry) => ({ layer, ...entry }))
           : [],
       );
     }
-    return [];
+    if (!Array.isArray(modules)) return [];
+    const normalized = new Map();
+    for (const item of modules) {
+      const code = String(item.code || item.module_code || "").toUpperCase();
+      if (!code) continue;
+      const layer = String(item.layer || item.layer_code || "").toUpperCase();
+      if (!CURRENT_MODULE_CODES[layer]?.has(code)) continue;
+      const key = `${layer}:${code}`;
+      const module = {
+        ...item,
+        code,
+        module_code: code,
+        label:
+          code === "BAOSTOCK_PRICES"
+            ? "BaoStock股票价格"
+            : item.label || item.title || code,
+      };
+      const previous = normalized.get(key);
+      if (!previous) normalized.set(key, module);
+    }
+    return [...normalized.values()];
   }
 
   function renderModulePicker(page, capabilities) {
@@ -622,7 +655,7 @@ export function mountDataJobPages(api) {
     }
     if (reset) {
       const modules = byId("dataInitModules");
-      for (const moduleCode of ["TDX_RAW", "TDX_SECTOR_MEMBERS"]) {
+      for (const moduleCode of ["BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"]) {
         const checkbox = modules.querySelector(
           `[data-module-code="${moduleCode}"]`,
         );
@@ -697,13 +730,16 @@ export function mountDataJobPages(api) {
 
   function requestBodyForPage(page) {
     const body = currentPageBody(page);
-    if (page === "initialize" && state.resetResumeFingerprint) {
-      return {
-        ...body,
-        reset_preview_fingerprint: state.resetResumeFingerprint,
-      };
-    }
-    return body;
+    const resetMode =
+      page === "initialize" &&
+      body.initialization_mode === "RESET_ALL_BUSINESS_FACTS";
+    return {
+      ...body,
+      ...(resetMode ? { raw_response_journal_enabled: true } : {}),
+      ...(page === "initialize" && state.resetResumeFingerprint
+        ? { reset_preview_fingerprint: state.resetResumeFingerprint }
+        : {}),
+    };
   }
 
   function populateTargets(capabilities) {
@@ -712,6 +748,7 @@ export function mountDataJobPages(api) {
     const sessions = (
       capabilities.available_target_sessions ||
       capabilities.official_calendar_sessions ||
+      capabilities.price_coverage?.closed_sessions ||
       capabilities.raw_coverage?.closed_sessions ||
       []
     ).filter((session) => String(session) <= cutoff);
@@ -734,9 +771,9 @@ export function mountDataJobPages(api) {
   }
 
   function renderCapabilities(capabilities) {
-    const raw = capabilities.raw_coverage || {};
+    const raw = capabilities.price_coverage || capabilities.raw_coverage || {};
     const summary =
-      "PG闭合Raw " +
+      "PG闭合BaoStock未复权行情 " +
       count(raw.stored_session_count) +
       " 个官方会话 · " +
       (raw.first_stored_session || "未知") +
@@ -753,13 +790,15 @@ export function mountDataJobPages(api) {
     byId("dataDailyCoverage").textContent =
       "最近完成研究会话 " +
       (completedSession || "未知") +
-      " · 来源包 " +
-      (raw.last_completed_source_package_id || "未知") +
-      " · 外部来源最新会话未核实（当前冻结） · " +
+      " · 来源捕获 " +
+      (raw.last_completed_source_capture_id ||
+        raw.last_completed_capture_id ||
+        "未知") +
+      " · 页面只显示研究截止内已完成会话 · " +
       summary;
     const gate = capabilities.execution_authorized
       ? "本机运行许可已启用；开始后仍会核验来源、会话窗口与PG覆盖。"
-      : "当前未授权真实行情执行。预检只读PG与官方日历，不请求来源、不写行情；初始化和新日日更无法启动。";
+      : "当前数据服务未开放真实行情执行。预检只读PG与官方日历，不请求来源、不写行情；初始化和日更无法启动。";
     for (const id of ["dataInitGate", "dataDailyGate"]) {
       byId(id).textContent = gate;
       byId(id).classList.toggle(
@@ -826,7 +865,7 @@ export function mountDataJobPages(api) {
       ["PG数据库", database],
       ["业务schema", schema],
       ["目标官方会话", targetRange],
-      ["基础Raw目标", `${rawCount || "未提供"}个官方会话`],
+      ["基础行情目标", `${rawCount || "未提供"}个官方会话`],
       [
         "Core/Profile历史输入窗口",
         body.profile_history_session_count
@@ -996,7 +1035,7 @@ export function mountDataJobPages(api) {
       const budget = plan.baostock_request_budget;
       const budgetText = budget
         ? `登录批次需要 ${budget.required_login_batches}，当前允许 ${budget.allowed_login_batches}，代码会话数 ${budget.symbol_session_units}。`
-        : "尚无可用的现存PG Raw批次预算。";
+        : "尚无可用的BaoStock行情请求预算。";
       root.append(
         element(
           "p",
@@ -1066,16 +1105,17 @@ export function mountDataJobPages(api) {
       root.append(
         element(
           "p",
-          "基础Raw窗口 " +
+          "基础BaoStock未复权行情窗口 " +
             plan.raw_history_session_count_available +
-            " 个本次计算输入官方会话；精确可复用同包已闭合 " +
+            " 个本次计算输入官方会话；精确可复用同捕获已闭合 " +
             plan.raw_history_sessions_in_pg +
             " 个，未在PG中找到 " +
             (plan.missing_raw_sessions || []).length +
-            " 个；截止内PG总Raw会话 " +
+            " 个；截止内PG总BaoStock未复权行情会话 " +
             (plan.source_coverage?.pg_closed_raw_session_count ?? "未知") +
-            " 个；当前画像来源包 " +
-            (plan.source_coverage?.active_pg_source_package_id ||
+            " 个；当前画像来源捕获 " +
+            (plan.source_coverage?.active_pg_source_capture_id ||
+              plan.source_coverage?.active_source_capture_id ||
               "未唯一绑定") +
             "。来源覆盖：" +
             (plan.source_coverage?.status || "未知") +
@@ -1089,7 +1129,7 @@ export function mountDataJobPages(api) {
           "p",
           "Core/Profile每个输出日分别使用 " +
             currentPageBody(page).profile_history_session_count +
-            " 个官方历史会话；该窗口独立于Raw总量和输出保存范围。",
+            " 个官方历史会话；该窗口独立于基础行情输入量和输出保存范围。",
           "muted",
         ),
       );
@@ -1176,25 +1216,6 @@ export function mountDataJobPages(api) {
       root.append(element("h3", "所选模块目标会话"), list);
     }
     const currentBody = currentPageBody(page);
-    if (currentBody.research_modules?.includes("ADJUSTED_PRICE")) {
-      const windows = plan.adjusted_price_source_windows || {};
-      const symbols = plan.adjusted_price_symbols_by_session || {};
-      const statuses = plan.adjusted_price_input_status_by_session || {};
-      const details = (plan.module_output_sessions?.ADJUSTED_PRICE || []).map(
-        (target) => {
-          const window = windows[target] || [];
-          const inputStatus = statuses[target] || {};
-          return window.length
-            ? `${target}：同包已存Raw ${window[0]} 至 ${window[window.length - 1]}（${window.length}个官方会话），公告来源代码 ${symbols[target]?.length ?? 0} 个`
-            : `${target}：${inputStatus.status || "NOT_COMPUTED"} · ${inputStatus.message || "公司行为事件覆盖未证明"}`;
-        },
-      );
-      if (details.length) {
-        root.append(
-          element("p", `仿射复权输入：${details.join("；")}`, "muted"),
-        );
-      }
-    }
     const isCleanupOperation = [
       "CLEAR_DERIVED",
       "CLEAR_AND_REGENERATE",
@@ -1288,16 +1309,16 @@ export function mountDataJobPages(api) {
     }
     const incomplete = [
       ...(plan.d0_insufficient_previous_sessions || []).map(
-        (day) => "D0 " + day + "：前序Raw不足",
+        (day) => "D0 " + day + "：前序价格历史不足",
       ),
       ...(plan.d1_insufficient_history_sessions || []).map(
-        (day) => "D1 " + day + "：算法窗口Raw不足",
+        (day) => "D1 " + day + "：算法价格窗口不足",
       ),
       ...(plan.profile_insufficient_history_sessions || []).map(
         (day) => "Profile " + day + "：历史窗口不足",
       ),
       ...(plan.market_breadth_insufficient_history_sessions || []).map(
-        (day) => "市场宽度 " + day + "：T-4官方Raw窗口不足",
+        (day) => "市场宽度 " + day + "：T-4官方BaoStock前复权窗口不足",
       ),
       ...(plan.market_participation_insufficient_sessions || []).map(
         (day) => "成交参与 " + day + "：宽度或Profile未闭合",
@@ -1362,7 +1383,7 @@ export function mountDataJobPages(api) {
         ["预计影响行", count(preview.affected_rows)],
         ["下游依赖", dependents.join("；") || "无 / 未声明"],
         [
-          "基础来源Raw",
+          "基础BaoStock行情",
           preview.raw_rows_untouched === true ? "不变" : "需要后端明确说明",
         ],
       ];
@@ -1385,7 +1406,7 @@ export function mountDataJobPages(api) {
       root.append(
         element(
           "p",
-          "基础来源（包括Raw）不能从此处清理；取消来源选择并仅选择一个派生模块。",
+          "基础来源（包括BaoStock行情）不能从此处清理；取消来源选择并仅选择一个派生模块。",
           "job-error",
         ),
       );
@@ -1486,7 +1507,7 @@ export function mountDataJobPages(api) {
       page === "initialize" ? "dataInitPlan" : "dataDailyPlan",
     );
     planRoot.replaceChildren(
-      element("p", "正在读取PG任务状态与截止内Raw覆盖…", "muted"),
+      element("p", "正在读取PG任务状态与截止内BaoStock行情覆盖…", "muted"),
     );
     try {
       const capabilities = await api("/api/product/data-jobs/capabilities");
@@ -1684,7 +1705,7 @@ export function mountDataJobPages(api) {
           `目标会话：${(preview.target_sessions || []).join("、") || "未知"}`,
           `影响表：${(preview.affected_tables || []).join("、") || "未知"}`,
           `预计行数：${count(preview.affected_rows)}`,
-          `Raw来源行保持：${preview.raw_rows_untouched === true ? "是" : "未证明"}`,
+          `基础行情行保持：${preview.raw_rows_untouched === true ? "是" : "未证明"}`,
         ].join("\n");
         if (
           preview.raw_rows_untouched !== true ||

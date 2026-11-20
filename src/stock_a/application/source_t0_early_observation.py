@@ -190,7 +190,7 @@ def persist_source_t0_early_observations_from_saved(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     snapshot_ids: Mapping[str, int],
 ) -> dict[str, Any]:
     """只从已存事实生成T0板内观察；不采集或重算Raw、Seed、D0和D1。"""
@@ -198,8 +198,8 @@ def persist_source_t0_early_observations_from_saved(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise SourceT0EarlyObservationError(
             "T0_EARLY_TARGET_INVALID", "T0观察目标日、截止日或来源包无效"
@@ -209,12 +209,17 @@ def persist_source_t0_early_observations_from_saved(
     source_version = read_source_version_context(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
     )
     if (
         source_version.get("status") != "AVAILABLE"
-        or source_version.get("source_package_id") != source_package_id
-        or type(source_version.get("source_capture_id")) is not int
+        or source_version.get("source_capture_id") != source_capture_id
+        or source_version.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or source_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or set(source_version.get("price_coordinates", ()))
+        != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
         or source_version.get("raw_row_count")
         != source_version.get("capture_expected_row_count")
     ):
@@ -226,11 +231,24 @@ def persist_source_t0_early_observations_from_saved(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
-        source_capture_id=source_version["source_capture_id"],
+        source_capture_id=source_capture_id,
         expected_source_count=source_version["capture_expected_row_count"],
         snapshot_ids=snapshot_ids,
     )
+    seed_scope = inputs.get("seed_scope")
+    if (
+        inputs.get("target_session") != target_session
+        or inputs.get("source_capture_id") != source_capture_id
+        or not isinstance(seed_scope, Mapping)
+        or seed_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or seed_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
+        or seed_scope.get("source_count")
+        != source_version.get("capture_expected_row_count")
+    ):
+        raise SourceT0EarlyObservationError(
+            "T0_EARLY_SEED_CAPTURE_INVALID",
+            "T0 Seed未绑定同一BaoStock QFQ paired capture或完整来源池",
+        )
     registrations = inputs["registrations"]
     boards_by_key: dict[tuple[int, str, str], dict[str, Any]] = {}
     symbols_by_board: dict[tuple[int, str, str], set[str]] = defaultdict(set)
@@ -255,11 +273,15 @@ def persist_source_t0_early_observations_from_saved(
     pulse_result = read_source_sector_pulse_for_boards(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
-        source_capture_id=source_version["source_capture_id"],
+        source_capture_id=source_capture_id,
         source_pool_count=source_version["capture_expected_row_count"],
         boards=boards,
     )
+    if pulse_result.get("source_capture_id") != source_capture_id:
+        raise SourceT0EarlyObservationError(
+            "T0_EARLY_PULSE_CAPTURE_INVALID",
+            "已存PULSE读取与当前paired capture身份不一致",
+        )
     pulse_by_board = pulse_result.get("by_board", {})
 
     resolved, adjacent_sessions, _ = resolve_pg_history_window(
@@ -273,12 +295,16 @@ def persist_source_t0_early_observations_from_saved(
     previous_source = read_source_version_context(
         config,
         target_session=previous_session,
-        source_package_id=source_package_id,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
     )
     previous_capture_id = (
         previous_source.get("source_capture_id")
         if previous_source.get("status") == "AVAILABLE"
-        and previous_source.get("source_package_id") == source_package_id
+        and previous_source.get("source_capture_id") == source_capture_id
+        and previous_source.get("price_coordinate") == "FORWARD_ADJUSTED"
+        and previous_source.get("time_role") == "NON_PIT_RETROSPECTIVE"
         else None
     )
     previous_profile_revision = None
@@ -286,7 +312,6 @@ def persist_source_t0_early_observations_from_saved(
         previous_pulse = read_source_sector_pulse_day(
             config,
             target_session=previous_session,
-            source_package_id=source_package_id,
             source_capture_id=previous_capture_id,
             source_pool_count=int(previous_source["capture_expected_row_count"]),
             snapshot_ids=dict(snapshot_ids),
@@ -303,7 +328,7 @@ def persist_source_t0_early_observations_from_saved(
         target_pulse_ids=transition_targets,
         previous_session=previous_session,
         target_session=target_session,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         previous_source_capture_id=previous_capture_id,
         target_source_capture_id=source_version["source_capture_id"],
         previous_profile_revision=previous_profile_revision,
@@ -324,8 +349,7 @@ def persist_source_t0_early_observations_from_saved(
         compared = read_source_launch_watch_board_rps_comparisons(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
-            source_capture_id=source_version["source_capture_id"],
+            source_capture_id=source_capture_id,
             board_symbol_contexts=comparison_contexts,
             seed_scope=inputs["seed_scope"],
         )
@@ -515,7 +539,6 @@ def persist_source_t0_early_observations_from_saved(
                 {
                     "enrollment_id": int(registration["enrollment_id"]),
                     "target_session": target_session,
-                    "source_package_id": source_package_id,
                     "source_capture_id": source_version["source_capture_id"],
                     "source_symbol": registration["source_symbol"],
                     "d0_fact_id": registration.get("d0_fact_id"),
@@ -571,7 +594,7 @@ def persist_source_t0_early_observations_from_saved(
                     "hypothesis_version": HYPOTHESIS_VERSION,
                     "evidence_revision_key": evidence_revision_key,
                     "research_mode": "NON_PIT_EXPLORATORY",
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "price_coordinate": "FORWARD_ADJUSTED",
                 }
             )
 
@@ -582,8 +605,9 @@ def persist_source_t0_early_observations_from_saved(
         "status": persistence["status"],
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
         "source_capture_id": source_version["source_capture_id"],
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "source_pool_count": source_version["capture_expected_row_count"],
         "profile_revision": inputs["seed_scope"]["profile_revision"],
         "seed_scope": inputs["seed_scope"],

@@ -13,29 +13,23 @@ def _usable_close(
     row: Mapping[str, Any] | None,
     *,
     expected_session: date,
-    source_package_id: int,
     source_capture_id: int,
     label: str,
 ) -> tuple[Fraction | None, str | None]:
     if row is None:
-        return None, f"{label}_RAW_ROW_MISSING"
+        return None, f"{label}_QFQ_ROW_MISSING"
     if row.get("session_date") != expected_session:
         return None, f"{label}_SESSION_MISMATCH"
     if row.get("bar_status") != "TARGET_PRESENT":
         return None, f"{label}_BAR_NOT_PRESENT"
-    if row.get("price_quality") != "OBSERVED":
-        return None, f"{label}_PRICE_NOT_OBSERVED"
-    if row.get("price_coordinate") != "RAW_UNADJUSTED":
-        return None, f"{label}_PRICE_COORDINATE_UNKNOWN"
+    if row.get("qfq_price_quality") != "OBSERVED":
+        return None, f"{label}_QFQ_PRICE_NOT_OBSERVED"
+    if row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED":
+        return None, f"{label}_QFQ_PRICE_COORDINATE_UNKNOWN"
     capture_id = row.get("source_capture_id")
-    if (
-        type(row.get("source_package_id")) is not int
-        or row.get("source_package_id") != source_package_id
-        or type(capture_id) is not int
-        or capture_id != source_capture_id
-    ):
+    if type(capture_id) is not int or capture_id != source_capture_id:
         return None, f"{label}_SOURCE_IDENTITY_MISMATCH"
-    values = [row.get(f"raw_{field}") for field in ("open", "high", "low", "close")]
+    values = [row.get(f"qfq_{field}") for field in ("open", "high", "low", "close")]
     if any(value is None for value in values):
         return None, f"{label}_OHLC_MISSING"
     try:
@@ -57,9 +51,7 @@ def source_sector_pulse_followup_outcome(
     rows_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]],
     t0_session: date,
     target_session: date,
-    source_package_id: int,
     t0_source_capture_id: int,
-    target_source_package_id: int,
     target_source_capture_id: int,
 ) -> dict[str, Any]:
     """按现役post_R规则计算T0收盘至一个官方后继会话的固定等权篮子。"""
@@ -67,13 +59,10 @@ def source_sector_pulse_followup_outcome(
         type(t0_session) is not date
         or type(target_session) is not date
         or target_session <= t0_session
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or any(
             type(value) is not int or value <= 0
             for value in (
                 t0_source_capture_id,
-                target_source_package_id,
                 target_source_capture_id,
             )
         )
@@ -94,14 +83,12 @@ def source_sector_pulse_followup_outcome(
         t0_close, t0_reason = _usable_close(
             by_session.get(t0_session),
             expected_session=t0_session,
-            source_package_id=source_package_id,
             source_capture_id=t0_source_capture_id,
             label="T0",
         )
         target_close, target_reason = _usable_close(
             by_session.get(target_session),
             expected_session=target_session,
-            source_package_id=target_source_package_id,
             source_capture_id=target_source_capture_id,
             label="TARGET",
         )
@@ -131,7 +118,10 @@ def source_sector_pulse_followup_outcome(
         "reason_codes": sorted(reasons),
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": t0_source_capture_id,
+        "target_source_capture_id": target_source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
     }
 
 

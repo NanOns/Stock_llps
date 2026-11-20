@@ -19,7 +19,6 @@ _ALGORITHM = "SOURCE_CROSS_PERIOD_PULSE_R1"
 _KINDS = ("INDUSTRY", "CONCEPT")
 _COLUMNS = (
     "target_session",
-    "source_package_id",
     "source_capture_id",
     "profile_revision",
     "catalog_id",
@@ -145,7 +144,7 @@ def _unknown_reasons(
 def _pulse_rows(
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     source_version: Mapping[str, Any],
     profile_revision: str,
     target_result: Mapping[str, Any],
@@ -159,8 +158,11 @@ def _pulse_rows(
         or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         or type(source_count) is not int
         or source_count < 1
-        or source_version.get("source_package_id") != source_package_id
-        or target_result.get("source_package_id") != source_package_id
+        or source_version.get("source_capture_id") != source_capture_id
+        or source_version.get("source_time_quality") != "NON_PIT_OBSERVED"
+        or source_version.get("source_clock_role") != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+        or source_version.get("source_available_at") is not None
+        or target_result.get("source_capture_id") != source_capture_id
         or target_result.get("target_session") != target_session.isoformat()
         or target_result.get("membership_mode")
         != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
@@ -292,7 +294,6 @@ def _pulse_rows(
                 )
             values = {
                 "target_session": target_session,
-                "source_package_id": source_package_id,
                 "source_capture_id": capture_id,
                 "profile_revision": profile_revision,
                 "catalog_id": catalog_id,
@@ -344,7 +345,7 @@ def _pulse_rows(
                 "calculation_status": "COMPLETE",
                 "research_mode": "NON_PIT_RETROSPECTIVE",
                 "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": "FORWARD_ADJUSTED",
                 "source_time_quality": source_version.get("source_time_quality"),
                 "source_clock_role": source_version.get("source_clock_role"),
                 "source_available_at": source_version.get("source_available_at"),
@@ -367,7 +368,7 @@ def _validate_write_scope(
     cursor: Any,
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     source_version: Mapping[str, Any],
     profile_revision: str,
     rows: Sequence[Sequence[Any]],
@@ -375,43 +376,42 @@ def _validate_write_scope(
 ) -> None:
     capture_id = source_version.get("source_capture_id")
     cursor.execute(
-        "SELECT capture_id, source_package_id, normalized_count, "
-        "source_time_quality, source_clock_role, source_available_at "
-        "FROM source_captures WHERE capture_id=%s AND source_package_id=%s "
-        "AND target_session=%s",
-        (capture_id, source_package_id, target_session),
+        "SELECT capture_id,provider,range_start_session,range_end_session,price_coordinates, "
+        "source_time_quality,source_clock_role,source_available_at "
+        "FROM source_captures WHERE capture_id=%s",
+        (capture_id,),
     )
     capture = cursor.fetchone()
     if capture is None or (
         int(capture[0]) != capture_id
-        or int(capture[1]) != source_package_id
-        or int(capture[2]) != source_version["capture_expected_row_count"]
-        or capture[3] != source_version["source_time_quality"]
-        or capture[4] != source_version["source_clock_role"]
-        or source_raw._db_scalar(capture[5])
+        or capture[1] != "BAOSTOCK"
+        or capture[2] > target_session
+        or capture[3] < target_session
+        or set(capture[4] or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or capture[5] != source_version["source_time_quality"]
+        or capture[6] != source_version["source_clock_role"]
+        or source_raw._db_scalar(capture[7])
         != source_version.get("source_available_at")
     ):
         raise SectorPulsePgError(
             "SECTOR_PULSE_CAPTURE_REVISION_MISMATCH", "目标Raw捕获身份或时钟修订已变化"
         )
     cursor.execute(
-        "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
-        "count(DISTINCT source_capture_id)::bigint, count(DISTINCT source_package_id)::bigint "
-        "FROM source_raw_daily WHERE session_date=%s AND source_package_id=%s "
-        "AND source_capture_id=%s",
-        (target_session, source_package_id, capture_id),
+        "SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint, "
+        "count(DISTINCT source_capture_id)::bigint "
+        "FROM source_raw_daily WHERE session_date=%s AND source_capture_id=%s "
+        "AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL",
+        (target_session, source_capture_id),
     )
-    raw_count, unique_symbols, capture_count, content_count = cursor.fetchone()
+    raw_count, unique_symbols, capture_count = cursor.fetchone()
     expected_count = int(source_version["raw_row_count"])
     if (
         int(raw_count),
         int(unique_symbols),
         int(capture_count),
-        int(content_count),
     ) != (
         expected_count,
         expected_count,
-        1,
         1,
     ):
         raise SectorPulsePgError(
@@ -420,14 +420,9 @@ def _validate_write_scope(
     cursor.execute(
         "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
         "count(DISTINCT profile_revision)::bigint FROM source_pool_seed_day_facts "
-        "WHERE target_session=%s AND source_package_id=%s "
-        "AND source_capture_id=%s AND profile_revision=%s",
-        (
-            target_session,
-            source_package_id,
-            capture_id,
-            profile_revision,
-        ),
+        "WHERE target_session=%s AND source_capture_id=%s "
+        "AND price_coordinate='FORWARD_ADJUSTED' AND profile_revision=%s",
+        (target_session, source_capture_id, profile_revision),
     )
     seed_count, seed_symbols, seed_revisions = cursor.fetchone()
     if (int(seed_count), int(seed_symbols), int(seed_revisions)) != (
@@ -502,7 +497,7 @@ def _persist_once(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     source_version: Mapping[str, Any],
     profile_revision: str,
     target_result: Mapping[str, Any],
@@ -518,7 +513,7 @@ def _persist_once(
         _validate_write_scope(
             cursor,
             target_session=target_session,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             source_version=source_version,
             profile_revision=profile_revision,
             rows=rows,
@@ -623,7 +618,7 @@ def persist_source_sector_pulse_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     source_version: Mapping[str, Any],
     profile_revision: str,
     target_result: Mapping[str, Any],
@@ -631,8 +626,8 @@ def persist_source_sector_pulse_day(
     """原子保存完整行业与GN同类板块集合；同键异内容拒绝回滚。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or not isinstance(profile_revision, str)
         or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         or not isinstance(source_version, Mapping)
@@ -643,7 +638,7 @@ def persist_source_sector_pulse_day(
         )
     rows = _pulse_rows(
         target_session=target_session,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         source_version=source_version,
         profile_revision=profile_revision,
         target_result=target_result,
@@ -653,7 +648,7 @@ def persist_source_sector_pulse_day(
             return _persist_once(
                 config,
                 target_session=target_session,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 source_version=source_version,
                 profile_revision=profile_revision,
                 target_result=target_result,
@@ -716,10 +711,14 @@ def _pulse_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "catalog_id": int(row["catalog_id"]),
         "pulse_fact_id": int(row["id"]),
         "profile_revision": str(row["profile_revision"]).strip(),
+        "source_capture_id": int(row["source_capture_id"]),
         "algorithm_contract": row["algorithm_contract"],
         "research_mode": row["research_mode"],
         "membership_mode": row["membership_mode"],
         "price_coordinate": row["price_coordinate"],
+        "source_time_quality": row["source_time_quality"],
+        "source_clock_role": row["source_clock_role"],
+        "source_available_at": row["source_available_at"],
         "formal_rotation_state": row["formal_rotation_state"],
         "calculation_status": row["calculation_status"],
     }
@@ -729,22 +728,25 @@ def read_source_sector_pulse_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     source_pool_count: int,
     snapshot_ids: Mapping[str, int | None],
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """按精确数据包、捕获和双成员快照只读已存PULSE事实。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(source_pool_count) is not int
         or source_pool_count < 1
         or not isinstance(snapshot_ids, Mapping)
         or set(snapshot_ids) != set(_KINDS)
+        or profile_revision is not None
+        and (
+            not isinstance(profile_revision, str)
+            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
+        )
     ):
         raise SectorPulsePgError(
             "SECTOR_PULSE_READ_ARGUMENT_INVALID",
@@ -789,13 +791,20 @@ def read_source_sector_pulse_day(
         cursor,
         _connection_identity,
     ):
+        seed_scope_predicate = (
+            "target_session=%s AND source_capture_id=%s "
+            "AND price_coordinate='FORWARD_ADJUSTED' "
+            "AND producer_version IS NOT NULL"
+        )
+        seed_scope_parameters: tuple[Any, ...] = (target_session, source_capture_id)
+        if profile_revision is not None:
+            seed_scope_predicate += " AND profile_revision=%s"
+            seed_scope_parameters = (*seed_scope_parameters, profile_revision)
         cursor.execute(
             "SELECT profile_revision, count(*)::bigint, count(DISTINCT source_symbol)::bigint "
-            "FROM source_pool_seed_day_facts WHERE target_session=%s "
-            "AND source_package_id=%s AND source_capture_id=%s "
-            "AND producer_version IS NOT NULL "
-            "GROUP BY profile_revision ORDER BY profile_revision",
-            (target_session, source_package_id, source_capture_id),
+            "FROM source_pool_seed_day_facts WHERE "
+            f"{seed_scope_predicate} GROUP BY profile_revision ORDER BY profile_revision",
+            seed_scope_parameters,
         )
         seed_versions = cursor.fetchall()
         if len(seed_versions) != 1 or (
@@ -830,13 +839,12 @@ def read_source_sector_pulse_day(
         cursor.execute(
             f"SELECT p.id, {', '.join('p.' + column for column in _COLUMNS)}, c.snapshot_id "
             f"FROM {_TABLE} p JOIN tdx_sector_catalog c ON c.id=p.catalog_id "
-            "WHERE p.target_session=%s AND p.source_package_id=%s "
-            "AND p.source_capture_id=%s AND p.profile_revision=%s "
+            "WHERE p.target_session=%s AND p.source_capture_id=%s "
+            "AND p.profile_revision=%s "
             "AND c.snapshot_id=ANY(%s) AND p.algorithm_contract=%s "
             'ORDER BY c.snapshot_id, p.board_kind, p.board_native_id COLLATE "C"',
             (
                 target_session,
-                source_package_id,
                 source_capture_id,
                 profile_revision,
                 active_snapshots,
@@ -896,7 +904,10 @@ def read_source_sector_pulse_day(
                     and row["research_mode"] == "NON_PIT_RETROSPECTIVE"
                     and row["membership_mode"]
                     == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-                    and row["price_coordinate"] == "RAW_UNADJUSTED"
+                    and row["price_coordinate"] == "FORWARD_ADJUSTED"
+                    and row["source_time_quality"] == "NON_PIT_OBSERVED"
+                    and row["source_clock_role"] == "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+                    and row["source_available_at"] is None
                     and int(row["ret5_denominator"]) == int(row["member_count"])
                     and int(row["breadth_denominator"]) == int(row["member_count"])
                     for row in group
@@ -939,7 +950,6 @@ def read_source_sector_pulse_for_boards(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     source_pool_count: int,
     boards: Sequence[Mapping[str, Any]],
@@ -947,8 +957,6 @@ def read_source_sector_pulse_for_boards(
     """仅读取观察页涉及板块的已存PULSE，不装载完整板块目录。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(source_pool_count) is not int
@@ -1002,9 +1010,9 @@ def read_source_sector_pulse_for_boards(
         cursor.execute(
             "SELECT profile_revision,count(*)::bigint,count(DISTINCT source_symbol)::bigint "
             "FROM source_pool_seed_day_facts WHERE target_session=%s "
-            "AND source_package_id=%s AND source_capture_id=%s "
+            "AND source_capture_id=%s AND price_coordinate='FORWARD_ADJUSTED' "
             "GROUP BY profile_revision ORDER BY profile_revision",
-            (target_session, source_package_id, source_capture_id),
+            (target_session, source_capture_id),
         )
         seed_scopes = cursor.fetchall()
         if (
@@ -1050,8 +1058,8 @@ LEFT JOIN tdx_sector_catalog catalog
  AND catalog.board_native_id=requested.board_native_id
 LEFT JOIN {_TABLE} p
   ON p.catalog_id=catalog.id
- AND p.target_session=%s AND p.source_package_id=%s
- AND p.source_capture_id=%s AND p.profile_revision=%s
+ AND p.target_session=%s AND p.source_capture_id=%s
+ AND p.profile_revision=%s
  AND p.algorithm_contract=%s
 ORDER BY requested.board_kind,requested.board_native_id COLLATE "C" OFFSET 0""",
             (
@@ -1059,7 +1067,6 @@ ORDER BY requested.board_kind,requested.board_native_id COLLATE "C" OFFSET 0""",
                 [item[1] for item in normalized],
                 [item[2] for item in normalized],
                 target_session,
-                source_package_id,
                 source_capture_id,
                 profile_revision,
                 _ALGORITHM,
@@ -1085,7 +1092,6 @@ ORDER BY requested.board_kind,requested.board_native_id COLLATE "C" OFFSET 0""",
         fact["snapshot_id"] = int(values[-1])
         valid = (
             fact["target_session"] == target_session
-            and int(fact["source_package_id"]) == source_package_id
             and int(fact["source_capture_id"]) == source_capture_id
             and fact["board_kind"] == kind
             and fact["board_native_id"] == native_id
@@ -1094,7 +1100,10 @@ ORDER BY requested.board_kind,requested.board_native_id COLLATE "C" OFFSET 0""",
             and fact["formal_rotation_state"] == "NOT_EVALUATED"
             and fact["research_mode"] == "NON_PIT_RETROSPECTIVE"
             and fact["membership_mode"] == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-            and fact["price_coordinate"] == "RAW_UNADJUSTED"
+            and fact["price_coordinate"] == "FORWARD_ADJUSTED"
+            and fact["source_time_quality"] == "NON_PIT_OBSERVED"
+            and fact["source_clock_role"] == "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+            and fact["source_available_at"] is None
             and int(fact["snapshot_board_count"]) > 0
             and int(fact["source_pool_count"]) == source_pool_count
             and int(fact["ret5_denominator"]) == int(fact["member_count"])

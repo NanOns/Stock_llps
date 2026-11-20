@@ -12,7 +12,7 @@ import {
 import { renderD1MaterialMarket, setD1MaterialStatus } from "./market.js";
 import { renderD1Boards, renderD1Members } from "./sectors.js";
 import {
-  renderBaoStockSupplement,
+  renderBaoStockPriceSource,
   renderD1StockDetail,
   renderD1Stocks,
 } from "./stocks.js";
@@ -70,7 +70,7 @@ const names = {
   diagnostics: ["数据与诊断", "查看所选来源与质量。", "06"],
   initialize: [
     "数据初始化",
-    "按官方交易会话规划历史Raw、Core/Profile和指定研究输出。",
+    "按官方交易会话规划BaoStock行情、Core/Profile和指定研究输出。",
     "07",
   ],
   daily: ["数据日更", "手动检查并处理研究截止内连续的官方交易会话。", "08"],
@@ -234,12 +234,12 @@ function pulseHistoryIdentityText(session) {
   const participationProfile =
     session.market?.participation?.profile_revision || "UNKNOWN";
   if (!identity)
-    return `来源包 / capture UNKNOWN · PULSE Profile UNKNOWN · 成交参与 Profile ${participationProfile}`;
+    return `来源捕获 UNKNOWN · PULSE Profile UNKNOWN · 成交参与 Profile ${participationProfile}`;
   const pulseProfile =
     identity.profile_revision ||
     session.pulse?.profile_revision ||
     "NOT_COMPUTED";
-  return `来源包 ${identity.source_package_id} · capture ${identity.source_capture_id} · PULSE Profile ${pulseProfile} · 成交参与 Profile ${participationProfile}`;
+  return `来源捕获 ${identity.source_capture_id} · PULSE Profile ${pulseProfile} · 成交参与 Profile ${participationProfile}`;
 }
 function renderPulseHistory(result) {
   const root = $("pulseHistory");
@@ -1101,7 +1101,6 @@ function t0EarlyObservationDetails(
         const result = await api("/api/preview/t0-early-observations", {
           symbol: sourceSymbol,
           target_session: requestIdentity.target_session,
-          source_package_id: requestIdentity.source_package_id,
           source_capture_id: requestIdentity.source_capture_id,
         });
         for (const registration of registrations) {
@@ -1237,6 +1236,12 @@ function t0EarlyObservationDetails(
       );
       if (context.board_kind && context.board_native_id) {
         const historyPanel = node("div", null, "t0-relative-position-history");
+        const membershipSnapshotId =
+          context.membership_snapshot_id ??
+          context.snapshot_id ??
+          (context.board_kind === "INDUSTRY"
+            ? requestIdentity.industry_snapshot_id
+            : requestIdentity.concept_snapshot_id);
         const historyButton = node(
           "button",
           "读取本板跨会话位次",
@@ -1246,8 +1251,8 @@ function t0EarlyObservationDetails(
         const identityReady =
           sourceSymbol &&
           requestIdentity.target_session &&
-          requestIdentity.source_package_id &&
-          requestIdentity.source_capture_id;
+          requestIdentity.source_capture_id &&
+          membershipSnapshotId;
         historyButton.disabled = !identityReady;
         historyButton.addEventListener("click", async () => {
           if (!identityReady) return;
@@ -1257,8 +1262,8 @@ function t0EarlyObservationDetails(
             const result = await api("/api/preview/t0-early-observations", {
               symbol: sourceSymbol,
               target_session: requestIdentity.target_session,
-              source_package_id: requestIdentity.source_package_id,
               source_capture_id: requestIdentity.source_capture_id,
+              membership_snapshot_id: membershipSnapshotId,
               board_kind: context.board_kind,
               board_native_id: context.board_native_id,
             });
@@ -1280,7 +1285,10 @@ function t0EarlyObservationDetails(
         historyPanel.append(historyButton);
         if (!identityReady)
           historyPanel.append(
-            node("p", "缺少精确目标日、来源包或捕获身份，不能读取跨会话事实。"),
+            node(
+              "p",
+              "缺少精确BaoStock捕获或板块成员快照身份，不能读取跨会话事实。",
+            ),
           );
         panel.append(historyPanel);
       }
@@ -1401,7 +1409,7 @@ function homeObservationFor(row, evidence, context) {
   const cached = state.d0Featured;
   if (
     cached?.target_session === context.target_session &&
-    cached?.source_package_id === context.source_package_id
+    cached?.source_capture_id === context.source_capture_id
   ) {
     const homeRow = cached.rows.get(row.source_symbol);
     if (homeRow) {
@@ -1651,7 +1659,7 @@ function applyDisplayNameContext(context) {
   message(
     "displayNameObservation",
     context.status === "AVAILABLE"
-      ? `中文名为本机TDX观察标签（NON_PIT，${context.captured_at || "观察时钟未知"}）；不是稳定证券身份。`
+      ? `中文名来自名称观察版本（NON_PIT，${context.captured_at || "观察时钟未知"}）；不是稳定证券身份。`
       : "中文名来源暂无可用观察；以名称未知和来源代码展示。",
   );
 }
@@ -1923,7 +1931,7 @@ async function init() {
     select.replaceChildren();
     for (const date of dates) select.add(new Option(date, date));
     select.disabled = !dates.length;
-    const latest = dates.find((date) => uniqueRawVersion(date));
+    const latest = dates.find((date) => uniquePriceVersion(date));
     if (!latest) {
       message("contextText", "没有可唯一绑定的完整来源日期。");
       return;
@@ -1935,9 +1943,13 @@ async function init() {
   }
 }
 
-function uniqueRawVersion(date) {
+function uniquePriceVersion(date) {
   const closed = state.versions.filter(
-    (v) => v.session_date === date && v.version_status === "CLOSED",
+    (v) =>
+      v.session_date === date &&
+      v.price_coordinate === "RAW_UNADJUSTED" &&
+      v.version_status === "CLOSED" &&
+      v.source_capture_id != null,
   );
   return closed.length === 1 ? closed[0] : null;
 }
@@ -2021,29 +2033,29 @@ async function selectDate(target_session) {
   const token = state.contextRequest;
   const controller = new AbortController();
   state.contextController = controller;
-  const version = uniqueRawVersion(target_session);
+  const version = uniquePriceVersion(target_session);
   if (!version) {
     message(
       "contextText",
-      `${target_session} 的完整来源缺失或存在冲突，无法确定唯一来源。`,
+      `${target_session} 的BaoStock未复权捕获缺失或存在冲突，无法确定唯一价格来源。`,
     );
     message("observationLabel", "来源不可用");
     return;
   }
-  const source_package_id = version.source_package_id;
+  const source_capture_id = version.source_capture_id;
   const selected = {
     target_session,
-    source_package_id,
+    source_capture_id,
     contextReady: false,
   };
   state.selected = selected;
   message(
     "contextText",
-    `${target_session} · 来源代码池 ${version.row_count} 条；成员快照和画像状态正在读取。`,
+    `${target_session} · BaoStock未复权来源代码池 ${version.row_count} 条；成员快照和画像状态正在读取。`,
   );
-  message("observationLabel", `${target_session} · 已保存行情`);
+  message("observationLabel", `${target_session} · BaoStock已保存行情`);
   $("metrics").replaceChildren(
-    countCard("来源代码池", version.row_count, "已保存 Raw 行"),
+    countCard("来源代码池", version.row_count, "BaoStock未复权Bar"),
     countCard(
       "目标日有价格",
       version.bar_status_counts?.TARGET_PRESENT,
@@ -2064,19 +2076,39 @@ async function selectDate(target_session) {
     message("focusAutoStatus", "正在读取交易日来源上下文…");
   try {
     const c = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session, source_package_id })}`,
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session, source_capture_id, price_coordinate: "FORWARD_ADJUSTED" })}`,
       undefined,
       controller.signal,
     );
     if (token !== state.contextRequest || state.selected !== selected) return;
     applyDisplayNameContext(c.display_name_context);
     state.context = c;
-    const uniqueSnapshot = (kind) => {
-      const matches = (c.snapshots || []).filter((s) => s.source_kind === kind);
-      return matches.length === 1 ? matches[0] : null;
-    };
-    const industry = uniqueSnapshot("TDX_TDXHY_CFG");
-    const concept = uniqueSnapshot("TDX_INFOHARBOR_BLOCK_DAT");
+    const snapshotTimes = [
+      ...new Set(
+        (c.snapshots || [])
+          .map((snapshot) => snapshot.observed_at)
+          .filter((value) => typeof value === "string" && value),
+      ),
+    ].sort((left, right) => Date.parse(right) - Date.parse(left));
+    let industry = null;
+    let concept = null;
+    for (const observedAt of snapshotTimes) {
+      const industryMatches = (c.snapshots || []).filter(
+        (snapshot) =>
+          snapshot.source_kind === "TDX_TDXHY_CFG" &&
+          snapshot.observed_at === observedAt,
+      );
+      const conceptMatches = (c.snapshots || []).filter(
+        (snapshot) =>
+          snapshot.source_kind === "TDX_INFOHARBOR_BLOCK_DAT" &&
+          snapshot.observed_at === observedAt,
+      );
+      if (industryMatches.length === 1 && conceptMatches.length === 1) {
+        [industry] = industryMatches;
+        [concept] = conceptMatches;
+        break;
+      }
+    }
     Object.assign(selected, {
       profile_revision: null,
       profile_status: "NOT_COMPUTED",
@@ -2151,10 +2183,10 @@ async function resolveProfileForDate(
       (p) =>
         p.complete &&
         p.target_session === c.target_session &&
-        p.source_package_id === c.source_package_id &&
+        p.source_capture_id === c.source_capture_id &&
         p.profile_revision === revision &&
         p.history_calendar_revision === detail.official_calendar_revision &&
-        p.price_coordinate === "RAW_UNADJUSTED",
+        p.price_coordinate === "FORWARD_ADJUSTED",
     );
     const profile = matches.length === 1 ? matches[0] : null;
     c.profile_revision = profile?.profile_revision || null;
@@ -2249,7 +2281,7 @@ async function loadD0PulseDirectoryPage() {
     const query = new URLSearchParams({
       target_session: context.target_session,
       research_cutoff: context.research_cutoff,
-      source_package_id: String(context.source_package_id),
+      source_capture_id: String(context.source_capture_id),
       profile_revision: context.profile_revision,
       industry_snapshot_id: String(context.industry_snapshot_id),
       concept_snapshot_id: String(context.concept_snapshot_id),
@@ -2750,7 +2782,7 @@ function renderMarketD0Summary() {
   root.append(
     node(
       "p",
-      `目标Raw分母 ${format(targetSourceCount)} · D0新增占来源池 ${d0Share}；市场环境宽度 ${market?.status === "AVAILABLE" ? market.metric?.exact?.fraction || "已证数值" : market?.status || "尚未读取"}（来源分母 ${format(market?.denominator?.N_source)}）。`,
+      `目标BaoStock未复权分母 ${format(targetSourceCount)} · D0新增占来源池 ${d0Share}；市场环境宽度 ${market?.status === "AVAILABLE" ? market.metric?.exact?.fraction || "已证数值" : market?.status || "尚未读取"}（来源分母 ${format(market?.denominator?.N_source)}）。`,
     ),
   );
   if (boards === null) {
@@ -2803,8 +2835,8 @@ function renderMarketD0Summary() {
 }
 
 async function loadFocusMarketContext(context) {
-  if (!context?.target_session || !context?.source_package_id) return;
-  const key = `${context.target_session}:${context.source_package_id}`;
+  if (!context?.target_session || !context?.source_capture_id) return;
+  const key = `${context.target_session}:${context.source_capture_id}`;
   if (state.focusMarketKey === key) return;
   state.focusMarketKey = key;
   const request = ++state.focusMarketRequest;
@@ -2812,7 +2844,7 @@ async function loadFocusMarketContext(context) {
   try {
     const params = new URLSearchParams({
       target_session: context.target_session,
-      source_package_id: String(context.source_package_id),
+      source_capture_id: String(context.source_capture_id),
     });
     const result = await api(`/api/product/market?${params}`);
     if (request !== state.focusMarketRequest || state.selected !== context)
@@ -2830,7 +2862,7 @@ async function loadFocusMarketContext(context) {
       Number(counts.COMPARABLE_BOTH_POSITIVE || 0);
     message(
       "focusMarketContext",
-      `市场环境（来源宽度 ${result.status}）· Raw ${format(result.denominator.N_source)} · 可评价 ${format(result.denominator.N_eligible)} · 目标日正收益 ${format(positive)} · UNKNOWN ${format(result.denominator.UNKNOWN)}。观察分组以 Raw 池为分母；两种分母不等同，正式市场阶段为 NOT_READY。`,
+      `市场环境（来源宽度 ${result.status}）· BaoStock来源池 ${format(result.denominator.N_source)} · 可评价 ${format(result.denominator.N_eligible)} · 目标日正收益 ${format(positive)} · UNKNOWN ${format(result.denominator.UNKNOWN)}。观察分组以来源池为分母；两种分母不等同，正式市场阶段为 NOT_READY。`,
     );
   } catch (error) {
     if (request === state.focusMarketRequest && state.selected === context) {
@@ -3525,7 +3557,7 @@ function focusEvidenceDetails(item, context) {
   details.append(
     node(
       "p",
-      `T0 ${t0.status || "UNKNOWN"} · ${t0.target_session || context.target_session} · 包 ${t0.source_package_id ?? "UNKNOWN"} / 捕获 ${t0.source_capture_id ?? "UNKNOWN"} · 画像 ${t0.profile_revision || "UNKNOWN"} · ${t0.price_coordinate || "UNKNOWN"} · NON_PIT_EXPLORATORY`,
+      `T0 ${t0.status || "UNKNOWN"} · ${t0.target_session || context.target_session} · 捕获 ${t0.source_capture_id ?? "UNKNOWN"} · 画像 ${t0.profile_revision || "UNKNOWN"} · ${t0.price_coordinate || "UNKNOWN"} · NON_PIT_EXPLORATORY`,
     ),
     node(
       "p",
@@ -3537,8 +3569,8 @@ function focusEvidenceDetails(item, context) {
     node(
       "p",
       item.seed_t1_outcome?.d0_transition_status === "NOT_COMPUTED"
-        ? `D0相邻转移 NOT_COMPUTED · Raw来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`
-        : `D0 ${item.d0_change?.before_state || "UNKNOWN"}→${item.d0_change?.after_state || "UNKNOWN"} · ${item.transition || item.seed_t1_outcome?.d0_transition_status || "UNKNOWN"} · Raw来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`,
+        ? `D0相邻转移 NOT_COMPUTED · BaoStock来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`
+        : `D0 ${item.d0_change?.before_state || "UNKNOWN"}→${item.d0_change?.after_state || "UNKNOWN"} · ${item.transition || item.seed_t1_outcome?.d0_transition_status || "UNKNOWN"} · BaoStock来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`,
     ),
     node("p", formalD0AdmissionSummaryText(formalD0Admission)),
     node(
@@ -3557,8 +3589,9 @@ function focusEvidenceDetails(item, context) {
       item.source_symbol || item.symbol || null,
       {
         target_session: t0.target_session || context.target_session,
-        source_package_id: t0.source_package_id ?? context.source_package_id,
         source_capture_id: t0.source_capture_id ?? context.source_capture_id,
+        industry_snapshot_id: context.industry_snapshot_id,
+        concept_snapshot_id: context.concept_snapshot_id,
       },
     ),
   );
@@ -3714,7 +3747,12 @@ async function loadFocusAuto(context, offset = 0) {
       "当前未按板块筛选；可从观察对象的行业/GN标签进入板内名单。";
   }
   void loadFocusMarketContext(context);
-  if (!context?.previous_session || !context?.source_package_id) {
+  const previousPriceVersion = uniquePriceVersion(context?.previous_session);
+  if (
+    !context?.previous_session ||
+    !context?.source_capture_id ||
+    !previousPriceVersion?.source_capture_id
+  ) {
     message("focusAutoStatus", "相邻同源会话不可用；自动观察范围 UNKNOWN。");
     renderFocusS2T1Cohort({
       status: "UNKNOWN",
@@ -3731,7 +3769,8 @@ async function loadFocusAuto(context, offset = 0) {
       before_session: context.previous_session,
       target_session: context.target_session,
       research_cutoff: context.research_cutoff,
-      source_package_id: context.source_package_id,
+      before_source_capture_id: previousPriceVersion.source_capture_id,
+      source_capture_id: context.source_capture_id,
       industry_snapshot_id: context.industry_snapshot_id,
       concept_snapshot_id: context.concept_snapshot_id,
       ...(Number.isInteger(context.d1_history_session_count) &&
@@ -3836,7 +3875,7 @@ async function loadFocusAuto(context, offset = 0) {
     message(
       "focusAutoStatus",
       context.target_session +
-        " · 目标Raw来源池 " +
+        " · 目标BaoStock来源池 " +
         format(result.watch_groups?.target_source_pool_denominator) +
         " · D0新增 " +
         d0GroupCount +
@@ -4086,7 +4125,7 @@ function renderSourceObservationSegment(item, context) {
     ),
     node(
       "p",
-      `来源包 ${item.source_package_id} / T0捕获 ${item.anchor_capture_id} / T0事实 #${item.anchor_rule_fact_id} · ${item.rule_version} · Profile ${item.profile_revision || "UNKNOWN"} · NON_PIT_EXPLORATORY / RAW_UNADJUSTED / SOURCE_SYMBOL_ONLY`,
+      `来源捕获 ${item.source_capture_id} / T0事实捕获 ${item.anchor_capture_id} / T0事实 #${item.anchor_rule_fact_id} · ${item.rule_version} · Profile ${item.profile_revision || "UNKNOWN"} · NON_PIT_EXPLORATORY / RAW_UNADJUSTED / SOURCE_SYMBOL_ONLY`,
       "muted",
     ),
     node(
@@ -4242,7 +4281,7 @@ function renderSourceObservationSegment(item, context) {
     result.replaceChildren(node("p", "正在按精确 T0 键读取已存事实…"));
     const key = {
       target_session: item.t0_session,
-      source_package_id: item.source_package_id,
+      source_capture_id: item.source_capture_id,
       profile_revision: item.profile_revision,
       history: item.history_session_count,
       d1_history: item.d1_history_session_count,
@@ -4344,7 +4383,7 @@ function renderSourceObservationSegment(item, context) {
           const fepResults = await Promise.all(
             [1, 3, 5].map(async (horizon) => {
               const query = new URLSearchParams({
-                source_package_id: String(item.source_package_id),
+                source_capture_id: String(item.source_capture_id),
                 rule: item.rule_id,
                 horizon: String(horizon),
                 lane: fepLane,
@@ -4488,18 +4527,18 @@ async function loadFocusObservationSegments(context, offset = 0) {
     true;
   message("focusSegmentPage", "—");
   message("focusSegmentEventPage", "—");
-  if (!context?.contextReady || !context?.source_package_id) {
+  if (!context?.contextReady || !context?.source_capture_id) {
     message(
       "focusSegmentOutcomeStatus",
-      "T0日期或来源包不可用；观察结局 UNKNOWN。",
+      "T0日期或BaoStock捕获不可用；观察结局 UNKNOWN。",
     );
     message(
       "focusSegmentStatus",
-      "研究日期或来源包不可用；观察段状态 UNKNOWN。",
+      "研究日期或BaoStock捕获不可用；观察段状态 UNKNOWN。",
     );
     message(
       "focusSegmentEventStatus",
-      "事件日期或来源包不可用；事件状态 UNKNOWN。",
+      "事件日期或BaoStock捕获不可用；事件状态 UNKNOWN。",
     );
     return;
   }
@@ -4511,7 +4550,7 @@ async function loadFocusObservationSegments(context, offset = 0) {
   const query = {
     as_of: context.target_session,
     research_cutoff: context.research_cutoff,
-    source_package_id: context.source_package_id,
+    source_capture_id: context.source_capture_id,
     rule: requestedRule || "ALL",
     status,
     event: selectedEvent,
@@ -4572,7 +4611,7 @@ async function loadFocusObservationSegments(context, offset = 0) {
         : "";
     message(
       "focusSegmentStatus",
-      `${context.target_session} · 来源包 ${context.source_package_id} · ${result.rule_id || selectedRule} · 已登记观察段 ${denominator.enrollment_count ?? 0} / 独立来源代码 ${denominator.independent_source_symbol_count ?? 0} · ${summary || "没有已存状态分布"} · ${result.identity_status || "SOURCE_SYMBOL_ONLY"} / ${result.scope || "NON_PIT_EXPLORATORY"} / ${result.price_coordinate || "RAW_UNADJUSTED"}${nextSessionStatus}`,
+      `${context.target_session} · 来源捕获 ${context.source_capture_id} · ${result.rule_id || selectedRule} · 已登记观察段 ${denominator.enrollment_count ?? 0} / 独立来源代码 ${denominator.independent_source_symbol_count ?? 0} · ${summary || "没有已存状态分布"} · ${result.identity_status || "SOURCE_SYMBOL_ONLY"} / ${result.scope || "NON_PIT_EXPLORATORY"} / ${result.price_coordinate || "RAW_UNADJUSTED"}${nextSessionStatus}`,
     );
     const items = Array.isArray(result.results) ? result.results : [];
     for (const item of items)
@@ -4645,7 +4684,7 @@ async function loadFocusObservationSegments(context, offset = 0) {
     if (!items.length) {
       root.textContent =
         result.status === "NO_OBSERVED_SAMPLE"
-          ? "NO_OBSERVED_SAMPLE：所选日期、规则与来源包没有已登记观察段；不代表来源池为零。"
+          ? "NO_OBSERVED_SAMPLE：所选日期、规则与来源捕获没有已登记观察段；不代表来源池为零。"
           : `当前状态没有记录（${status}）；其它状态保持独立。`;
     }
   } catch (error) {
@@ -4757,19 +4796,19 @@ $("d0BoardNext").addEventListener("click", () => {
 
 async function loadD0Overview(c) {
   const token = ++state.d0Request;
-  const before = uniqueRawVersion(c.previous_session);
-  if (!before || before.source_package_id !== c.source_package_id) {
+  const before = uniquePriceVersion(c.previous_session);
+  if (!before || !c.source_capture_id) {
     state.d0Result = null;
     state.d0Status = "UNKNOWN";
-    state.d0Error = "相邻会话没有可确认的同源 Raw";
+    state.d0Error = "相邻官方会话缺少唯一BaoStock价格捕获";
     message(
       "d0Status",
-      "相邻会话没有可确认的同源 Raw，D0 新增状态为 UNKNOWN。",
+      "相邻官方会话缺少唯一BaoStock价格捕获，D0新增状态为UNKNOWN。",
     );
-    message("overviewBoards", "相邻会话同源 Raw 不可用，板块变化 UNKNOWN。");
-    message("overviewStocks", "相邻会话同源 Raw 不可用，个股变化 UNKNOWN。");
+    message("overviewBoards", "相邻官方会话价格捕获不可用，板块变化UNKNOWN。");
+    message("overviewStocks", "相邻官方会话价格捕获不可用，个股变化UNKNOWN。");
     $("metrics").lastElementChild.replaceWith(
-      countCard("D0 新增", "UNKNOWN", "相邻会话同源 Raw 不可用"),
+      countCard("D0 新增", "UNKNOWN", "相邻会话价格捕获不可用"),
     );
     renderD0Boards();
     renderMarketD0Summary();
@@ -4792,7 +4831,8 @@ async function loadD0Overview(c) {
         before_session: c.previous_session,
         target_session: c.target_session,
         research_cutoff: c.research_cutoff,
-        source_package_id: c.source_package_id,
+        before_source_capture_id: before.source_capture_id,
+        source_capture_id: c.source_capture_id,
         industry_snapshot_id: c.industry_snapshot_id,
         concept_snapshot_id: c.concept_snapshot_id,
         watch_group: "D0_NEW",
@@ -4824,7 +4864,7 @@ async function loadD0Overview(c) {
         homeRows.length === Math.min(candidateCount, homeFeaturedCount)
           ? {
               target_session: c.target_session,
-              source_package_id: c.source_package_id,
+              source_capture_id: c.source_capture_id,
               candidate_count: candidateCount,
               home_featured_count: homeFeaturedCount,
               rows: new Map(homeRows.map((item) => [item.source_symbol, item])),
@@ -4985,6 +5025,7 @@ async function openD0Board(board, offset = 0) {
   message("memberList", "正在读取…");
   $("memberPrev").disabled = $("memberNext").disabled = true;
   if (!$("boardDialog").open) $("boardDialog").showModal();
+  const beforeVersion = uniquePriceVersion(c.previous_session);
   try {
     let result;
     if (board.pulse_followup_only) {
@@ -5003,11 +5044,14 @@ async function openD0Board(board, offset = 0) {
         filter: { filtered_total: null, global_total: null },
       };
     } else {
+      if (!beforeVersion?.source_capture_id || !c.source_capture_id)
+        throw new Error("相邻官方会话缺少唯一BaoStock价格捕获");
       result = await api("/api/preview/source-launch-watch", {
         before_session: c.previous_session,
         target_session: c.target_session,
         research_cutoff: c.research_cutoff,
-        source_package_id: c.source_package_id,
+        before_source_capture_id: beforeVersion.source_capture_id,
+        source_capture_id: c.source_capture_id,
         industry_snapshot_id: c.industry_snapshot_id,
         concept_snapshot_id: c.concept_snapshot_id,
         ...(Number.isInteger(c.d1_history_session_count) &&
@@ -5030,7 +5074,7 @@ async function openD0Board(board, offset = 0) {
       return;
     const researchQuery = {
       target_session: c.target_session,
-      source_package_id: c.source_package_id,
+      source_capture_id: c.source_capture_id,
       d1_history_session_count: Number.isInteger(c.d1_history_session_count)
         ? c.d1_history_session_count
         : c.stock_history_session_count || c.source_history_session_count || 1,
@@ -5089,7 +5133,7 @@ async function openD0Board(board, offset = 0) {
         const historyQuery = new URLSearchParams({
           target_session: c.target_session,
           research_cutoff: c.research_cutoff,
-          source_package_id: String(c.source_package_id),
+          source_capture_id: String(c.source_capture_id),
           profile_revision: historyProfileRevision,
           snapshot_id: String(Number(historySnapshotId)),
           board_kind: board.board_kind,
@@ -5130,7 +5174,7 @@ async function openD0Board(board, offset = 0) {
           reason_codes: item.reason_codes || [],
         })),
         research_mode: pulse?.research_mode || "NON_PIT_RETROSPECTIVE",
-        price_coordinate: pulse?.price_coordinate || "RAW_UNADJUSTED",
+        price_coordinate: pulse?.price_coordinate || "UNKNOWN",
       };
     }
     const pulseSummary =
@@ -5176,7 +5220,7 @@ async function openD0Board(board, offset = 0) {
       .join(" · ");
     const pulseFollowupLine = pulseFollowupSummary
       ? `PULSE后继收盘观察（${pulseFollowup.research_mode ?? "NON_PIT_RETROSPECTIVE"}；${pulseFollowup.price_coordinate ?? "RAW_UNADJUSTED"}；描述性回看，不是事前胜率）${pulseFollowupSummary}`
-      : `PULSE后继Raw观察 ${pulseFollowup?.status ?? "NOT_COMPUTED"} · ${(pulseFollowup?.reason_codes ?? ["PULSE_FOLLOWUP_NOT_AVAILABLE"]).join("、")}`;
+      : `PULSE后继BaoStock价格观察 ${pulseFollowup?.status ?? "NOT_COMPUTED"} · ${(pulseFollowup?.reason_codes ?? ["PULSE_FOLLOWUP_NOT_AVAILABLE"]).join("、")}`;
     const pulseFollowupComparison =
       result.sector_pulse_followup_comparison?.[board.board_kind];
     const comparisonReasonLabels = {
@@ -5383,7 +5427,7 @@ async function toggleBoardComparison(board) {
     const result = await api("/api/product/board-comparison", {
       target_session: context.target_session,
       research_cutoff: context.research_cutoff,
-      source_package_id: context.source_package_id,
+      source_capture_id: context.source_capture_id,
       d1_history_session_count: context.d1_history_session_count,
       industry_snapshot_id: context.industry_snapshot_id,
       concept_snapshot_id: context.concept_snapshot_id,
@@ -5670,7 +5714,7 @@ async function loadProfileChanges() {
     message("profileChangeList", "当前范围没有可用的此前官方会话。");
     return;
   }
-  const beforeRaw = uniqueRawVersion(previousDate);
+  const beforeRaw = uniquePriceVersion(previousDate);
   if (!context.profile_revision || !beforeRaw) {
     message("profileChangeSummary", "NOT_COMPARABLE");
     message(
@@ -5682,7 +5726,7 @@ async function loadProfileChanges() {
   let beforeRevision;
   try {
     const beforeContext = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: previousDate, source_package_id: beforeRaw.source_package_id })}`,
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: previousDate, source_capture_id: beforeRaw.source_capture_id, price_coordinate: "FORWARD_ADJUSTED" })}`,
       undefined,
       controller.signal,
     );
@@ -5699,14 +5743,14 @@ async function loadProfileChanges() {
       (item) =>
         item.complete &&
         item.target_session === previousDate &&
-        item.source_package_id === beforeRaw.source_package_id &&
+        item.source_capture_id === beforeRaw.source_capture_id &&
         item.profile_revision === beforeRevision,
     );
     const afterProfiles = state.profiles.filter(
       (item) =>
         item.complete &&
         item.target_session === context.target_session &&
-        item.source_package_id === context.source_package_id &&
+        item.source_capture_id === context.source_capture_id &&
         item.profile_revision === context.profile_revision,
     );
     const beforeProfile =
@@ -5753,9 +5797,9 @@ async function loadProfileChanges() {
   const query = new URLSearchParams({
     before_session: previousDate,
     after_session: context.target_session,
-    before_source_package_id: beforeRaw.source_package_id,
+    before_source_capture_id: beforeRaw.source_capture_id,
     before_profile_revision: beforeRevision,
-    after_source_package_id: context.source_package_id,
+    after_source_capture_id: context.source_capture_id,
     after_profile_revision: context.profile_revision,
     offset: "0",
     limit: "15",
@@ -5954,6 +5998,13 @@ function sourceSeedExplanation(seed) {
     .join("；");
   return `${routes}。范围 NON_PIT_RETROSPECTIVE；价格坐标 RAW_UNADJUSTED。未满足/未知谓词：${unmet || "无"}。来源质量 ${quality.source_time_quality} / ${quality.source_clock_role}；目标日实际K线 ${quality.target_actual_quote ? "有" : "未知或缺失"}；收盘质量 ${quality.target_close_quality}${quality.target_close_reason ? `：${quality.target_close_reason}` : ""}${qualityReasons ? `；输入质量原因：${qualityReasons}` : ""}。正式候选资格 NOT_EVALUATED。`;
 }
+function sourceCaptureIdFrom(...values) {
+  const value = values.find(
+    (item) => item !== null && item !== undefined && String(item).trim(),
+  );
+  return value === undefined ? null : String(value);
+}
+
 async function resolveStockCodeInput(value, context) {
   const input = value.trim().toUpperCase();
   if (/^(SH|SZ|BJ)\.\d{6}$/.test(input))
@@ -5962,12 +6013,14 @@ async function resolveStockCodeInput(value, context) {
     throw new Error("请输入六位数字股票代码，无需市场前缀。");
   if (!context?.contextReady)
     throw new Error("当前研究日期的真实来源池尚未就绪。");
+  const query = {
+    target_session: context.target_session,
+    stock_code: input,
+  };
+  const captureId = sourceCaptureIdFrom(context.source_capture_id);
+  if (captureId) query.source_capture_id = captureId;
   const result = await api(
-    `/api/product/resolve-stock-code?${new URLSearchParams({
-      target_session: context.target_session,
-      source_package_id: context.source_package_id,
-      stock_code: input,
-    })}`,
+    `/api/product/resolve-stock-code?${new URLSearchParams(query)}`,
   );
   return result;
 }
@@ -5985,8 +6038,13 @@ async function openStock(symbol, row = {}) {
     message("stockSearchStatus", "研究日期上下文尚未就绪，请稍后重试。");
     return;
   }
+  let selectedCaptureId = sourceCaptureIdFrom(selected.source_capture_id);
   try {
     const resolved = await resolveStockCodeInput(symbol, selected);
+    selectedCaptureId = sourceCaptureIdFrom(
+      resolved.source_capture_id,
+      selectedCaptureId,
+    );
     symbol = resolved.source_symbol;
     if (resolved.display_name)
       row = { ...row, display_name: resolved.display_name };
@@ -6000,7 +6058,7 @@ async function openStock(symbol, row = {}) {
   currentStockSymbol = symbol;
   currentStockSource = {
     target_session: selected.target_session,
-    source_package_id: selected.source_package_id,
+    source_capture_id: selectedCaptureId,
   };
   if (
     /^BJ\.\d{6}$/.test(symbol) &&
@@ -6041,7 +6099,7 @@ async function openStock(symbol, row = {}) {
     "stockMeta",
     `${c.target_session} · RAW_UNADJUSTED · SOURCE_SYMBOL_ONLY · NON_PIT`,
   );
-  message("stockStatus", "正在读取同日 Raw、Core 与 Profile…");
+  message("stockStatus", "正在读取同日 BaoStock 行情、Core 与 Profile…");
   $("stockContent").replaceChildren();
   message(
     "stockSearchStatus",
@@ -6051,10 +6109,9 @@ async function openStock(symbol, row = {}) {
   try {
     if (c.profileResolution) await c.profileResolution;
     if (token !== state.stockRequest || state.selected !== c) return;
-    const data = await stockApi("/api/preview/stock", {
+    const stockRequest = {
       symbol,
       target_session: c.target_session,
-      source_package_id: c.source_package_id,
       session_count: c.stock_history_session_count,
       profile_revision: c.profile_revision,
       d1_history_session_count: Number.isInteger(c.d1_history_session_count)
@@ -6062,8 +6119,25 @@ async function openStock(symbol, row = {}) {
         : null,
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,
-    });
+    };
+    if (selectedCaptureId) stockRequest.source_capture_id = selectedCaptureId;
+    const data = await stockApi("/api/preview/stock", stockRequest);
     if (token !== state.stockRequest) return;
+    const detailCaptureId = sourceCaptureIdFrom(
+      data.source_capture_id,
+      data.source_version?.source_capture_id,
+      data.raw?.source_capture_id,
+      data.raw?.capture_id,
+      selectedCaptureId,
+    );
+    if (!detailCaptureId) throw new Error("个股详情响应缺少来源捕获身份");
+    if (
+      selectedCaptureId &&
+      detailCaptureId &&
+      detailCaptureId !== selectedCaptureId
+    )
+      throw new Error("个股详情来源捕获与请求不一致");
+    currentStockSource.source_capture_id = detailCaptureId;
     const storedEvidence = data.stored_research_evidence;
     const d1State = storedEvidence?.d1?.status || "NOT_COMPUTED";
     const d1Scope = storedEvidence?.d1?.scope || {};
@@ -6092,7 +6166,9 @@ async function openStock(symbol, row = {}) {
     root.append(
       grid,
       node("h3", "价格与画像"),
-      renderBaoStockSupplement(data.baostock_supplement),
+      renderBaoStockPriceSource(
+        data.baostock_price_source || data.baostock_price,
+      ),
     );
     const core = node("div", null, "fact-grid");
     for (const [key, label] of [
@@ -6135,77 +6211,37 @@ async function openStock(symbol, row = {}) {
       dayError: null,
       week: null,
       month: null,
-      adjusted: null,
-      adjustedNotice: "",
-      coordinate: "RAW_UNADJUSTED",
-      adjustedRequest: 0,
+      coordinate: "FORWARD_ADJUSTED",
+      coordinateRequest: 0,
       selected: "day",
       periodStatus: "LOADING",
     };
     const dayErrorNotice = node("p", null, "rule");
     dayErrorNotice.hidden = true;
+    const periodErrorNotice = node("p", null, "rule");
+    periodErrorNotice.hidden = true;
     const coordinateButtons = new Map();
     function updateCoordinateControls() {
       for (const [coordinate, button] of coordinateButtons) {
         button.classList.toggle("selected", history.coordinate === coordinate);
       }
+      const coordinateLabel =
+        history.coordinate === "FORWARD_ADJUSTED" ? "前复权" : "未复权";
       message(
         "stockMeta",
-        `${c.target_session} · ${history.coordinate} · SOURCE_SYMBOL_ONLY · NON_PIT${history.coordinate === "ADJUSTED" ? " · RETROSPECTIVE" : ""}`,
+        `${c.target_session} · BaoStock ${coordinateLabel} · ${history.coordinate} · SOURCE_SYMBOL_ONLY · NON_PIT`,
       );
-      if (
-        history.coordinate === "ADJUSTED" &&
-        history.adjusted?.status === "READY"
-      ) {
-        const payload = history.adjusted;
-        const points = Array.isArray(payload.points) ? payload.points : [];
-        const qualities = points.reduce((counts, item) => {
-          const quality = item.price_quality || "UNKNOWN";
-          counts[quality] = (counts[quality] || 0) + 1;
-          return counts;
-        }, {});
-        const qualitySummary =
-          Object.entries(qualities)
-            .map(([quality, count]) => `${quality} ${count}`)
-            .join(" / ") || "UNKNOWN";
-        const coverage = payload.coverage || {};
-        const covered =
-          coverage.covered_session_count ??
-          coverage.stored_session_count ??
-          points.length;
-        const expected =
-          coverage.expected_session_count ??
-          coverage.requested_session_count ??
-          "未知";
-        const references = Array.isArray(payload.event_refs)
-          ? payload.event_refs
-          : [];
-        const source =
-          payload.source ||
-          (references.length
-            ? "TDX_RAW + 公司行为事件引用"
-            : "TDX_RAW + 公司行为事件引用未返回");
-        const referenceSummary = references.length
-          ? ` · 事件引用 ${references.length}`
-          : " · 事件引用未返回";
-        const actionCoverage = Array.isArray(coverage.action_coverage_status)
-          ? coverage.action_coverage_status.join(" / ")
-          : "UNKNOWN";
-        const coverageState = coverage.status || "UNKNOWN";
-        coordinateStatus.textContent = `当前显示 ADJUSTED · 来源 ${source} · 算法 ${payload.algorithm_version || "UNKNOWN"} · 质量 ${qualitySummary} · 价格窗口 ${covered}/${expected} · 事件覆盖 ${actionCoverage} (${coverageState})${referenceSummary} · RETROSPECTIVE_NON_PIT`;
-      } else if (history.coordinate === "RAW_UNADJUSTED") {
-        coordinateStatus.textContent = history.adjustedNotice
-          ? `${history.adjustedNotice} 当前保留并显示 RAW_UNADJUSTED 原始价格。`
-          : "当前显示 RAW_UNADJUSTED 原始价格；未闭合周 / 月不展示部分 OHLC。";
-      }
+      coordinateStatus.textContent =
+        history.coordinate === "FORWARD_ADJUSTED"
+          ? "BaoStock 前复权价格 (adjustflag=2) · 后验历史坐标 NON_PIT；未闭合周 / 月不展示部分 OHLC。"
+          : "BaoStock 未复权价格 (adjustflag=3) · 历史回取 NON_PIT；未闭合周 / 月不展示部分 OHLC。";
     }
     function showHistory(kind) {
       history.selected = kind;
       periodControls.querySelectorAll("button").forEach((button) => {
         button.classList.toggle("selected", button.dataset.kind === kind);
       });
-      const adjusted = history.coordinate === "ADJUSTED";
-      const entries = adjusted ? history.adjusted?.[kind] : history[kind];
+      const entries = history[kind];
       periodResults.replaceChildren();
       if (!entries) {
         periodResults.textContent =
@@ -6222,23 +6258,34 @@ async function openStock(symbol, row = {}) {
       }
       for (const item of [...entries].reverse()) {
         const label = kind === "day" ? item.session_date : item.period_key;
+        const qfq = history.coordinate === "FORWARD_ADJUSTED";
         const o =
-          kind === "day" ? (adjusted ? item.ohlc : item.raw_ohlc) : item.ohlc;
+          kind === "day" ? (qfq ? item.qfq_ohlc : item.raw_ohlc) : item.ohlc;
         const scalar = (value) =>
           value && typeof value === "object" && "value" in value
             ? value.value
             : value;
         const val = (name) => scalar(o?.[name]);
         const quality =
-          kind === "day" ? item.price_quality : item.coverage_status;
+          kind === "day"
+            ? qfq
+              ? item.qfq_price_quality
+              : item.raw_price_quality
+            : item.coverage_status;
         const reason =
           kind === "day"
-            ? item.reason || item.price_reason || item.adjustment_status
+            ? qfq
+              ? item.qfq_price_reason || item.reason
+              : item.raw_price_reason || item.reason
             : (item.reason_codes || []).join(" / ");
+        const coordinateLabel =
+          history.coordinate === "FORWARD_ADJUSTED"
+            ? "BaoStock前复权"
+            : "BaoStock未复权";
         const line =
           val("close") == null
-            ? `${label} · ${quality || "UNKNOWN"} · ${reason || "价格不可用"}`
-            : `${label} · 开 ${format(val("open"))}　高 ${format(val("high"))}　低 ${format(val("low"))}　收 ${format(val("close"))} · ${quality || "UNKNOWN"}`;
+            ? `${label} · ${coordinateLabel} · ${quality || "UNKNOWN"} · ${reason || "价格不可用"}`
+            : `${label} · ${coordinateLabel} · 开 ${format(val("open"))}　高 ${format(val("high"))}　低 ${format(val("low"))}　收 ${format(val("close"))} · ${quality || "UNKNOWN"}`;
         periodResults.append(node("div", line, "history-row"));
       }
     }
@@ -6253,93 +6300,145 @@ async function openStock(symbol, row = {}) {
       button.addEventListener("click", () => showHistory(kind));
       periodControls.append(button);
     }
+    async function loadCoordinateHistory(coordinate, request) {
+      const isCurrent = () =>
+        request === history.coordinateRequest &&
+        token === state.stockRequest &&
+        selected === state.selected;
+      const expectedCaptureId = sourceCaptureIdFrom(detailCaptureId);
+      const queryValues = {
+        target_session: c.target_session,
+        symbol,
+        session_count: String(c.stock_history_session_count),
+        price_coordinate: coordinate,
+      };
+      const timelineRequest = {
+        symbol,
+        target_session: c.target_session,
+        session_count: c.stock_history_session_count,
+        price_coordinate: coordinate,
+      };
+      if (expectedCaptureId) {
+        queryValues.source_capture_id = String(expectedCaptureId);
+        timelineRequest.source_capture_id = String(expectedCaptureId);
+      }
+      const query = new URLSearchParams(queryValues);
+      const [periodResult, dayResult] = await Promise.allSettled([
+        stockApi(`/api/source-symbol/raw-periods?${query}`),
+        stockApi("/api/preview/stock-timeline", timelineRequest),
+      ]);
+      if (!isCurrent()) return;
+
+      function responseCaptureId(result, label) {
+        if (result.price_coordinate !== coordinate)
+          throw new Error(`${label}价格坐标与请求不一致`);
+        if (
+          result.source_capture_id === null ||
+          result.source_capture_id === undefined ||
+          !String(result.source_capture_id).trim()
+        )
+          throw new Error(`${label}响应缺少来源捕获身份`);
+        const actualCaptureId = String(result.source_capture_id);
+        if (expectedCaptureId && actualCaptureId !== String(expectedCaptureId))
+          throw new Error(`${label}来源捕获与请求不一致`);
+        return actualCaptureId;
+      }
+
+      let periodCaptureId = null;
+      let periodIdentityError = null;
+      if (periodResult.status === "fulfilled") {
+        try {
+          periodCaptureId = responseCaptureId(periodResult.value, "周月");
+        } catch (error) {
+          periodIdentityError = error;
+        }
+      }
+      let dayCaptureId = null;
+      let dayIdentityError = null;
+      if (dayResult.status === "fulfilled") {
+        try {
+          dayCaptureId = responseCaptureId(dayResult.value, "日线");
+        } catch (error) {
+          dayIdentityError = error;
+        }
+      }
+      if (periodCaptureId && dayCaptureId && periodCaptureId !== dayCaptureId) {
+        periodIdentityError = new Error("周月与日线来源捕获不一致");
+        dayIdentityError = new Error("日线与周月来源捕获不一致");
+      }
+
+      if (periodResult.status === "fulfilled") {
+        const result = periodResult.value;
+        try {
+          if (periodIdentityError) throw periodIdentityError;
+          if (
+            !Array.isArray(result.periods?.week) ||
+            !Array.isArray(result.periods?.month)
+          )
+            throw new Error("周月周期响应缺少完整结果");
+          history.week = result.periods.week;
+          history.month = result.periods.month;
+          history.periodStatus = "READY";
+          periodErrorNotice.textContent = "";
+          periodErrorNotice.hidden = true;
+        } catch (error) {
+          history.periodStatus = "READ_FAILED";
+          history.week = history.month = null;
+          periodErrorNotice.textContent = `周 / 月 UNKNOWN：${error.message}`;
+          periodErrorNotice.hidden = false;
+        }
+      } else {
+        history.periodStatus = "READ_FAILED";
+        history.week = history.month = null;
+        periodErrorNotice.textContent = `周 / 月 UNKNOWN：${periodResult.reason.message}`;
+        periodErrorNotice.hidden = false;
+      }
+
+      if (dayResult.status === "fulfilled") {
+        const result = dayResult.value;
+        if (!dayIdentityError) {
+          history.day = result.points || [];
+          history.dayError = null;
+          dayErrorNotice.textContent = "";
+          dayErrorNotice.hidden = true;
+        } else {
+          history.day = null;
+          history.dayError = dayIdentityError.message;
+          dayErrorNotice.textContent = `日线 UNKNOWN：${history.dayError}`;
+          dayErrorNotice.hidden = false;
+        }
+      } else {
+        history.day = null;
+        history.dayError = dayResult.reason.message;
+        dayErrorNotice.textContent = `日线 UNKNOWN：${history.dayError}`;
+        dayErrorNotice.hidden = false;
+      }
+      if (history.selected === "day") showHistory("day");
+      else showHistory(history.selected);
+    }
+
     for (const [coordinate, label] of [
-      ["RAW_UNADJUSTED", "RAW_UNADJUSTED"],
-      ["ADJUSTED", "ADJUSTED"],
+      ["RAW_UNADJUSTED", "未复权"],
+      ["FORWARD_ADJUSTED", "前复权"],
     ]) {
       const button = node("button", label, "button subtle");
       button.type = "button";
       button.addEventListener("click", () => {
-        if (coordinate === "RAW_UNADJUSTED") {
-          history.adjustedRequest += 1;
-          history.coordinate = "RAW_UNADJUSTED";
-          updateCoordinateControls();
-          showHistory(history.selected);
-          return;
-        }
-        const request = ++history.adjustedRequest;
-        if (history.adjusted?.status === "READY") {
-          history.coordinate = "ADJUSTED";
-          history.adjustedNotice = "";
-          updateCoordinateControls();
-          showHistory(history.selected);
-          return;
-        }
-        history.adjustedNotice =
-          "正在只读PG中查询已保存的 ADJUSTED 结果；当前仍显示原始价格。";
+        if (history.coordinate === coordinate) return;
+        history.coordinate = coordinate;
+        const request = ++history.coordinateRequest;
+        history.day = null;
+        history.dayError = null;
+        history.week = null;
+        history.month = null;
+        history.periodStatus = "LOADING";
+        dayErrorNotice.textContent = "";
+        dayErrorNotice.hidden = true;
+        periodErrorNotice.textContent = "";
+        periodErrorNotice.hidden = true;
         updateCoordinateControls();
-        const query = new URLSearchParams({
-          symbol,
-          target_session: c.target_session,
-        });
-        stockApi(`/api/source-symbol/adjusted-history?${query}`)
-          .then((result) => {
-            if (
-              request !== history.adjustedRequest ||
-              token !== state.stockRequest ||
-              selected !== state.selected
-            )
-              return;
-            const points = Array.isArray(result.points) ? result.points : [];
-            if (
-              result.status === "READY" &&
-              result.price_coordinate === "ADJUSTED" &&
-              result.research_mode === "RETROSPECTIVE_NON_PIT" &&
-              points.length
-            ) {
-              history.adjusted = {
-                ...result,
-                day: points,
-                week: result.periods?.week || [],
-                month: result.periods?.month || [],
-              };
-              history.coordinate = "ADJUSTED";
-              history.adjustedNotice = "";
-            } else {
-              history.coordinate = "RAW_UNADJUSTED";
-              const reason =
-                result.reason ||
-                result.coverage?.reason ||
-                result.coverage?.reason_code ||
-                "PG中没有完整可读的调整价格结果";
-              const coverage = result.coverage || {};
-              const covered =
-                coverage.covered_session_count ??
-                coverage.stored_session_count ??
-                "未知";
-              const expected =
-                coverage.expected_session_count ??
-                coverage.requested_session_count ??
-                "未知";
-              const source = result.source || "UNKNOWN";
-              history.adjustedNotice = `ADJUSTED ${result.status || "UNKNOWN"}：来源 ${source} · 质量 UNKNOWN · 覆盖 ${covered}/${expected} · RETROSPECTIVE_NON_PIT · ${reason}`;
-            }
-            updateCoordinateControls();
-            showHistory(history.selected);
-          })
-          .catch((error) => {
-            if (
-              request !== history.adjustedRequest ||
-              token !== state.stockRequest ||
-              selected !== state.selected ||
-              error.name === "AbortError"
-            )
-              return;
-            history.coordinate = "RAW_UNADJUSTED";
-            history.adjustedNotice = `ADJUSTED 读取失败：${error.message}`;
-            updateCoordinateControls();
-            showHistory(history.selected);
-          });
+        showHistory(history.selected);
+        void loadCoordinateHistory(coordinate, request);
       });
       coordinateButtons.set(coordinate, button);
       coordinateControls.append(button);
@@ -6349,6 +6448,7 @@ async function openStock(symbol, row = {}) {
       coordinateStatus,
       periodControls,
       dayErrorNotice,
+      periodErrorNotice,
       periodResults,
     );
     updateCoordinateControls();
@@ -6407,6 +6507,7 @@ async function openStock(symbol, row = {}) {
         },
         symbol,
       );
+      if (detailCaptureId) materialRequest.source_capture_id = detailCaptureId;
       waitForD1Material(materialRequest, controller.signal, () => {
         if (token === state.stockRequest && state.selected === c)
           materialStatus.textContent =
@@ -6432,19 +6533,14 @@ async function openStock(symbol, row = {}) {
       "stockStatus",
       `已读取 ${data.window?.real_bar_count ?? "—"} / ${data.window?.requested_sessions ?? "—"} 个实际 Bar；来源级诊断不构成正式选股。`,
     );
-    const query = new URLSearchParams({
-      target_session: c.target_session,
-      source_package_id: c.source_package_id,
-      symbol,
-      session_count: c.stock_history_session_count,
-    });
     const profileQuery = new URLSearchParams({
       target_session: c.target_session,
-      source_package_id: c.source_package_id,
       profile_revision: c.profile_revision,
+      price_coordinate: "FORWARD_ADJUSTED",
       symbol,
       limit: "1",
     });
+    if (detailCaptureId) profileQuery.set("source_capture_id", detailCaptureId);
     if (c.profile_revision)
       stockApi(`/api/source-symbol-price-profiles?${profileQuery}`)
         .then((result) => {
@@ -6453,6 +6549,14 @@ async function openStock(symbol, row = {}) {
           if (!item) {
             storedProfiles.textContent =
               "该代码在所选持久画像修订中没有记录；不能推断其他版本不存在。";
+            return;
+          }
+          if (
+            detailCaptureId &&
+            sourceCaptureIdFrom(item.source_capture_id) !== detailCaptureId
+          ) {
+            storedProfiles.textContent =
+              "画像来源捕获与个股详情不一致；没有展示该画像。";
             return;
           }
           storedProfiles.replaceChildren();
@@ -6469,46 +6573,7 @@ async function openStock(symbol, row = {}) {
           if (token === state.stockRequest)
             storedProfiles.textContent = `所选画像 UNKNOWN：${error.message}`;
         });
-    stockApi(`/api/source-symbol/raw-periods?${query}`)
-      .then((p) => {
-        if (token !== state.stockRequest) return;
-        if (!Array.isArray(p.periods?.week) || !Array.isArray(p.periods?.month))
-          throw new Error("周月周期响应缺少完整结果");
-        history.week = p.periods.week;
-        history.month = p.periods.month;
-        history.periodStatus = "READY";
-        if (history.selected !== "day") showHistory(history.selected);
-      })
-      .catch((e) => {
-        if (token === state.stockRequest) {
-          history.periodStatus = "READ_FAILED";
-          history.week = history.month = null;
-          periods.append(node("p", `周 / 月 UNKNOWN：${e.message}`));
-          if (history.selected !== "day") showHistory(history.selected);
-        }
-      });
-    stockApi("/api/preview/stock-timeline", {
-      symbol,
-      target_session: c.target_session,
-      source_package_id: c.source_package_id,
-      session_count: c.stock_history_session_count,
-    })
-      .then((timeline) => {
-        if (token !== state.stockRequest) return;
-        history.day = timeline.points || [];
-        history.dayError = null;
-        dayErrorNotice.textContent = "";
-        dayErrorNotice.hidden = true;
-        if (history.selected === "day") showHistory("day");
-      })
-      .catch((error) => {
-        if (token === state.stockRequest) {
-          history.dayError = error.message;
-          dayErrorNotice.textContent = `日线 UNKNOWN：${error.message}`;
-          dayErrorNotice.hidden = false;
-          if (history.selected === "day") showHistory("day");
-        }
-      });
+    void loadCoordinateHistory(history.coordinate, ++history.coordinateRequest);
   } catch (error) {
     if (token === state.stockRequest)
       message("stockStatus", `个股读取失败：${error.message}`);
@@ -7145,7 +7210,7 @@ function cohortDateComparisonDisclosure(context, key, token) {
       const results = await Promise.all(
         ["ENTRY", "DAILY_LANDMARK", "REENTRY"].map(async (lane) => {
           const query = new URLSearchParams({
-            source_package_id: context.source_package_id,
+            source_capture_id: context.source_capture_id,
             rule: key.rule,
             horizon,
             lane,
@@ -7202,7 +7267,7 @@ function cohortDateComparisonDisclosure(context, key, token) {
     content.replaceChildren(node("p", "正在读取跨 T0 对照…", "muted"));
     try {
       const comparisonQuery = {
-        source_package_id: context.source_package_id,
+        source_capture_id: context.source_capture_id,
         rule: key.rule,
         horizon,
       };
@@ -7372,14 +7437,14 @@ async function loadExtra(page) {
     $("focusStockResult").replaceChildren();
     message(
       "focusStockStatus",
-      "输入六位股票代码后可独立读取 Raw 观察；正式 Focus 未计算。",
+      "输入六位股票代码后可独立读取 BaoStock 行情观察；正式 Focus 未计算。",
     );
     void loadFocusAuto(c, 0);
     void loadFocusObservationSegments(c, 0);
   }
   const common = {
     target_session: c.target_session,
-    source_package_id: c.source_package_id,
+    source_capture_id: c.source_capture_id,
   };
   try {
     if (page === "market") {
@@ -7410,7 +7475,7 @@ async function loadExtra(page) {
         ["来源分母", data.denominator.N_source],
         [
           "来源读取覆盖",
-          `目标日有价 ${data.source_cohort.target_present_count} · 缺价 ${data.source_cohort.target_missing_count} · 读取失败 ${data.source_cohort.read_failed_count} · Raw行 ${data.source_cohort.raw_row_count}`,
+          `目标日有价 ${data.source_cohort.target_present_count} · 缺价 ${data.source_cohort.target_missing_count} · 读取失败 ${data.source_cohort.read_failed_count} · 价格行 ${data.source_cohort.raw_row_count}`,
         ],
         ["可评价分母", data.denominator.N_eligible],
         ["UNKNOWN", data.denominator.UNKNOWN],
@@ -7502,12 +7567,12 @@ async function loadExtra(page) {
       const version = state.versions.find(
         (v) =>
           v.session_date === c.target_session &&
-          v.source_package_id === c.source_package_id,
+          v.source_capture_id === c.source_capture_id,
       );
       const profiles = state.profiles.filter(
         (p) =>
           p.target_session === c.target_session &&
-          p.source_package_id === c.source_package_id &&
+          p.source_capture_id === c.source_capture_id &&
           (c.profile_revision
             ? p.profile_revision === c.profile_revision
             : true),
@@ -7523,14 +7588,14 @@ async function loadExtra(page) {
                 ? "目录为空"
                 : "所选日期无已保存修订";
       const context = await api(
-        `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session })}`,
+        `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session, source_capture_id: c.source_capture_id, price_coordinate: "FORWARD_ADJUSTED" })}`,
       );
       if (token !== extraRequest || activePage !== page) return;
       const snapshots = context.snapshots || [];
       detailRows($(id), [
-        ["目标日 / 来源包", `${c.target_session} / ${c.source_package_id}`],
+        ["目标日 / 来源捕获", `${c.target_session} / ${c.source_capture_id}`],
         [
-          "Raw 覆盖",
+          "BaoStock行情覆盖",
           version
             ? `${version.row_count} / ${version.expected_row_count} · ${JSON.stringify(version.bar_status_counts)} · ${version.version_status}`
             : "目录中未保存",
@@ -7604,7 +7669,7 @@ async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
     if (token !== cohortRequest || activePage !== "focus") return;
     const query = {
       target_session: c.target_session,
-      source_package_id: c.source_package_id,
+      source_capture_id: c.source_capture_id,
       profile_revision: key.profile_revision,
       rule: key.rule,
       history: key.history,
@@ -7627,7 +7692,7 @@ async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
       try {
         const forwardQuery = {
           target_session: c.target_session,
-          source_package_id: c.source_package_id,
+          source_capture_id: c.source_capture_id,
           profile_revision: key.profile_revision,
           history: key.history,
           d1_history: key.d1_history,
@@ -7748,7 +7813,7 @@ $("readCohortEnrollment").addEventListener("click", async () => {
   try {
     const query = {
       target_session: c.target_session,
-      source_package_id: c.source_package_id,
+      source_capture_id: c.source_capture_id,
       profile_revision: key.profile_revision,
       history: key.history,
       d1_history: key.d1_history,
@@ -7825,17 +7890,31 @@ $("focusReadStock").addEventListener("click", async () => {
     const sessionCount = c.stock_history_session_count;
     if (!Number.isInteger(sessionCount) || sessionCount <= 0)
       throw new Error("所选日期的股票历史窗口不可用");
-    const data = await api("/api/preview/stock", {
+    const focusStockBody = {
       symbol,
       target_session: c.target_session,
-      source_package_id: c.source_package_id,
       session_count: sessionCount,
       profile_revision: c.profile_revision,
       d1_history_session_count: c.d1_history_session_count,
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,
-    });
+    };
+    const focusCaptureId = sourceCaptureIdFrom(
+      c.source_capture_id,
+      resolved.source_capture_id,
+    );
+    if (focusCaptureId) focusStockBody.source_capture_id = focusCaptureId;
+    const data = await api("/api/preview/stock", focusStockBody);
     if (token !== focusStockRequest || activePage !== "focus") return;
+    const echoedFocusCaptureId = sourceCaptureIdFrom(
+      data.source_capture_id,
+      data.source_version?.source_capture_id,
+      data.raw?.source_capture_id,
+      data.raw?.capture_id,
+    );
+    if (!echoedFocusCaptureId) throw new Error("个股详情响应缺少来源捕获身份");
+    if (focusCaptureId && echoedFocusCaptureId !== focusCaptureId)
+      throw new Error("个股详情来源捕获与请求不一致");
     message(
       "focusStockStatus",
       `${displayStockTitle({ ...data, display_name: resolved.display_name }, stockCode)} · ${c.target_session} · RAW_UNADJUSTED · SOURCE_SYMBOL_ONLY · NON_PIT；来源观察已计算，冻结规则及正式 Focus 的状态分别以规则结果为准。`,

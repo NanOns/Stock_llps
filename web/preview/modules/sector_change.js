@@ -54,7 +54,7 @@ async function loadPostSignal() {
   const count = Number($("postSignalCount").value);
   $("postSignalPanel").hidden = false;
   $("postSignalRows").replaceChildren();
-  $("postSignalStatus").textContent = "正在读取精确来源包的后续价格事实。";
+  $("postSignalStatus").textContent = "正在读取精确来源捕获的后续价格事实。";
   if (!Number.isInteger(count) || count < 1 || count > 10) {
     $("postSignalStatus").textContent = "N必须为1至10的整数。";
     return;
@@ -65,6 +65,7 @@ async function loadPostSignal() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         post_signal_price_facts: true,
+        price_coordinate: "FORWARD_ADJUSTED",
         ...selected,
         session_count: count,
       }),
@@ -75,9 +76,15 @@ async function loadPostSignal() {
       Number($("postSignalCount").value) !== count
     )
       return;
+    if (
+      data.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.time_role !== "NON_PIT_RETROSPECTIVE" ||
+      data.source_capture_id !== selected.source_capture_id
+    )
+      throw new Error("后续价格响应的捕获、QFQ坐标或NON_PIT时点角色不匹配。");
     const base = data.t0.ohlc;
     $("postSignalStatus").textContent =
-      `${data.symbol} · T0 ${data.target_session} · 截止 ${data.research_cutoff} · 已存来源行范围 ${data.saved_session_range.join(" 至 ")}（范围内不保证每个会话有合法Bar） · ${data.status}；官方会话 ${data.available_session_count}/${data.requested_session_count}，合法Bar ${data.valid_bar_count}，未知Bar ${data.unknown_bar_count}，超出截止 ${data.not_available_session_count}；T0原始收盘 ${sectorMetric(base.close.value)}（${base.quality} ${base.reason || ""}）。后验事实，不是可交易收益。`;
+      `${data.symbol} · T0 ${data.target_session} · 截止 ${data.research_cutoff} · 捕获ID ${data.source_capture_id} · ${data.price_coordinate} · ${data.time_role} · 已存来源行范围 ${data.saved_session_range.join(" 至 ")}（范围内不保证每个会话有合法Bar） · ${data.status}；官方会话 ${data.available_session_count}/${data.requested_session_count}，合法Bar ${data.valid_bar_count}，未知Bar ${data.unknown_bar_count}，超出截止 ${data.not_available_session_count}；T0前复权收盘 ${sectorMetric(base.close.value)}（${base.quality} ${base.reason || ""}）。后验事实，不是可交易收益。`;
     for (const point of data.points) {
       const row = document.createElement("tr");
       const price = point.ohlc;
@@ -89,7 +96,7 @@ async function loadPostSignal() {
           .join(" · "),
       );
       cell(row, `${point.bar_status} · ${price.quality} ${price.reason || ""}`);
-      const change = point.raw_close_relative_change;
+      const change = point.qfq_close_relative_change;
       cell(
         row,
         change.quality === "OBSERVED"
@@ -113,8 +120,8 @@ const sectorD1ViewSettings = {
 function sectorSelectedVersion() {
   const value = $("sectorVersionSelect").value;
   if (!value.includes("|")) return null;
-  const [target_session, source_package_id] = value.split("|");
-  return { target_session, source_package_id };
+  const [target_session, source_capture_id] = value.split("|");
+  return { target_session, source_capture_id };
 }
 
 function sectorLabel(value) {
@@ -243,7 +250,7 @@ function sectorExactProfile(version) {
   return state.profileSnapshots.filter(
     (snapshot) =>
       snapshot.target_session === version.target_session &&
-      snapshot.source_package_id === version.source_package_id &&
+      snapshot.source_capture_id === version.source_capture_id &&
       snapshot.complete === true,
   );
 }
@@ -257,7 +264,7 @@ function sectorPopulateProfileRevisions(version) {
       snapshot.profile_revision,
     );
     option.title =
-      `target ${snapshot.target_session} · source package ID ${snapshot.source_package_id} · ` +
+      `target ${snapshot.target_session} · source capture ID ${snapshot.source_capture_id} · ` +
       `profile_revision ${snapshot.profile_revision}`;
     select.append(option);
   }
@@ -324,18 +331,18 @@ async function loadSectorChangeContext() {
     $(id).replaceChildren(new Option("正在读取PG目录…", ""));
   }
   if (!version) {
-    sectorInvalidate("请选择PG中已有的目标日期与来源包版本。");
+    sectorInvalidate("请选择PG中已有的目标日期与价格捕获。");
     return;
   }
   sectorPopulateProfileRevisions(version);
   try {
     const context = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: version.target_session })}`,
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: version.target_session, source_capture_id: version.source_capture_id, price_coordinate: "FORWARD_ADJUSTED" })}`,
     );
     if (
       request !== state.sectorChange.contextRequest ||
-      `${sectorSelectedVersion()?.target_session}|${sectorSelectedVersion()?.source_package_id}` !==
-        `${version.target_session}|${version.source_package_id}`
+      `${sectorSelectedVersion()?.target_session}|${sectorSelectedVersion()?.source_capture_id}` !==
+        `${version.target_session}|${version.source_capture_id}`
     )
       return;
     state.sectorChange.context = context;
@@ -371,7 +378,8 @@ function sectorCurrentRequest() {
     observation_mode: sectorObservationMode,
     target_session: version.target_session,
     research_cutoff: state.sectorChange.context.research_cutoff,
-    source_package_id: version.source_package_id,
+    source_capture_id: version.source_capture_id,
+    price_coordinate: "FORWARD_ADJUSTED",
     profile_revision: $("sectorProfileRevisionSelect").value,
     industry_snapshot_id: $("sectorIndustrySnapshotSelect").value,
     concept_snapshot_id: $("sectorConceptSnapshotSelect").value,
@@ -743,7 +751,7 @@ function renderSectorChange(data) {
   const identity = $("sectorChangeIdentity");
   identity.hidden = false;
   identity.textContent =
-    `${data.target_session} · 来源包ID ${data.source_package_id} · ` +
+    `${data.target_session} · 来源捕获ID ${data.source_capture_id} · ` +
     `Profile rev ${$("sectorProfileRevisionSelect").value} · NON_PIT回溯研究 · 来源代码级，不是正式选股。`;
   renderSectorMetrics(data);
   renderSectorBoards(data);
@@ -788,7 +796,8 @@ async function loadSectorChangeView() {
   const identity = [
     payload.observation_mode,
     payload.target_session,
-    payload.source_package_id,
+    payload.source_capture_id,
+    payload.price_coordinate,
     payload.profile_revision,
     payload.industry_snapshot_id,
     payload.concept_snapshot_id,
@@ -808,7 +817,8 @@ async function loadSectorChangeView() {
     const currentIdentity = [
       $("sectorObservationMode").value,
       currentVersion?.target_session,
-      currentVersion?.source_package_id,
+      currentVersion?.source_capture_id,
+      "FORWARD_ADJUSTED",
       $("sectorProfileRevisionSelect").value,
       $("sectorIndustrySnapshotSelect").value,
       $("sectorConceptSnapshotSelect").value,
@@ -821,6 +831,13 @@ async function loadSectorChangeView() {
       $("sectorExplainSymbol").value.trim().toUpperCase() !== requestedSymbol
     )
       return;
+    if (
+      data.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.time_role !== "NON_PIT_RETROSPECTIVE" ||
+      data.source_capture_id !== version.source_capture_id ||
+      data.d1?.price_coordinate !== "FORWARD_ADJUSTED"
+    )
+      throw new Error("D0/D1响应的价格捕获、QFQ坐标或NON_PIT时点角色不匹配。");
     renderSectorChange(data);
     renderSectorSymbolObservation(data);
   } catch (error) {
@@ -850,7 +867,8 @@ async function loadSectorSingleD0() {
         source_observation_only: true,
         symbol,
         target_session: version.target_session,
-        source_package_id: version.source_package_id,
+        source_capture_id: version.source_capture_id,
+        price_coordinate: "FORWARD_ADJUSTED",
         research_cutoff: state.sectorChange.context.research_cutoff,
         ...(industry && concept
           ? { industry_snapshot_id: industry, concept_snapshot_id: concept }
@@ -861,12 +879,18 @@ async function loadSectorSingleD0() {
     if (
       request !== state.sectorChange.request ||
       current?.target_session !== version.target_session ||
-      current?.source_package_id !== version.source_package_id ||
+      current?.source_capture_id !== version.source_capture_id ||
       $("sectorIndustrySnapshotSelect").value !== industry ||
       $("sectorConceptSnapshotSelect").value !== concept ||
       $("sectorExplainSymbol").value.trim().toUpperCase() !== symbol
     )
       return;
+    if (
+      data.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.time_role !== "NON_PIT_RETROSPECTIVE" ||
+      data.source_capture_id !== version.source_capture_id
+    )
+      throw new Error("单股D0响应的价格捕获、QFQ坐标或NON_PIT时点角色不匹配。");
     const root = $("sectorSymbolObservation");
     const membership = data.current_tdx_membership;
     const boards = (membership.memberships || [])
@@ -1013,7 +1037,7 @@ async function openSectorStock(symbol, row, targetSession) {
   const chosenVersion = state.versions.find(
     (item) =>
       item.session_date === version.target_session &&
-      item.source_package_id === version.source_package_id,
+      item.source_capture_id === version.source_capture_id,
   );
   if (!chosenVersion) {
     $("sectorChangeStatus").textContent =
@@ -1022,10 +1046,10 @@ async function openSectorStock(symbol, row, targetSession) {
   }
   state.sectorChange.returnTarget = targetSession;
   $("versionSelect").value =
-    `${version.target_session}|${version.source_package_id}`;
+    `${version.target_session}|${version.source_capture_id}`;
   state.version = {
     target_session: version.target_session,
-    source_package_id: version.source_package_id,
+    source_capture_id: version.source_capture_id,
   };
   $("symbolInput").value = symbol;
   $("windowInput").value = "75";
@@ -1040,8 +1064,10 @@ async function openSectorStock(symbol, row, targetSession) {
     persistedProfileSnapshot: profileSnapshot
       ? {
           target_session: profileSnapshot.target_session,
-          source_package_id: profileSnapshot.source_package_id,
+          source_capture_id: profileSnapshot.source_capture_id,
           profile_revision: profileSnapshot.profile_revision,
+          price_coordinate:
+            profileSnapshot.price_coordinate || "FORWARD_ADJUSTED",
         }
       : null,
   });
@@ -1076,11 +1102,11 @@ let sectorChangeExplorerInitialized = false;
 function initializeSectorChangeExplorer() {
   state.sectorChange.contextRequest++;
   const select = $("sectorVersionSelect");
-  select.replaceChildren(new Option("— 请选择真实PG目标日期与来源包 —", ""));
+  select.replaceChildren(new Option("— 请选择真实PG目标日期与来源捕获 —", ""));
   for (const version of state.versions) {
     const option = new Option(
-      `${version.session_date} · 包ID ${version.source_package_id} · ${version.version_status} · Raw ${version.row_count}/${version.expected_row_count}`,
-      `${version.session_date}|${version.source_package_id}`,
+      `${version.session_date} · 捕获ID ${version.source_capture_id} · ${version.version_status} · 来源行 ${version.row_count}/${version.expected_row_count}`,
+      `${version.session_date}|${version.source_capture_id}`,
     );
     select.append(option);
   }

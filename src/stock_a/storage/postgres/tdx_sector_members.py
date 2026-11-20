@@ -13,6 +13,7 @@ from fractions import Fraction
 import re
 import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence
+from uuid import uuid4
 
 from stock_a.sources.tdx.sector_members import (
     SectorCatalogRow,
@@ -110,7 +111,6 @@ def _read_strength_inputs(
     cursor: Any,
     *,
     source_capture_id: int,
-    source_package_id: int,
     target_session: date,
     profile_revision: str,
     official_calendar_id: str,
@@ -124,11 +124,14 @@ def _read_strength_inputs(
     list[dict[str, Any]],
     dict[str, int],
 ]:
-    """读取或在同一事务内复用精确来源键的成员历史。"""
+    """按BaoStock捕获读取QFQ Core/Profile与RAW/QFQ双坐标历史。"""
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        raise TdxSectorMembersPgError(
+            "STRENGTH_CAPTURE_INVALID", "板块强度必须绑定来源捕获ID"
+        )
     ordered_symbols = tuple(sorted(set(symbols)))
     cache_key = (
         source_capture_id,
-        source_package_id,
         target_session,
         profile_revision,
         official_calendar_id,
@@ -165,76 +168,64 @@ def _read_strength_inputs(
         "revision_queries": 0,
         "raw_queries": 0,
     }
-
-    missing_profile_symbols = [
+    missing = [
         symbol
         for symbol in ordered_symbols
         if symbol not in cache["profile_loaded_symbols"]
     ]
-    if missing_profile_symbols:
+    if missing:
         fetched["profile_queries"] = 1
         cursor.execute(
-            """SELECT p.source_symbol, p.source_capture_id,
-       p.price_coordinate, p.calculation_scope, p.producer_contract,
-       p.producer_version,
-       p.ret20::text, p.ret20_exact_numerator::text,
-       p.ret20_exact_denominator::text, p.ret20_quality, p.ret20_reason
-FROM source_symbol_price_profiles p
-WHERE p.target_session=%s::date
-  AND p.source_capture_id=%s AND p.source_package_id=%s
-  AND p.profile_revision=%s AND p.source_symbol=ANY(%s)
-ORDER BY p.source_symbol COLLATE "C" """,
-            (
-                target_session,
-                source_capture_id,
-                source_package_id,
-                profile_revision,
-                list(missing_profile_symbols),
-            ),
+            """SELECT p.source_symbol,p.source_capture_id,p.price_coordinate,
+                      p.calculation_scope,p.producer_contract,p.producer_version,
+                      p.ret20::text,p.ret20_exact_numerator::text,
+                      p.ret20_exact_denominator::text,p.ret20_quality,p.ret20_reason
+               FROM stock.source_symbol_price_profiles p
+               WHERE p.target_session=%s AND p.source_capture_id=%s
+                 AND p.profile_revision=%s AND p.source_symbol=ANY(%s::text[])
+               ORDER BY p.source_symbol COLLATE "C""",
+            (target_session, source_capture_id, profile_revision, list(missing)),
         )
-        profile_columns = [item.name for item in cursor.description]
+        columns = [item.name for item in cursor.description]
         profile_records = [
-            dict(zip(profile_columns, row, strict=True)) for row in cursor.fetchall()
+            dict(zip(columns, row, strict=True)) for row in cursor.fetchall()
         ]
         fetched["profile_rows"] = len(profile_records)
         for row in profile_records:
             cache["profiles_by_symbol"].setdefault(
                 str(row["source_symbol"]), []
             ).append(row)
-        cache["profile_loaded_symbols"].update(missing_profile_symbols)
+        cache["profile_loaded_symbols"].update(missing)
     profile_rows = [
         dict(row)
         for symbol in ordered_symbols
         for row in cache["profiles_by_symbol"].get(symbol, ())
     ]
 
-    missing_revision_symbols = [
+    missing = [
         symbol
         for symbol in ordered_symbols
         if symbol not in cache["revision_loaded_symbols"]
     ]
-    if missing_revision_symbols:
+    if missing:
         fetched["revision_queries"] = 1
         cursor.execute(
-            """SELECT source_symbol, session_date,
-       count(*)::bigint, count(DISTINCT source_package_id)::bigint,
-       count(DISTINCT source_capture_id)::bigint
-FROM source_raw_daily
-WHERE source_symbol=ANY(%s)
-  AND session_date=ANY(%s::date[])
-GROUP BY source_symbol, session_date""",
-            (list(missing_revision_symbols), list(window_sessions)),
+            """SELECT source_symbol,session_date,count(*)::bigint,
+                      count(DISTINCT source_capture_id)::bigint
+               FROM stock.source_raw_daily
+               WHERE source_capture_id=%s AND source_symbol=ANY(%s::text[])
+                 AND session_date=ANY(%s::date[])
+               GROUP BY source_symbol,session_date""",
+            (source_capture_id, list(missing), list(window_sessions)),
         )
         revision_rows = cursor.fetchall()
         fetched["revision_groups"] = len(revision_rows)
         for row in revision_rows:
-            symbol = str(row[0])
-            cache["revision_counts_by_symbol"].setdefault(symbol, {})[row[1]] = {
+            cache["revision_counts_by_symbol"].setdefault(str(row[0]), {})[row[1]] = {
                 "row_count": int(row[2]),
-                "package_count": int(row[3]),
-                "capture_count": int(row[4]),
+                "capture_count": int(row[3]),
             }
-        cache["revision_loaded_symbols"].update(missing_revision_symbols)
+        cache["revision_loaded_symbols"].update(missing)
     revision_counts = {
         (symbol, session): dict(counts)
         for symbol in ordered_symbols
@@ -243,25 +234,47 @@ GROUP BY source_symbol, session_date""",
         .items()
     }
 
-    missing_raw_symbols = [
+    missing = [
         symbol
         for symbol in ordered_symbols
         if symbol not in cache["raw_loaded_symbols"]
     ]
-    if missing_raw_symbols:
+    if missing:
         fetched["raw_queries"] = 1
-        fetched_rows = _read_history_rows(
-            cursor,
-            source_symbols=missing_raw_symbols,
-            sessions=window_sessions,
-            source_package_id=source_package_id,
+        cursor.execute(
+            """SELECT source_symbol,session_date,source_capture_id,bar_status,bar_reason,
+                      raw_open,raw_high,raw_low,raw_close,price_quality,price_reason,
+                      raw_preclose,raw_preclose_quality,raw_preclose_reason,
+                      qfq_open,qfq_high,qfq_low,qfq_close,qfq_price_quality,qfq_price_reason,
+                      raw_amount,raw_amount_quality,raw_volume,raw_volume_quality,
+                      raw_turn_value,raw_turn_quality,raw_tradestatus_value,
+                      raw_tradestatus_quality,raw_is_st_value,raw_is_st_quality,
+                      returned_fields,unit_contract_version,source_clock_role,
+                      observed_started_at,observed_completed_at
+               FROM stock.source_raw_daily
+               WHERE source_capture_id=%s AND source_symbol=ANY(%s::text[])
+                 AND session_date=ANY(%s::date[])
+               ORDER BY source_symbol COLLATE "C",session_date""",
+            (source_capture_id, list(missing), list(window_sessions)),
         )
+        columns = [item.name for item in cursor.description]
+        fetched_rows = [
+            dict(zip(columns, row, strict=True)) for row in cursor.fetchall()
+        ]
         fetched["raw_rows"] = len(fetched_rows)
         for row in fetched_rows:
+            if row.get("source_capture_id") != source_capture_id:
+                raise TdxSectorMembersPgError(
+                    "STRENGTH_RAW_CAPTURE_MISMATCH", "历史Raw行source_capture_id不一致"
+                )
+            row["source_capture_id"] = int(row["source_capture_id"])
+            row["raw_price_coordinate"] = "RAW_UNADJUSTED"
+            row["qfq_price_coordinate"] = "FORWARD_ADJUSTED"
+            row["time_role"] = "NON_PIT_RETROSPECTIVE"
             cache["raw_rows_by_symbol"].setdefault(
                 str(row["source_symbol"]), []
             ).append(row)
-        cache["raw_loaded_symbols"].update(missing_raw_symbols)
+        cache["raw_loaded_symbols"].update(missing)
     raw_rows = [
         dict(row)
         for symbol in ordered_symbols
@@ -345,7 +358,7 @@ def _read_snapshot_rows(cursor: Any, snapshot_id: int) -> tuple[dict | None, set
     if type(snapshot_id) is not int or snapshot_id <= 0:
         raise TdxSectorMembersPgError("SNAPSHOT_ID_INVALID", "快照ID必须为正BIGINT")
     cursor.execute(
-        """SELECT snapshot_id, source_kind,
+        """SELECT snapshot_id,source_capture_id,source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
@@ -359,6 +372,7 @@ FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
         zip(
             (
                 "snapshot_id",
+                "source_capture_id",
                 "source_kind",
                 "source_path_role",
                 "source_file_size",
@@ -375,6 +389,24 @@ FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
             row,
         )
     )
+    if snapshot["source_capture_id"] is not None:
+        cursor.execute(
+            """SELECT provider,capture_uuid,price_coordinates,source_time_quality
+               FROM stock.source_captures WHERE capture_id=%s""",
+            (snapshot["source_capture_id"],),
+        )
+        capture = cursor.fetchone()
+        if (
+            capture is None
+            or capture[0] != "TDX"
+            or capture[1] is None
+            or tuple(capture[2] or ()) != ()
+            or capture[3] != "UNKNOWN"
+        ):
+            raise TdxSectorMembersPgError(
+                "SECTOR_CAPTURE_IDENTITY_INVALID",
+                "TDX成员捕获提供方、价格坐标或来源时钟不合法",
+            )
     cursor.execute(
         """SELECT board_kind, board_native_id, board_name
 FROM tdx_sector_catalog WHERE snapshot_id=%s""",
@@ -451,6 +483,7 @@ ORDER BY observed_at DESC, snapshot_id DESC""",
         actual, catalog, members = _read_snapshot_rows(cursor, int(snapshot_id))
         if (
             actual is not None
+            and actual.get("source_capture_id") is not None
             and _stable_snapshot_matches(actual, snapshot)
             and catalog == _expected_catalog(snapshot)
             and members == _expected_members(snapshot)
@@ -584,15 +617,48 @@ def verify_remote_sector_source_readback(
 
 
 def _insert_snapshot(cursor: Any, snapshot: SectorSourceSnapshot) -> int:
+    if snapshot.observed_at.tzinfo is None or snapshot.observed_at.utcoffset() is None:
+        raise TdxSectorMembersPgError(
+            "SNAPSHOT_CAPTURE_CLOCK_INVALID", "TDX成员快照观察时间必须带时区"
+        )
+    capture_uuid = uuid4()
+    capture_session = snapshot.observed_at.date()
+    capture_normalized_count = len(snapshot.catalog_rows) + len(snapshot.member_rows)
+    cursor.execute(
+        """INSERT INTO stock.source_captures
+             (provider,capture_uuid,range_start_session,range_end_session,
+              price_coordinates,parser_contract,read_started_at,validated_at,
+              source_available_at,source_time_quality,source_clock_role,
+              normalized_count,requested_symbol_count,unit_contract_version)
+           VALUES ('TDX',%s,%s,%s,'{}',%s,%s,%s,NULL,'UNKNOWN',%s,%s,0,NULL)
+           RETURNING capture_id""",
+        (
+            capture_uuid,
+            capture_session,
+            capture_session,
+            snapshot.parse_contract_version,
+            snapshot.observed_at,
+            snapshot.observed_at,
+            "TDX_REMOTE_SECTOR_MEMBERS_CAPTURED_NON_PIT",
+            capture_normalized_count,
+        ),
+    )
+    capture_row = cursor.fetchone()
+    if capture_row is None or type(capture_row[0]) is not int or capture_row[0] <= 0:
+        raise TdxSectorMembersPgError(
+            "SECTOR_CAPTURE_IDENTITY_INSERT_FAILED", "PostgreSQL未分配正数TDX捕获键"
+        )
+    source_capture_id = int(capture_row[0])
     cursor.execute(
         """INSERT INTO tdx_sector_source_snapshots (
-    source_kind, source_path_role,
+    source_capture_id,source_kind, source_path_role,
     source_file_size, observed_at, source_valid_on, source_known_at,
     source_available_at, clock_quality, research_mode,
     parse_contract_version, rows_declared, source_quality
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 RETURNING snapshot_id""",
         (
+            source_capture_id,
             snapshot.source_kind,
             snapshot.source_path_role,
             snapshot.source_file_size,
@@ -720,6 +786,7 @@ def persist_sector_source_snapshots(
         raise TdxSectorMembersPgError(error.code, str(error)) from error
 
     readback: dict[str, dict] = {}
+    capture_ids: dict[str, int] = {}
     try:
         with _transaction(config, write=False) as (_connection, cursor, _scope):
             for snapshot in snapshots:
@@ -727,6 +794,8 @@ def persist_sector_source_snapshots(
                 actual, catalog, members = _read_snapshot_rows(cursor, snapshot_id)
                 if (
                     actual is None
+                    or type(actual.get("source_capture_id")) is not int
+                    or actual.get("source_capture_id") <= 0
                     or not _stable_snapshot_matches(actual, snapshot)
                     or catalog != _expected_catalog(snapshot)
                     or members != _expected_members(snapshot)
@@ -736,9 +805,11 @@ def persist_sector_source_snapshots(
                         "提交后独立只读事务读回的来源快照或成员集合不匹配",
                     )
                 readback[str(snapshot_id)] = {
+                    "source_capture_id": int(actual["source_capture_id"]),
                     "catalog_rows": len(catalog),
                     "member_rows": len(members),
                 }
+                capture_ids[snapshot.source_kind] = int(actual["source_capture_id"])
     except TdxSectorMembersPgError:
         raise
     except RawSourcePgError as error:
@@ -760,6 +831,7 @@ def persist_sector_source_snapshots(
         "snapshots": [
             {
                 "snapshot_id": snapshot_ids[item.source_kind],
+                "source_capture_id": capture_ids[item.source_kind],
                 "source_kind": item.source_kind,
                 "source_file_size": item.source_file_size,
                 "rows_declared": item.rows_declared,
@@ -790,6 +862,7 @@ def persist_sector_source_snapshots(
 def _snapshot_payload(row: Sequence[Any]) -> dict[str, Any]:
     fields = (
         "snapshot_id",
+        "source_capture_id",
         "source_kind",
         "source_path_role",
         "source_file_size",
@@ -804,6 +877,8 @@ def _snapshot_payload(row: Sequence[Any]) -> dict[str, Any]:
         "source_quality",
     )
     payload = dict(zip(fields, row))
+    if payload["source_capture_id"] is not None:
+        payload["source_capture_id"] = int(payload["source_capture_id"])
     payload["observed_at"] = payload["observed_at"].isoformat()
     for name in ("source_valid_on",):
         if payload[name] is not None:
@@ -830,14 +905,14 @@ def query_latest_sector_source_observation(
     config: dict[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     source_profile: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """读取最新TDX行业/GN快照摘要，并可选核对其与精确画像的交集。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise TdxSectorMembersPgError(
             "SECTOR_OBSERVATION_TARGET_INVALID", "板块观察必须绑定目标日和正数来源包ID"
@@ -851,7 +926,7 @@ def query_latest_sector_source_observation(
         and isinstance(set_comparison, Mapping)
         and set_comparison.get("symbol_sets_match") is True
         and profile.get("target_session") == target_session.isoformat()
-        and profile.get("source_package_id") == source_package_id
+        and profile.get("source_capture_id") == source_capture_id
     )
     source_capture_id = profile.get("source_capture_id") if has_exact_profile else None
     profile_revision = (
@@ -916,8 +991,7 @@ LEFT JOIN LATERAL (
            )::bigint AS history_75_session_overlap_symbols
     FROM tdx_sector_members m
     JOIN source_symbol_price_profiles p
-      ON p.target_session=%s::date AND p.source_package_id=%s
-     AND p.source_capture_id=%s
+      ON p.target_session=%s::date AND p.source_capture_id=%s
      AND p.profile_revision=%s
      AND p.source_symbol=m.source_symbol
     JOIN tdx_sector_catalog c ON c.id=m.catalog_id
@@ -926,7 +1000,6 @@ LEFT JOIN LATERAL (
 ORDER BY s.source_kind""",
                 (
                     target_session,
-                    source_package_id,
                     source_capture_id,
                     profile_revision,
                 ),
@@ -965,7 +1038,7 @@ ORDER BY s.source_kind""",
     return {
         "status": "AVAILABLE" if snapshots else "NO_MATCH",
         "target_session": target_session.isoformat(),
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "source_profile_revision": profile_revision,
         "selection_rule": "MAX_OBSERVED_AT_PER_EXACT_TDX_SOURCE_KIND",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
@@ -1118,7 +1191,7 @@ def query_tdx_sector_symbol_membership(
         ):
             requested_ids = [industry_snapshot_id, concept_snapshot_id]
             cursor.execute(
-                """SELECT snapshot_id, source_kind,
+                """SELECT snapshot_id,source_capture_id,source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
@@ -1580,7 +1653,7 @@ def read_rotation_snapshot_members(
         )
     with _transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT snapshot_id, source_kind,
+            """SELECT snapshot_id,source_capture_id,source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
@@ -1667,7 +1740,7 @@ def query_sector_catalog(
     try:
         with _transaction(config, write=False) as (_connection, cursor, _scope):
             cursor.execute(
-                """SELECT snapshot_id, source_kind,
+                """SELECT snapshot_id,source_capture_id,source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
@@ -1771,7 +1844,7 @@ def query_sector_members(
     board_native_id: str,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str | None,
     offset: int,
     limit: int,
@@ -1793,7 +1866,7 @@ def query_sector_members(
         raise TdxSectorMembersPgError(
             "SESSION_AFTER_CUTOFF", "目标交易日不得晚于显式研究截止日"
         )
-    if type(source_package_id) is not int or source_package_id <= 0:
+    if type(source_capture_id) is not int or source_capture_id <= 0:
         raise TdxSectorMembersPgError(
             "SOURCE_PACKAGE_ID_INVALID", "来源包ID必须是正BIGINT"
         )
@@ -1808,7 +1881,7 @@ def query_sector_members(
     try:
         with _transaction(config, write=False) as (_connection, cursor, _scope):
             cursor.execute(
-                """SELECT snapshot_id, source_kind,
+                """SELECT snapshot_id,source_capture_id,source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
@@ -1825,74 +1898,23 @@ FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
                 raise TdxSectorMembersPgError(
                     "SECTOR_SNAPSHOT_MODE_REJECTED", "不接受未经声明的历史PIT成员快照"
                 )
-            cursor.execute(
-                """SELECT DISTINCT r.source_package_id, r.source_capture_id,
-       c.read_started_at, c.validated_at, c.source_available_at,
-       c.source_time_quality, c.source_clock_role, c.parser_contract,
-       c.normalized_count, s.dataset_id, s.byte_count
-FROM source_raw_daily r
-JOIN source_captures c ON c.capture_id=r.source_capture_id
-  AND c.source_package_id=r.source_package_id AND c.target_session=r.session_date
-JOIN source_packages s ON s.source_package_id=r.source_package_id
-WHERE r.session_date=%s::date AND r.source_package_id=%s
-ORDER BY r.source_capture_id, r.source_package_id LIMIT 2""",
-                (target_session, source_package_id),
+            source_version = _read_baostock_capture_day(
+                cursor,
+                target_session=target_session,
+                source_capture_id=source_capture_id,
+                research_cutoff=research_cutoff,
             )
-            source_version = cursor.fetchall()
-            if len(source_version) != 1:
-                raise TdxSectorMembersPgError(
-                    "SOURCE_VERSION_NOT_UNIQUE",
-                    "目标日与来源包数字ID没有唯一Raw捕获引用",
-                )
-            (
-                source_package_id,
-                source_capture_id,
-                _capture_started_at,
-                _capture_validated_at,
-                source_available_at,
-                source_time_quality,
-                source_clock_role,
-                parser_contract,
-                expected_row_count,
-                source_dataset_id,
-                source_byte_count,
-            ) = source_version[0]
-            if (
-                source_dataset_id != source_raw._DATASET_ID
-                or type(expected_row_count) is not int
-                or expected_row_count <= 0
-            ):
-                raise TdxSectorMembersPgError(
-                    "SOURCE_VERSION_INVALID", "Raw来源捕获或内容元数据不合法"
-                )
-            cursor.execute(
-                """SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint,
-       count(*) FILTER (WHERE bar_status='TARGET_PRESENT')::bigint,
-       count(*) FILTER (WHERE bar_status='TARGET_MISSING')::bigint,
-       count(*) FILTER (WHERE bar_status='READ_FAILED')::bigint
-FROM source_raw_daily
-WHERE source_capture_id=%s AND session_date=%s::date AND source_package_id=%s""",
-                (source_capture_id, target_session, source_package_id),
-            )
-            raw_counts = cursor.fetchone()
-            if (
-                int(raw_counts[0]) != expected_row_count
-                or int(raw_counts[1]) != expected_row_count
-            ):
-                raise TdxSectorMembersPgError(
-                    "SOURCE_RAW_COUNT_MISMATCH",
-                    "目标日Raw行数与capture记录的来源代码数不一致",
-                )
+            expected_row_count = source_version["source_symbol_count"]
+            parser_contract = source_version["parser_contract"]
+            source_time_quality = source_version["source_time_quality"]
+            source_clock_role = source_version["source_clock_role"]
+            source_available_at = source_version["source_available_at"]
             cursor.execute(
                 """SELECT DISTINCT profile_revision COLLATE "C" AS profile_revision
 FROM source_symbol_price_profiles
-WHERE source_capture_id=%s AND target_session=%s::date AND source_package_id=%s
+WHERE source_capture_id=%s AND target_session=%s::date
 ORDER BY 1""",
-                (
-                    source_capture_id,
-                    target_session,
-                    source_package_id,
-                ),
+                (source_capture_id, target_session),
             )
             profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
             selected_profile = profile_revision
@@ -1921,18 +1943,16 @@ FROM tdx_sector_members m
 JOIN tdx_sector_catalog c ON c.id=m.catalog_id
 LEFT JOIN source_raw_daily r ON r.source_capture_id=%s
   AND r.source_symbol=m.source_symbol
-  AND r.session_date=%s::date AND r.source_package_id=%s
+  AND r.session_date=%s::date
 LEFT JOIN source_symbol_price_profiles p ON p.source_capture_id=%s
-  AND p.target_session=%s::date AND p.source_package_id=%s
+  AND p.target_session=%s::date
   AND p.source_symbol=m.source_symbol AND p.profile_revision=%s
 WHERE c.snapshot_id=%s AND m.board_kind=%s AND m.board_native_id=%s""",
                 (
                     source_capture_id,
                     target_session,
-                    source_package_id,
                     source_capture_id,
                     target_session,
-                    source_package_id,
                     selected_profile,
                     snapshot_id,
                     board_kind,
@@ -1976,19 +1996,17 @@ FROM tdx_sector_members m
 JOIN tdx_sector_catalog c ON c.id=m.catalog_id
 LEFT JOIN source_raw_daily r ON r.source_capture_id=%s
   AND r.source_symbol=m.source_symbol
-  AND r.session_date=%s::date AND r.source_package_id=%s
+  AND r.session_date=%s::date
 LEFT JOIN source_symbol_price_profiles p ON p.source_capture_id=%s
-  AND p.target_session=%s::date AND p.source_package_id=%s
+  AND p.target_session=%s::date
   AND p.source_symbol=m.source_symbol AND p.profile_revision=%s
 WHERE c.snapshot_id=%s AND m.board_kind=%s AND m.board_native_id=%s
 ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                 (
                     source_capture_id,
                     target_session,
-                    source_package_id,
                     source_capture_id,
                     target_session,
-                    source_package_id,
                     selected_profile,
                     snapshot_id,
                     board_kind,
@@ -2024,14 +2042,9 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "status": "AVAILABLE" if total_member_count else "NO_MATCH",
         "snapshot": snapshot,
         "source_version": {
+            **source_version,
             "target_session": target_session.isoformat(),
-            "source_package_id": source_package_id,
-            "source_capture_id": int(source_capture_id),
-            "parser_contract": parser_contract,
             "raw_row_count": expected_row_count,
-            "source_byte_count": int(source_byte_count),
-            "source_time_quality": source_time_quality,
-            "source_clock_role": source_clock_role,
             "source_available_at": source_available_at.isoformat()
             if source_available_at
             else None,
@@ -2074,50 +2087,149 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
     }
 
 
+def _read_baostock_capture_day(
+    cursor: Any,
+    *,
+    target_session: date,
+    source_capture_id: int,
+    research_cutoff: date,
+) -> dict[str, Any]:
+    cursor.execute(
+        """SELECT capture_id,capture_uuid,provider,range_start_session,
+                  range_end_session,price_coordinates,source_time_quality,
+                  source_clock_role,source_available_at,parser_contract,
+                  normalized_count,unit_contract_version
+           FROM stock.source_captures
+           WHERE capture_id=%s AND provider='BAOSTOCK'""",
+        (source_capture_id,),
+    )
+    capture = cursor.fetchone()
+    if capture is None:
+        raise TdxSectorMembersPgError(
+            "SOURCE_CAPTURE_NOT_FOUND", "没有找到指定BaoStock来源捕获"
+        )
+    (
+        capture_id,
+        capture_uuid,
+        provider,
+        range_start,
+        range_end,
+        coordinates,
+        time_quality,
+        clock_role,
+        available_at,
+        parser_contract,
+        normalized_count,
+        unit_contract,
+    ) = capture
+    if (
+        type(capture_id) is not int
+        or capture_id != source_capture_id
+        or capture_uuid is None
+        or range_start is None
+        or range_end is None
+        or range_start > target_session
+        or target_session > range_end
+        or range_end > research_cutoff
+        or set(coordinates or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or time_quality != "NON_PIT_OBSERVED"
+        or clock_role != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+        or available_at is not None
+        or type(normalized_count) is not int
+        or normalized_count < 0
+        or not unit_contract
+    ):
+        raise TdxSectorMembersPgError(
+            "SOURCE_CAPTURE_INVALID",
+            "BaoStock捕获日期、坐标、单位或NON_PIT时钟身份不合法",
+        )
+    cursor.execute(
+        """WITH request_codes AS (
+               SELECT source_code,
+                      count(*)=2 AND count(DISTINCT adjustment_flag)=2
+                        AND count(DISTINCT eligible_start_session)=1
+                        AND count(DISTINCT eligible_end_session)=1
+                        AND bool_and(request_status IN ('COMPLETED','NO_DATA')
+                          AND (request_status='NO_DATA'
+                               OR completed_through_session>=range_end_session)) AS complete,
+                      min(eligible_start_session) AS eligible_start,
+                      max(eligible_end_session) AS eligible_end
+               FROM stock.source_capture_requests
+               WHERE capture_id=%s AND range_end_session<=%s
+               GROUP BY source_code
+           )
+           SELECT count(*) FILTER (
+                     WHERE %s BETWEEN eligible_start AND eligible_end
+                  )::bigint,
+                  count(*) FILTER (
+                     WHERE %s BETWEEN eligible_start AND eligible_end AND complete
+                  )::bigint
+           FROM request_codes""",
+        (source_capture_id, research_cutoff, target_session, target_session),
+    )
+    eligible_count, completed_count = (int(value) for value in cursor.fetchone())
+    cursor.execute(
+        """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint,
+                  count(*) FILTER (WHERE bar_status='TARGET_PRESENT')::bigint,
+                  count(*) FILTER (WHERE bar_status='TARGET_MISSING')::bigint,
+                  count(*) FILTER (WHERE bar_status='READ_FAILED')::bigint,
+                  count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint,
+                  count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint
+           FROM stock.source_raw_daily
+           WHERE source_capture_id=%s AND session_date=%s
+             AND session_date<=%s""",
+        (source_capture_id, target_session, research_cutoff),
+    )
+    raw = cursor.fetchone()
+    row_count, symbol_count = int(raw[0]), int(raw[1])
+    if (
+        eligible_count <= 0
+        or eligible_count != completed_count
+        or row_count != eligible_count
+        or symbol_count != row_count
+        or int(raw[5]) != row_count
+        or int(raw[6]) != row_count
+    ):
+        raise TdxSectorMembersPgError(
+            "SOURCE_RAW_CAPTURE_INCOMPLETE",
+            "目标日RAW/QFQ来源行、请求状态或BaoStock有效证券分母未闭合",
+        )
+    return {
+        "target_session": target_session,
+        "source_capture_id": source_capture_id,
+        "capture_uuid": str(capture_uuid),
+        "provider": provider,
+        "range_start_session": range_start,
+        "range_end_session": range_end,
+        "price_coordinates": tuple(coordinates),
+        "source_time_quality": time_quality,
+        "source_clock_role": clock_role,
+        "source_available_at": available_at,
+        "parser_contract": parser_contract,
+        "unit_contract_version": unit_contract,
+        "capture_normalized_row_count": normalized_count,
+        "source_symbol_count": row_count,
+        "target_present_count": int(raw[2]),
+        "target_missing_count": int(raw[3]),
+        "read_failed_count": int(raw[4]),
+    }
+
+
 def _breadth_source_version(
     cursor: Any,
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
+    research_cutoff: date,
 ) -> dict[str, Any]:
-    cursor.execute(
-        """SELECT DISTINCT r.source_package_id, r.source_capture_id,
-       c.source_available_at, c.source_time_quality, c.source_clock_role,
-       c.parser_contract, c.normalized_count, s.dataset_id, s.byte_count
-FROM source_raw_daily r
-JOIN source_captures c ON c.capture_id=r.source_capture_id
-  AND c.source_package_id=r.source_package_id AND c.target_session=r.session_date
-JOIN source_packages s ON s.source_package_id=r.source_package_id
-WHERE r.session_date=%s::date AND r.source_package_id=%s
-ORDER BY r.source_capture_id, r.source_package_id LIMIT 2""",
-        (target_session, source_package_id),
+    source = _read_baostock_capture_day(
+        cursor,
+        target_session=target_session,
+        source_capture_id=source_capture_id,
+        research_cutoff=research_cutoff,
     )
-    rows = cursor.fetchall()
-    if len(rows) != 1:
-        raise TdxSectorMembersPgError(
-            "SOURCE_VERSION_NOT_UNIQUE",
-            "目标日与来源包数字ID没有唯一Raw捕获",
-        )
-    (
-        source_package_id,
-        source_capture_id,
-        source_available_at,
-        source_time_quality,
-        source_clock_role,
-        parser_contract,
-        raw_count,
-        dataset_id,
-        source_byte_count,
-    ) = rows[0]
-    if (
-        dataset_id != source_raw._DATASET_ID
-        or type(raw_count) is not int
-        or raw_count <= 0
-    ):
-        raise TdxSectorMembersPgError(
-            "SOURCE_VERSION_INVALID", "Raw来源捕获或内容元数据不合法"
-        )
+    raw_count = source["source_symbol_count"]
     if raw_count > MAX_MEMBER_INSERTS:
         raise TdxSectorMembersPgError(
             "BREADTH_SOURCE_ROW_BUDGET_EXCEEDED",
@@ -2126,32 +2238,11 @@ ORDER BY r.source_capture_id, r.source_package_id LIMIT 2""",
     cursor.execute(
         """SELECT count(*)::bigint,
        count(DISTINCT source_symbol)::bigint,
-       count(*) FILTER (WHERE bar_status='TARGET_PRESENT')::bigint,
-       count(*) FILTER (WHERE bar_status='TARGET_MISSING')::bigint,
-       count(*) FILTER (WHERE bar_status='READ_FAILED')::bigint
-FROM source_raw_daily
-WHERE source_capture_id=%s AND session_date=%s::date AND source_package_id=%s""",
-        (source_capture_id, target_session, source_package_id),
-    )
-    raw_counts = cursor.fetchone()
-    if int(raw_counts[0]) != raw_count or int(raw_counts[1]) != raw_count:
-        raise TdxSectorMembersPgError(
-            "SOURCE_RAW_COUNT_MISMATCH",
-            "capture记录与Raw代码集合分母不一致",
-        )
-    cursor.execute(
-        """SELECT count(*)::bigint,
-       count(DISTINCT source_symbol)::bigint,
        count(DISTINCT source_capture_id)::bigint
 FROM source_symbol_price_profiles
-WHERE source_capture_id=%s AND target_session=%s::date AND source_package_id=%s
+WHERE source_capture_id=%s AND target_session=%s::date
   AND profile_revision=%s""",
-        (
-            source_capture_id,
-            target_session,
-            source_package_id,
-            profile_revision,
-        ),
+        (source_capture_id, target_session, profile_revision),
     )
     profile_counts = cursor.fetchone()
     if (
@@ -2163,20 +2254,7 @@ WHERE source_capture_id=%s AND target_session=%s::date AND source_package_id=%s
             "PROFILE_SOURCE_IDENTITY_MISMATCH",
             "画像行分母、唯一捕获或capture与Raw来源版本不一致",
         )
-    return {
-        "target_session": target_session,
-        "source_package_id": int(source_package_id),
-        "source_capture_id": int(source_capture_id),
-        "source_symbol_count": raw_count,
-        "parser_contract": parser_contract,
-        "source_time_quality": str(source_time_quality),
-        "source_clock_role": str(source_clock_role),
-        "source_available_at": source_available_at.isoformat()
-        if source_available_at
-        else None,
-        "source_byte_count": int(source_byte_count),
-        "profile_revision": profile_revision,
-    }
+    return {**source, "profile_revision": profile_revision}
 
 
 def _validate_breadth_request(
@@ -2456,7 +2534,6 @@ def _core_transition_summary(
                 return {
                     "target_session": source["target_session"].isoformat(),
                     "source_capture_id": source["source_capture_id"],
-                    "source_package_id": source["source_package_id"],
                     "profile_revision": source["profile_revision"],
                     "raw_close": row.get(f"{side}_raw_close"),
                     "raw_price_quality": row.get(f"{side}_raw_price_quality"),
@@ -2828,7 +2905,7 @@ def _summarize_sector_breadth_rows(
                     "board_native_id": board["board_native_id"],
                     "target_session": after_source["target_session"].isoformat(),
                     "research_cutoff": after_source["research_cutoff"].isoformat(),
-                    "source_package_id": after_source["source_package_id"],
+                    "source_capture_id": after_source["source_capture_id"],
                     "profile_revision": after_source["profile_revision"],
                     "offset": 0,
                     "limit": 30,
@@ -2852,9 +2929,9 @@ def query_sector_breadth(
     before_session: date,
     after_session: date,
     research_cutoff: date,
-    before_source_package_id: int,
+    before_source_capture_id: int,
     before_profile_revision: str,
-    after_source_package_id: int,
+    after_source_capture_id: int,
     after_profile_revision: str,
     official_calendar_id: str,
     official_calendar_revision: str,
@@ -2866,9 +2943,9 @@ def query_sector_breadth(
     core_transition_kind: str = "ALL",
 ) -> dict[str, Any]:
     identities = (
-        before_source_package_id,
+        before_source_capture_id,
         before_profile_revision,
-        after_source_package_id,
+        after_source_capture_id,
         after_profile_revision,
     )
     _validate_breadth_request(
@@ -2895,7 +2972,7 @@ def query_sector_breadth(
     try:
         with _transaction(config, write=False) as (_connection, cursor, _unused):
             cursor.execute(
-                """SELECT snapshot_id, source_kind,
+                """SELECT snapshot_id,source_capture_id,source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
@@ -2921,14 +2998,14 @@ FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
                     cursor,
                     target_session=before_session,
                     max_target_session=research_cutoff,
-                    source_package_id=before_source_package_id,
+                    source_capture_id=before_source_capture_id,
                     profile_revision=before_profile_revision,
                 )
                 after_profile = _snapshot_for_session(
                     cursor,
                     target_session=after_session,
                     max_target_session=research_cutoff,
-                    source_package_id=after_source_package_id,
+                    source_capture_id=after_source_capture_id,
                     profile_revision=after_profile_revision,
                 )
             except PriceProfilePgError as error:
@@ -2948,14 +3025,16 @@ FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
             before_source = _breadth_source_version(
                 cursor,
                 target_session=before_session,
-                source_package_id=before_source_package_id,
+                source_capture_id=before_source_capture_id,
                 profile_revision=before_profile_revision,
+                research_cutoff=research_cutoff,
             )
             after_source = _breadth_source_version(
                 cursor,
                 target_session=after_session,
-                source_package_id=after_source_package_id,
+                source_capture_id=after_source_capture_id,
                 profile_revision=after_profile_revision,
+                research_cutoff=research_cutoff,
             )
             before_source["research_cutoff"] = research_cutoff
             after_source["research_cutoff"] = research_cutoff
@@ -3071,11 +3150,9 @@ LEFT JOIN classified x ON x.source_symbol=m.source_symbol
 LEFT JOIN source_raw_daily rb
   ON rb.source_capture_id=%s
  AND rb.source_symbol=m.source_symbol AND rb.session_date=%s::date
- AND rb.source_package_id=%s
 LEFT JOIN source_raw_daily ra
   ON ra.source_capture_id=%s
  AND ra.source_symbol=m.source_symbol AND ra.session_date=%s::date
- AND ra.source_package_id=%s
 WHERE c.snapshot_id=%s AND c.board_kind=%s"""
                 + member_filter_sql
                 + """
@@ -3087,10 +3164,8 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
                 *_profile_change_snapshot_parameters(after_profile),
                 before_source["source_capture_id"],
                 before_session,
-                before_source_package_id,
                 after_source["source_capture_id"],
                 after_session,
-                after_source_package_id,
                 snapshot_id,
                 board_kind,
                 page_board_ids,
@@ -3148,7 +3223,7 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
         "member_limit": member_limit,
         "boards": page,
         "research_scope": "SOURCE_SYMBOL_ONLY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE/NON_PIT_RETROSPECTIVE",
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "formal_historical_sector_qualification": "UNKNOWN_NOT_CONNECTED",
@@ -3178,7 +3253,7 @@ def query_sector_strength(
     board_native_id: str | None,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str | None,
     official_calendar_id: str,
     official_calendar_revision: str,
@@ -3208,7 +3283,7 @@ def query_sector_strength(
         raise TdxSectorMembersPgError(
             "SESSION_DATE_INVALID", "目标官方会话必须不晚于显式研究截止日"
         )
-    if type(source_package_id) is not int or source_package_id <= 0:
+    if type(source_capture_id) is not int or source_capture_id <= 0:
         raise TdxSectorMembersPgError(
             "SOURCE_PACKAGE_ID_INVALID", "来源包ID必须是正BIGINT"
         )
@@ -3256,7 +3331,7 @@ def query_sector_strength(
     try:
         with transaction_context as (_connection, cursor, _unused):
             cursor.execute(
-                """SELECT snapshot_id, source_kind,
+                """SELECT snapshot_id,source_capture_id,source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
@@ -3277,28 +3352,18 @@ FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
                     "SECTOR_SNAPSHOT_MODE_REJECTED",
                     "当前TDX成员快照仅可作为NON_PIT后验研究输入",
                 )
-
-            cursor.execute(
-                """SELECT DISTINCT source_capture_id
-FROM source_raw_daily
-WHERE session_date=%s::date
-  AND source_package_id=%s
-ORDER BY source_capture_id LIMIT 2""",
-                (target_session, source_package_id),
+            _read_baostock_capture_day(
+                cursor,
+                target_session=target_session,
+                source_capture_id=source_capture_id,
+                research_cutoff=research_cutoff,
             )
-            raw_capture_ids = [int(row[0]) for row in cursor.fetchall()]
-            if len(raw_capture_ids) != 1:
-                raise TdxSectorMembersPgError(
-                    "SOURCE_VERSION_NOT_UNIQUE",
-                    "目标日与来源包ID没有唯一Raw捕获",
-                )
-            source_capture_id = raw_capture_ids[0]
             cursor.execute(
                 """SELECT DISTINCT profile_revision
 FROM source_symbol_price_profiles
-WHERE target_session=%s::date AND source_capture_id=%s AND source_package_id=%s
+               WHERE target_session=%s::date AND source_capture_id=%s
 ORDER BY profile_revision""",
-                (target_session, source_capture_id, source_package_id),
+                (target_session, source_capture_id),
             )
             profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
             selected_profile = profile_revision
@@ -3322,7 +3387,6 @@ ORDER BY profile_revision""",
 
             validation_key = (
                 source_capture_id,
-                source_package_id,
                 target_session,
                 research_cutoff,
                 selected_profile,
@@ -3341,7 +3405,7 @@ ORDER BY profile_revision""",
                         cursor,
                         target_session=target_session,
                         max_target_session=research_cutoff,
-                        source_package_id=source_package_id,
+                        source_capture_id=source_capture_id,
                         profile_revision=selected_profile,
                     )
                 except PriceProfilePgError as error:
@@ -3368,8 +3432,9 @@ ORDER BY profile_revision""",
                 source_version = _breadth_source_version(
                     cursor,
                     target_session=target_session,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     profile_revision=selected_profile,
+                    research_cutoff=research_cutoff,
                 )
                 if read_context is not None:
                     read_context.validated_source_versions[validation_key] = (
@@ -3456,7 +3521,6 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
                 ) = _read_strength_inputs(
                     cursor,
                     source_capture_id=source_version["source_capture_id"],
-                    source_package_id=source_package_id,
                     target_session=target_session,
                     profile_revision=selected_profile,
                     official_calendar_id=official_calendar_id,

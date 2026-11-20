@@ -8,22 +8,29 @@ async function loadProfileSnapshots() {
   );
   try {
     const data = await api("/api/source-symbol-price-profiles/snapshots");
+    if (
+      !Array.isArray(data.snapshots) ||
+      data.snapshots.some(
+        (snapshot) => snapshot.price_coordinate !== "FORWARD_ADJUSTED",
+      )
+    )
+      throw new Error("Profile目录未明确绑定BaoStock前复权价格坐标。");
     $("dataBoundary").textContent =
       `研究冻结于${data.research_cutoff}。当前页面读取PG已存行情和后验研究结果，不代表官方上市总体、稳定证券身份、交易状态或选股结论。`;
     state.profileSnapshots = data.snapshots || [];
     populateChangeSnapshots(state.profileSnapshots);
     $("profileSnapshotSelect").replaceChildren(
-      new Option("— 请选择精确画像日期 / 来源包ID / 画像修订 —", ""),
+      new Option("— 请选择精确画像日期 / 来源捕获ID / 画像修订 —", ""),
     );
     for (const item of state.profileSnapshots) {
       const key = profileSnapshotKey(item);
       const option = new Option(
-        `${item.target_session} · 包ID ${item.source_package_id} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision}`,
+        `${item.target_session} · 捕获ID ${item.source_capture_id} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision}`,
         key,
       );
       option.title =
         `${item.target_session} · ` +
-        `目标日 ${item.target_session} · 来源包ID ${item.source_package_id} · ` +
+        `目标日 ${item.target_session} · 来源捕获ID ${item.source_capture_id} · ` +
         `profile_revision ${item.profile_revision}`;
       option.disabled = !item.complete;
       $("profileSnapshotSelect").append(option);
@@ -33,7 +40,7 @@ async function loadProfileSnapshots() {
       ? `${state.profileSnapshots.length}个真实PG画像版本`
       : "没有已保存画像";
     $("profileMessage").textContent = state.profileSnapshots.length
-      ? "请选择精确日期、来源包ID和画像修订。搜索仅读取PG持久画像，不回退latest。"
+      ? "请选择精确日期、来源捕获ID和画像修订。搜索仅读取PG持久画像，不回退latest。"
       : "PG画像表中没有已保存记录。";
   } catch (error) {
     $("dataBoundary").textContent =
@@ -125,7 +132,7 @@ function profileBias20AtrRowText(item) {
   const denominator = String(item.bias20_atr_exact_denominator ?? "");
   if (
     quality !== "OBSERVED" ||
-    item.price_coordinate !== "RAW_UNADJUSTED" ||
+    item.price_coordinate !== "FORWARD_ADJUSTED" ||
     !/^-?\d+$/.test(numerator) ||
     !/^\d+$/.test(denominator) ||
     !/[1-9]/.test(denominator) ||
@@ -133,8 +140,8 @@ function profileBias20AtrRowText(item) {
     item.ma20 == null ||
     item.atr20_quality !== "OBSERVED" ||
     item.atr20 == null ||
-    item.target_raw_price_quality !== "OBSERVED" ||
-    item.target_raw_close == null
+    item.target_qfq_price_quality !== "OBSERVED" ||
+    item.target_qfq_close == null
   ) {
     const reason =
       item.bias20_atr_unknown_reason ||
@@ -142,7 +149,7 @@ function profileBias20AtrRowText(item) {
       "未知原因未提供";
     return (
       `UNKNOWN · ${text(reason)} · Core ${text(quality)} · ` +
-      `RAW价格 ${text(item.target_raw_price_quality)}`
+      `QFQ价格 ${text(item.target_qfq_price_quality)}`
     );
   }
   return (
@@ -190,11 +197,11 @@ function profilePositionRowText(item, conditions) {
     .join(" AND ");
 }
 function renderPricePositionDetail(root, item) {
-  appendText(root, "h3", "RAW价格相对位置 / 数值 / 质量 / 原因");
+  appendText(root, "h3", "前复权价格相对位置 / 数值 / 质量 / 原因");
   appendText(
     root,
     "p",
-    "比较只使用RAW_UNADJUSTED坐标与PG NUMERIC值；UNKNOWN保留各输入质量原因。相对滚动前20会话高点的位置不代表固定前高突破或交易信号。",
+    "比较只使用FORWARD_ADJUSTED坐标与PG NUMERIC值；UNKNOWN保留各输入质量原因。相对滚动前20会话高点的位置不代表固定前高突破或交易信号。",
     "muted",
   );
   const table = document.createElement("table");
@@ -276,7 +283,7 @@ async function loadProfilePage() {
     selectedPositions.length
   ) {
     $("profileMessage").textContent =
-      "两个RAW位置条件必须使用不同的比较字段；旧结果已清除。";
+      "两个前复权位置条件必须使用不同的比较字段；旧结果已清除。";
     $("profileCount").textContent = "筛选未执行";
     $("profilePageStatus").textContent = "请调整位置条件";
     return;
@@ -293,8 +300,9 @@ async function loadProfilePage() {
   }
   const params = new URLSearchParams({
     target_session: snapshot.target_session,
-    source_package_id: snapshot.source_package_id,
+    source_capture_id: snapshot.source_capture_id,
     profile_revision: snapshot.profile_revision,
+    price_coordinate: "FORWARD_ADJUSTED",
     offset: String(state.profileOffset),
     limit: String(state.profileLimit),
     market: $("profileMarketSelect").value,
@@ -318,7 +326,7 @@ async function loadProfilePage() {
   const symbol = $("profileSymbolInput").value.trim();
   if (symbol) params.set("symbol", symbol);
   $("profileMessage").textContent =
-    "正在按精确日期、来源包和画像修订读取PG分页…";
+    "正在按精确日期、来源捕获和画像修订读取PG分页…";
   try {
     const data = await api(`/api/source-symbol-price-profiles?${params}`);
     if (requestId !== state.profileRequest) return;
@@ -351,8 +359,10 @@ async function loadProfilePage() {
       );
     if (
       data.target_session !== snapshot.target_session ||
-      data.source_package_id !== snapshot.source_package_id ||
+      data.source_capture_id !== snapshot.source_capture_id ||
       data.profile_revision !== snapshot.profile_revision ||
+      data.price_coordinate !== "FORWARD_ADJUSTED" ||
+      data.rows.some((item) => item.price_coordinate !== "FORWARD_ADJUSTED") ||
       data.bias20_atr_band !== bias20AtrBand ||
       !data.bias20_atr_band_definition ||
       data.source_pool_total !== snapshot.source_symbol_count ||
@@ -398,7 +408,7 @@ async function loadProfilePage() {
       profileCondition,
     );
     const binding =
-      `${snapshot.target_session} · 来源包ID ${data.source_package_id} · ` +
+      `${snapshot.target_session} · 来源捕获ID ${data.source_capture_id} · ` +
       `profile_revision ${data.profile_revision}`;
     state.profileTotal = page.total;
     $("profileCount").textContent =
@@ -515,7 +525,7 @@ async function loadProfilePage() {
         makeComparisonAddButton({
           source_symbol: item.source_symbol,
           target_session: item.target_session,
-          source_package_id: item.source_package_id,
+          source_capture_id: item.source_capture_id,
           profile_revision: item.profile_revision,
           origin_label: "完整PG价格画像",
         }),

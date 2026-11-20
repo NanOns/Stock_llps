@@ -15,7 +15,8 @@ from stock_a.research.entry_context.sessions import _load_calendar
 def research_universe_pg_history_preview(
     *,
     target_session: str,
-    source_package_id: int,
+    source_capture_id: int | None = None,
+    source_package_id: int | None = None,
     session_dates: Sequence[date],
     page: Mapping[str, Any],
     profile_contract: dict[str, Any],
@@ -32,7 +33,8 @@ def research_universe_pg_history_preview(
             preview = research_stock_pg_history_preview(
                 symbol=symbol,
                 target_session=target_session,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
                 session_dates=session_dates,
                 history_rows=candidate["history_rows"],
                 missing_history_sessions=tuple(
@@ -61,10 +63,10 @@ def research_universe_pg_history_preview(
             )
             target_status = (target_row or {}).get("bar_status")
             target_status = {
-                "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
-                "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
-                "READ_FAILED": "TDX_READ_FAILED",
-            }.get(target_status, "TDX_READ_FAILED")
+                "TARGET_PRESENT": "BAOSTOCK_TARGET_BAR_PRESENT",
+                "TARGET_MISSING": "BAOSTOCK_TARGET_BAR_MISSING",
+                "READ_FAILED": "BAOSTOCK_READ_FAILED",
+            }.get(target_status, "BAOSTOCK_READ_FAILED")
             core_field_ids = sorted(
                 {
                     item.get("field_id")
@@ -143,7 +145,7 @@ def research_universe_pg_history_preview(
                     "consumer_status": "CONSUMER_FAILED",
                     "consumer_error_code": error_code,
                     "identity_status": "SOURCE_SYMBOL_ONLY",
-                    "source_object_status": "TDX_SOURCE_SYMBOL_OBSERVED",
+                    "source_object_status": "BAOSTOCK_SOURCE_SYMBOL_OBSERVED",
                     "target_bar_status": target_status,
                     "price_research_status": "UNKNOWN_DATA",
                     "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
@@ -216,6 +218,7 @@ def research_universe_pg_history_preview(
             )
             continue
         fields = preview.get("core", {}).get("fields", {})
+        window = preview.get("window") or {}
         profile_preview = preview.get("profile_preview")
         components = (
             profile_preview.get("components", [])
@@ -266,6 +269,9 @@ def research_universe_pg_history_preview(
             )
             if name in fields
         }
+        price_window_status = window.get("price_window_status")
+        if price_window_status == "UNKNOWN_DATA":
+            price_window_status = "PRICE_FIELDS_UNKNOWN"
         result_item = {
             "symbol": symbol,
             "status": preview.get("status"),
@@ -279,19 +285,20 @@ def research_universe_pg_history_preview(
             "listing_status": preview.get("listing_status"),
             "suspension_status": preview.get("suspension_status"),
             "pit_status": preview.get("pit_status"),
-            "window": preview.get("window"),
+            "window": window,
             "history_status": preview.get("history_status"),
             "history_records_complete": preview.get("history_records_complete"),
-            "history_records_status": preview.get("history_records_status"),
-            "price_window_usable": preview.get("price_window_usable"),
-            "price_window_status": preview.get("price_window_status"),
-            "price_window_reason": preview.get("price_window_reason"),
-            "price_window_valid_bar_count": preview.get("price_window_valid_bar_count"),
-            "price_window_expected_bar_count": preview.get(
+            "history_records_status": preview.get("history_status")
+            or "HISTORY_ROW_NOT_STORED",
+            "price_window_usable": window.get("price_window_usable"),
+            "price_window_status": price_window_status,
+            "price_window_reason": window.get("price_window_reason"),
+            "price_window_valid_bar_count": window.get("price_window_valid_bar_count"),
+            "price_window_expected_bar_count": window.get(
                 "price_window_expected_bar_count"
             ),
-            "ma20_window_valid_bar_count": preview.get("ma20_window_valid_bar_count"),
-            "ma20_window_expected_bar_count": preview.get(
+            "ma20_window_valid_bar_count": window.get("ma20_window_valid_bar_count"),
+            "ma20_window_expected_bar_count": window.get(
                 "ma20_window_expected_bar_count"
             ),
             "missing_history_sessions": preview.get("missing_history_sessions"),
@@ -328,14 +335,14 @@ def research_universe_pg_history_preview(
         results.append(result_item)
     return {
         "ok": True,
-        "contract": "STOCK_A_PG_SOURCE_SYMBOL_UNIVERSE_CORE_PROFILE_PREVIEW_R1",
+        "contract": "STOCK_A_PG_BAOSTOCK_SOURCE_SYMBOL_UNIVERSE_CORE_PROFILE_PREVIEW_R2",
         "status": page["status"],
         "target_session": target_session,
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "research_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "identity_status": "SOURCE_SYMBOL_ONLY",
-        "source_object_status": "TDX_SOURCE_SYMBOL_OBSERVED",
+        "source_object_status": "BAOSTOCK_SOURCE_SYMBOL_OBSERVED",
         "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
         "listing_status": "LISTING_STATUS_UNKNOWN",
         "suspension_status": "SUSPENSION_STATUS_UNKNOWN",

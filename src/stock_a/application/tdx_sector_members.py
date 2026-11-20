@@ -10,15 +10,13 @@ from zoneinfo import ZoneInfo
 from typing import Any
 
 from stock_a.sources.tdx.sector_members import (
-    SectorSourceInputs,
     TdxSectorSourceError,
     parse_remote_sector_source_inputs_with_status,
-    parse_sector_source_inputs,
-    read_sector_source_inputs,
 )
 from stock_a.sources.tdx.remote_sector import (
     TdxRemoteSectorError,
     fetch_remote_sector_files,
+    remote_sector_source_inputs,
     validate_remote_sector_files,
 )
 from stock_a.domain import FieldValue, unknown
@@ -54,46 +52,8 @@ class TdxSectorMembersApplicationError(ValueError):
 
 
 def ingest_tdx_sector_members(config: dict[str, Any]) -> dict[str, Any]:
-    roots = config.get("source_policy", {}).get("configured_tdx_source_roots")
-    if (
-        config.get("source_policy", {}).get("all_source_roots_read_only") is not True
-        or not isinstance(roots, list)
-        or len(roots) != 1
-        or not isinstance(roots[0], str)
-        or not roots[0]
-    ):
-        raise TdxSectorMembersApplicationError(
-            "TDX_SOURCE_ROOT_NOT_BOUND",
-            "接入要求唯一登记的只读TDX来源根，拒绝猜测安装路径",
-        )
-    try:
-        inputs = read_sector_source_inputs(roots[0])
-        observed_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-        snapshots = parse_sector_source_inputs(inputs, observed_at=observed_at)
-    except TdxSectorSourceError:
-        raise
-    source_files = [
-        {
-            "relative_path": item.relative_path,
-            "absolute_path": item.absolute_path,
-            "size_bytes": item.size_bytes,
-            "last_write_time_utc": item.last_write_time_utc,
-            "last_write_time_is_source_clock": False,
-        }
-        for item in inputs.files.values()
-    ]
-    persisted = persist_sector_source_snapshots(config, snapshots)
-    return {
-        "status": persisted["status"],
-        "source_root": inputs.root,
-        "observed_at": observed_at.isoformat(),
-        "source_clock_quality": "UNKNOWN",
-        "research_mode": "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT",
-        "source_files": source_files,
-        **persisted,
-        "source_downloaded": False,
-        "source_modified": False,
-    }
+    """从TDX远端读取行业/GN成员并写入唯一PG生产链。"""
+    return refresh_remote_tdx_sector_members(config, validate_only=False)
 
 
 def refresh_remote_tdx_sector_members(
@@ -102,8 +62,12 @@ def refresh_remote_tdx_sector_members(
     validate_only: bool,
 ) -> dict[str, Any]:
     """从TDX远端候选校验成员来源，并按typed事实集合识别已存版本。"""
+    remote_config = dict(config)
+    remote_policy = dict(remote_config.get("source_policy", {}))
+    remote_policy["configured_tdx_source_roots"] = []
+    remote_config["source_policy"] = remote_policy
     try:
-        remote = fetch_remote_sector_files(config)
+        remote = fetch_remote_sector_files(remote_config)
     except TdxRemoteSectorError:
         raise
     except (OSError, TimeoutError) as error:
@@ -112,10 +76,7 @@ def refresh_remote_tdx_sector_members(
         ) from error
     validate_remote_sector_files(remote)
 
-    inputs = SectorSourceInputs(
-        root=f"TDX_REMOTE_SERVER/{remote.host}:7709",
-        files={item.relative_path: item for item in remote.files.values()},
-    )
+    inputs = remote_sector_source_inputs(host=remote.host, files=remote.files)
     observed_at = datetime.now(ZoneInfo("Asia/Shanghai"))
     parse_outcome = parse_remote_sector_source_inputs_with_status(
         inputs, observed_at=observed_at
@@ -265,15 +226,15 @@ def refresh_remote_tdx_sector_members(
                     f"--snapshot-id {snapshot_id or '<SNAPSHOT_ID>'} --board-kind <INDUSTRY|CONCEPT> "
                     "--board-native-id <原生板块ID> --target-session <YYYY-MM-DD> "
                     "--research-cutoff <YYYY-MM-DD> "
-                    "--source-package-id <BIGINT> [--profile-revision <REVISION>]"
+                    "--source-capture-id <BIGINT> [--profile-revision <REVISION>]"
                 ),
                 "followup_breadth_command_template": (
                     "python -m stock_a source-tdx-sector-members breadth "
                     f"--snapshot-id {snapshot_id or '<SNAPSHOT_ID>'} --board-kind <INDUSTRY|CONCEPT> "
                     "--before-session <YYYY-MM-DD> --after-session <YYYY-MM-DD> "
                     "--research-cutoff <YYYY-MM-DD> "
-                    "--before-source-package-id <BIGINT> --before-profile-revision <REVISION> "
-                    "--after-source-package-id <BIGINT> --after-profile-revision <REVISION>"
+                    "--before-source-capture-id <BIGINT> --before-profile-revision <REVISION> "
+                    "--after-source-capture-id <BIGINT> --after-profile-revision <REVISION>"
                 ),
             }
         )
@@ -421,7 +382,7 @@ def read_latest_tdx_sector_snapshot_observation(
     config: dict[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     source_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """只读投影最新行业/GN快照及其与精确画像的成员交集。"""
@@ -429,7 +390,7 @@ def read_latest_tdx_sector_snapshot_observation(
         observation = query_latest_sector_source_observation(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             source_profile=source_profile,
         )
     except TdxSectorMembersPgError as error:
@@ -467,7 +428,7 @@ def read_tdx_sector_members(
     board_native_id: str,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str | None,
     offset: int,
     limit: int,
@@ -479,7 +440,7 @@ def read_tdx_sector_members(
         board_native_id=board_native_id,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         offset=offset,
         limit=limit,
@@ -495,9 +456,9 @@ def read_tdx_sector_breadth(
     before_session: date,
     after_session: date,
     research_cutoff: date,
-    before_source_package_id: int,
+    before_source_capture_id: int,
     before_profile_revision: str,
-    after_source_package_id: int,
+    after_source_capture_id: int,
     after_profile_revision: str,
     offset: int,
     limit: int,
@@ -533,9 +494,9 @@ def read_tdx_sector_breadth(
         before_session=before_session,
         after_session=after_session,
         research_cutoff=research_cutoff,
-        before_source_package_id=before_source_package_id,
+        before_source_capture_id=before_source_capture_id,
         before_profile_revision=before_profile_revision,
-        after_source_package_id=after_source_package_id,
+        after_source_capture_id=after_source_capture_id,
         after_profile_revision=after_profile_revision,
         official_calendar_id=str(calendar["calendar_id"]),
         official_calendar_revision=str(calendar_revision),
@@ -593,51 +554,47 @@ def _median_fraction(values: list[Fraction]) -> Fraction | None:
     return (ordered[middle - 1] + ordered[middle]) / 2
 
 
-def _raw_window_observation(
+def _qfq_window_observation(
     *,
     source_symbol: str,
     session: date,
     raw_by_key: dict[tuple[str, date], dict[str, Any]],
     revision_counts: dict[tuple[str, date], dict[str, int]],
     target_session: date,
-    target_capture_id: str,
+    target_capture_id: int,
 ) -> tuple[CoreObservation, str | None]:
     key = (source_symbol, session)
     revisions = revision_counts.get(key)
     row = raw_by_key.get(key)
     if revisions is None or revisions["row_count"] == 0:
-        reason = "RAW_HISTORY_SESSION_NOT_STORED"
+        reason = "QFQ_HISTORY_SESSION_NOT_STORED"
         return (
             CoreObservation(
                 session=session,
                 state="UNKNOWN",
-                coordinate_id="RAW_UNADJUSTED",
+                coordinate_id="FORWARD_ADJUSTED",
                 close=unknown(reason),
             ),
             reason,
         )
-    if (
-        revisions["row_count"] != 1
-        or revisions["package_count"] != 1
-        or revisions["capture_count"] != 1
-    ):
+    if revisions["row_count"] != 1 or revisions["capture_count"] != 1:
         reason = "SOURCE_REVISION_OR_CAPTURE_AMBIGUOUS"
         return (
             CoreObservation(
                 session=session,
                 state="UNKNOWN",
-                coordinate_id="RAW_UNADJUSTED",
+                coordinate_id="FORWARD_ADJUSTED",
                 close=unknown(reason),
             ),
             reason,
         )
     if row is None:
-        reason = "SOURCE_PACKAGE_MISMATCH"
+        reason = "SOURCE_CAPTURE_MISMATCH"
         return (
             CoreObservation(
                 session=session,
                 state="UNKNOWN",
-                coordinate_id="RAW_UNADJUSTED",
+                coordinate_id="FORWARD_ADJUSTED",
                 close=unknown(reason),
             ),
             reason,
@@ -648,45 +605,33 @@ def _raw_window_observation(
             CoreObservation(
                 session=session,
                 state="UNKNOWN",
-                coordinate_id="RAW_UNADJUSTED",
+                coordinate_id="FORWARD_ADJUSTED",
                 close=unknown(reason),
             ),
             reason,
         )
-    if row.get("price_coordinate") != "RAW_UNADJUSTED":
+    if row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED":
         reason = "PRICE_COORDINATE_INCOMPATIBLE"
         return (
             CoreObservation(
                 session=session,
                 state="UNKNOWN",
-                coordinate_id=str(row.get("price_coordinate") or "UNKNOWN"),
+                coordinate_id=str(row.get("qfq_price_coordinate") or "UNKNOWN"),
                 close=unknown(reason),
             ),
             reason,
         )
-    status = row.get("bar_status")
-    if status != "TARGET_PRESENT":
-        reason = row.get("bar_reason") or (
-            "TARGET_BAR_MISSING"
-            if status == "TARGET_MISSING"
-            else "SOURCE_ENTRY_READ_FAILED"
+    if row.get("qfq_price_quality") != "OBSERVED":
+        reason = row.get("qfq_price_reason") or (
+            "QFQ_BAR_NOT_RETURNED"
+            if row.get("qfq_price_quality") == "UNKNOWN"
+            else "QFQ_PRICE_QUALITY_UNKNOWN"
         )
         return (
             CoreObservation(
                 session=session,
                 state="UNKNOWN",
-                coordinate_id="RAW_UNADJUSTED",
-                close=unknown(str(reason)),
-            ),
-            str(reason),
-        )
-    if row.get("price_quality") != "OBSERVED":
-        reason = row.get("price_reason") or "RAW_PRICE_QUALITY_UNKNOWN"
-        return (
-            CoreObservation(
-                session=session,
-                state="UNKNOWN",
-                coordinate_id="RAW_UNADJUSTED",
+                coordinate_id="FORWARD_ADJUSTED",
                 close=unknown(str(reason)),
             ),
             str(reason),
@@ -694,9 +639,9 @@ def _raw_window_observation(
 
     fields: dict[str, FieldValue] = {}
     for name in ("open", "high", "low", "close"):
-        value = row.get(f"raw_{name}")
+        value = row.get(f"qfq_{name}")
         if value is None:
-            fields[name] = unknown(f"RAW_{name.upper()}_MISSING")
+            fields[name] = unknown(f"QFQ_{name.upper()}_MISSING")
         else:
             try:
                 fields[name] = FieldValue(_fraction_from_raw(value))
@@ -705,7 +650,7 @@ def _raw_window_observation(
     observation = CoreObservation(
         session=session,
         state="ACTUAL",
-        coordinate_id="RAW_UNADJUSTED",
+        coordinate_id="FORWARD_ADJUSTED",
         open=fields["open"],
         high=fields["high"],
         low=fields["low"],
@@ -984,7 +929,7 @@ def read_tdx_sector_strength(
     board_native_id: str | None,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str | None,
     changed_only: bool,
     sort_by: str,
@@ -1059,7 +1004,7 @@ def read_tdx_sector_strength(
         board_native_id=board_native_id,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         official_calendar_id=str(calendar["calendar_id"]),
         official_calendar_revision=str(calendar_revision),
@@ -1108,7 +1053,7 @@ def read_tdx_sector_strength(
         observations: list[CoreObservation] = []
         observation_issues: list[str | None] = []
         for session in window_sessions:
-            observation, issue = _raw_window_observation(
+            observation, issue = _qfq_window_observation(
                 source_symbol=symbol,
                 session=session,
                 raw_by_key=raw_by_key,
@@ -1175,14 +1120,14 @@ def read_tdx_sector_strength(
                     issues=endpoint_issues,
                     periods=periods,
                 )
-                value_source = "CORE_RETURN_KERNEL_FROM_EXACT_PACKAGE_RAW_WINDOW"
+                value_source = "CORE_RETURN_KERNEL_FROM_EXACT_CAPTURE_QFQ_WINDOW"
                 if endpoint == target_endpoint and periods == 20:
                     profile = profile_by_symbol.get(symbol)
                     if profile is None:
                         value = None
-                        reason = "CORE_PROFILE_NOT_IN_EXACT_TARGET_PACKAGE_SCOPE"
+                        reason = "CORE_PROFILE_NOT_IN_EXACT_TARGET_CAPTURE_SCOPE"
                         value_source = "EXACT_TARGET_CORE_PROFILE_REQUIRED"
-                    elif profile["price_coordinate"] != "RAW_UNADJUSTED":
+                    elif profile["price_coordinate"] != "FORWARD_ADJUSTED":
                         value = None
                         reason = "PRICE_COORDINATE_INCOMPATIBLE"
                         value_source = "EXACT_TARGET_CORE_PROFILE_REQUIRED"
@@ -1217,7 +1162,7 @@ def read_tdx_sector_strength(
                             result.quality != "OBSERVED" or stored_value != result.value
                         ):
                             value = None
-                            reason = "CORE_PROFILE_RET20_RAW_WINDOW_MISMATCH"
+                            reason = "CORE_PROFILE_RET20_QFQ_WINDOW_MISMATCH"
                             value_source = "EXACT_TARGET_CORE_PROFILE_VERIFIED_BY_RAW"
                         else:
                             value = stored_value
@@ -1290,7 +1235,7 @@ def read_tdx_sector_strength(
         "three_official_sessions_before": prior_session.isoformat(),
         "window_sessions": [session.isoformat() for session in window_sessions],
         "research_cutoff": research_cutoff.isoformat(),
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "entity_identity": "SOURCE_SYMBOL_ONLY",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
         "pit_status": "NON_PIT_RETROSPECTIVE",
@@ -1323,8 +1268,8 @@ def read_tdx_sector_strength(
         },
         "boards": page,
         "return_provenance": {
-            "target_ret20": "目标日已存价格画像的Core ret20；仅当精确值与同包Raw Core收益内核一致时接受。",
-            "ret5_and_prior_endpoint_returns": "Existing Core return kernel over exact same-package RAW official-session window; no other Core fields recalculated.",
+            "target_ret20": "目标日已存QFQ价格画像的Core ret20；仅当精确值与同捕获QFQ Core收益内核一致时接受。",
+            "ret5_and_prior_endpoint_returns": "现有Core收益公式在精确BaoStock捕获的同一QFQ官方会话窗计算；不重算其它Core字段。",
             "comparison": "Each horizon uses its own fixed common evaluable source-symbol set; target and prior medians are both recomputed on that same set.",
             "membership_is_post_hoc": True,
         },
@@ -1360,7 +1305,7 @@ def read_tdx_sector_strength(
             if not field.startswith("core.ret")
         )
         output["return_provenance"]["ret5_and_prior_endpoint_returns"] = (
-            "同包Raw官方会话窗口复用Core收益内核；额外计算ret1和MA20供跨期宽度研究。"
+            "同一BaoStock捕获的QFQ官方会话窗口复用Core收益内核；额外计算ret1和MA20供跨期宽度研究。"
         )
     if include_all_member_symbols:
         output["all_member_symbols_for_linkage"] = {

@@ -27,6 +27,7 @@ _SEED_SCOPE_COLUMNS = (
     "calendar_revision",
     "research_mode",
     "price_coordinate",
+    "source_capture_id",
     "source_time_quality",
     "source_clock_role",
     "source_available_at",
@@ -35,11 +36,11 @@ _SEED_SCOPE_COLUMNS = (
 )
 _SCOPE_SELECT = """SELECT profile_revision, producer_contract, producer_version,
        history_session_count, calendar_id, calendar_revision, research_mode,
-       price_coordinate, source_time_quality,
+       price_coordinate, source_capture_id, source_time_quality,
        source_clock_role, source_available_at, count(*)::bigint,
        count(DISTINCT source_symbol)::bigint
     FROM source_pool_seed_day_facts
-    WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
+    WHERE target_session=%s AND source_capture_id=%s
     GROUP BY profile_revision, producer_contract, producer_version,
              history_session_count, calendar_id, calendar_revision,
              research_mode, price_coordinate,
@@ -61,8 +62,8 @@ def _integer_numeric(value: Any) -> int:
     return int(numeric)
 
 
-def _seed_scope(cursor: Any, *, session: date, package: int, capture: int):
-    cursor.execute(_SCOPE_SELECT, (session, package, capture))
+def _seed_scope(cursor: Any, *, session: date, source_capture_id: int):
+    cursor.execute(_SCOPE_SELECT, (session, source_capture_id))
     scopes = cursor.fetchall()
     if len(scopes) != 1:
         raise SourceS2T1CohortError("T0或T+1 Seed scope缺失或存在多个画像版本")
@@ -75,7 +76,6 @@ def persist_source_s2_t1_cohort_in_transaction(
     target_session: date,
     endpoint_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     endpoint_source_capture_id: int,
     source_symbols: Sequence[str],
@@ -98,24 +98,21 @@ def persist_source_s2_t1_cohort_in_transaction(
     t0_scope = _seed_scope(
         cursor,
         session=target_session,
-        package=source_package_id,
-        capture=source_capture_id,
+        source_capture_id=source_capture_id,
     )
     endpoint_scope = _seed_scope(
         cursor,
         session=endpoint_session,
-        package=source_package_id,
-        capture=endpoint_source_capture_id,
+        source_capture_id=endpoint_source_capture_id,
     )
     for label, scope in (("T0", t0_scope), ("T+1", endpoint_scope)):
         if (
             scope["source_count"] != expected_count
             or scope["distinct_source_count"] != expected_count
             or scope["research_mode"] != "NON_PIT_RETROSPECTIVE"
-            or scope["price_coordinate"] != "RAW_UNADJUSTED"
+            or scope["price_coordinate"] != "FORWARD_ADJUSTED"
             or scope["source_time_quality"] != "NON_PIT_OBSERVED"
-            or scope["source_clock_role"]
-            != "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
+            or scope["source_clock_role"] != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
             or scope["source_available_at"] is not None
         ):
             raise SourceS2T1CohortError(f"{label} Seed不是完整且合法的NON_PIT范围")
@@ -129,7 +126,6 @@ def persist_source_s2_t1_cohort_in_transaction(
            JOIN source_pool_seed_day_facts t1
              ON t1.source_symbol=t0.source_symbol
             AND t1.target_session=%s
-            AND t1.source_package_id=t0.source_package_id
             AND t1.source_capture_id=%s
             AND t1.profile_revision=%s
             AND t1.producer_contract=%s
@@ -142,16 +138,14 @@ def persist_source_s2_t1_cohort_in_transaction(
            LEFT JOIN source_forward_path_facts p
              ON p.target_session=t0.target_session
             AND p.source_symbol=t0.source_symbol
-            AND p.source_package_id=t0.source_package_id
             AND p.source_capture_id=t0.source_capture_id
             AND p.endpoint_session=%s
             AND p.horizon=1
             AND p.path_rule_version=%s
             AND p.calendar_revision=%s
-            AND p.price_coordinate='RAW_UNADJUSTED'
+            AND p.price_coordinate='FORWARD_ADJUSTED'
             AND p.scope='NON_PIT_EXPLORATORY'
            WHERE t0.target_session=%s
-             AND t0.source_package_id=%s
              AND t0.source_capture_id=%s
              AND t0.profile_revision=%s
              AND t0.producer_contract=%s
@@ -177,7 +171,6 @@ def persist_source_s2_t1_cohort_in_transaction(
             path_rule_version,
             calendar_revision,
             target_session,
-            source_package_id,
             source_capture_id,
             t0_scope["profile_revision"],
             t0_scope["producer_contract"],
@@ -209,8 +202,8 @@ def persist_source_s2_t1_cohort_in_transaction(
             price_coordinate,
             scope,
         ) = row
-        if scope != "NON_PIT_EXPLORATORY" or price_coordinate != "RAW_UNADJUSTED":
-            raise SourceS2T1CohortError("T+1路径不是NON_PIT RAW_UNADJUSTED事实")
+        if scope != "NON_PIT_EXPLORATORY" or price_coordinate != "FORWARD_ADJUSTED":
+            raise SourceS2T1CohortError("T+1路径不是NON_PIT QFQ事实")
         outcomes.append(
             {
                 "source_symbol": symbol,
@@ -233,7 +226,6 @@ def persist_source_s2_t1_cohort_in_transaction(
         target_session=target_session,
         endpoint_session=endpoint_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
         source_capture_id=source_capture_id,
         endpoint_source_capture_id=endpoint_source_capture_id,
         t0_scope=t0_scope,
@@ -245,7 +237,7 @@ def persist_source_s2_t1_cohort_in_transaction(
     )
     selection = (
         "target_session=%s AND endpoint_session=%s AND research_cutoff=%s "
-        "AND source_package_id=%s AND source_capture_id=%s "
+        "AND source_capture_id=%s "
         "AND endpoint_source_capture_id=%s AND calendar_revision=%s "
         "AND path_rule_version=%s AND cohort_version=%s"
     )
@@ -253,7 +245,6 @@ def persist_source_s2_t1_cohort_in_transaction(
         target_session,
         endpoint_session,
         research_cutoff,
-        source_package_id,
         source_capture_id,
         endpoint_source_capture_id,
         calendar_revision,
@@ -274,8 +265,8 @@ def persist_source_s2_t1_cohort_in_transaction(
                   count(DISTINCT (t0_s2_state,t1_s2_state))::bigint
            FROM source_s2_t1_cohort_stats
            WHERE target_session=%s AND endpoint_session=%s
-             AND research_cutoff=%s AND source_package_id=%s
-             AND source_capture_id=%s AND endpoint_source_capture_id=%s
+             AND research_cutoff=%s AND source_capture_id=%s
+             AND endpoint_source_capture_id=%s
              AND calendar_revision=%s AND path_rule_version=%s
              AND cohort_version=%s""",
         args,
@@ -410,7 +401,6 @@ def _summary_payload(rows: Sequence[tuple[Any, ...]]) -> dict[str, Any]:
         "target_session": first["target_session"].isoformat(),
         "endpoint_session": first["endpoint_session"].isoformat(),
         "research_cutoff": first["research_cutoff"].isoformat(),
-        "source_package_id": first["source_package_id"],
         "source_capture_id": first["source_capture_id"],
         "endpoint_source_capture_id": first["endpoint_source_capture_id"],
         "t0_profile_revision": first["t0_profile_revision"],
@@ -439,13 +429,90 @@ def _summary_payload(rows: Sequence[tuple[Any, ...]]) -> dict[str, Any]:
     }
 
 
+def _capture_session_count(
+    cursor: Any,
+    *,
+    session: date,
+    source_capture_id: int,
+    research_cutoff: date,
+) -> int | None:
+    """返回仅在捕获请求、日线和双坐标分母都闭合时的逐日证券数。"""
+    cursor.execute(
+        """SELECT provider,range_start_session,range_end_session,
+                  price_coordinates,source_time_quality,source_clock_role,
+                  source_available_at
+           FROM source_captures WHERE capture_id=%s""",
+        (source_capture_id,),
+    )
+    capture = cursor.fetchone()
+    if (
+        capture is None
+        or capture[0] != "BAOSTOCK"
+        or capture[1] is None
+        or capture[2] is None
+        or not capture[1] <= session <= capture[2] <= research_cutoff
+        or set(capture[3] or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or capture[4] != "NON_PIT_OBSERVED"
+        or capture[5] != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+        or capture[6] is not None
+    ):
+        return None
+    cursor.execute(
+        """WITH request_codes AS (
+               SELECT source_code,
+                      count(*)=2 AND count(DISTINCT adjustment_flag)=2
+                        AND count(DISTINCT eligible_start_session)=1
+                        AND count(DISTINCT eligible_end_session)=1
+                        AND bool_and(
+                            request_status IN ('COMPLETED','NO_DATA')
+                            AND (request_status='NO_DATA' OR
+                                 completed_through_session>=range_end_session)
+                        ) AS complete,
+                      min(eligible_start_session) AS eligible_start,
+                      max(eligible_end_session) AS eligible_end
+               FROM source_capture_requests
+               WHERE capture_id=%s AND range_end_session<=%s
+               GROUP BY source_code
+           )
+           SELECT count(*) FILTER (
+                      WHERE %s BETWEEN eligible_start AND eligible_end
+                  )::bigint,
+                  count(*) FILTER (
+                      WHERE %s BETWEEN eligible_start AND eligible_end AND complete
+                  )::bigint
+           FROM request_codes""",
+        (source_capture_id, research_cutoff, session, session),
+    )
+    expected_count, complete_count = (int(value or 0) for value in cursor.fetchone())
+    cursor.execute(
+        """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint,
+                  count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint,
+                  count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint
+           FROM source_raw_daily
+           WHERE session_date=%s AND source_capture_id=%s AND session_date<=%s""",
+        (session, source_capture_id, research_cutoff),
+    )
+    row_count, symbol_count, raw_count, qfq_count = (
+        int(value or 0) for value in cursor.fetchone()
+    )
+    if (
+        expected_count <= 0
+        or expected_count != complete_count
+        or row_count != expected_count
+        or symbol_count != row_count
+        or raw_count != row_count
+        or qfq_count != row_count
+    ):
+        return None
+    return expected_count
+
+
 def _read_exact_scope(
     config: Mapping[str, Any],
     *,
     target_session: date,
     endpoint_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     endpoint_source_capture_id: int | None,
     expected_rows: Sequence[tuple[Any, ...]] | None = None,
@@ -455,59 +522,63 @@ def _read_exact_scope(
         cursor,
         _,
     ):
-        cursor.execute(
-            """SELECT capture_id, normalized_count
-               FROM source_captures
-               WHERE target_session=%s AND source_package_id=%s
-               ORDER BY capture_id""",
-            (target_session, source_package_id),
+        target_capture_count = _capture_session_count(
+            cursor,
+            session=target_session,
+            source_capture_id=source_capture_id,
+            research_cutoff=research_cutoff,
         )
-        target_captures = cursor.fetchall()
-        if len(target_captures) != 1 or target_captures[0][0] != source_capture_id:
+        if target_capture_count is None:
             return {
-                "status": "AMBIGUOUS",
-                "reason_codes": ["T0_SOURCE_CAPTURE_NOT_UNIQUE"],
+                "status": "INCOMPLETE",
+                "reason_codes": ["T0_CAPTURE_PARTITION_NOT_CLOSED"],
             }
-        target_capture_count = target_captures[0][1]
-        cursor.execute(
-            """SELECT capture_id, normalized_count
-               FROM source_captures
-               WHERE target_session=%s AND source_package_id=%s
-               ORDER BY capture_id""",
-            (endpoint_session, source_package_id),
+        if endpoint_source_capture_id is None:
+            cursor.execute(
+                """SELECT DISTINCT c.capture_id
+                   FROM source_raw_daily r
+                   JOIN source_captures c ON c.capture_id=r.source_capture_id
+                   WHERE r.session_date=%s AND c.provider='BAOSTOCK'
+                     AND c.range_start_session<=%s AND c.range_end_session<=%s
+                     AND c.price_coordinates @> ARRAY[
+                         'RAW_UNADJUSTED','FORWARD_ADJUSTED'
+                     ]::text[]
+                   ORDER BY c.capture_id""",
+                (endpoint_session, endpoint_session, research_cutoff),
+            )
+            endpoint_ids = [int(row[0]) for row in cursor.fetchall()]
+            if len(endpoint_ids) != 1:
+                return {
+                    "status": "NOT_COMPUTED" if not endpoint_ids else "AMBIGUOUS",
+                    "target_session": target_session.isoformat(),
+                    "endpoint_session": endpoint_session.isoformat(),
+                    "research_cutoff": research_cutoff.isoformat(),
+                    "reason_codes": ["T1_CAPTURE_NOT_UNIQUE"],
+                }
+            endpoint_source_capture_id = endpoint_ids[0]
+        endpoint_capture_count = _capture_session_count(
+            cursor,
+            session=endpoint_session,
+            source_capture_id=endpoint_source_capture_id,
+            research_cutoff=research_cutoff,
         )
-        endpoint_captures = cursor.fetchall()
-        if not endpoint_captures:
+        if endpoint_capture_count is None:
             return {
-                "status": "NOT_COMPUTED",
-                "target_session": target_session.isoformat(),
-                "endpoint_session": endpoint_session.isoformat(),
-                "research_cutoff": research_cutoff.isoformat(),
-                "reason_codes": ["T1_SOURCE_CAPTURE_NOT_SAVED"],
+                "status": "INCOMPLETE",
+                "reason_codes": ["T1_CAPTURE_PARTITION_NOT_CLOSED"],
             }
-        if len(endpoint_captures) != 1 or (
-            endpoint_source_capture_id is not None
-            and endpoint_captures[0][0] != endpoint_source_capture_id
-        ):
-            return {
-                "status": "AMBIGUOUS",
-                "reason_codes": ["T1_SOURCE_CAPTURE_NOT_UNIQUE"],
-            }
-        endpoint_capture_count = endpoint_captures[0][1]
-        endpoint_source_capture_id = endpoint_captures[0][0]
         columns = ", ".join(f'"{column}"' for column in COHORT_COLUMNS)
         cursor.execute(
             f"""SELECT {columns} FROM source_s2_t1_cohort_stats
                 WHERE target_session=%s AND endpoint_session=%s
-                  AND research_cutoff=%s AND source_package_id=%s
-                  AND source_capture_id=%s AND endpoint_source_capture_id=%s
+                  AND research_cutoff=%s AND source_capture_id=%s
+                  AND endpoint_source_capture_id=%s
                   AND cohort_version=%s AND path_rule_version=%s
                 ORDER BY t0_s2_state, t1_s2_state""",
             (
                 target_session,
                 endpoint_session,
                 research_cutoff,
-                source_package_id,
                 source_capture_id,
                 endpoint_source_capture_id,
                 COHORT_VERSION,
@@ -525,7 +596,16 @@ def _read_exact_scope(
         }
     if (
         expected_rows is not None
-        and tuple(sorted(expected_rows, key=lambda row: (row[18], row[19]))) != rows
+        and tuple(
+            sorted(
+                expected_rows,
+                key=lambda row: (
+                    row[COHORT_COLUMNS.index("t0_s2_state")],
+                    row[COHORT_COLUMNS.index("t1_s2_state")],
+                ),
+            )
+        )
+        != rows
     ):
         raise SourceS2T1CohortReadError("S2/T+1统计提交后异事务读回与事务输入不一致")
     payload = _summary_payload(rows)
@@ -541,7 +621,6 @@ def _read_exact_scope(
             ("target_session", target_session.isoformat()),
             ("endpoint_session", endpoint_session.isoformat()),
             ("research_cutoff", research_cutoff.isoformat()),
-            ("source_package_id", source_package_id),
             ("source_capture_id", source_capture_id),
             ("endpoint_source_capture_id", endpoint_source_capture_id),
         ):
@@ -557,7 +636,6 @@ def read_source_s2_t1_cohort_scope(
     target_session: date,
     endpoint_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     endpoint_source_capture_id: int,
     expected_rows: Sequence[tuple[Any, ...]] | None = None,
@@ -568,7 +646,6 @@ def read_source_s2_t1_cohort_scope(
         target_session=target_session,
         endpoint_session=endpoint_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
         source_capture_id=source_capture_id,
         endpoint_source_capture_id=endpoint_source_capture_id,
         expected_rows=expected_rows,
@@ -581,8 +658,8 @@ def read_source_s2_t1_cohort_for_focus(
     target_session: date,
     endpoint_session: date | None,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
+    endpoint_source_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """Focus只读精确T0/T+1摘要；未到期或缺少数据时保留状态。"""
     if endpoint_session is None:
@@ -597,8 +674,6 @@ def read_source_s2_t1_cohort_for_focus(
         or type(endpoint_session) is not date
         or type(research_cutoff) is not date
         or not target_session < endpoint_session <= research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
     ):
@@ -608,8 +683,7 @@ def read_source_s2_t1_cohort_for_focus(
         target_session=target_session,
         endpoint_session=endpoint_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
         source_capture_id=source_capture_id,
-        endpoint_source_capture_id=None,
+        endpoint_source_capture_id=endpoint_source_capture_id,
     )
     return result

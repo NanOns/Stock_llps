@@ -116,6 +116,7 @@ async function runChanges(requestId) {
   const params = new URLSearchParams({
     before_session: before,
     after_session: after,
+    price_coordinate: "FORWARD_ADJUSTED",
     offset: String(state.changeOffset),
     limit: String(state.changeLimit),
     change_type: $("changeTypeSelect").value,
@@ -134,7 +135,7 @@ async function runChanges(requestId) {
     ["before", beforeSnapshot],
     ["after", afterSnapshot],
   ]) {
-    params.set(`${prefix}_source_package_id`, snapshot.source_package_id);
+    params.set(`${prefix}_source_capture_id`, snapshot.source_capture_id);
     params.set(`${prefix}_profile_revision`, snapshot.profile_revision);
   }
   const symbol = $("changeSymbolInput").value.trim();
@@ -187,6 +188,7 @@ async function runChanges(requestId) {
     const snapshotMatches = (received, expected) =>
       Boolean(
         received?.complete &&
+        received.price_coordinate === "FORWARD_ADJUSTED" &&
         profileSnapshotKey(received) === profileSnapshotKey(expected) &&
         typeof received.history_calendar_id === "string" &&
         received.history_calendar_id.length > 0 &&
@@ -202,6 +204,7 @@ async function runChanges(requestId) {
     if (
       !snapshotMatches(data.before_snapshot, beforeSnapshot) ||
       !snapshotMatches(data.after_snapshot, afterSnapshot) ||
+      data.price_coordinate !== "FORWARD_ADJUSTED" ||
       data.before_snapshot.history_calendar_id !==
         data.after_snapshot.history_calendar_id ||
       data.before_snapshot.history_calendar_revision !==
@@ -214,6 +217,10 @@ async function runChanges(requestId) {
         expectedBias20AtrStateFilter.uses_full_source_union ||
       data.rows.some(
         (item) =>
+          (item.before_present &&
+            item.before_price_coordinate !== "FORWARD_ADJUSTED") ||
+          (item.after_present &&
+            item.after_price_coordinate !== "FORWARD_ADJUSTED") ||
           !item.before_bias20_atr_state ||
           !item.after_bias20_atr_state ||
           !item.bias20_atr_pair_compatibility ||

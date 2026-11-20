@@ -33,7 +33,6 @@ _HORIZONS = (1, 3, 5)
 _GROUP_COLUMNS = (
     "t0_session",
     "research_cutoff",
-    "t0_source_package_id",
     "t0_source_capture_id",
     "t0_profile_revision",
     "snapshot_id",
@@ -45,7 +44,6 @@ _GROUP_COLUMNS = (
     "cohort_state",
     "horizon_sessions",
     "target_session",
-    "target_source_package_id",
     "target_source_capture_id",
     "calendar_id",
     "calendar_revision",
@@ -83,7 +81,6 @@ _GROUP_BUSINESS_COLUMNS = _GROUP_COLUMNS
 _GROUP_KEY = (
     "t0_session",
     "research_cutoff",
-    "t0_source_package_id",
     "t0_source_capture_id",
     "t0_profile_revision",
     "snapshot_id",
@@ -163,17 +160,13 @@ def prepare_sector_pulse_cohort_rows(
         ) from error
 
     pulse_identity = pulses[0]
-    source_package_id = t0_source.get("source_package_id")
     source_capture_id = t0_source.get("source_capture_id")
     profile_revision = pulse_identity.get("profile_revision")
     if (
-        type(source_package_id) is not int
-        or source_package_id <= 0
-        or type(source_capture_id) is not int
+        type(source_capture_id) is not int
         or source_capture_id <= 0
         or not isinstance(profile_revision, str)
         or not profile_revision
-        or pulse_identity.get("source_package_id") != source_package_id
         or pulse_identity.get("source_capture_id") != source_capture_id
     ):
         raise SectorPulseCohortPgError(
@@ -191,7 +184,6 @@ def prepare_sector_pulse_cohort_rows(
         versions = {
             (
                 row.get("profile_revision"),
-                row.get("source_package_id"),
                 row.get("source_capture_id"),
                 row.get("algorithm_contract"),
                 row.get("source_time_quality"),
@@ -227,7 +219,6 @@ def prepare_sector_pulse_cohort_rows(
         group_row = {
             "t0_session": t0_session,
             "research_cutoff": research_cutoff,
-            "t0_source_package_id": source_package_id,
             "t0_source_capture_id": source_capture_id,
             "t0_profile_revision": profile_revision,
             "snapshot_id": identity["snapshot_id"],
@@ -241,11 +232,6 @@ def prepare_sector_pulse_cohort_rows(
             "target_session": (
                 date.fromisoformat(group["target_session"])
                 if group["target_session"] is not None
-                else None
-            ),
-            "target_source_package_id": (
-                target_version.get("source_package_id")
-                if target_version is not None
                 else None
             ),
             "target_source_capture_id": (
@@ -280,7 +266,7 @@ def prepare_sector_pulse_cohort_rows(
             "maximum_return_denominator": distribution["maximum_return_denominator"],
             "research_mode": "NON_PIT_RETROSPECTIVE",
             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "source_time_quality": identity["source_time_quality"],
             "source_clock_role": identity["source_clock_role"],
             "source_available_at": identity["source_available_at"],
@@ -314,7 +300,6 @@ def _read_group_batch(
     *,
     t0_session: date,
     research_cutoff: date,
-    t0_source_package_id: int,
     t0_source_capture_id: int,
     t0_profile_revision: str,
     snapshot_ids: Mapping[str, int],
@@ -325,7 +310,7 @@ def _read_group_batch(
         f"""SELECT id,{", ".join(_GROUP_COLUMNS)}
 FROM {_GROUP_TABLE}
 WHERE t0_session=%s AND research_cutoff=%s
-  AND t0_source_package_id=%s AND t0_source_capture_id=%s
+  AND t0_source_capture_id=%s
   AND t0_profile_revision=%s AND snapshot_id=ANY(%s::bigint[])
   AND pulse_algorithm_contract=%s AND cohort_contract=%s
   AND followup_contract=%s AND calendar_id=%s AND calendar_revision=%s
@@ -333,7 +318,6 @@ ORDER BY board_kind,cohort_axis,horizon_sessions,cohort_state""",
         (
             t0_session,
             research_cutoff,
-            t0_source_package_id,
             t0_source_capture_id,
             t0_profile_revision,
             list(snapshot_ids.values()),
@@ -389,7 +373,6 @@ def persist_sector_pulse_cohort_rows(
         cursor,
         t0_session=context["t0_session"],
         research_cutoff=context["research_cutoff"],
-        t0_source_package_id=context["t0_source_version"]["source_package_id"],
         t0_source_capture_id=context["t0_source_version"]["source_capture_id"],
         t0_profile_revision=identity["profile_revision"],
         snapshot_ids=snapshot_ids,
@@ -421,7 +404,6 @@ def persist_sector_pulse_cohort_rows(
         cursor,
         t0_session=context["t0_session"],
         research_cutoff=context["research_cutoff"],
-        t0_source_package_id=context["t0_source_version"]["source_package_id"],
         t0_source_capture_id=context["t0_source_version"]["source_capture_id"],
         t0_profile_revision=identity["profile_revision"],
         snapshot_ids=snapshot_ids,
@@ -620,7 +602,6 @@ def read_source_sector_pulse_cohort_groups(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     profile_revision: str,
     snapshot_ids: Mapping[str, int],
@@ -634,10 +615,7 @@ def read_source_sector_pulse_cohort_groups(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or any(
-            type(value) is not int or value <= 0
-            for value in (source_package_id, source_capture_id)
-        )
+        or any(type(value) is not int or value <= 0 for value in (source_capture_id,))
         or not isinstance(profile_revision, str)
         or set(snapshot_ids) != set(_KINDS)
         or set(expected_board_counts) != set(_KINDS)
@@ -661,7 +639,6 @@ def read_source_sector_pulse_cohort_groups(
             cursor,
             t0_session=target_session,
             research_cutoff=research_cutoff,
-            t0_source_package_id=source_package_id,
             t0_source_capture_id=source_capture_id,
             t0_profile_revision=profile_revision,
             snapshot_ids={kind: snapshot_ids[kind] for kind in selected_kinds},
@@ -696,7 +673,7 @@ def read_source_sector_pulse_cohort_groups(
             "unit": "BOARD_RELATION; OVERLAPPING_MEMBERS_AND_DATES_ARE_NOT_INDEPENDENT",
             "research_mode": "NON_PIT_RETROSPECTIVE",
             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "predictive_validation": "NO_PREDICTIVE_VALIDATION",
             "by_kind": {
                 kind: {"status": "NOT_COMPUTED", "horizons": []}
@@ -816,7 +793,7 @@ def read_source_sector_pulse_cohort_groups(
         "unit": "BOARD_RELATION; OVERLAPPING_MEMBERS_AND_DATES_ARE_NOT_INDEPENDENT",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "predictive_validation": "NO_PREDICTIVE_VALIDATION",
         "by_kind": by_kind,
     }

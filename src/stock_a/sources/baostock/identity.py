@@ -8,32 +8,54 @@ import re
 from typing import Any, Mapping
 
 
-_SYMBOL = re.compile(r"^(SH|SZ)\.([0-9]{6})$")
+_SYMBOL = re.compile(r"^(SH|SZ|BJ)\.([0-9]{6})$")
 _REQUIRED_BASIC_FIELDS = {"code", "code_name", "ipoDate", "outDate", "type", "status"}
 _REQUIRED_SESSION_FIELDS = {"code", "tradeStatus", "code_name"}
 
 
 def normalize_baostock_symbol(value: object) -> str | None:
-    """把BaoStock小写市场前缀转成项目代码格式，只接受沪深六位代码。"""
+    """把BaoStock市场前缀规范化；接受沪深及北交所六位来源代码。"""
     if not isinstance(value, str):
         return None
     normalized = value.strip().upper()
     return normalized if _SYMBOL.fullmatch(normalized) else None
 
 
-def eligible_research_board(symbol: object) -> str | None:
-    """返回本阶段正式范围内的板别；科创板、北交所和非沪深代码不进入分母。"""
-    normalized = normalize_baostock_symbol(symbol)
+def classify_baostock_board(source_symbol: object) -> tuple[str, str] | None:
+    """按通用交易所和代码段分类；不绑定具体证券或上市身份。"""
+    normalized = normalize_baostock_symbol(source_symbol)
     if normalized is None:
         return None
     market, code = normalized.split(".", 1)
+    if market == "BJ":
+        return market, "BEIJING_BOARD"
+    if market == "SH" and code.startswith(("900",)):
+        return market, "B_SHARE"
+    if market == "SZ" and code.startswith(("200",)):
+        return market, "B_SHARE"
+    if market == "SH" and code.startswith(("688", "689")):
+        return market, "STAR_BOARD"
     if market == "SH" and code.startswith(("600", "601", "603", "605")):
-        return "MAIN_BOARD"
+        return market, "MAIN_BOARD"
     if market == "SZ" and code.startswith(("000", "001", "002", "003")):
-        return "MAIN_BOARD"
+        return market, "MAIN_BOARD"
     if market == "SZ" and code.startswith(("300", "301")):
-        return "GEM"
-    return None
+        return market, "GEM"
+    return market, "OTHER"
+
+
+def eligible_research_board(symbol: object) -> str | None:
+    """本任务来源研究范围包括沪深主板、创业板和科创板。"""
+    classification = classify_baostock_board(symbol)
+    if classification is None:
+        return None
+    _market, board = classification
+    return board if board in {"MAIN_BOARD", "GEM", "STAR_BOARD"} else None
+
+
+def _board_label(symbol: str) -> str | None:
+    classification = classify_baostock_board(symbol)
+    return classification[1] if classification is not None else None
 
 
 def _valid_response(
@@ -145,7 +167,7 @@ def project_identity_lifecycle(
         return IdentityLifecycleProjection(
             normalized,
             target_session,
-            eligible_research_board(normalized),
+            _board_label(normalized),
             "UNMAPPED",
             None,
             None,
@@ -165,7 +187,7 @@ def project_identity_lifecycle(
         return IdentityLifecycleProjection(
             normalized,
             target_session,
-            eligible_research_board(normalized),
+            _board_label(normalized),
             "UNMAPPED",
             None,
             None,
@@ -195,7 +217,7 @@ def project_identity_lifecycle(
         return IdentityLifecycleProjection(
             normalized,
             target_session,
-            eligible_research_board(normalized),
+            _board_label(normalized),
             "UNMAPPED",
             None,
             None,
@@ -225,7 +247,7 @@ def project_identity_lifecycle(
         return IdentityLifecycleProjection(
             normalized,
             target_session,
-            eligible_research_board(normalized),
+            _board_label(normalized),
             "UNMAPPED",
             None,
             None,
@@ -290,7 +312,7 @@ def project_identity_lifecycle(
     return IdentityLifecycleProjection(
         normalized,
         target_session,
-        eligible_research_board(normalized),
+        _board_label(normalized),
         "PROVISIONAL",
         None,
         name,

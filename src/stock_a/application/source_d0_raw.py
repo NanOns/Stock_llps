@@ -24,7 +24,6 @@ from stock_a.application.source_pool_seed import source_seed_predicates
 from stock_a.application.source_d1_structures import (
     discover_source_d1_prior_support_reference,
 )
-from stock_a.application.tdx_sector_members import _raw_window_observation
 from stock_a.research.core import MarketSessionCalendar, calculate_core
 from stock_a.domain import FieldValue, unknown
 from stock_a.research.admission import admit, line_breached
@@ -38,15 +37,16 @@ from stock_a.research.entry_history.history_preview import (
     research_stock_pg_history_preview,
 )
 from stock_a.research.entry_history.history_timeline import post_signal_price_facts
+from stock_a.research.entry_history.support import _core_observation_from_pg_price_row
 from stock_a.storage.postgres.d0_raw import (
     MAX_SOURCE_SYMBOLS,
     D0RawPgError,
     read_source_d0_raw_window,
 )
-from stock_a.storage.postgres.source_raw import (
-    RawSourcePgError,
-    read_raw_daily_history_page,
-    read_raw_daily_history_stock,
+from stock_a.storage.postgres.baostock_price_facts import read_baostock_price_history
+from stock_a.storage.postgres.source_raw import RawSourcePgError
+from stock_a.storage.postgres.baostock_price_facts import (
+    read_baostock_price_history_batch,
 )
 
 
@@ -174,10 +174,11 @@ def finalize_prior_shape_observation(item):
     attach_continuation_observation(item)
 
 
-def read_source_shape_cohort(config, day, *, research_cutoff, source_package_id):
+def read_source_shape_cohort(config, day, *, research_cutoff, source_capture_id):
     """对完整T0来源池复用回踩、续强诊断；历史RPS按会话共享。"""
     target = day["session"]
     source = day["scenarios"]["RECOVERY_TURN"]["source_version"]
+    source_capture_id = source["source_capture_id"]
     expected = set(day["states"])
     calendar = _official_calendar(target)
     end = calendar["sessions"].index(target)
@@ -196,7 +197,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_package_id)
                 config,
                 target_session=target,
                 research_cutoff=research_cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
             )
         except RawSourcePgError as error:
             if error.code != "PG_SOURCE_NO_MATCH":
@@ -214,226 +215,243 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_package_id)
     rps_cache = {}
     rps_errors = {}
     output = {}
+    rows_by_symbol: dict[str, list[dict[str, Any]]] = {
+        symbol: [] for symbol in expected
+    }
     offset = 0
+    expected_rows = None
     while True:
-        page = read_raw_daily_history_page(
+        page = read_baostock_price_history_batch(
             config,
-            target_session=target,
-            source_package_id=source_package_id,
+            source_symbols=tuple(sorted(expected)),
             sessions=sessions,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            cutoff=research_cutoff,
             offset=offset,
             limit=100,
-            market="ALL",
-            board="ALL",
-            include_parser_contract=True,
         )
         if (
-            page["total_count"] != len(expected)
-            or page["version_status"] != "CLOSED"
-            or not page["partition_closed"]
+            page.get("source_capture_id") != source_capture_id
+            or page.get("price_coordinate") != "FORWARD_ADJUSTED"
         ):
             raise SourceD0RawError(
-                "D0_SHAPE_POOL_MISMATCH", "诊断形态来源池或版本不完整。"
+                "D0_SHAPE_POOL_MISMATCH", "诊断形态没有绑定配对QFQ来源捕获。"
             )
-        for candidate in page["candidates"]:
-            symbol = candidate["source_symbol"]
-            rows = candidate["history_rows"]
-            by_date = {row["session_date"]: row for row in rows}
-            birth = by_date.get(target)
-            if (
-                symbol not in expected
-                or symbol in output
-                or birth is None
-                or birth.get("source_capture_id") != source["source_capture_id"]
-                or birth.get("source_package_id") != source["source_package_id"]
-                or birth.get("parser_contract") != source["parser_contract"]
-            ):
-                raise SourceD0RawError(
-                    "D0_SHAPE_TARGET_MISMATCH", "诊断形态T0来源捕获不一致。"
-                )
-            args = {
-                "sessions": sessions,
-                "rows": rows,
-                "symbol": symbol,
-                "source_package_id": source["source_package_id"],
-                "parser_contract": source["parser_contract"],
-            }
-            shape = observe_prior_shapes(**args)
-            needed = [
-                date.fromisoformat(item["session"])
-                for item in shape["historical_states"]
-                if item.get("recovery_needs_rps")
-            ]
-            for prior in needed:
-                if prior in rps_cache or prior in rps_errors:
-                    continue
-                try:
-                    rps_cache[prior] = read_source_pool_rps(
-                        config,
-                        target_session=prior,
-                        research_cutoff=research_cutoff,
-                        source_package_id=source_package_id,
-                        page_size=5000,
-                    )["facts"]
-                except RawSourcePgError as error:
-                    if error.code != "PG_SOURCE_NO_MATCH":
-                        raise
-                    rps_errors[prior] = error.code
-                except ValueError as error:
-                    if str(error) not in unavailable_messages:
-                        raise
-                    rps_errors[prior] = unavailable_messages[str(error)]
-            historical_rps = {
-                prior: rps_cache[prior].get(symbol, {}).get("rps5_delta3_pp")
-                for prior in needed
-                if prior in rps_cache
-            }
-            if historical_rps:
-                shape = observe_prior_shapes(**args, historical_rps=historical_rps)
-            rps = target_rps["facts"][symbol]
-            item = calculate_d0_recovery_turn_raw(
-                target_session=target,
-                official_sessions=short_sessions,
-                history_rows_by_session=by_date,
-                source_symbol=symbol,
-                source_package_id=source["source_package_id"],
-                target_capture_id=source["source_capture_id"],
-                parser_contract=source["parser_contract"],
-                rps5_delta3=rps.get("rps5_delta3_pp"),
-                rps20=rps.get("rps20"),
-                include_prior_ols=True,
+        if expected_rows is None:
+            expected_rows = int(page["page"]["total"])
+        elif int(page["page"]["total"]) != expected_rows:
+            raise SourceD0RawError(
+                "D0_SHAPE_POOL_MISMATCH", "QFQ历史分页期间行数分母发生变化。"
             )
-            _attach_continuation_core(
-                item,
-                rows={session: by_date.get(session) for session in short_sessions},
-                sessions=short_sessions,
-                calendar=calendar,
-                source_package_id=source["source_package_id"],
-                target_capture_id=source["source_capture_id"],
-                parser_contract=source["parser_contract"],
+        if any(
+            item.get("coverage_status") != "COMPLETE"
+            for item in page.get("coverage", ())
+        ):
+            raise SourceD0RawError(
+                "D0_SHAPE_HISTORY_INCOMPLETE", "D0诊断历史QFQ坐标请求未闭合。"
             )
-            item["prior_shape_observation"] = shape
-            finalize_prior_shape_observation(item)
-            parents = shape["diagnostic_parent_candidates"]
-            parent_states = [
-                parent.get("source_shape_state", "UNKNOWN") for parent in parents
-            ]
-            history_unknown = len(shape["historical_states"]) < 20 or any(
-                row["launch"] == "UNKNOWN" or row["recovery"] == "UNKNOWN"
-                for row in shape["historical_states"]
-            )
-            partial = item["other_scenario_partial_predicates"]["STRONG_PULLBACK"]
-            independent = [
-                partial[key]["state"]
-                for key in (
-                    "prior_ols_slope_positive",
-                    "prior_ols_r2_at_least_040",
-                    "close_not_below_previous",
-                    "clv",
-                    "no_shadow_rejection",
-                )
-            ]
-            alternatives = [
-                partial["reclaim_ma5"]["state"],
-                partial["retest_previous_ma10"]["state"],
-            ]
-            independent.append(
-                "TRUE"
-                if "TRUE" in alternatives
-                else "UNKNOWN"
-                if "UNKNOWN" in alternatives
-                else "FALSE"
-            )
-            pullback = (
-                "TRUE"
-                if "TRUE" in parent_states
-                else "FALSE"
-                if "FALSE" in independent
-                else "UNKNOWN"
-                if history_unknown or "UNKNOWN" in parent_states
-                else "FALSE"
-            )
-            continuation = shape["continuation_shape"]["state"]
-            shape_reasons = []
-            if target_rps_error:
-                shape_reasons.append(f"T0_RPS:{target_rps_error}")
-            if len(shape["historical_states"]) < 20:
-                shape_reasons.append("DIAGNOSTIC_PARENT_WINDOW_TRUNCATED")
-            for history in shape["historical_states"]:
-                if history["launch"] == "UNKNOWN" or history["recovery"] == "UNKNOWN":
-                    reason = (
-                        history.get("reason")
-                        or history.get("recovery_reason")
-                        or "UNKNOWN_PARENT_STATE"
-                    )
-                    shape_reasons.append(f"{history['session']}:{reason}")
-            for parent in parents:
-                if parent.get("source_shape_state", "UNKNOWN") == "UNKNOWN":
-                    if parent.get("reason"):
-                        shape_reasons.append(
-                            f"{parent['birth_session']}:{parent['reason']}"
-                        )
-                    for name, predicate in parent.get("predicates", {}).items():
-                        if predicate["state"] == "UNKNOWN":
-                            shape_reasons.append(
-                                f"{name}:{predicate.get('reason') or 'UNKNOWN'}"
-                            )
-            for group in ("STRONG_PULLBACK", "TREND_CONTINUE"):
-                for name, predicate in item["other_scenario_partial_predicates"][
-                    group
-                ].items():
-                    if (
-                        isinstance(predicate, dict)
-                        and predicate.get("state") == "UNKNOWN"
-                    ):
-                        shape_reasons.append(
-                            f"{group}.{name}:{predicate.get('reason') or predicate.get('reason_code') or 'UNKNOWN'}"
-                        )
-            shape_reasons = list(dict.fromkeys(shape_reasons))
-            pullback_false_reasons = [
-                f"PREDICATE_FALSE:{key}"
-                for key in (
-                    "prior_ols_slope_positive",
-                    "prior_ols_r2_at_least_040",
-                    "close_not_below_previous",
-                    "clv",
-                    "no_shadow_rejection",
-                )
-                if partial[key]["state"] == "FALSE"
-            ]
-            if all(value == "FALSE" for value in alternatives):
-                pullback_false_reasons.append("RECLAIM_AND_RETEST_FALSE")
-            if pullback == "FALSE" and not pullback_false_reasons:
-                pullback_false_reasons.append("NO_MATCHING_DIAGNOSTIC_PARENT")
-            continuation_false_reasons = [
-                f"PREDICATE_FALSE:{key}"
-                for key, value in shape["continuation_shape"]["components"].items()
-                if value == "FALSE"
-            ]
-            output[symbol] = {
-                "STRONG_PULLBACK_DIAGNOSTIC": {
-                    "state": pullback,
-                    "reasons": shape_reasons
-                    if pullback == "UNKNOWN"
-                    else pullback_false_reasons
-                    if pullback == "FALSE"
-                    else [],
-                },
-                "TREND_CONTINUE_DIAGNOSTIC": {
-                    "state": continuation,
-                    "reasons": shape_reasons
-                    if continuation == "UNKNOWN"
-                    else continuation_false_reasons
-                    if continuation == "FALSE"
-                    else [],
-                },
-                "matched_parent_count": sum(state == "TRUE" for state in parent_states),
-                "parent_count": len(parents),
-                "history_unknown": history_unknown,
-            }
-        offset = page["next_offset"]
-        if offset is None:
+        for row in page.get("rows", ()):
+            symbol = row["source_symbol"]
+            rows_by_symbol.setdefault(symbol, []).append(row)
+        next_offset = page["page"].get("next_offset")
+        if next_offset is None:
             break
+        offset = int(next_offset)
+
+    for symbol in sorted(expected):
+        rows = rows_by_symbol.get(symbol, [])
+        if symbol not in expected:
+            raise SourceD0RawError(
+                "D0_SHAPE_POOL_MISMATCH", "QFQ历史含目标来源池外代码。"
+            )
+        by_date = {row["session_date"]: row for row in rows}
+        birth = by_date.get(target)
+        if (
+            symbol not in expected
+            or symbol in output
+            or birth is None
+            or birth.get("source_capture_id") != source["source_capture_id"]
+            or birth.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
+        ):
+            raise SourceD0RawError(
+                "D0_SHAPE_TARGET_MISMATCH", "诊断形态T0来源捕获不一致。"
+            )
+        args = {
+            "sessions": sessions,
+            "rows": rows,
+            "symbol": symbol,
+            "source_capture_id": source["source_capture_id"],
+            "price_coordinate": "FORWARD_ADJUSTED",
+        }
+        shape = observe_prior_shapes(**args)
+        needed = [
+            date.fromisoformat(item["session"])
+            for item in shape["historical_states"]
+            if item.get("recovery_needs_rps")
+        ]
+        for prior in needed:
+            if prior in rps_cache or prior in rps_errors:
+                continue
+            try:
+                rps_cache[prior] = read_source_pool_rps(
+                    config,
+                    target_session=prior,
+                    research_cutoff=research_cutoff,
+                    source_capture_id=source_capture_id,
+                    page_size=1000,
+                )["facts"]
+            except RawSourcePgError as error:
+                if error.code != "PG_SOURCE_NO_MATCH":
+                    raise
+                rps_errors[prior] = error.code
+            except ValueError as error:
+                if str(error) not in unavailable_messages:
+                    raise
+                rps_errors[prior] = unavailable_messages[str(error)]
+        historical_rps = {
+            prior: rps_cache[prior].get(symbol, {}).get("rps5_delta3_pp")
+            for prior in needed
+            if prior in rps_cache
+        }
+        if historical_rps:
+            shape = observe_prior_shapes(**args, historical_rps=historical_rps)
+        rps = target_rps["facts"][symbol]
+        item = calculate_d0_recovery_turn_raw(
+            target_session=target,
+            official_sessions=short_sessions,
+            history_rows_by_session=by_date,
+            source_symbol=symbol,
+            source_capture_id=source["source_capture_id"],
+            price_coordinate="FORWARD_ADJUSTED",
+            rps5_delta3=rps.get("rps5_delta3_pp"),
+            rps20=rps.get("rps20"),
+            include_prior_ols=True,
+        )
+        _attach_continuation_core(
+            item,
+            rows={session: by_date.get(session) for session in short_sessions},
+            sessions=short_sessions,
+            calendar=calendar,
+            source_capture_id=source["source_capture_id"],
+            price_coordinate="FORWARD_ADJUSTED",
+        )
+        item["prior_shape_observation"] = shape
+        finalize_prior_shape_observation(item)
+        parents = shape["diagnostic_parent_candidates"]
+        parent_states = [
+            parent.get("source_shape_state", "UNKNOWN") for parent in parents
+        ]
+        history_unknown = len(shape["historical_states"]) < 20 or any(
+            row["launch"] == "UNKNOWN" or row["recovery"] == "UNKNOWN"
+            for row in shape["historical_states"]
+        )
+        partial = item["other_scenario_partial_predicates"]["STRONG_PULLBACK"]
+        independent = [
+            partial[key]["state"]
+            for key in (
+                "prior_ols_slope_positive",
+                "prior_ols_r2_at_least_040",
+                "close_not_below_previous",
+                "clv",
+                "no_shadow_rejection",
+            )
+        ]
+        alternatives = [
+            partial["reclaim_ma5"]["state"],
+            partial["retest_previous_ma10"]["state"],
+        ]
+        independent.append(
+            "TRUE"
+            if "TRUE" in alternatives
+            else "UNKNOWN"
+            if "UNKNOWN" in alternatives
+            else "FALSE"
+        )
+        pullback = (
+            "TRUE"
+            if "TRUE" in parent_states
+            else "FALSE"
+            if "FALSE" in independent
+            else "UNKNOWN"
+            if history_unknown or "UNKNOWN" in parent_states
+            else "FALSE"
+        )
+        continuation = shape["continuation_shape"]["state"]
+        shape_reasons = []
+        if target_rps_error:
+            shape_reasons.append(f"T0_RPS:{target_rps_error}")
+        if len(shape["historical_states"]) < 20:
+            shape_reasons.append("DIAGNOSTIC_PARENT_WINDOW_TRUNCATED")
+        for history in shape["historical_states"]:
+            if history["launch"] == "UNKNOWN" or history["recovery"] == "UNKNOWN":
+                reason = (
+                    history.get("reason")
+                    or history.get("recovery_reason")
+                    or "UNKNOWN_PARENT_STATE"
+                )
+                shape_reasons.append(f"{history['session']}:{reason}")
+        for parent in parents:
+            if parent.get("source_shape_state", "UNKNOWN") == "UNKNOWN":
+                if parent.get("reason"):
+                    shape_reasons.append(
+                        f"{parent['birth_session']}:{parent['reason']}"
+                    )
+                for name, predicate in parent.get("predicates", {}).items():
+                    if predicate["state"] == "UNKNOWN":
+                        shape_reasons.append(
+                            f"{name}:{predicate.get('reason') or 'UNKNOWN'}"
+                        )
+        for group in ("STRONG_PULLBACK", "TREND_CONTINUE"):
+            for name, predicate in item["other_scenario_partial_predicates"][
+                group
+            ].items():
+                if isinstance(predicate, dict) and predicate.get("state") == "UNKNOWN":
+                    shape_reasons.append(
+                        f"{group}.{name}:{predicate.get('reason') or predicate.get('reason_code') or 'UNKNOWN'}"
+                    )
+        shape_reasons = list(dict.fromkeys(shape_reasons))
+        pullback_false_reasons = [
+            f"PREDICATE_FALSE:{key}"
+            for key in (
+                "prior_ols_slope_positive",
+                "prior_ols_r2_at_least_040",
+                "close_not_below_previous",
+                "clv",
+                "no_shadow_rejection",
+            )
+            if partial[key]["state"] == "FALSE"
+        ]
+        if all(value == "FALSE" for value in alternatives):
+            pullback_false_reasons.append("RECLAIM_AND_RETEST_FALSE")
+        if pullback == "FALSE" and not pullback_false_reasons:
+            pullback_false_reasons.append("NO_MATCHING_DIAGNOSTIC_PARENT")
+        continuation_false_reasons = [
+            f"PREDICATE_FALSE:{key}"
+            for key, value in shape["continuation_shape"]["components"].items()
+            if value == "FALSE"
+        ]
+        output[symbol] = {
+            "STRONG_PULLBACK_DIAGNOSTIC": {
+                "state": pullback,
+                "reasons": shape_reasons
+                if pullback == "UNKNOWN"
+                else pullback_false_reasons
+                if pullback == "FALSE"
+                else [],
+            },
+            "TREND_CONTINUE_DIAGNOSTIC": {
+                "state": continuation,
+                "reasons": shape_reasons
+                if continuation == "UNKNOWN"
+                else continuation_false_reasons
+                if continuation == "FALSE"
+                else [],
+            },
+            "matched_parent_count": sum(state == "TRUE" for state in parent_states),
+            "parent_count": len(parents),
+            "history_unknown": history_unknown,
+        }
     if set(output) != expected:
         raise SourceD0RawError("D0_SHAPE_POOL_MISMATCH", "诊断形态来源代码集合不完整。")
     return {
@@ -447,11 +465,11 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_package_id)
     }
 
 
-def diagnostic_admission(result, *, target, source_package_id):
+def diagnostic_admission(result, *, target, source_capture_id):
     """应用来源诊断角色，不生成正式事件。"""
     item = result["results"][0]
     symbol = item["source_symbol"]
-    source = f"source_package:{source_package_id}"
+    source = f"BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}"
     missing = unknown("FORMAL_EPISODE_NOT_ESTABLISHED")
     raw = (
         FieldValue(item["scenario_raw"] == "TRUE")
@@ -464,7 +482,7 @@ def diagnostic_admission(result, *, target, source_package_id):
             entity_id=symbol,
             ordinal=ordinal,
             next_ordinal=ordinal + 1,
-            coordinate_id=f"RAW:TDX_SOURCE_SYMBOL:{symbol}",
+            coordinate_id=f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}",
             scenario=result["scenario"],
             role="DIAGNOSTIC",
             raw=raw,
@@ -488,26 +506,28 @@ def diagnostic_admission(result, *, target, source_package_id):
 
 
 def attach_stock_risk_readiness(
-    config, result, *, target, cutoff, source_package_id, rps_read=None
+    config, result, *, target, cutoff, source_capture_id, rps_read=None
 ):
     """将同股同日PG历史事实交给现役风险归并，保留正式结构未知。"""
     item = result["results"][0]
     symbol = item["source_symbol"]
     _, sessions, _ = resolve_pg_history_window(target.isoformat(), 75)
-    history = read_raw_daily_history_stock(
+    history = read_baostock_price_history(
         config,
         source_symbol=symbol,
         target_session=target,
-        source_package_id=source_package_id,
         sessions=sessions,
-        research_cutoff=cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
+        cutoff=cutoff,
     )
     preview = research_stock_pg_history_preview(
         symbol=symbol,
         target_session=target.isoformat(),
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
         session_dates=sessions,
-        history_rows=history["history_rows"],
+        history_rows=history["rows"],
         profile_contract=load_price_profile_contract(_CONFIG_ROOT).document,
     )
     damage_data = preview["core"]["fields"]["core.price_damage"]
@@ -524,8 +544,10 @@ def attach_stock_risk_readiness(
 
     damage, extension = field(damage_data), field(extension_data)
     missing = unknown("FORMAL_EPISODE_NOT_ESTABLISHED")
-    coordinate = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
-    source = f"source_package:{source_package_id}"
+    coordinate = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
+    )
+    source = f"BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}"
     fact = lambda value: Fact(value, symbol, target, coordinate, source)
     risk = compose(
         entity_id=symbol,
@@ -545,12 +567,12 @@ def attach_stock_risk_readiness(
             config,
             target_session=target,
             research_cutoff=cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
         )
     if (
         rps_read["target_session"] != target
         or rps_read["research_cutoff"] != cutoff
-        or rps_read["source_package_id"] != source_package_id
+        or rps_read["source_capture_id"] != source_capture_id
     ):
         raise ValueError("风险输入RPS与目标来源身份不一致")
     metric_field = rps_read["facts"].get(symbol, {}).get("rps5_delta3_pp") or unknown(
@@ -559,18 +581,17 @@ def attach_stock_risk_readiness(
     prior = research_stock_pg_history_preview(
         symbol=symbol,
         target_session=sessions[-2].isoformat(),
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
         session_dates=sessions[:-1],
-        history_rows=[
-            row for row in history["history_rows"] if row["session_date"] < target
-        ],
+        history_rows=[row for row in history["rows"] if row["session_date"] < target],
         profile_contract=load_price_profile_contract(_CONFIG_ROOT).document,
         include_profile_preview=False,
         allow_missing_target_row=True,
     )
-    previous_close = prior["raw"]["close"]
+    previous_close = prior["qfq"]["close"]
     previous_ma = prior["core"]["fields"]["core.ma20"]
-    current_close = preview["raw"]["close"]
+    current_close = preview["qfq"]["close"]
     current_ma = preview["core"]["fields"]["core.ma20"]
     if all(
         x.get("quality") == "OBSERVED"
@@ -597,7 +618,7 @@ def attach_stock_risk_readiness(
         "profile_extension": extension_data,
         "structure_applicability": "UNKNOWN",
         "diagnostic_admission": diagnostic_admission(
-            result, target=target, source_package_id=source_package_id
+            result, target=target, source_capture_id=source_capture_id
         ),
         "risk": asdict(risk),
         "health_input_rps5_delta3_pp": fraction_payload(Fraction(metric_field.value))
@@ -625,6 +646,7 @@ def attach_source_d1_prior_reference(
     item: dict[str, Any],
     discovery: Mapping[str, Any] | None = None,
     *,
+    source_capture_id: int,
     source_prior: Mapping[str, Any] | None = None,
 ) -> None:
     """给D0诊断附上前一会话已观察的来源级D1支撑，不构造正式父事件。"""
@@ -688,7 +710,9 @@ def attach_source_d1_prior_reference(
             raise SourceD0RawError(
                 "D0_D1_SOURCE_SYMBOL_MISMATCH", "结构支撑参考来源代码与D0不一致。"
             )
-        expected_coordinate = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
+        expected_coordinate = (
+            f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
+        )
         source_prior_identity_reasons = []
         if source_prior.get("identity_status") != "SOURCE_SYMBOL_ONLY":
             source_prior_identity_reasons.append(
@@ -696,12 +720,9 @@ def attach_source_d1_prior_reference(
             )
         if source_prior.get("research_mode") != "NON_PIT_RETROSPECTIVE":
             source_prior_identity_reasons.append("SOURCE_RESEARCH_MODE_NOT_NON_PIT")
-        if source_prior.get("price_coordinate") != "RAW_UNADJUSTED":
-            source_prior_identity_reasons.append("SOURCE_PRICE_COORDINATE_NOT_RAW")
-        for identity_field in (
-            "source_package_id",
-            "parser_contract",
-        ):
+        if source_prior.get("price_coordinate") != "FORWARD_ADJUSTED":
+            source_prior_identity_reasons.append("SOURCE_PRICE_COORDINATE_NOT_QFQ")
+        for identity_field in ("source_capture_id",):
             if source_prior.get(identity_field) is None:
                 source_prior_identity_reasons.append(
                     f"SOURCE_{identity_field.upper()}_IDENTITY_MISSING"
@@ -724,8 +745,8 @@ def attach_source_d1_prior_reference(
                 quality_reasons.add("REFERENCE_IDENTITY_NOT_SOURCE_SYMBOL_ONLY")
             if reference.get("research_mode") != "NON_PIT_RETROSPECTIVE":
                 quality_reasons.add("REFERENCE_RESEARCH_MODE_NOT_NON_PIT")
-            if reference.get("price_coordinate_status") != "RAW_UNADJUSTED":
-                quality_reasons.add("REFERENCE_PRICE_COORDINATE_NOT_RAW")
+            if reference.get("price_coordinate_status") != "FORWARD_ADJUSTED":
+                quality_reasons.add("REFERENCE_PRICE_COORDINATE_NOT_QFQ")
             if reference.get("observable_session") != expected_prior:
                 quality_reasons.add("REFERENCE_OBSERVABLE_SESSION_MISMATCH")
             anchor_session = reference.get("anchor_session")
@@ -754,10 +775,7 @@ def attach_source_d1_prior_reference(
                     continue
                 if row.get("session") != expected_session:
                     quality_reasons.add(f"{label}_SOURCE_SESSION_MISMATCH")
-                for identity_field in (
-                    "source_package_id",
-                    "parser_contract",
-                ):
+                for identity_field in ("source_capture_id",):
                     expected_value = source_prior.get(identity_field)
                     if (
                         expected_value is None
@@ -822,7 +840,9 @@ def attach_source_d1_prior_reference(
         "formal_parent_episode_ready": formal_parent_status,
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "research_mode": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "window": source_prior.get("window") if source_prior is not None else None,
     }
     for scenario in ("STRONG_PULLBACK", "TREND_CONTINUE"):
@@ -852,7 +872,7 @@ def attach_recovery_failure_followup(
     target: date,
     followup: date,
     cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
 ) -> None:
     """只观察诊断线出生后有界官方会话，不生成D2状态。"""
     if type(followup) is not date or not target < followup <= cutoff:
@@ -878,18 +898,21 @@ def attach_recovery_failure_followup(
             category="ARGUMENT",
         )
     try:
-        history = read_raw_daily_history_stock(
+        history = read_baostock_price_history_batch(
             config,
-            source_symbol=item["source_symbol"],
-            target_session=target,
-            source_package_id=source_package_id,
+            source_symbols=(item["source_symbol"],),
             sessions=sessions,
-            starts_at_target=True,
-            research_cutoff=cutoff,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            cutoff=cutoff,
+            limit=100,
         )
-    except RawSourcePgError as error:
-        raise SourceD0RawError(error.code, str(error)) from error
-    by_date = {row["session_date"]: row for row in history["history_rows"]}
+    except (RawSourcePgError, ValueError) as error:
+        raise SourceD0RawError(
+            getattr(error, "code", "FOLLOWUP_QFQ_HISTORY_UNAVAILABLE"), str(error)
+        ) from error
+    history_rows = history.get("rows", ())
+    by_date = {row["session_date"]: row for row in history_rows}
     line_data = item["failure_line_candidate"]["value"]
     line = (
         Fraction(int(line_data["numerator"]), int(line_data["denominator"]))
@@ -903,7 +926,7 @@ def attach_recovery_failure_followup(
         reason = None
         close = None
         if row is None:
-            saved_end = (history.get("saved_session_range") or [None, None])[1]
+            saved_end = item.get("source_version", {}).get("range_end_session")
             reason = (
                 "NOT_AVAILABLE_AFTER_SAVED_RANGE"
                 if saved_end is not None and session.isoformat() > saved_end
@@ -911,21 +934,20 @@ def attach_recovery_failure_followup(
             )
         elif (
             birth is None
-            or row.get("source_package_id") != birth.get("source_package_id")
-            or row.get("parser_contract") != birth.get("parser_contract")
-            or row.get("price_coordinate") != "RAW_UNADJUSTED"
+            or row.get("source_capture_id") != birth.get("source_capture_id")
+            or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
         ):
             reason = "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH"
         elif (
             row.get("bar_status") != "TARGET_PRESENT"
-            or row.get("price_quality") != "OBSERVED"
+            or row.get("qfq_price_quality") != "OBSERVED"
         ):
             reason = "FOLLOWUP_PRICE_UNKNOWN"
         else:
             try:
                 if any(
                     isinstance(row[key], bool)
-                    for key in ("raw_open", "raw_high", "raw_low", "raw_close")
+                    for key in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
                 ):
                     raise ValueError("布尔值不是有效OHLC")
                 values = [
@@ -1017,9 +1039,8 @@ def attach_recovery_failure_followup(
                 row is not None
                 and birth is not None
                 and (
-                    row.get("source_package_id") == birth.get("source_package_id")
-                    and row.get("parser_contract") == birth.get("parser_contract")
-                    and row.get("price_coordinate") == "RAW_UNADJUSTED"
+                    row.get("source_capture_id") == birth.get("source_capture_id")
+                    and row.get("qfq_price_coordinate") == "FORWARD_ADJUSTED"
                 )
             ):
                 safe_rows.append(row)
@@ -1038,7 +1059,7 @@ def attach_recovery_failure_followup(
 
 
 def attach_shape_state_followup(
-    config, result, *, target, followup, cutoff, source_package_id
+    config, result, *, target, followup, cutoff, source_capture_id
 ):
     """追踪T0已选诊断父；各后继会话形态与峰为滚动重算。"""
     item = result["results"][0]
@@ -1058,7 +1079,7 @@ def attach_shape_state_followup(
                 scenario="RECOVERY_TURN",
                 target_session=session,
                 research_cutoff=cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 symbol=item["source_symbol"],
                 limit=1,
                 _include_shape_observation=True,
@@ -1077,8 +1098,8 @@ def attach_shape_state_followup(
             continue
         if (
             len(later["results"]) != 1
-            or later["source_version"]["source_package_id"]
-            != result["source_version"]["source_package_id"]
+            or later["source_version"]["source_capture_id"]
+            != result["source_version"]["source_capture_id"]
         ):
             observations.append(
                 {
@@ -1095,14 +1116,14 @@ def attach_shape_state_followup(
             scenario="LAUNCH_CONFIRM",
             target_session=session,
             research_cutoff=cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             symbol=item["source_symbol"],
             limit=1,
         )
         if (
             len(later_launch["results"]) != 1
-            or later_launch["source_version"]["source_package_id"]
-            != result["source_version"]["source_package_id"]
+            or later_launch["source_version"]["source_capture_id"]
+            != result["source_version"]["source_capture_id"]
         ):
             source_states = {"LAUNCH_CONFIRM": "UNKNOWN", "RECOVERY_TURN": "UNKNOWN"}
         else:
@@ -1266,14 +1287,24 @@ def _target_row_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         },
         "price_quality": row.get("price_quality"),
         "price_reason": row.get("price_reason"),
+        "qfq_ohlc": {
+            key: _fraction(row.get(column))
+            for key, column in (
+                ("open", "qfq_open"),
+                ("high", "qfq_high"),
+                ("low", "qfq_low"),
+                ("close", "qfq_close"),
+            )
+        },
+        "qfq_price_quality": row.get("qfq_price_quality"),
+        "qfq_price_reason": row.get("qfq_price_reason"),
         "raw_amount": _fraction(row.get("raw_amount")),
         "raw_amount_quality": row.get("raw_amount_quality"),
         "raw_amount_reason": row.get("raw_amount_reason"),
         "amount_unit_status": row.get("amount_unit_status"),
         "raw_volume_quality": row.get("raw_volume_quality"),
         "volume_unit_status": row.get("volume_unit_status"),
-        "source_capture_id": int(row.get("source_capture_id")),
-        "source_package_id": row.get("source_package_id"),
+        "source_capture_id": row.get("source_capture_id"),
         "source_clock_role": row.get("source_clock_role"),
         "source_available_at": _iso(row.get("source_available_at")),
         "observed_started_at": _iso(row.get("observed_started_at")),
@@ -1281,7 +1312,9 @@ def _target_row_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "first_source_date": _iso(row.get("first_source_date")),
         "last_source_date": _iso(row.get("last_source_date")),
         "future_source_rows_excluded": row.get("future_source_rows_excluded"),
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "price_coordinates_in_capture": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "stable_security_id_status": "UNVERIFIED",
         "pit_status": "NON_PIT_RETROSPECTIVE",
@@ -1294,11 +1327,10 @@ def _attach_continuation_core(
     rows,
     sessions,
     calendar,
-    source_package_id,
-    target_capture_id,
-    parser_contract,
+    source_capture_id,
+    price_coordinate,
 ):
-    """将现役Core斜率和前高投影到延续场景，保留其actual窗口身份。"""
+    """以QFQ跨日结构及RAW成交量额构造连续Core观察。"""
     symbol = item["source_symbol"]
     present = {
         day: row
@@ -1306,10 +1338,10 @@ def _attach_continuation_core(
         if isinstance(day, date) and row is not None
     }
     inconsistent = any(
-        row.get("parser_contract") != parser_contract
-        or row.get("source_symbol") != symbol
-        or row.get("source_package_id") != source_package_id
-        or row.get("reference_quality") is False
+        row.get("source_symbol") != symbol
+        or row.get("source_capture_id") != source_capture_id
+        or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
+        or row.get("qfq_price_quality") is None
         for row in present.values()
     )
     result = item["other_scenario_partial_predicates"]["TREND_CONTINUE"]
@@ -1321,19 +1353,16 @@ def _attach_continuation_core(
                 "reason": "RAW_SOURCE_IDENTITY_MISMATCH",
             }
         return
-    by_key = {(symbol, day): row for day, row in present.items()}
-    counts = {
-        key: {"row_count": 1, "package_count": 1, "capture_count": 1} for key in by_key
-    }
     history = tuple(
-        _raw_window_observation(
-            source_symbol=symbol,
+        _core_observation_from_pg_price_row(
+            present.get(day),
             session=day,
-            raw_by_key=by_key,
-            revision_counts=counts,
-            target_session=sessions[-1],
-            target_capture_id=target_capture_id,
-        )[0]
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+            coordinate_id=(
+                f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
+            ),
+        )
         for day in sessions
     )
     core = calculate_core(
@@ -1423,14 +1452,15 @@ def query_source_d0_raw_launch(
     scenario: str,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     state: str | None = None,
     symbol: str | None = None,
     offset: int = 0,
     limit: int = 30,
     action: str = "current",
     before_session: date | None = None,
-    before_source_package_id: int | None = None,
+    before_source_capture_id: int | None = None,
     transition: str | None = None,
     _history_symbol: str | None = None,
     _include_shape_observation: bool = False,
@@ -1458,10 +1488,11 @@ def query_source_d0_raw_launch(
             config,
             scenario=scenario,
             before_session=before_session,
-            before_source_package_id=before_source_package_id,
+            before_source_capture_id=before_source_capture_id,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
             state=state,
             symbol=symbol,
             offset=offset,
@@ -1479,7 +1510,7 @@ def query_source_d0_raw_launch(
         value is not None
         for value in (
             before_session,
-            before_source_package_id,
+            before_source_capture_id,
             transition,
         )
     ):
@@ -1499,6 +1530,9 @@ def query_source_d0_raw_launch(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise SourceD0RawError(
             "D0_DATE_AFTER_CUTOFF",
@@ -1557,7 +1591,7 @@ def query_source_d0_raw_launch(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             sessions=sessions,
             expected_calendar=calendar_identity,
             history_source_symbol=symbol if _single_symbol_only else None,
@@ -1581,13 +1615,13 @@ def query_source_d0_raw_launch(
                         config,
                         target_session=target_session,
                         research_cutoff=research_cutoff,
-                        source_package_id=source_package_id,
+                        source_capture_id=source_capture_id,
                     )
                 )
                 if (
                     rps.get("target_session") != target_session
                     or rps.get("research_cutoff") != research_cutoff
-                    or rps.get("source_package_id") != source_package_id
+                    or rps.get("source_capture_id") != source_capture_id
                 ):
                     rps_input_error = "D0_RPS_SOURCE_IDENTITY_MISMATCH"
                 elif set(rps["facts"]) != set(pg_result["source_symbols"]):
@@ -1615,9 +1649,8 @@ def query_source_d0_raw_launch(
             official_sessions=sessions,
             history_rows_by_session=pg_result["history_rows_by_symbol"][source_symbol],
             source_symbol=source_symbol,
-            source_package_id=source_package_id,
-            target_capture_id=source_version["source_capture_id"],
-            parser_contract=source_version["parser_contract"],
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
         )
         if scenario == "LAUNCH_CONFIRM":
             item = calculate_d0_launch_confirm_raw(
@@ -1665,31 +1698,32 @@ def query_source_d0_raw_launch(
                 rows=pg_result["history_rows_by_symbol"][item["source_symbol"]],
                 sessions=sessions,
                 calendar=calendar,
-                source_package_id=source_version["source_package_id"],
-                target_capture_id=source_version["source_capture_id"],
-                parser_contract=source_version["parser_contract"],
+                source_capture_id=source_version["source_capture_id"],
+                price_coordinate=price_coordinate,
             )
             if _include_shape_observation:
                 extended_sessions = calendar["sessions"][
-                    max(0, target_index - 74) : target_index + 1
+                    max(0, target_index - 59) : target_index + 1
                 ]
                 history_read_started = time.perf_counter()
-                history = read_raw_daily_history_stock(
+                history = read_baostock_price_history_batch(
                     config,
-                    source_symbol=item["source_symbol"],
-                    target_session=target_session,
-                    source_package_id=source_package_id,
+                    source_symbols=(item["source_symbol"],),
                     sessions=extended_sessions,
-                    include_parser_contract=True,
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
+                    cutoff=research_cutoff,
+                    limit=100,
                 )
                 source_d1_prior_history_read_seconds += (
                     time.perf_counter() - history_read_started
                 )
-                source_d1_prior_history_rows_read += len(history["history_rows"])
+                history_rows = history.get("rows", ())
+                source_d1_prior_history_rows_read += len(history_rows)
                 history_target = next(
                     (
                         row
-                        for row in history["history_rows"]
+                        for row in history_rows
                         if row["session_date"] == target_session
                     ),
                     None,
@@ -1698,10 +1732,7 @@ def query_source_d0_raw_launch(
                     history_target is None
                     or history_target.get("source_capture_id")
                     != source_version["source_capture_id"]
-                    or history_target.get("source_package_id")
-                    != source_version["source_package_id"]
-                    or history_target.get("parser_contract")
-                    != source_version["parser_contract"]
+                    or history_target.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
                 ):
                     raise SourceD0RawError(
                         "D0_PRIOR_HISTORY_TARGET_BINDING_MISMATCH",
@@ -1711,15 +1742,15 @@ def query_source_d0_raw_launch(
                 shape_session_set = set(shape_sessions)
                 shape_rows = [
                     row
-                    for row in history["history_rows"]
+                    for row in history_rows
                     if row["session_date"] in shape_session_set
                 ]
                 item["prior_shape_observation"] = observe_prior_shapes(
                     sessions=shape_sessions,
                     rows=shape_rows,
                     symbol=item["source_symbol"],
-                    source_package_id=source_package_id,
-                    parser_contract=source_version["parser_contract"],
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
                 )
                 historical_rps = {}
                 rps_errors = {}
@@ -1733,7 +1764,7 @@ def query_source_d0_raw_launch(
                             config,
                             target_session=prior_day,
                             research_cutoff=research_cutoff,
-                            source_package_id=source_package_id,
+                            source_capture_id=source_capture_id,
                         )
                         historical_rps[prior_day] = (
                             prior_rps["facts"]
@@ -1758,8 +1789,8 @@ def query_source_d0_raw_launch(
                         sessions=shape_sessions,
                         rows=shape_rows,
                         symbol=item["source_symbol"],
-                        source_package_id=source_package_id,
-                        parser_contract=source_version["parser_contract"],
+                        source_capture_id=source_capture_id,
+                        price_coordinate="FORWARD_ADJUSTED",
                         historical_rps=historical_rps,
                     )
                 item["prior_shape_observation"]["historical_rps_errors"] = rps_errors
@@ -1771,17 +1802,21 @@ def query_source_d0_raw_launch(
                 prior_session_set = set(prior_sessions)
                 prior_rows = [
                     row
-                    for row in history["history_rows"]
+                    for row in history_rows
                     if row["session_date"] in prior_session_set
                 ]
                 source_prior = discover_source_d1_prior_support_reference(
                     symbol=item["source_symbol"],
                     sessions=prior_sessions,
                     history_rows=prior_rows,
-                    source_package_id=source_package_id,
-                    parser_contract=source_version["parser_contract"],
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
                 )
-                attach_source_d1_prior_reference(item, source_prior=source_prior)
+                attach_source_d1_prior_reference(
+                    item,
+                    source_capture_id=source_capture_id,
+                    source_prior=source_prior,
+                )
                 source_d1_prior_rows_decoded += source_prior["raw_history_rows_decoded"]
                 source_d1_prior_session_count += len(prior_sessions)
     elif scenario == "RECOVERY_TURN":
@@ -1798,12 +1833,12 @@ def query_source_d0_raw_launch(
 
     return {
         "ok": True,
-        "contract": "STOCK_A_D0_LAUNCH_CONFIRM_SOURCE_SYMBOL_RAW_R1"
+        "contract": "STOCK_A_D0_LAUNCH_CONFIRM_BAOSTOCK_QFQ_R2"
         if scenario == "LAUNCH_CONFIRM"
-        else "STOCK_A_D0_RECOVERY_TURN_SOURCE_SYMBOL_RAW_R1",
-        "producer_version": "STOCK_A_D0_LAUNCH_RAW_READER_R1"
+        else "STOCK_A_D0_RECOVERY_TURN_BAOSTOCK_QFQ_R2",
+        "producer_version": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R2"
         if scenario == "LAUNCH_CONFIRM"
-        else "STOCK_A_D0_RECOVERY_RAW_READER_R1",
+        else "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R2",
         "algorithm_contract": "ALG-28 + §11.6 D0_SCENARIO_FACTS_R3",
         "scenario": scenario,
         "scenario_role": "DIAGNOSTIC_ONLY",
@@ -1833,16 +1868,21 @@ def query_source_d0_raw_launch(
         "session_contract": "D0_SESSION_R2",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "strict_official_sessions": [session.isoformat() for session in sessions],
         "official_calendar": calendar_identity,
         "source_version": {
-            "source_package_id": source_version["source_package_id"],
             "source_capture_id": source_version["source_capture_id"],
             "parser_contract": source_version["parser_contract"],
+            "price_coordinate": price_coordinate,
+            "price_coordinates_in_capture": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+            "range_end_session": _iso(source_version["range_end_session"]),
+            "unit_contract_version": source_version["unit_contract_version"],
             "source_time_quality": source_version["source_time_quality"],
             "source_available_at": _iso(source_version["source_available_at"]),
             "source_clock_role": source_version["source_clock_role"],
-            "source_byte_count": source_version["source_byte_count"],
             "capture_expected_row_count": source_version["capture_expected_row_count"],
             **calendar_identity,
         },
@@ -1922,10 +1962,11 @@ def _query_source_d0_raw_launch_changes(
     *,
     scenario: str,
     before_session: date | None,
-    before_source_package_id: int | None,
+    before_source_capture_id: int | None,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str,
     state: str | None,
     symbol: str | None,
     offset: int,
@@ -1959,11 +2000,12 @@ def _query_source_d0_raw_launch_changes(
             category="ARGUMENT",
         )
     if (
-        type(before_source_package_id) is not int
-        or type(source_package_id) is not int
-        or before_source_package_id <= 0
-        or source_package_id <= 0
-        or before_source_package_id != source_package_id
+        type(before_source_capture_id) is not int
+        or type(source_capture_id) is not int
+        or before_source_capture_id <= 0
+        or source_capture_id <= 0
+        or before_source_capture_id != source_capture_id
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise SourceD0RawError(
             "D0_CHANGE_PACKAGE_IDENTITY_MISMATCH",
@@ -2042,7 +2084,8 @@ def _query_source_d0_raw_launch_changes(
             scenario=scenario,
             target_session=before_session,
             research_cutoff=research_cutoff,
-            source_package_id=before_source_package_id,
+            source_capture_id=before_source_capture_id,
+            price_coordinate=price_coordinate,
             state="ALL",
             offset=0,
             limit=_MAX_LIMIT,
@@ -2055,7 +2098,8 @@ def _query_source_d0_raw_launch_changes(
             scenario=scenario,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
             state="ALL",
             offset=0,
             limit=_MAX_LIMIT,
@@ -2069,8 +2113,8 @@ def _query_source_d0_raw_launch_changes(
     before_source = before_result["source_version"]
     after_source = after_result["source_version"]
     compatible_identity = (
-        before_source["source_package_id"] == after_source["source_package_id"]
-        and before_source["source_package_id"] == after_source["source_package_id"]
+        before_source["source_capture_id"] == after_source["source_capture_id"]
+        and before_source["source_capture_id"] == after_source["source_capture_id"]
         and before_result["official_calendar"] == after_result["official_calendar"]
         and before_result["session_contract"] == after_result["session_contract"]
         and before_result["algorithm_contract"] == after_result["algorithm_contract"]
@@ -2165,7 +2209,8 @@ def _query_source_d0_raw_launch_changes(
             "before": before_item,
             "after": after_item,
             "identity_status": "SOURCE_SYMBOL_ONLY",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "time_role": "NON_PIT_RETROSPECTIVE",
             "pit_status": "NON_PIT_RETROSPECTIVE",
             "scenario_role": "DIAGNOSTIC_ONLY",
             "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
@@ -2208,14 +2253,16 @@ def _query_source_d0_raw_launch_changes(
             "absolute_liquidity_cny_status": result["absolute_liquidity_cny_status"],
             "stable_security_id_status": result["stable_security_id_status"],
             "pit_status": result["pit_status"],
-            "price_coordinate": "RAW_UNADJUSTED",
+            "source_capture_id": result["source_version"]["source_capture_id"],
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "time_role": "NON_PIT_RETROSPECTIVE",
             "execution": result["execution"],
         }
 
     return {
         "ok": True,
-        "contract": "STOCK_A_D0_LAUNCH_ADJACENT_TRANSITION_RAW_R1",
-        "producer_version": "STOCK_A_D0_LAUNCH_RAW_READER_R1",
+        "contract": "STOCK_A_D0_LAUNCH_ADJACENT_TRANSITION_BAOSTOCK_QFQ_R2",
+        "producer_version": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R2",
         "action": "changes",
         "scenario": scenario,
         "pair_status": "COMPARABLE",
@@ -2231,7 +2278,9 @@ def _query_source_d0_raw_launch_changes(
         "episode_status": "NOT_ISSUED",
         "session_contract": "D0_SESSION_R2",
         "research_cutoff": research_cutoff.isoformat(),
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "entity_identity": "SOURCE_SYMBOL_ONLY",
         "before": endpoint_summary(before_result),
         "after": endpoint_summary(after_result),

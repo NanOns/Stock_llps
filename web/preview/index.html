@@ -13,7 +13,7 @@
         <p class="eyebrow">STOCK A / 本机开发研究</p>
         <h1>来源级研究预览</h1>
         <p class="sub">
-          只读读取已保存的 PG Raw；显式选择日期、来源包版本和研究窗口。
+          只读读取已保存的BaoStock行情；显式选择日期、价格捕获和研究窗口。
         </p>
       </div>
       <span class="badge">非正式发布 · NON_PIT</span>
@@ -34,14 +34,13 @@
           <div>
             <h2 id="sectorChangeTitle">来源池变化 → 行业 / GN 概念 → 个股</h2>
             <p>
-              从已保存的PG
-              Raw、Profile与TDX成员快照读取来源级研究。事件窗按官方会话显式选择；板块和成员先全量联算再分页。
+              从已保存的BaoStock价格、Profile与TDX行业/GN成员快照读取研究。事件窗按官方会话显式选择；板块和成员按真实快照分页。
             </p>
           </div>
           <span id="sectorChangeCount" class="count">等待精确来源身份</span>
         </div>
         <div id="sectorChangeStatus" class="population" role="status">
-          请选择目标日期、来源包、Profile修订、行业快照与GN快照。
+          请选择目标日期、BaoStock捕获、Profile修订、行业快照与GN快照。
         </div>
         <div class="sector-controls">
           <label>
@@ -52,9 +51,9 @@
             </select>
           </label>
           <label>
-            目标交易日与来源包
+            目标交易日与价格捕获
             <select id="sectorVersionSelect" disabled>
-              <option value="">— 请选择真实PG版本 —</option>
+              <option value="">— 请选择真实BaoStock捕获 —</option>
             </select>
           </label>
           <label>
@@ -99,7 +98,7 @@
           <h3>后续价格事实</h3>
           <p>
             HISTORICAL_NON_PIT_EXPLORATION ·
-            RAW_UNADJUSTED：后验已取得事实，未经复权或交易可实现性验证；缺Bar不等于停牌。
+            FORWARD_ADJUSTED：BaoStock前复权坐标；历史后验NON_PIT，不代表可交易收益。
           </p>
           <label
             >观察官方交易会话数 N（1–10）
@@ -120,9 +119,9 @@
               <thead>
                 <tr>
                   <th>会话</th>
-                  <th>Raw OHLC</th>
+                  <th>前复权 OHLC</th>
                   <th>质量/缺失原因</th>
-                  <th>相对T0原始收盘价变动</th>
+                  <th>相对T0前复权收盘价变动</th>
                 </tr>
               </thead>
               <tbody id="postSignalRows"></tbody>
@@ -317,13 +316,13 @@
           <div>
             <h2 id="comparisonTitle">临时多股对照</h2>
             <p>
-              只在当前网页内存中保留最多3只来源代码；须来自同一目标日期、来源包SHA和画像修订。RAW指数从全部所选代码首个共同有效收盘设为100，不是复权收益、RPS或交易信号。
+              只在当前网页内存中保留最多3只来源代码；须来自同一目标日期、捕获、价格坐标和画像修订。前复权指数从全部所选代码首个共同有效QFQ收盘设为100，不是RPS或交易信号。
             </p>
           </div>
           <span id="comparisonCount" class="count">0/3</span>
         </div>
         <div id="comparisonNotice" class="population" role="status">
-          从两日RAW关系结果或完整PG画像页加入同一来源快照的代码。
+          从两日价格关系结果或完整PG画像页加入同一捕获、坐标和画像修订的代码。
         </div>
         <div id="comparisonBasket" class="comparison-basket"></div>
         <div class="comparison-controls">
@@ -347,10 +346,12 @@
           >
             <div class="panel-head">
               <div>
-                <h3 id="comparisonPeriodTitle">同源闭周/月结构与RAW价格指数</h3>
+                <h3 id="comparisonPeriodTitle">
+                  同源闭周/月结构与前复权价格指数
+                </h3>
                 <p>
                   按ISO自然周或自然月对齐现役PG
-                  Raw周期。只有所有选中来源代码共同完整且已闭合的周期才建立该周期类型自己的t0；这是SOURCE_SYMBOL_ONLY、RAW_UNADJUSTED、NON_PIT_RETROSPECTIVE对照，不是RPS、市场排名或交易信号。
+                  BaoStock前复权周期。只有所有选中来源代码共同完整且已闭合的周期才建立该周期类型自己的t0；这是SOURCE_SYMBOL_ONLY、FORWARD_ADJUSTED、NON_PIT_RETROSPECTIVE对照，不是RPS、市场排名或交易信号。
                 </p>
               </div>
               <span id="comparisonPeriodCount" class="count">等待周期</span>
@@ -365,7 +366,7 @@
               </label>
             </div>
             <div id="comparisonPeriodStatus" class="population" role="status">
-              读取同一日期、包SHA与来源代码的PG Raw周期数据后显示。
+              读取同一日期、捕获、坐标与来源代码的PG价格周期后显示。
             </div>
             <div class="table-wrap">
               <table class="comparison-table">
@@ -388,7 +389,7 @@
                 <p>
                   按完整 observations
                   对齐官方会话与字段。关系未变化只表示前后关系相同；不可比和未记录均单独保留。
-                  这是 SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT
+                  这是 SOURCE_SYMBOL_ONLY / FORWARD_ADJUSTED / NON_PIT
                   的后验事实，不是信号或全市场排名。
                 </p>
               </div>
@@ -606,7 +607,7 @@
           <div class="highlights-head">
             <div>
               <h3 id="priceRelationScreenTitle">
-                RAW结构关系变化与结束日联合筛选
+                前复权结构关系变化与结束日联合筛选
               </h3>
               <p>
                 MA20方向仅比较两个显式已存快照中的RAW数值，不代表逐日斜率或趋势信号。联合筛选在完整来源并集上计算；结束日最多添加两个价格位置AND条件。
@@ -697,7 +698,9 @@
                 maxlength="9"
               />
             </label>
-            <button id="searchPriceRelations" type="button">查询RAW关系</button>
+            <button id="searchPriceRelations" type="button">
+              查询前复权关系
+            </button>
           </div>
           <div id="priceRelationScreenSummary" class="population" role="status">
             请选择两个完整PG画像快照。
@@ -753,7 +756,7 @@
               <h3 id="sourceBreadthTitle">已存来源池 MA20 广度</h3>
               <p>
                 使用两端完整来源代码集合；当前变化筛选、分页和最多30条重点观察都不改变统计分母。结果是
-                SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT
+                SOURCE_SYMBOL_ONLY / FORWARD_ADJUSTED / NON_PIT_RETROSPECTIVE
                 价格诊断，不代表正式上市总体或交易信号。
               </p>
             </div>
@@ -776,8 +779,8 @@
                 <thead>
                   <tr>
                     <th>来源代码 / 双日画像</th>
-                    <th>起始日 RAW收盘 / MA20</th>
-                    <th>结束日 RAW收盘 / MA20</th>
+                    <th>起始日 QFQ收盘 / MA20</th>
+                    <th>结束日 QFQ收盘 / MA20</th>
                     <th>UNKNOWN / 不可比原因</th>
                     <th>来源身份与坐标</th>
                   </tr>
@@ -836,7 +839,7 @@
                 <th>来源代码</th>
                 <th>实际变化</th>
                 <th>MA20/ATR距离（精确前后）</th>
-                <th>RAW收盘 / MA20关系</th>
+                <th>前复权收盘 / MA20关系</th>
                 <th>Profile11字段前后质量 / 状态 / 原因</th>
                 <th>Core质量或原因变化</th>
                 <th>详情</th>
@@ -873,7 +876,7 @@
             <h2 id="profileBrowserTitle">已持久化来源代码价格画像</h2>
             <p>
               SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE ·
-              只查询精确日期、来源包SHA和画像修订；不是正式上市Universe或稳定证券身份结果。
+              只查询精确日期、来源捕获、价格坐标和画像修订；不是正式上市总体或稳定证券身份结果。
             </p>
           </div>
           <div class="pager-actions">
@@ -904,15 +907,18 @@
               maxlength="9" /></label
           ><label
             >市场<select id="profileMarketSelect">
-              <option value="ALL">沪深全部</option>
+              <option value="ALL">A股全部</option>
               <option value="SH">上海</option>
               <option value="SZ">深圳</option>
+              <option value="BJ">北京</option>
             </select></label
           ><label
             >板别<select id="profileBoardSelect">
-              <option value="ALL">主板与创业板</option>
+              <option value="ALL">全部板别</option>
               <option value="MAIN_BOARD">主板</option>
               <option value="GEM">创业板</option>
+              <option value="STAR_BOARD">科创板</option>
+              <option value="BEIJING_BOARD">北交所</option>
             </select></label
           ><label
             >MA20 / ATR20距离<select id="profileBias20AtrBandSelect">
@@ -927,9 +933,9 @@
           ><label
             >目标日Bar<select id="profileBarStatusSelect">
               <option value="ALL">全部状态</option>
-              <option value="TDX_TARGET_BAR_PRESENT">有Bar</option>
-              <option value="TDX_TARGET_BAR_MISSING">目标日缺Bar</option>
-              <option value="TDX_READ_FAILED">读取失败</option>
+              <option value="TARGET_PRESENT">有Bar</option>
+              <option value="TARGET_MISSING">目标日缺Bar</option>
+              <option value="READ_FAILED">读取失败</option>
             </select></label
           ><label
             >价格窗口<select id="profileWindowStatusSelect">
@@ -971,7 +977,7 @@
               <option value="ALL">仅查看质量分布，不筛质量/状态</option>
             </select></label
           ><label
-            >RAW位置条件1<select id="profilePosition1Select">
+            >前复权位置条件1<select id="profilePosition1Select">
               <option value="">不启用</option>
               <optgroup label="收盘 vs MA20">
                 <option value="c_vs_ma20:ABOVE">高于 ABOVE</option>
@@ -993,7 +999,7 @@
               </optgroup>
             </select></label
           ><label
-            >RAW位置条件2<select id="profilePosition2Select">
+            >前复权位置条件2<select id="profilePosition2Select">
               <option value="">不启用</option>
               <optgroup label="收盘 vs MA20">
                 <option value="c_vs_ma20:ABOVE">高于 ABOVE</option>
@@ -1017,7 +1023,7 @@
           ><button id="searchProfiles" type="button">查询画像</button>
         </div>
         <p id="profileBias20AtrHelp" class="muted">
-          距离按 (当前RAW收盘−MA20)/ATR20
+          距离按 (当前前复权收盘−MA20)/ATR20
           计算；0表示恰等于MA20，正负表示收盘在均线两侧。这是来源价格描述，不是量能、确认回踩或买入信号。
         </p>
         <div id="profileMessage" class="population" role="status">
@@ -1029,7 +1035,7 @@
               <tr>
                 <th>来源代码</th>
                 <th>市场 / 板别</th>
-                <th>目标日Bar</th>
+                <th>目标日RAW Bar</th>
                 <th>PG窗口覆盖</th>
                 <th>MA20</th>
                 <th>ATR20</th>
@@ -1039,7 +1045,7 @@
                   所选Core字段 / 值 / 质量 / 原因
                 </th>
                 <th>Profile11状态 / 质量 / 原因</th>
-                <th>所选RAW位置 / 数值 / 质量 / 原因</th>
+                <th>所选前复权位置 / 数值 / 质量 / 原因</th>
                 <th>价格状态 / 原因</th>
                 <th>详情</th>
               </tr>
@@ -1073,26 +1079,29 @@
         <div class="panel-head">
           <div>
             <h2>预览范围</h2>
-            <p>日期和包SHA都来自真实PG目录；任何查询都不会回退到最新版本。</p>
+            <p>日期和捕获ID都来自真实PG目录；任何查询都不会回退到最新版本。</p>
           </div>
           <button id="reloadCatalog" class="quiet">刷新目录</button>
         </div>
         <div class="controls">
           <label
-            >目标交易日与来源包版本<select id="versionSelect" disabled>
+            >目标交易日与BaoStock捕获<select id="versionSelect" disabled>
               <option>正在读取PG目录…</option>
             </select></label
           ><label
             >市场筛选<select id="marketSelect">
-              <option value="ALL">沪深全部来源候选</option>
+              <option value="ALL">A股全部来源候选</option>
               <option value="SH">上海来源候选</option>
               <option value="SZ">深圳来源候选</option>
+              <option value="BJ">北京来源候选</option>
             </select></label
           ><label
             >板别筛选<select id="boardSelect">
-              <option value="ALL">主板与创业板</option>
+              <option value="ALL">全部板别</option>
               <option value="MAIN_BOARD">主板</option>
               <option value="GEM">创业板</option>
+              <option value="STAR_BOARD">科创板</option>
+              <option value="BEIJING_BOARD">北交所</option>
             </select></label
           >
         </div>
@@ -1226,8 +1235,7 @@
                 <div>
                   <h3 id="timelineTitle">历史价格结构轨迹</h3>
                   <p class="muted">
-                    按所选截止日、来源包SHA、来源代码和会话数查询；逐日复用现役Core，RAW_UNADJUSTED
-                    / NON_PIT_DIAGNOSTIC。
+                    按所选截止日、来源捕获、价格坐标、来源代码和会话数查询；前复权历史与Core关系标记NON_PIT。
                   </p>
                 </div>
                 <button id="queryTimeline" class="quiet" type="button">
@@ -1239,7 +1247,7 @@
                 <div id="timelineReturn"></div>
                 <section
                   class="candlestick-research"
-                  aria-label="RAW K线图研究"
+                  aria-label="价格坐标K线图研究"
                 >
                   <div class="chart-controls" role="group" aria-label="K线周期">
                     <button
@@ -1276,7 +1284,7 @@
                     aria-labelledby="priceStructureTitle"
                     aria-live="polite"
                   >
-                    <h4 id="priceStructureTitle">RAW价格结构观察</h4>
+                    <h4 id="priceStructureTitle">BaoStock价格结构观察</h4>
                     <p id="priceStructureIdentity" class="muted"></p>
                     <div
                       id="priceStructureSummary"
@@ -1327,8 +1335,7 @@
                   </h4>
                   <p class="muted">
                     从同一75会话Core轨迹读取已存MA20值；按相邻官方会话比较UP、SAME、DOWN或UNKNOWN。
-                    这不是回归斜率、正式趋势确认或交易信号；RAW
-                    OHLC可用时，MA20未知只影响对应相邻对。
+                    这不是回归斜率、正式趋势确认或交易信号；所选价格坐标OHLC可用时，MA20未知只影响对应相邻对。
                   </p>
                   <div class="price-relation-history-controls">
                     <label for="ma20DirectionWindow">
@@ -1444,9 +1451,9 @@
                     <thead>
                       <tr>
                         <th>官方会话</th>
-                        <th>Raw行 / Bar / 价格质量</th>
-                        <th>RAW OHLC · RAW_UNADJUSTED</th>
-                        <th>RAW收盘</th>
+                        <th>BaoStock行 / Bar / 价格质量</th>
+                        <th>OHLC · 所选坐标</th>
+                        <th>收盘 · 所选坐标</th>
                         <th>Core MA20</th>
                         <th>收盘相对MA20</th>
                         <th>紧邻前态 / 变化</th>
@@ -1468,13 +1475,23 @@
               class="raw-period-research"
               aria-labelledby="rawPeriodTitle"
             >
-              <h3 id="rawPeriodTitle">来源代码后验周/月K线与趋势观察</h3>
+              <h3 id="rawPeriodTitle">BaoStock后验周/月K线与趋势观察</h3>
               <p class="muted">
-                NON_PIT_RAW_DIAGNOSTIC · 自然周/月按官方交易日历聚合真实PG Raw；
+                NON_PIT_RETROSPECTIVE ·
+                自然周/月按官方交易日历聚合所选BaoStock价格坐标；
                 未闭合周期不展示部分OHLC，缺Bar不推断停牌或退市。
               </p>
+              <label for="priceCoordinateSelect">
+                价格坐标
+                <select id="priceCoordinateSelect">
+                  <option value="RAW_UNADJUSTED">未复权（BaoStock RAW）</option>
+                  <option value="FORWARD_ADJUSTED">
+                    前复权（BaoStock QFQ）
+                  </option>
+                </select>
+              </label>
               <div id="rawPeriodStatus" class="population" role="status">
-                正在读取该来源代码的真实Raw周期观察。
+                正在读取该来源代码的BaoStock价格周期观察。
               </div>
               <div id="rawPeriodIdentity" class="population"></div>
               <div id="rawPeriodTrends" class="period-trends"></div>
@@ -1485,7 +1502,7 @@
                     <tr>
                       <th>周期</th>
                       <th>闭合 / 覆盖</th>
-                      <th>OHLC · RAW_UNADJUSTED</th>
+                      <th>OHLC · 所选坐标</th>
                       <th>有效Bar / 日历会话</th>
                       <th>缺Bar / 读取失败 / 未保存</th>
                       <th>真实来源日线</th>
@@ -1505,7 +1522,7 @@
                     <tr>
                       <th>周期</th>
                       <th>闭合 / 覆盖</th>
-                      <th>OHLC · RAW_UNADJUSTED</th>
+                      <th>OHLC · 所选坐标</th>
                       <th>有效Bar / 日历会话</th>
                       <th>缺Bar / 读取失败 / 未保存</th>
                       <th>真实来源日线</th>
@@ -1521,8 +1538,8 @@
               <div class="unavailable">
                 <strong>正式资格继续未知</strong>
                 <span>
-                  复权共坐标、稳定 security_id、公司行为选集、上市总体与严格 PIT
-                  未由本页面证明；正式 profile.closed_week/month 保持 UNKNOWN。
+                  严格PIT、稳定 security_id与官方上市总体未由本页面证明；正式
+                  profile.closed_week/month 保持 UNKNOWN。
                 </span>
               </div>
             </section>
@@ -1531,14 +1548,14 @@
               ><span
                 >永久security_id、官方上市总体、上市生命周期、停复牌历史及严格PIT：<code
                   >UNKNOWN / NOT_CONNECTED</code
-                >。TDX来源代码级价格查询仍可用；缺Bar不代表停牌、退市或上市前。</span
+                >。价格来源为BaoStock；行业/GN成员仍按独立TDX快照读取。缺Bar不代表停牌、退市或上市前。</span
               >
             </div>
           </div>
         </section>
       </div>
       <footer>
-        Stock A 本机来源级研究预览 · PostgreSQL只读 · RAW_UNADJUSTED ·
+        Stock A 本机来源级研究预览 · PostgreSQL只读 · BaoStock RAW/QFQ ·
         NON_PIT_RETROSPECTIVE
       </footer>
     </main>

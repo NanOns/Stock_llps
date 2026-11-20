@@ -18,7 +18,7 @@ def read_source_enrollment_cohort(
     *,
     target: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     history_session_count: int,
     d1_history_session_count: int,
@@ -31,8 +31,8 @@ def read_source_enrollment_cohort(
         or type(research_cutoff) is not date
         or target > research_cutoff
         or rule not in RULES
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(history_session_count) is not int
         or type(d1_history_session_count) is not int
         or type(event_window_start) is not date
@@ -53,7 +53,7 @@ def read_source_enrollment_cohort(
         config,
         target=target,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         history_session_count=history_session_count,
         d1_history_session_count=d1_history_session_count,

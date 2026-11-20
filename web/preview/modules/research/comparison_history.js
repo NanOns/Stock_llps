@@ -8,7 +8,7 @@ function validateMa20DirectionHistory(data) {
     !binding ||
     binding.target_session !== data.target_session ||
     binding.source_symbol !== data.symbol ||
-    binding.source_package_id !== data.source_package_id ||
+    binding.source_capture_id !== data.source_capture_id ||
     binding.calendar_id !== data.calendar_id ||
     binding.calendar_revision !== data.calendar_revision ||
     binding.price_coordinate !== data.price_coordinate ||
@@ -60,23 +60,28 @@ function validateMa20DirectionHistory(data) {
 }
 function validateComparisonTimeline(data, selection) {
   if (
-    data.price_coordinate !== "RAW_UNADJUSTED" ||
+    data.price_coordinate !== "FORWARD_ADJUSTED" ||
+    data.time_role !== "NON_PIT_RETROSPECTIVE" ||
     data.symbol !== selection.source_symbol ||
     data.target_session !== selection.target_session ||
-    data.source_package_id !== selection.source_package_id ||
+    data.source_capture_id !== selection.source_capture_id ||
     data.selection?.source_symbol !== selection.source_symbol ||
     data.selection?.target_session !== selection.target_session ||
-    data.selection?.source_package_id !== selection.source_package_id ||
+    data.selection?.source_capture_id !== selection.source_capture_id ||
     data.selection?.session_count !== 75 ||
     data.snapshot_identity?.target_session !== selection.target_session ||
-    data.snapshot_identity?.source_package_id !== selection.source_package_id ||
+    data.snapshot_identity?.source_capture_id !== selection.source_capture_id ||
+    data.snapshot_identity?.price_coordinate !== "FORWARD_ADJUSTED" ||
+    data.selection?.price_coordinate !== "FORWARD_ADJUSTED" ||
+    data.source_version?.source_capture_id !== selection.source_capture_id ||
+    data.source_version?.price_coordinate !== "FORWARD_ADJUSTED" ||
     data.source_version?.status !== "AVAILABLE" ||
     data.total_session_count > 75 ||
     !Array.isArray(data.points) ||
     data.points.length !== data.total_session_count
   )
     throw new Error(
-      "75会话响应的代码、RAW坐标或精确来源包版本不匹配，已拒绝加入对照。",
+      "75会话响应的代码、前复权坐标或精确价格捕获不匹配，已拒绝加入对照。",
     );
   validateMa20DirectionHistory(data);
   const dates = data.points.map((point) => point.session_date);
@@ -85,7 +90,8 @@ function validateComparisonTimeline(data, selection) {
     data.points.some(
       (point) =>
         point.source_symbol !== selection.source_symbol ||
-        point.source_package_id !== selection.source_package_id,
+        point.source_capture_id !== selection.source_capture_id ||
+        point.price_coordinate !== "FORWARD_ADJUSTED",
     )
   )
     throw new Error("轨迹日期或逐日来源身份不完整，已拒绝同日合并。");
@@ -152,27 +158,28 @@ function validateComparisonRawPeriods(data, selection, timeline) {
   if (
     !identity ||
     data?.ok !== true ||
-    data.research_mode !== "NON_PIT_RAW_DIAGNOSTIC" ||
+    !String(data.research_mode || "").includes("NON_PIT") ||
     data.identity_status !== "SOURCE_SYMBOL_ONLY" ||
     data.pit_status !== "NON_PIT_RETROSPECTIVE" ||
-    data.price_coordinate !== "RAW_UNADJUSTED" ||
+    data.price_coordinate !== "FORWARD_ADJUSTED" ||
+    data.time_role !== "NON_PIT_RETROSPECTIVE" ||
     data.target_session !== selection.target_session ||
     data.source_symbol !== selection.source_symbol ||
     data.symbol !== selection.source_symbol ||
-    data.source_package_id !== selection.source_package_id ||
+    data.source_capture_id !== selection.source_capture_id ||
     data.calendar_id !== timeline.calendar_id ||
     data.calendar_revision !== timeline.calendar_revision ||
     data.history_window?.start_session !== timeline.session_start ||
     data.history_window?.end_session !== selection.target_session ||
     responseSelection?.source_symbol !== selection.source_symbol ||
     responseSelection?.target_session !== selection.target_session ||
-    responseSelection?.source_package_id !== selection.source_package_id ||
+    responseSelection?.source_capture_id !== selection.source_capture_id ||
     identity.target_session !== selection.target_session ||
-    identity.source_package_id !== selection.source_package_id ||
+    identity.source_capture_id !== selection.source_capture_id ||
     identity.identity_type !== timeline.snapshot_identity.identity_type ||
     identity.application_id !== timeline.snapshot_identity.application_id ||
     identity.preview_mode !== timeline.snapshot_identity.preview_mode ||
-    identity.price_coordinate !== "RAW_UNADJUSTED" ||
+    identity.price_coordinate !== "FORWARD_ADJUSTED" ||
     identity.core_algorithm_version !==
       timeline.snapshot_identity.core_algorithm_version ||
     identity.research_entry_version !==
@@ -183,13 +190,12 @@ function validateComparisonRawPeriods(data, selection, timeline) {
     sourceVersion?.status !== "AVAILABLE" ||
     sourceVersion?.source_capture_id !==
       timeline.source_version?.source_capture_id ||
-    sourceVersion?.source_package_id !==
-      timeline.source_version?.source_package_id ||
+    sourceVersion?.price_coordinate !== "FORWARD_ADJUSTED" ||
     !Array.isArray(data.periods?.week) ||
     !Array.isArray(data.periods?.month)
   )
     throw new Error(
-      "闭周/月响应的来源版本、日历、窗口或RAW坐标与75会话轨迹不一致。",
+      "闭周/月响应的来源版本、日历、窗口或前复权坐标与75会话轨迹不一致。",
     );
   for (const [kind, periods] of Object.entries(data.periods)) {
     const seen = new Set();
@@ -208,9 +214,14 @@ function validateComparisonRawPeriods(data, selection, timeline) {
         ) ||
         !Array.isArray(period.reason_codes) ||
         seen.has(period.period_key) ||
-        !Array.isArray(period.source_source_package_ids) ||
-        period.source_source_package_ids.some(
-          (packageId) => packageId !== selection.source_package_id,
+        period.source_capture_id !== selection.source_capture_id ||
+        period.price_coordinate !== "FORWARD_ADJUSTED" ||
+        period.time_role !== "NON_PIT_RETROSPECTIVE" ||
+        !Array.isArray(period.daily_rows) ||
+        period.daily_rows.some(
+          (row) =>
+            row.source_capture_id !== selection.source_capture_id ||
+            row.price_coordinate !== "FORWARD_ADJUSTED",
         )
       )
         throw new Error("闭周/月响应含错序、重复或来源身份不完整的周期行。");
@@ -235,7 +246,7 @@ function comparisonBasketRequestKey(basket) {
   return basket
     .map(
       (item) =>
-        `${item.source_symbol}|${item.target_session}|${item.source_package_id}|${item.profile_revision}`,
+        `${item.source_symbol}|${item.target_session}|${item.source_capture_id}|${item.profile_revision}`,
     )
     .join(";");
 }
@@ -269,8 +280,9 @@ async function loadComparisonRawPeriods(entries, requestId, requestKey) {
       try {
         const query = new URLSearchParams({
           target_session: entry.selection.target_session,
-          source_package_id: entry.selection.source_package_id,
+          source_capture_id: entry.selection.source_capture_id,
           symbol: entry.selection.source_symbol,
+          price_coordinate: "FORWARD_ADJUSTED",
         });
         const response = await api(`/api/source-symbol/raw-periods?${query}`);
         return {
@@ -335,8 +347,9 @@ async function compareSelectedSymbols() {
           body: JSON.stringify({
             symbol: selection.source_symbol,
             target_session: selection.target_session,
-            source_package_id: selection.source_package_id,
+            source_capture_id: selection.source_capture_id,
             session_count: 75,
+            price_coordinate: "FORWARD_ADJUSTED",
           }),
         });
         return {
@@ -430,12 +443,16 @@ function openComparisonTimeline(sourceSymbol, sessionDate = null) {
     };
   }
   state.timelineRequest++;
+  state.priceCoordinate = "FORWARD_ADJUSTED";
+  const coordinateSelect = $("priceCoordinateSelect");
+  if (coordinateSelect) coordinateSelect.value = "FORWARD_ADJUSTED";
   state.timeline = entry.data;
   state.timelineContext = {
     target_session: entry.selection.target_session,
-    source_package_id: entry.selection.source_package_id,
+    source_capture_id: entry.selection.source_capture_id,
     symbol: entry.selection.source_symbol,
     session_count: 75,
+    price_coordinate: "FORWARD_ADJUSTED",
     origin: "comparison",
   };
   state.chartPeriodContext = chartContextForTimeline(entry.data);
@@ -448,7 +465,7 @@ function openComparisonTimeline(sourceSymbol, sessionDate = null) {
   state.chartSelection =
     pointIndex >= 0 ? { mode: "day", index: pointIndex } : null;
   clearRawPeriodState(
-    "已复用多股对照已读取的75会话；闭周/月视图按需读现役PG Raw周期接口。",
+    "已复用多股对照已读取的75会话；闭周/月视图按需读BaoStock指定坐标周期。",
   );
   clearResult();
   $("stockResult").classList.add("timeline-only");
@@ -456,11 +473,11 @@ function openComparisonTimeline(sourceSymbol, sessionDate = null) {
   $("resultTitle").textContent =
     `${sourceSymbol} · ${entry.selection.target_session}`;
   $("resultMode").textContent =
-    "复用多股对照的现役75会话轨迹 · SOURCE_SYMBOL_ONLY · RAW_UNADJUSTED · NON_PIT";
-  $("snapshotId").textContent = entry.selection.source_package_id;
+    "复用多股对照的现役75会话轨迹 · SOURCE_SYMBOL_ONLY · FORWARD_ADJUSTED · NON_PIT_RETROSPECTIVE";
+  $("snapshotId").textContent = entry.selection.source_capture_id;
   $("windowText").textContent = "75个官方会话";
   $("versionSelect").value =
-    `${entry.selection.target_session}|${entry.selection.source_package_id}`;
+    `${entry.selection.target_session}|${entry.selection.source_capture_id}`;
   $("symbolInput").value = sourceSymbol;
   $("windowInput").value = "75";
   renderTimeline(entry.data);

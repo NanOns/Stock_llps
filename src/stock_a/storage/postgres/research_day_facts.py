@@ -35,7 +35,7 @@ _D0_COLUMNS = (
     "target_session",
     "source_symbol",
     "market",
-    "source_package_id",
+    "source_capture_id",
     "before_capture_id",
     "target_capture_id",
     "producer_version",
@@ -66,7 +66,7 @@ _D1_COLUMNS = (
     "market",
     "board",
     "structure_type",
-    "source_package_id",
+    "source_capture_id",
     "target_capture_id",
     "d1_history_session_count",
     "history_window_start",
@@ -156,7 +156,7 @@ _ANCHOR_COLUMNS = (
     "gap_after_reason",
 )
 _D0_KEY = (
-    "source_package_id",
+    "source_capture_id",
     "target_session",
     "source_symbol",
     "before_capture_id",
@@ -167,7 +167,7 @@ _D0_KEY = (
     "calendar_revision",
 )
 _D1_KEY = (
-    "source_package_id",
+    "source_capture_id",
     "target_session",
     "source_symbol",
     "structure_type",
@@ -228,7 +228,7 @@ def _d0_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 facts.target_session,
                 item.source_symbol,
                 item.market,
-                facts.source_package_id,
+                facts.source_capture_id,
                 facts.before_capture_id,
                 facts.target_capture_id,
                 facts.d0_producer_version,
@@ -250,7 +250,7 @@ def _d0_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 facts.calendar_id,
                 facts.calendar_revision,
                 "NON_PIT_RETROSPECTIVE",
-                "RAW_UNADJUSTED",
+                "FORWARD_ADJUSTED",
             )
         )
     return result
@@ -269,7 +269,7 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 item.market,
                 item.board,
                 item.structure_type,
-                facts.source_package_id,
+                facts.source_capture_id,
                 facts.target_capture_id,
                 facts.d1_history_session_count,
                 facts.d1_history_window_start,
@@ -283,7 +283,7 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 facts.source_clock_role,
                 _available_at(facts.source_available_at),
                 "NON_PIT_RETROSPECTIVE",
-                "RAW_UNADJUSTED",
+                "FORWARD_ADJUSTED",
                 item.history_row_count,
                 item.target_bar_status,
                 item.target_bar_reason,
@@ -384,8 +384,8 @@ def _validate_facts(
         or type(include_d1) is not bool
         or not (include_d0 or include_d1)
         or facts.target_session <= facts.before_session
-        or type(facts.source_package_id) is not int
-        or facts.source_package_id <= 0
+        or type(facts.source_capture_id) is not int
+        or facts.source_capture_id <= 0
         or type(facts.before_capture_id) is not int
         or type(facts.target_capture_id) is not int
         or facts.before_capture_id <= 0
@@ -470,7 +470,7 @@ def _validate_facts(
             _SYMBOL.fullmatch(item.source_symbol) is None
             or item.market not in {"SH", "SZ"}
             or item.source_symbol[:2] != item.market
-            or item.board not in {"MAIN_BOARD", "GEM"}
+            or item.board not in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
             or item.structure_type not in _STRUCTURE_TYPE_SET
             or item.generation_state not in {"GENERATED", "NOT_GENERATED", "UNKNOWN"}
             or item.history_row_count < 1
@@ -546,6 +546,20 @@ def _row_matches(expected: Sequence[Any], actual: Sequence[Any]) -> bool:
     ) == tuple(map(_normalize_value, actual))
 
 
+def _row_difference_columns(
+    expected: Sequence[Any], actual: Sequence[Any], columns: Sequence[str]
+) -> tuple[str, ...]:
+    if len(expected) != len(actual) or len(expected) != len(columns):
+        return ("ROW_WIDTH",)
+    return tuple(
+        name
+        for name, expected_value, actual_value in zip(
+            columns, expected, actual, strict=True
+        )
+        if _normalize_value(expected_value) != _normalize_value(actual_value)
+    )
+
+
 def _sort_rows(
     rows: Sequence[Sequence[Any]], columns: Sequence[str], key: Sequence[str]
 ) -> list[tuple[Any, ...]]:
@@ -562,13 +576,13 @@ def _scope_predicate(
 ) -> tuple[str, tuple[Any, ...]]:
     if table_name.endswith("source_d0_launch_day_facts"):
         return (
-            "target_session=%s AND source_package_id=%s "
+            "target_session=%s AND source_capture_id=%s "
             "AND before_capture_id=%s AND target_capture_id=%s AND producer_version=%s "
             "AND algorithm_contract=%s AND session_contract=%s "
             "AND calendar_revision=%s",
             (
                 facts.target_session,
-                facts.source_package_id,
+                facts.source_capture_id,
                 facts.before_capture_id,
                 facts.target_capture_id,
                 facts.d0_producer_version,
@@ -579,14 +593,14 @@ def _scope_predicate(
         )
     if table_name.endswith("source_d1_structure_day_facts"):
         return (
-            "target_session=%s AND source_package_id=%s "
+            "target_session=%s AND source_capture_id=%s "
             "AND target_capture_id=%s AND d1_history_session_count=%s "
             "AND calendar_revision=%s "
             "AND producer_contract=%s AND producer_version=%s "
             "AND material_change_contract=%s",
             (
                 facts.target_session,
-                facts.source_package_id,
+                facts.source_capture_id,
                 facts.target_capture_id,
                 facts.d1_history_session_count,
                 facts.calendar_revision,
@@ -615,13 +629,13 @@ def _verify_raw_source(
         f"""
         SELECT session_date, count(*), count(DISTINCT source_symbol),
                count(DISTINCT source_capture_id), min(source_capture_id),
-               count(DISTINCT source_package_id), min(source_package_id)
+               count(DISTINCT source_capture_id), min(source_capture_id)
         FROM source_raw_daily
-        WHERE source_package_id=%s
+        WHERE source_capture_id=%s
           AND session_date IN ({placeholders})
         GROUP BY session_date ORDER BY session_date
         """,
-        (facts.source_package_id, *sessions),
+        (facts.source_capture_id, *sessions),
     )
     observed = {row[0]: row[1:] for row in cursor.fetchall()}
     target = observed.get(facts.target_session)
@@ -635,7 +649,7 @@ def _verify_raw_source(
         or target[2] != 1
         or target[3] != facts.target_capture_id
         or target[4] != 1
-        or target[5] != facts.source_package_id
+        or target[5] != facts.source_capture_id
         or (
             include_d0
             and (
@@ -652,11 +666,11 @@ def _verify_raw_source(
     cursor.execute(
         f"""
         SELECT session_date, source_symbol FROM source_raw_daily
-        WHERE source_package_id=%s
+        WHERE source_capture_id=%s
           AND session_date IN ({placeholders})
         ORDER BY session_date, source_symbol
         """,
-        (facts.source_package_id, *sessions),
+        (facts.source_capture_id, *sessions),
     )
     raw_symbols_by_session = {session: set() for session in sessions}
     for session_date, source_symbol in cursor.fetchall():
@@ -732,21 +746,25 @@ def _insert_rows(
     if not rows:
         return 0
     placeholders = ", ".join(["%s"] * len(columns))
-    # 0022以捕获父键收窄唯一约束；调用方可保留更严格的范围比较。
+    # 0059将多日事实唯一键统一为paired capture加目标会话及来源业务维度。
     current_keys = {
         "source_d0_launch_day_facts": (
-            "target_capture_id",
+            "source_capture_id",
+            "target_session",
             "source_symbol",
             "before_capture_id",
+            "target_capture_id",
             "producer_version",
             "algorithm_contract",
             "session_contract",
             "calendar_revision",
         ),
         "source_d1_structure_day_facts": (
-            "target_capture_id",
+            "source_capture_id",
+            "target_session",
             "source_symbol",
             "structure_type",
+            "target_capture_id",
             "d1_history_session_count",
             "calendar_revision",
             "producer_contract",
@@ -754,24 +772,20 @@ def _insert_rows(
             "material_change_contract",
         ),
         "source_d0_scenario_day_facts": (
-            "source_capture_id",
+            "target_session",
             "source_symbol",
+            "source_capture_id",
             "scenario",
             "producer_version",
             "calendar_revision",
         ),
         "source_pool_seed_day_facts": (
-            "source_capture_id",
+            "target_session",
             "source_symbol",
+            "source_capture_id",
             "profile_revision",
             "producer_version",
         ),
-        "source_market_breadth_days": (
-            "source_capture_id",
-            "contract_version",
-            "calendar_revision",
-        ),
-        "source_market_breadth_symbols": ("breadth_day_id", "source_symbol"),
     }
     conflict = ", ".join(current_keys.get(table.rsplit(".", 1)[-1], key))
     inserted = 0
@@ -870,13 +884,53 @@ def _persist_source_research_day_once(
             actual_d0 = _select_rows(
                 cursor, "source_d0_launch_day_facts", _D0_COLUMNS, predicate, params
             )
-            if len(actual_d0) != len(d0_rows) or any(
-                not _row_matches(expected, persisted)
-                for expected, persisted in zip(d0_rows, actual_d0, strict=True)
-            ):
+            d0_mismatch_details = [
+                {
+                    "source_symbol": expected[_D0_COLUMNS.index("source_symbol")],
+                    "columns": list(
+                        _row_difference_columns(expected, persisted, _D0_COLUMNS)
+                    ),
+                }
+                for expected, persisted in zip(d0_rows, actual_d0, strict=False)
+                if not _row_matches(expected, persisted)
+            ][:3]
+            if len(actual_d0) != len(d0_rows) or d0_mismatch_details:
+                cursor.execute(
+                    """SELECT count(*)::bigint,
+                              count(DISTINCT before_capture_id)::bigint,
+                              count(DISTINCT target_capture_id)::bigint
+                       FROM source_d0_launch_day_facts
+                       WHERE target_session=%s AND source_capture_id=%s""",
+                    (facts.target_session, facts.source_capture_id),
+                )
+                broad_count, before_capture_count, target_capture_count = (
+                    cursor.fetchone()
+                )
+                expected_sample = (
+                    {
+                        name: d0_rows[0][_D0_COLUMNS.index(name)]
+                        for name in (
+                            "target_session",
+                            "source_capture_id",
+                            "before_capture_id",
+                            "target_capture_id",
+                            "producer_version",
+                            "algorithm_contract",
+                            "session_contract",
+                            "calendar_revision",
+                        )
+                    }
+                    if d0_rows
+                    else None
+                )
                 raise ResearchDayPgError(
                     "RESEARCH_DAY_TYPED_READBACK_MISMATCH",
-                    "D0 typed事实事务内读回不一致，拒绝提交",
+                    "D0 typed事实事务内读回不一致，拒绝提交："
+                    f"预期行数={len(d0_rows)}，实际行数={len(actual_d0)}，"
+                    f"capture范围行数={int(broad_count)}，"
+                    f"before_capture种类数={int(before_capture_count)}，"
+                    f"target_capture种类数={int(target_capture_count)}，"
+                    f"首行键={expected_sample}，差异样例={d0_mismatch_details}",
                 )
             from stock_a.storage.postgres.research_enrollment import (
                 insert_d0_enrollments,
@@ -885,10 +939,10 @@ def _persist_source_research_day_once(
             enrollment = insert_d0_enrollments(
                 cursor,
                 target=facts.target_session,
-                package=facts.source_package_id,
-                capture=facts.target_capture_id,
+                source_capture_id=facts.source_capture_id,
+                target_capture_id=facts.target_capture_id,
                 before=facts.before_session,
-                before_capture=facts.before_capture_id,
+                before_capture_id=facts.before_capture_id,
                 producer_version=facts.d0_producer_version,
                 algorithm_contract=facts.d0_algorithm_contract,
                 session_contract=facts.d0_session_contract,
@@ -1086,7 +1140,7 @@ def _read_selected_board_observation(
     cursor: Any,
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     target_capture_id: int,
     d1_history_session_count: int,
     d1_predicate: str,
@@ -1158,8 +1212,8 @@ def _read_selected_board_observation(
 
     cursor.execute(
         "SELECT source_symbol FROM source_raw_daily "
-        "WHERE session_date=%s AND source_package_id=%s AND source_capture_id=%s",
-        (target_session, source_package_id, target_capture_id),
+        "WHERE session_date=%s AND source_capture_id=%s",
+        (target_session, source_capture_id),
     )
     target_source_symbols = {row[0] for row in cursor.fetchall()}
 
@@ -1180,18 +1234,21 @@ def _read_selected_board_observation(
         "history_session_count, calendar_id, calendar_revision, research_mode, "
         "price_coordinate, count(*)::bigint, count(DISTINCT source_symbol)::bigint "
         "FROM source_pool_seed_day_facts "
-        "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+        "WHERE target_session=%s AND source_capture_id=%s "
         "GROUP BY profile_revision, producer_contract, producer_version, "
         "history_session_count, calendar_id, calendar_revision, research_mode, price_coordinate "
         "ORDER BY profile_revision, producer_contract, producer_version, history_session_count",
-        (target_session, source_package_id, target_capture_id),
+        (target_session, source_capture_id),
     )
     seed_scopes = cursor.fetchall()
     seed_scope = None
     seed_scope_status = "NOT_COMPUTED"
     if len(seed_scopes) == 1:
         candidate = seed_scopes[0]
-        if candidate[6] == "NON_PIT_RETROSPECTIVE" and candidate[7] == "RAW_UNADJUSTED":
+        if (
+            candidate[6] == "NON_PIT_RETROSPECTIVE"
+            and candidate[7] == "FORWARD_ADJUSTED"
+        ):
             seed_scope = candidate
             seed_scope_status = (
                 "AVAILABLE"
@@ -1212,15 +1269,14 @@ def _read_selected_board_observation(
             "target_close_quality, rps5_numerator, rps5_denominator, rps5_quality, "
             "rps20_numerator, rps20_denominator, rps20_quality "
             "FROM source_pool_seed_day_facts "
-            "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s "
             "AND profile_revision=%s AND producer_contract=%s AND producer_version=%s "
             "AND history_session_count=%s AND calendar_id=%s AND calendar_revision=%s "
             "AND research_mode=%s AND price_coordinate=%s AND source_symbol=ANY(%s) "
             "ORDER BY source_symbol",
             (
                 target_session,
-                source_package_id,
-                target_capture_id,
+                source_capture_id,
                 *seed_scope[:8],
                 symbols,
             ),
@@ -1519,7 +1575,7 @@ def read_source_research_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     d1_history_session_count: int,
     offset: int = 0,
     limit: int = 30,
@@ -1535,8 +1591,8 @@ def read_source_research_day(
     """只读分页读取PG事实；未迁移或未计算时返回明确状态，不重算回退。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(d1_history_session_count) is not int
         or not 1 <= d1_history_session_count <= 32767
         or type(offset) is not int
@@ -1574,7 +1630,7 @@ def read_source_research_day(
         return {
             "storage_status": "INCOMPLETE",
             "target_session": target_session.isoformat(),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "d1_history_session_count": d1_history_session_count,
             "results": [],
             "reason": reason,
@@ -1595,7 +1651,7 @@ def read_source_research_day(
             return {
                 "storage_status": "NOT_COMPUTED",
                 "target_session": target_session.isoformat(),
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
                 "d1_history_session_count": d1_history_session_count,
                 "results": [],
                 "reason": "R06事实迁移尚未应用",
@@ -1604,17 +1660,17 @@ def read_source_research_day(
             "SELECT DISTINCT target_capture_id, calendar_revision, "
             "producer_contract, producer_version, material_change_contract "
             "FROM source_d1_structure_day_facts "
-            "WHERE target_session=%s AND source_package_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s "
             "AND d1_history_session_count=%s ORDER BY target_capture_id, calendar_revision, "
             "producer_contract, producer_version, material_change_contract",
-            (target_session, source_package_id, d1_history_session_count),
+            (target_session, source_capture_id, d1_history_session_count),
         )
         d1_scopes = cursor.fetchall()
         if not d1_scopes:
             return {
                 "storage_status": "NOT_COMPUTED",
                 "target_session": target_session.isoformat(),
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
                 "d1_history_session_count": d1_history_session_count,
                 "results": [],
                 "reason": "该精确来源与D1窗口尚无已保存研究事实",
@@ -1631,7 +1687,7 @@ def read_source_research_day(
             material_change_contract,
         ) = d1_scopes[0]
         d1_predicate = (
-            "target_session=%s AND source_package_id=%s "
+            "target_session=%s AND source_capture_id=%s "
             "AND target_capture_id=%s AND d1_history_session_count=%s "
             "AND calendar_revision=%s "
             "AND producer_contract=%s AND producer_version=%s "
@@ -1639,7 +1695,7 @@ def read_source_research_day(
         )
         d1_params = (
             target_session,
-            source_package_id,
+            source_capture_id,
             target_capture_id,
             d1_history_session_count,
             calendar_revision,
@@ -1678,7 +1734,7 @@ def read_source_research_day(
             f"SELECT before_session, history_window_start, history_window_end, "
             f"calendar_id, calendar_revision, producer_contract, material_change_contract, "
             f"source_time_quality, source_clock_role, source_available_at, research_mode, "
-            f"price_coordinate, min(source_package_id), count(DISTINCT source_package_id), "
+            f"price_coordinate, min(source_capture_id), count(DISTINCT source_capture_id), "
             f"count(DISTINCT source_symbol), count(*) "
             f"FROM source_d1_structure_day_facts WHERE {d1_predicate} "
             f"GROUP BY before_session, history_window_start, history_window_end, calendar_id, "
@@ -1695,7 +1751,7 @@ def read_source_research_day(
             )
         d1_context = contexts[0]
         before_session = d1_context[0]
-        source_package_id = d1_context[12]
+        source_capture_id = d1_context[12]
         if d1_context[13] != 1:
             return incomplete_result(
                 "D1逐股事实绑定多个来源数据包",
@@ -1750,10 +1806,10 @@ def read_source_research_day(
             "before_source_count, target_source_count, union_source_count, before_window_start, "
             "target_window_start, calendar_id, calendar_revision, "
             "source_time_quality, source_clock_role, source_available_at, research_mode, price_coordinate, "
-            "source_package_id, before_session "
+            "source_capture_id, before_session "
             "FROM source_d0_launch_day_facts WHERE target_session=%s "
-            "AND source_package_id=%s AND target_capture_id=%s ORDER BY before_capture_id, producer_version, session_contract",
-            (target_session, source_package_id, target_capture_id),
+            "AND source_capture_id=%s AND target_capture_id=%s ORDER BY before_capture_id, producer_version, session_contract",
+            (target_session, source_capture_id, target_capture_id),
         )
         d0_scopes = cursor.fetchall()
         if not d0_scopes:
@@ -1764,11 +1820,11 @@ def read_source_research_day(
                 "目标D0事实缺失或读取键不唯一",
             )
         d0_scope = d0_scopes[0]
-        if d0_scope[16] != source_package_id:
+        if d0_scope[16] != source_capture_id:
             return incomplete_result(
                 "D0与D1绑定的来源数据包编号不一致",
-                d0_source_package_id=d0_scope[16],
-                d1_source_package_id=source_package_id,
+                d0_source_capture_id=d0_scope[16],
+                d1_source_capture_id=source_capture_id,
             )
         if d0_scope[10] != calendar_revision or d0_scope[17] != before_session:
             return incomplete_result(
@@ -1779,14 +1835,14 @@ def read_source_research_day(
                 d1_calendar_revision=calendar_revision,
             )
         d0_predicate = (
-            "target_session=%s AND source_package_id=%s "
+            "target_session=%s AND source_capture_id=%s "
             "AND before_capture_id=%s AND target_capture_id=%s "
             "AND producer_version=%s AND algorithm_contract=%s AND session_contract=%s "
             "AND calendar_revision=%s"
         )
         d0_params = (
             target_session,
-            source_package_id,
+            source_capture_id,
             d0_scope[0],
             target_capture_id,
             d0_scope[1],
@@ -1866,7 +1922,7 @@ def read_source_research_day(
         )
 
         d1_alias_predicate = (
-            "d.target_session=%s AND d.source_package_id=%s "
+            "d.target_session=%s AND d.source_capture_id=%s "
             "AND d.target_capture_id=%s AND d.d1_history_session_count=%s "
             "AND d.calendar_revision=%s "
             "AND d.producer_contract=%s AND d.producer_version=%s "
@@ -2071,7 +2127,7 @@ def read_source_research_day(
             selected_board_observation = _read_selected_board_observation(
                 cursor,
                 target_session=target_session,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 target_capture_id=target_capture_id,
                 d1_history_session_count=d1_history_session_count,
                 d1_predicate=d1_predicate,
@@ -2088,7 +2144,7 @@ def read_source_research_day(
             "storage_status": "SAVED",
             "target_session": target_session.isoformat(),
             "before_session": _json_value(before_session),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "target_capture_id": target_capture_id,
             "d1_history_session_count": d1_history_session_count,
             "calendar_revision": calendar_revision,
@@ -2096,7 +2152,7 @@ def read_source_research_day(
             "d1_producer_version": d1_producer_version,
             "d1_material_change_contract": material_change_contract,
             "research_mode": "NON_PIT_RETROSPECTIVE",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "result_status": result_status,
             "membership_snapshots": [
                 {
@@ -2149,13 +2205,13 @@ def read_source_research_day(
 
 
 def read_source_research_day_scope(
-    config: Mapping[str, Any], *, target_session: date, source_package_id: int
+    config: Mapping[str, Any], *, target_session: date, source_capture_id: int
 ) -> dict[str, Any]:
     """读取单日D1 typed事实的唯一已保存窗口键，不计算或修改事实。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise ResearchDayPgError("RESEARCH_DAY_QUERY_INVALID", "PG研究事实范围键无效")
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
@@ -2170,7 +2226,7 @@ def read_source_research_day_scope(
             return {
                 "status": "NOT_COMPUTED",
                 "target_session": target_session.isoformat(),
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
                 "d1_history_session_count": None,
                 "scope_count": 0,
                 "database_write_attempted": False,
@@ -2181,17 +2237,17 @@ def read_source_research_day_scope(
             "SELECT DISTINCT d1_history_session_count, target_capture_id, "
             "calendar_revision, producer_contract, producer_version, "
             "material_change_contract FROM source_d1_structure_day_facts "
-            "WHERE target_session=%s AND source_package_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s "
             "ORDER BY d1_history_session_count, target_capture_id, calendar_revision, "
             "producer_contract, producer_version, material_change_contract",
-            (target_session, source_package_id),
+            (target_session, source_capture_id),
         )
         scopes = cursor.fetchall()
     if not scopes:
         return {
             "status": "NOT_COMPUTED",
             "target_session": target_session.isoformat(),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "d1_history_session_count": None,
             "scope_count": 0,
             "database_write_attempted": False,
@@ -2206,7 +2262,7 @@ def read_source_research_day_scope(
     return {
         "status": "SAVED_SCOPE_UNIQUE",
         "target_session": target_session.isoformat(),
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "d1_history_session_count": scopes[0][0],
         "target_capture_id": scopes[0][1],
         "calendar_revision": scopes[0][2],
@@ -2224,7 +2280,7 @@ def read_source_board_comparison(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     d1_history_session_count: int,
     snapshot_ids: Mapping[str, int | None],
     board_a_kind: str,
@@ -2235,8 +2291,8 @@ def read_source_board_comparison(
     """在同一只读快照内比较两个当前板块及其已存来源级事实。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(d1_history_session_count) is not int
         or not 1 <= d1_history_session_count <= 32767
         or not isinstance(snapshot_ids, Mapping)
@@ -2300,11 +2356,10 @@ def read_source_board_comparison(
             "SELECT DISTINCT r.source_capture_id,c.normalized_count "
             "FROM source_raw_daily r JOIN source_captures c "
             "ON c.capture_id=r.source_capture_id "
-            "AND c.source_package_id=r.source_package_id "
             "AND c.target_session=r.session_date "
-            "WHERE r.session_date=%s AND r.source_package_id=%s "
+            "WHERE r.session_date=%s AND r.source_capture_id=%s "
             "ORDER BY r.source_capture_id LIMIT 2",
-            (target_session, source_package_id),
+            (target_session, source_capture_id),
         )
         captures = cursor.fetchall()
         if len(captures) != 1:
@@ -2315,9 +2370,9 @@ def read_source_board_comparison(
         target_capture_id, expected_source_count = captures[0]
         cursor.execute(
             "SELECT source_symbol FROM source_raw_daily "
-            "WHERE session_date=%s AND source_package_id=%s "
-            "AND source_capture_id=%s ORDER BY source_symbol",
-            (target_session, source_package_id, target_capture_id),
+            "WHERE session_date=%s AND source_capture_id=%s "
+            "ORDER BY source_symbol",
+            (target_session, source_capture_id),
         )
         source_symbols = {row[0] for row in cursor.fetchall()}
         source_pool_status = (
@@ -2352,9 +2407,9 @@ def read_source_board_comparison(
         cursor.execute(
             "SELECT DISTINCT before_capture_id,producer_version,algorithm_contract,"
             "session_contract,calendar_revision FROM source_d0_launch_day_facts "
-            "WHERE target_session=%s AND source_package_id=%s AND target_capture_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s "
             "ORDER BY before_capture_id,producer_version,algorithm_contract",
-            (target_session, source_package_id, target_capture_id),
+            (target_session, source_capture_id, target_capture_id),
         )
         d0_scopes = cursor.fetchall()
         d0_by_symbol: dict[str, tuple[str | None, str | None]] = {}
@@ -2362,14 +2417,14 @@ def read_source_board_comparison(
         if len(d0_scopes) == 1:
             d0_scope = d0_scopes[0]
             d0_predicate = (
-                "target_session=%s AND source_package_id=%s "
+                "target_session=%s AND source_capture_id=%s "
                 "AND before_capture_id=%s AND target_capture_id=%s "
                 "AND producer_version=%s AND algorithm_contract=%s "
                 "AND session_contract=%s AND calendar_revision=%s"
             )
             d0_params = (
                 target_session,
-                source_package_id,
+                source_capture_id,
                 d0_scope[0],
                 target_capture_id,
                 d0_scope[1],
@@ -2394,9 +2449,9 @@ def read_source_board_comparison(
             "SELECT DISTINCT profile_revision,producer_contract,producer_version,"
             "history_session_count,calendar_id,calendar_revision,research_mode,"
             "price_coordinate FROM source_pool_seed_day_facts "
-            "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s "
             "ORDER BY profile_revision,producer_version",
-            (target_session, source_package_id, target_capture_id),
+            (target_session, source_capture_id),
         )
         seed_scopes = cursor.fetchall()
         seed_by_symbol: dict[str, str] = {}
@@ -2405,15 +2460,15 @@ def read_source_board_comparison(
             seed_scope = seed_scopes[0]
             if (
                 seed_scope[6] == "NON_PIT_RETROSPECTIVE"
-                and seed_scope[7] == "RAW_UNADJUSTED"
+                and seed_scope[7] == "FORWARD_ADJUSTED"
             ):
                 cursor.execute(
                     "SELECT source_symbol,source_seed_state FROM source_pool_seed_day_facts "
-                    "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+                    "WHERE target_session=%s AND source_capture_id=%s "
                     "AND profile_revision=%s AND producer_contract=%s AND producer_version=%s "
                     "AND history_session_count=%s AND calendar_id=%s AND calendar_revision=%s "
                     "AND research_mode=%s AND price_coordinate=%s",
-                    (target_session, source_package_id, target_capture_id, *seed_scope),
+                    (target_session, source_capture_id, *seed_scope),
                 )
                 rows = cursor.fetchall()
                 seed_by_symbol = {row[0]: row[1] or "UNKNOWN" for row in rows}
@@ -2431,12 +2486,12 @@ def read_source_board_comparison(
             "SELECT DISTINCT d1_history_session_count,calendar_revision,"
             "producer_contract,producer_version,material_change_contract,"
             "research_mode,price_coordinate FROM source_d1_structure_day_facts "
-            "WHERE target_session=%s AND source_package_id=%s AND target_capture_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s "
             "AND d1_history_session_count=%s "
             "ORDER BY calendar_revision,producer_contract,producer_version",
             (
                 target_session,
-                source_package_id,
+                source_capture_id,
                 target_capture_id,
                 d1_history_session_count,
             ),
@@ -2448,14 +2503,14 @@ def read_source_board_comparison(
             d1_scope = d1_scopes[0]
             if (
                 d1_scope[5] == "NON_PIT_RETROSPECTIVE"
-                and d1_scope[6] == "RAW_UNADJUSTED"
+                and d1_scope[6] == "FORWARD_ADJUSTED"
             ):
                 cursor.execute(
                     "SELECT source_symbol,"
                     "array_agg(DISTINCT target_price_quality ORDER BY target_price_quality),"
                     "coalesce(sum(material_change_anchor_count),0)::bigint,count(*)::int "
                     "FROM source_d1_structure_day_facts "
-                    "WHERE target_session=%s AND source_package_id=%s AND target_capture_id=%s "
+                    "WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s "
                     "AND d1_history_session_count=%s AND calendar_revision=%s "
                     "AND producer_contract=%s AND producer_version=%s "
                     "AND material_change_contract=%s AND research_mode=%s "
@@ -2463,7 +2518,7 @@ def read_source_board_comparison(
                     "GROUP BY source_symbol",
                     (
                         target_session,
-                        source_package_id,
+                        source_capture_id,
                         target_capture_id,
                         *d1_scope,
                     ),
@@ -2558,8 +2613,7 @@ def read_source_board_comparison(
     return {
         "status": "AVAILABLE" if source_pool_status == "AVAILABLE" else "INCOMPLETE",
         "target_session": target_session.isoformat(),
-        "source_package_id": source_package_id,
-        "source_capture_id": target_capture_id,
+        "source_capture_id": source_capture_id,
         "source_pool_count": len(source_symbols),
         "d0_scope_status": d0_status,
         "seed_scope_status": seed_status,

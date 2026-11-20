@@ -79,7 +79,6 @@ def query_source_stock_seed_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     source_symbol: str,
     profile_revision: str | None,
@@ -92,7 +91,6 @@ def query_source_stock_seed_context(
     identity = {
         "target_session": target_session.isoformat(),
         "source_symbol": source_symbol,
-        "source_package_id": source_package_id,
         "source_capture_id": source_capture_id,
         "profile_revision": profile_revision,
     }
@@ -118,7 +116,6 @@ def query_source_stock_seed_context(
         stored = read_source_stock_seed_fact(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
             profile_revision=profile_revision,
             source_symbol=source_symbol,
@@ -152,7 +149,6 @@ def query_source_stock_seed_context(
     if (
         row["target_session"] != target_session
         or row["source_symbol"] != source_symbol
-        or row["source_package_id"] != source_package_id
         or row["source_capture_id"] != source_capture_id
         or str(row["profile_revision"]).strip() != profile_revision
         or row["source_time_quality"] != source_time_quality

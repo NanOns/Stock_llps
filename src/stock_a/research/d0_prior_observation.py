@@ -12,7 +12,13 @@ from stock_a.research.d0_launch_raw import (
 
 
 def observe_prior_shapes(
-    *, sessions, rows, symbol, source_package_id, parser_contract, historical_rps=None
+    *,
+    sessions,
+    rows,
+    symbol,
+    source_capture_id,
+    price_coordinate="FORWARD_ADJUSTED",
+    historical_rps=None,
 ):
     """逐个过去启动观察计算旧峰；目标日及后续行情不参与父或峰的选择。"""
     sessions = tuple(sessions)
@@ -24,9 +30,9 @@ def observe_prior_shapes(
     by_day = {row["session_date"]: row for row in rows}
     if len(by_day) != len(rows):
         raise ValueError("同一历史会话不得存在重复来源行")
-    same_package = all(
-        row.get("source_package_id") == source_package_id
-        and row.get("parser_contract") == parser_contract
+    same_capture = all(
+        row.get("source_capture_id") == source_capture_id
+        and row.get("price_coordinate") in (None, price_coordinate)
         for row in rows
     )
     checked = []
@@ -36,12 +42,11 @@ def observe_prior_shapes(
             day,
             by_day,
             source_symbol=symbol,
-            source_package_id=source_package_id,
-            target_capture_id=row.get("source_capture_id") if row else "",
-            parser_contract=parser_contract,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
         )
-        if not same_package:
-            values, error = None, "RAW_SOURCE_PACKAGE_MISMATCH"
+        if not same_capture:
+            values, error = None, "SOURCE_CAPTURE_MISMATCH"
         checked.append((row, values, error))
 
     def pred(value, formula, **inputs):
@@ -73,9 +78,8 @@ def observe_prior_shapes(
             official_sessions=sessions[index - 20 : index + 1],
             history_rows_by_session=by_day,
             source_symbol=symbol,
-            source_package_id=source_package_id,
-            target_capture_id=checked[index][0]["source_capture_id"],
-            parser_contract=parser_contract,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
         )
         launch = calculate_d0_launch_confirm_raw(**args)
         recovery_args = dict(args)
@@ -199,12 +203,12 @@ def observe_prior_shapes(
             for j in amount_indices:
                 row, _, error = checked[j]
                 value, amount_error = _raw_amount(
-                    sessions[j], row, parser_contract=parser_contract
+                    sessions[j], row, source_capture_id=source_capture_id
                 )
                 if (
                     error
                     or amount_error
-                    or row.get("amount_unit_status") != "UNIT_UNVERIFIED"
+                    or row.get("amount_unit_status") != "CNY_VERIFIED"
                 ):
                     amount_reason = error or amount_error or "AMOUNT_UNIT_MISMATCH"
                     amount_values = []
@@ -243,7 +247,7 @@ def observe_prior_shapes(
         parts["contraction"]["pullback_sessions"] = [
             day.isoformat() for day in sessions[peak + 1 : last]
         ]
-        parts["contraction"]["amount_unit"] = "SAME_SOURCE_NATIVE_UNIT_UNVERIFIED"
+        parts["contraction"]["amount_unit"] = "CNY_VERIFIED_RAW_AMOUNT"
         candidates.extend(
             {
                 "birth_session": sessions[index].isoformat(),
@@ -264,6 +268,9 @@ def observe_prior_shapes(
         "formal_parent": "UNKNOWN_NOT_PROVEN_BY_SOURCE_DIAGNOSTIC",
         "formal_pb_continue": "NOT_EVALUATED",
         "target_session": target.isoformat(),
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "prior_through": sessions[-2].isoformat() if len(sessions) > 1 else None,
         "historical_states": historical,
         "diagnostic_parent_candidates": candidates,

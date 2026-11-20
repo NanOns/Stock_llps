@@ -34,7 +34,7 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
             scenario=args.scenario,
             target_session=_parse_session_date(args.target_session),
             research_cutoff=_parse_session_date(args.research_cutoff),
-            source_package_id=args.source_package_id,
+            source_capture_id=args.source_capture_id,
             state=args.state,
             symbol=args.symbol,
             offset=args.offset,
@@ -45,7 +45,9 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
                 if args.before_session is not None
                 else None
             ),
-            before_source_package_id=args.before_source_package_id,
+            before_source_capture_id=(
+                args.before_source_capture_id or args.source_capture_id
+            ),
             transition=args.transition,
             _include_shape_observation=(
                 args.action == "current"
@@ -69,7 +71,7 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
                 result,
                 target=_parse_session_date(args.target_session),
                 cutoff=_parse_session_date(args.research_cutoff),
-                source_package_id=args.source_package_id,
+                source_capture_id=args.source_capture_id,
             )
         if getattr(args, "followup_session", None):
             if (
@@ -88,7 +90,7 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
                 target=_parse_session_date(args.target_session),
                 followup=_parse_session_date(args.followup_session),
                 cutoff=_parse_session_date(args.research_cutoff),
-                source_package_id=args.source_package_id,
+                source_capture_id=args.source_capture_id,
             )
         if getattr(args, "shape_followup_states", False):
             if (
@@ -109,7 +111,7 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
                 target=_parse_session_date(args.target_session),
                 followup=_parse_session_date(args.followup_session),
                 cutoff=_parse_session_date(args.research_cutoff),
-                source_package_id=args.source_package_id,
+                source_capture_id=args.source_capture_id,
             )
         if getattr(args, "shape_control_symbol", None):
             if (
@@ -134,7 +136,7 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
                     scenario="RECOVERY_TURN",
                     target_session=_parse_session_date(args.target_session),
                     research_cutoff=_parse_session_date(args.research_cutoff),
-                    source_package_id=args.source_package_id,
+                    source_capture_id=args.source_capture_id,
                     symbol=comparison_symbol,
                     limit=1,
                     _include_shape_observation=True,
@@ -149,7 +151,7 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
                     target=_parse_session_date(args.target_session),
                     followup=_parse_session_date(args.followup_session),
                     cutoff=_parse_session_date(args.research_cutoff),
-                    source_package_id=args.source_package_id,
+                    source_capture_id=args.source_capture_id,
                 )
                 samples.append(comparison)
             result["shape_source_comparison"] = compare_shape_observations(samples)

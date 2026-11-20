@@ -18,7 +18,7 @@ from stock_a.storage.postgres.research_enrollment import _enrollment_forward_pat
 _OBSERVATION_COLUMNS = (
     "id",
     "source_enrollment_id",
-    "source_package_id",
+    "source_capture_id",
     "source_symbol",
     "rule_id",
     "rule_version",
@@ -49,7 +49,7 @@ _OBSERVATION_COLUMNS = (
     "producer_contract",
     "producer_version",
     "evidence_target_session",
-    "evidence_source_package_id",
+    "evidence_source_capture_id",
     "evidence_source_symbol",
     "evidence_rule_id",
     "evidence_rule_version",
@@ -65,7 +65,6 @@ _OBSERVATION_COLUMNS = (
 
 _FORWARD_COLUMNS = (
     "target_session",
-    "source_package_id",
     "source_capture_id",
     "source_symbol",
     "horizon",
@@ -128,7 +127,7 @@ def _fraction_summary(values: Sequence[str]) -> dict[str, Any]:
 def read_source_observation_outcomes_cursor(
     cursor: Any,
     *,
-    source_package_id: int,
+    source_capture_id: int,
     t0_session: date,
     research_cutoff: date,
     rule_id: str | None,
@@ -137,8 +136,8 @@ def read_source_observation_outcomes_cursor(
 ) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
     """在调用方现有只读事务中汇总单一T0及一个期限。"""
     if (
-        type(source_package_id) is not int
-        or source_package_id <= 0
+        type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(t0_session) is not date
         or type(research_cutoff) is not date
         or t0_session > research_cutoff
@@ -166,49 +165,49 @@ def read_source_observation_outcomes_cursor(
     rule_clause = " AND r.rule_id=%s" if rule_id else ""
     rule_params = (rule_id,) if rule_id else ()
     cursor.execute(
-        f"""SELECT e.id,r.source_package_id,r.source_symbol,r.rule_id,
-                      r.rule_version,r.target_session,r.id,r.source_capture_id,
+        f"""SELECT e.id,r.source_capture_id,r.source_symbol,r.rule_id,
+                      r.rule_version,r.target_session,r.id,
                       e.enrollment_kind,e.reason_code,e.parent_enrollment_id,
                       r.profile_revision,r.history_session_count,
                       r.d1_history_session_count,r.event_window_start,
                       r.calendar_revision,r.scope,r.state
                FROM source_research_enrollments e
                JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
-               WHERE r.source_package_id=%s AND r.target_session=%s
+               WHERE r.source_capture_id=%s AND r.target_session=%s
                  AND e.enrollment_kind IN
                      ('ENTRY','REENTRY','FIRST_OBSERVED_LEFT_CENSORED','DAILY_LANDMARK')
                  {rule_clause}
                ORDER BY r.rule_id,e.enrollment_kind,r.source_symbol,e.id""",
-        (source_package_id, t0_session, *rule_params),
+        (source_capture_id, t0_session, *rule_params),
     )
     anchor_rows = cursor.fetchall()
     all_by_kind: dict[str, list[tuple[Any, ...]]] = defaultdict(list)
     for row in anchor_rows:
-        all_by_kind[row[8]].append(row)
+        all_by_kind[row[7]].append(row)
 
-    eligible = [row for row in anchor_rows if row[8] in {"ENTRY", "REENTRY"}]
+    eligible = [row for row in anchor_rows if row[7] in {"ENTRY", "REENTRY"}]
     anchors: dict[int, dict[str, Any]] = {}
     for row in eligible:
         anchors[row[0]] = {
             "enrollment_id": row[0],
-            "source_package_id": row[1],
+            "source_capture_id": row[1],
             "source_symbol": row[2],
             "rule_id": row[3],
             "rule_version": row[4],
             "t0_session": row[5],
             "anchor_rule_fact_id": row[6],
-            "anchor_capture_id": row[7],
-            "enrollment_kind": row[8],
-            "enrollment_reason": row[9],
-            "parent_enrollment_id": row[10],
-            "profile_revision": row[11],
-            "history_session_count": row[12],
-            "d1_history_session_count": row[13],
-            "event_window_start": row[14],
-            "calendar_revision": row[15],
-            "scope": row[16],
-            "t0_state": row[17],
-            "price_coordinate": "RAW_UNADJUSTED",
+            "anchor_capture_id": row[1],
+            "enrollment_kind": row[7],
+            "enrollment_reason": row[8],
+            "parent_enrollment_id": row[9],
+            "profile_revision": row[10],
+            "history_session_count": row[11],
+            "d1_history_session_count": row[12],
+            "event_window_start": row[13],
+            "calendar_revision": row[14],
+            "scope": row[15],
+            "t0_state": row[16],
+            "price_coordinate": "FORWARD_ADJUSTED",
             "identity_status": "SOURCE_SYMBOL_ONLY",
         }
 
@@ -225,8 +224,8 @@ def read_source_observation_outcomes_cursor(
     if anchors and observation_end is not None and observation_end >= t0_session:
         cursor.execute(
             f"""SELECT {", ".join(f"o.{column}" for column in _OBSERVATION_COLUMNS[:32])},
-                          ev.target_session,ev.source_package_id,ev.source_symbol,
-                          ev.rule_id,ev.rule_version,ev.source_capture_id,ev.state,
+                          ev.target_session,ev.source_capture_id,ev.source_symbol,
+                          ev.rule_id,ev.rule_version,ev.state,
                           ev.profile_revision,ev.history_session_count,
                           ev.d1_history_session_count,ev.event_window_start,
                           ev.calendar_revision,ev.scope
@@ -239,8 +238,15 @@ def read_source_observation_outcomes_cursor(
                    ORDER BY o.source_enrollment_id,o.observation_session,o.id""",
             (list(anchors), t0_session, observation_end),
         )
+        evidence_columns = (
+            _OBSERVATION_COLUMNS[: _OBSERVATION_COLUMNS.index("evidence_capture_id")]
+            + _OBSERVATION_COLUMNS[
+                _OBSERVATION_COLUMNS.index("evidence_capture_id") + 1 :
+            ]
+        )
         for raw in cursor.fetchall():
-            row = dict(zip(_OBSERVATION_COLUMNS, raw, strict=True))
+            row = dict(zip(evidence_columns, raw, strict=True))
+            row["evidence_capture_id"] = row["target_capture_id"]
             observations_by_id[row["source_enrollment_id"]].append(row)
 
     details: dict[int, dict[str, Any]] = {}
@@ -287,7 +293,6 @@ def read_source_observation_outcomes_cursor(
                    JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
                    JOIN source_forward_path_facts f
                      ON f.target_session=r.target_session
-                    AND f.source_package_id=r.source_package_id
                     AND f.source_capture_id=r.source_capture_id
                     AND f.source_symbol=r.source_symbol
                    WHERE e.id=ANY(%s) AND f.horizon=%s
@@ -339,7 +344,6 @@ def read_source_observation_outcomes_cursor(
                 pre_due_reason_counts[key + (pre_due_reason,)] += 1
 
         forward_anchor = {
-            "package": anchor["source_package_id"],
             "capture": anchor["anchor_capture_id"],
             "source_symbol": anchor["source_symbol"],
             "calendar_revision": anchor["calendar_revision"],
@@ -463,7 +467,7 @@ def read_source_observation_outcomes_cursor(
         "outcome_classification": "RETROSPECTIVE_OUTCOME_STRATIFICATION_NON_PIT",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "scope": "NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "denominator": {
             "kind": "FROZEN_SOURCE_T0_ENROLLMENTS",
             "full_t0_enrollment_count": len(anchor_rows),

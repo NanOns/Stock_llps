@@ -2,144 +2,16 @@
 
 from __future__ import annotations
 
-from stock_a.storage.postgres.source_raw import (
-    RAW_DAILY_APPEND_TASK_SCOPES,
-    RawSourcePgError,
-    import_verified_vipdata_target,
-    import_verified_vipdata_history,
-    read_raw_daily_catalog,
-    read_raw_daily_page,
-    read_raw_daily_history_page,
-    read_raw_daily_history_stock,
-    read_raw_daily_stock,
-)
-
 from stock_a.application.cli_commands.parser import ChineseParser
 
 
 def register_commands(commands):
-    display_names = commands.add_parser(
-        "source-symbol-display-names",
-        help="只读解析本机TDX中文名称并写入非PIT页面标签",
-        description="只读唯一配置的TDX根；名称仅作为未验证的展示标签，不证明证券实体、上市状态或PIT身份。",
-    )
-    display_names.add_argument(
-        "--confirm-task-scope",
-        required=True,
-        choices=("R06_SYMBOL_DISPLAY_NAMES_R1",),
-        help="显式绑定当前已授权R06名称标签任务",
-    )
-    display_names.add_argument(
-        "--persist",
-        action="store_true",
-        help="以一个PG事务整体替换当前标签快照并完整读回",
-    )
-
-    raw_import = commands.add_parser(
-        "source-vipdata-persist",
-        help="按稳定Raw每日APPEND操作将已验证VIPDATA单日观察写入固定PG typed表",
-        description="只接受已登记的稳定Raw每日APPEND操作标识、显式G盘ZIP和目标交易会话；最多5000候选，分块写stock_a.stock.source_raw_daily。",
-    )
-    raw_import.add_argument(
-        "--task-scope",
-        required=True,
-        choices=RAW_DAILY_APPEND_TASK_SCOPES,
-        help="仅登记Raw每日APPEND操作及过渡兼容标识",
-    )
-    raw_import.add_argument(
-        "--vipdata-package",
-        required=True,
-        help="G:/codex_tmp内已存在且只读的VIPDATA ZIP绝对路径",
-    )
-    raw_import.add_argument(
-        "--max-vipdata-validation-seconds",
-        type=float,
-        default=300.0,
-        help="本地ZIP原件与CRC完整复验秒数上限，默认300",
-    )
-    raw_import.add_argument(
-        "--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD"
-    )
-    raw_import.add_argument(
-        "--history-session-count",
-        type=int,
-        default=1,
-        help="显式官方日历历史窗口会话数，1保持单日行为；每个VIPDATA条目只扫描一次",
-    )
-    raw_import.add_argument(
-        "--max-source-quality-bytes",
-        type=int,
-        default=4294967296,
-        help="全来源候选条目解压字节上限，默认4GiB",
-    )
-    raw_import.add_argument(
-        "--max-source-quality-records",
-        type=int,
-        default=125000000,
-        help="全来源候选记录上限，默认125000000",
-    )
-    raw_import.add_argument(
-        "--max-source-quality-seconds",
-        type=float,
-        default=1800.0,
-        help="单遍全来源目标日扫描秒数上限，默认1800",
-    )
-    raw_import.add_argument(
-        "--chunk-size",
-        type=int,
-        default=100,
-        help="每个可恢复PG事务最多写入行数，固定上限100",
-    )
-    raw_import.add_argument(
-        "--max-raw-rows",
-        type=int,
-        default=2_000_000,
-        help="单次历史导入可暂存的最大全池Raw行数，默认200万；超过预算时拒绝",
-    )
-    raw_catalog = commands.add_parser(
-        "source-raw-catalog",
-        help="只读查询PG中Stock A Raw来源日期版本目录",
-    )
-    raw_catalog.add_argument(
-        "--research-cutoff",
-        required=True,
-        help="必填研究截止会话，格式YYYY-MM-DD",
-    )
-    raw_catalog.add_argument("--year", type=int, help="可选年份筛选Raw目录")
-    raw_catalog.add_argument("--offset", type=int, default=0, help="版本页偏移，默认0")
-    raw_catalog.add_argument(
-        "--limit", type=int, default=100, help="每页版本数，默认100，最多200"
-    )
     sector_members = commands.add_parser(
         "source-tdx-sector-members",
-        help="接入或只读查询本机与远端TDX行业、概念成员及精确PG研究上下文",
+        help="接入远端TDX行业、GN概念成员并按BaoStock捕获读取精确PG研究上下文",
     )
     sector_actions = sector_members.add_subparsers(
         dest="sector_action", parser_class=ChineseParser, required=True
-    )
-    sector_ingest = sector_actions.add_parser(
-        "ingest", help="只读解析唯一配置TDX根并幂等写入三个成员表"
-    )
-    sector_ingest.add_argument(
-        "--confirm-task-scope",
-        required=True,
-        choices=("R03_TDX_REAL_SECTOR_MEMBERS_TO_PG_R1",),
-        help="显式绑定本批已批准任务范围",
-    )
-    sector_refresh = sector_actions.add_parser(
-        "refresh-remote",
-        help="动态发现并校验远端TDX行业与概念成员来源",
-    )
-    sector_refresh.add_argument(
-        "--confirm-task-scope",
-        required=True,
-        choices=("R03_TDX_HEADLESS_SECTOR_SOURCE_REFRESH_R1",),
-        help="显式绑定本批已批准远端成员刷新范围",
-    )
-    sector_refresh.add_argument(
-        "--validate-only",
-        action="store_true",
-        help="只下载并校验远端成员原件、差异与PG身份，不执行INSERT",
     )
     sector_catalog = sector_actions.add_parser(
         "catalog", help="分页查询精确行业或概念来源快照目录"
@@ -150,7 +22,7 @@ def register_commands(commands):
     sector_catalog.add_argument("--offset", type=int, default=0)
     sector_catalog.add_argument("--limit", type=int, default=100)
     sector_query = sector_actions.add_parser(
-        "members", help="读取精确板块成员与Core/Profile状态"
+        "members", help="读取精确板块成员与BaoStock QFQ Core/Profile状态"
     )
     sector_query.add_argument("--snapshot-id", type=int, required=True)
     sector_query.add_argument(
@@ -159,12 +31,12 @@ def register_commands(commands):
     sector_query.add_argument("--board-native-id", required=True)
     sector_query.add_argument("--target-session", required=True)
     sector_query.add_argument("--research-cutoff", required=True)
-    sector_query.add_argument("--source-package-id", type=int, required=True)
+    sector_query.add_argument("--source-capture-id", type=int, required=True)
     sector_query.add_argument("--profile-revision")
     sector_query.add_argument("--offset", type=int, default=0)
     sector_query.add_argument("--limit", type=int, default=100)
     sector_breadth = sector_actions.add_parser(
-        "breadth", help="读取真实行业或概念完整成员的两日MA20广度及关系变化"
+        "breadth", help="读取真实行业或概念完整成员的两日QFQ MA20广度及关系变化"
     )
     sector_breadth.add_argument("--snapshot-id", type=int, required=True)
     sector_breadth.add_argument(
@@ -176,9 +48,9 @@ def register_commands(commands):
     sector_breadth.add_argument("--before-session", required=True)
     sector_breadth.add_argument("--after-session", required=True)
     sector_breadth.add_argument("--research-cutoff", required=True)
-    sector_breadth.add_argument("--before-source-package-id", type=int, required=True)
+    sector_breadth.add_argument("--before-source-capture-id", type=int, required=True)
     sector_breadth.add_argument("--before-profile-revision", required=True)
-    sector_breadth.add_argument("--after-source-package-id", type=int, required=True)
+    sector_breadth.add_argument("--after-source-capture-id", type=int, required=True)
     sector_breadth.add_argument("--after-profile-revision", required=True)
     sector_breadth.add_argument("--offset", type=int, default=0)
     sector_breadth.add_argument("--limit", type=int, default=30)
@@ -203,7 +75,7 @@ def register_commands(commands):
     )
     sector_strength = sector_actions.add_parser(
         "strength",
-        help="按精确当前TDX成员快照比较5/20会话来源级Core收益与三会话前变化",
+        help="按精确当前TDX成员快照比较BaoStock QFQ Core收益与三会话前变化",
     )
     sector_strength.add_argument("--snapshot-id", type=int, required=True)
     sector_strength.add_argument(
@@ -214,7 +86,7 @@ def register_commands(commands):
     )
     sector_strength.add_argument("--target-session", required=True)
     sector_strength.add_argument("--research-cutoff", required=True)
-    sector_strength.add_argument("--source-package-id", type=int, required=True)
+    sector_strength.add_argument("--source-capture-id", type=int, required=True)
     sector_strength.add_argument("--profile-revision")
     sector_strength.add_argument(
         "--rotation-start",
@@ -248,7 +120,7 @@ def register_commands(commands):
     )
     sector_change_stocks = sector_actions.add_parser(
         "change-stocks",
-        help="全量联接行业概念强弱变化与同一来源包D1支撑变化股票",
+        help="全量联接行业概念强弱变化与同一BaoStock capture的QFQ D1支撑变化",
     )
     sector_change_stocks.add_argument("--industry-snapshot-id", type=int, required=True)
     sector_change_stocks.add_argument("--concept-snapshot-id", type=int, required=True)
@@ -258,24 +130,12 @@ def register_commands(commands):
     sector_change_stocks.add_argument(
         "--research-cutoff", required=True, help="显式研究截止会话YYYY-MM-DD"
     )
-    sector_change_stocks.add_argument("--source-package-id", type=int, required=True)
+    sector_change_stocks.add_argument("--source-capture-id", type=int, required=True)
     sector_change_stocks.add_argument("--profile-revision")
-    sector_change_stocks.add_argument(
-        "--d0-structure-symbol", help="对一个来源代码联接D0恢复诊断和前态D1支撑参考"
-    )
-    sector_change_stocks.add_argument(
-        "--d0-risk-readiness", action="store_true", help="联接该股风险和正式资格可用性"
-    )
-    sector_change_stocks.add_argument(
-        "--d0-followup-session", help="诊断冻结线的后继官方会话终点"
-    )
     sector_change_stocks.add_argument(
         "--include-source-seed-board",
         action="store_true",
-        help="只读计算全来源探索性RPS/Seed并汇总指定板块完整成员",
-    )
-    sector_change_stocks.add_argument(
-        "--loo-source-symbol", help="剔除一个目标来源股票，重算同类板块竞争位置"
+        help="附加指定板块的后验跨期Core/Profile强度输入",
     )
     sector_change_stocks.add_argument(
         "--event-window-start", required=True, help="D1历史事件窗口起始官方会话"
@@ -283,8 +143,7 @@ def register_commands(commands):
     sector_change_stocks.add_argument(
         "--pg-history-session-count",
         type=int,
-        default=75,
-        help="读取包含目标日的官方历史窗口，1至75，默认75",
+        help="可选的目标日历史会话数；省略时按BaoStock配置预算选择并受capture覆盖范围限制",
     )
     sector_change_stocks.add_argument(
         "--board-kind",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timezone
 import importlib
 from importlib import metadata
@@ -17,13 +18,15 @@ from typing import Any
 from stock_a.domain import ContractError
 
 
-_SYMBOL_PATTERN = re.compile(r"^(SH|SZ)\.([0-9]{6})$")
+_SYMBOL_PATTERN = re.compile(r"^(SH|SZ|BJ)\.([0-9]{6})$")
 _PINNED_SDK_VERSION = "0.9.3"
-_QUERY_FIELDS = (
-    "date,code,open,high,low,close,volume,amount,adjustflag,turn,tradestatus,isST"
+_QUERY_FIELDS = "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,isST"
+_MAX_QUERY_ROWS = 250
+_MAX_OFFICIAL_SESSIONS_PER_RANGE = 250
+_MAX_API_QUERIES_PER_BATCH = 100
+_MAX_VERIFIED_DAILY_CAPTURES = (
+    _MAX_OFFICIAL_SESSIONS_PER_RANGE * _MAX_API_QUERIES_PER_BATCH
 )
-_MAX_QUERY_ROWS = 8
-_MAX_DAILY_QUERIES_PER_SESSION = 10
 _DEFAULT_SOCKET_TIMEOUT_SECONDS = 30.0
 _VERIFIED_DAILY_CAPTURES: dict[int, "BaoStockDailySourceCapture"] = {}
 _VERIFIED_IDENTITY_CAPTURES: dict[int, "BaoStockIdentitySourceCapture"] = {}
@@ -32,12 +35,13 @@ _CAPTURE_ID_SEQUENCE = count(1)
 
 @dataclass(frozen=True)
 class BaoStockDailySourceCapture:
-    """本进程内由真实SDK成功响应签发的单代码/单日原始行绑定。"""
+    """本进程内由真实SDK成功响应签发的单代码/单日/坐标原始行绑定。"""
 
     capture_id: int
     source_symbol: str
     target_session: date
     adjustflag: str
+    price_coordinate: str
     amount_raw: str
     volume_raw: str
     captured_at: datetime
@@ -51,6 +55,17 @@ class BaoStockIdentitySourceCapture:
     normalized_count: int
     request_started_at: datetime
     request_completed_at: datetime
+
+
+class BaostockRawResponseSinkError(RuntimeError):
+    """成功行情原始响应无法落盘时阻止查询结果进入规范化或PG写入。"""
+
+    def __init__(self, source_symbol: str, adjustflag: str):
+        self.source_symbol = source_symbol
+        self.adjustflag = adjustflag
+        super().__init__(
+            "BaoStock成功原始响应未能写入调试档案；拒绝继续使用或保存该批结果"
+        )
 
 
 def resolve_verified_baostock_capture(
@@ -135,6 +150,7 @@ def _issue_verified_daily_capture(
     fields: tuple[str, ...],
     rows: list[dict[str, str]],
     completed_at: str,
+    adjustflag: str,
     injected_transport: bool,
 ) -> BaoStockDailySourceCapture | None:
     if injected_transport or len(rows) != 1:
@@ -145,7 +161,7 @@ def _issue_verified_daily_capture(
         not required.issubset(fields)
         or row.get("code", "").lower() != symbol.lower()
         or row.get("date") != target_session
-        or row.get("adjustflag") != "3"
+        or row.get("adjustflag") != adjustflag
     ):
         return None
     try:
@@ -156,7 +172,8 @@ def _issue_verified_daily_capture(
             capture_id=next(_CAPTURE_ID_SEQUENCE),
             source_symbol=symbol.upper(),
             target_session=date.fromisoformat(target_session),
-            adjustflag="3",
+            adjustflag=adjustflag,
+            price_coordinate=_price_coordinate(adjustflag),
             amount_raw=row["amount"],
             volume_raw=row["volume"],
             captured_at=captured_at,
@@ -164,7 +181,7 @@ def _issue_verified_daily_capture(
     except (KeyError, TypeError, ValueError):
         return None
     _VERIFIED_DAILY_CAPTURES[capture.capture_id] = capture
-    while len(_VERIFIED_DAILY_CAPTURES) > 256:
+    while len(_VERIFIED_DAILY_CAPTURES) > _MAX_VERIFIED_DAILY_CAPTURES:
         _VERIFIED_DAILY_CAPTURES.pop(next(iter(_VERIFIED_DAILY_CAPTURES)))
     return capture
 
@@ -177,6 +194,7 @@ def _issue_verified_daily_row_capture(
     fields: tuple[str, ...],
     row: dict[str, str],
     captured_at: str,
+    adjustflag: str,
     injected_transport: bool,
 ) -> BaoStockDailySourceCapture | None:
     """为一次真实完整范围响应中的单个行签发本进程内capture。"""
@@ -187,7 +205,7 @@ def _issue_verified_daily_row_capture(
         return None
     if (
         row.get("code", "").upper() != symbol.upper()
-        or row.get("adjustflag") != "3"
+        or row.get("adjustflag") != adjustflag
         or not start_session <= row.get("date", "") <= end_session
     ):
         return None
@@ -202,7 +220,8 @@ def _issue_verified_daily_row_capture(
             capture_id=next(_CAPTURE_ID_SEQUENCE),
             source_symbol=symbol.upper(),
             target_session=session,
-            adjustflag="3",
+            adjustflag=adjustflag,
+            price_coordinate=_price_coordinate(adjustflag),
             amount_raw=row["amount"],
             volume_raw=row["volume"],
             captured_at=captured_clock,
@@ -210,9 +229,27 @@ def _issue_verified_daily_row_capture(
     except (KeyError, TypeError, ValueError):
         return None
     _VERIFIED_DAILY_CAPTURES[capture.capture_id] = capture
-    while len(_VERIFIED_DAILY_CAPTURES) > 256:
+    while len(_VERIFIED_DAILY_CAPTURES) > _MAX_VERIFIED_DAILY_CAPTURES:
         _VERIFIED_DAILY_CAPTURES.pop(next(iter(_VERIFIED_DAILY_CAPTURES)))
     return capture
+
+
+def _price_coordinate(adjustflag: str) -> str:
+    """将供应方复权参数映射到独立价格坐标。"""
+    return {
+        "3": "RAW_UNADJUSTED",
+        "2": "FORWARD_ADJUSTED",
+    }[adjustflag]
+
+
+def _validate_adjustflag(value: object) -> str:
+    if isinstance(value, bool):
+        raise ContractError("BaoStock复权参数只支持2前复权或3未复权")
+    if isinstance(value, int) and value in (2, 3):
+        return str(value)
+    if isinstance(value, str) and value in ("2", "3"):
+        return value
+    raise ContractError("BaoStock复权参数只支持2前复权或3未复权")
 
 
 def _timestamp() -> str:
@@ -319,6 +356,7 @@ def _unavailable_result(
     status: str,
     symbol: str,
     target_session: str,
+    adjustflag: str,
     started_at: str,
     sdk_version: str | None,
     message: str,
@@ -342,11 +380,14 @@ def _unavailable_result(
         "requested_symbol": symbol,
         "requested_source_code": None,
         "target_session": target_session,
+        "adjustflag": adjustflag,
+        "coordinate": _price_coordinate(adjustflag),
         "request": {
             "start_date": target_session,
             "end_date": target_session,
             "frequency": "d",
-            "adjustflag": "3",
+            "adjustflag": adjustflag,
+            "coordinate": _price_coordinate(adjustflag),
             "fields": _QUERY_FIELDS.split(","),
             "socket_timeout_seconds": _DEFAULT_SOCKET_TIMEOUT_SECONDS,
             "max_rows": _MAX_QUERY_ROWS,
@@ -377,7 +418,7 @@ def _unavailable_result(
         "rows": list(rows),
         "error_type": error_type,
         "reason": _message(message),
-        "authority": "SUPPLEMENTAL_SOURCE_ONLY_NOT_OFFICIAL_IDENTITY_OR_PIT",
+        "authority": "BAOSTOCK_PRICE_OBSERVATION_NOT_OFFICIAL_IDENTITY_OR_PIT",
     }
 
 
@@ -385,13 +426,15 @@ def query_daily_rows(
     symbol: str,
     target_session: str,
     *,
+    adjustflag: str | int = "3",
     timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
     max_rows: int = _MAX_QUERY_ROWS,
     transport: object | None = None,
 ) -> dict[str, Any]:
     """查询一个显式来源代码和单个历史交易日；不重试、不写文件、不改TDX。"""
+    adjustflag = _validate_adjustflag(adjustflag)
     if not isinstance(symbol, str) or _SYMBOL_PATTERN.fullmatch(symbol) is None:
-        raise ContractError("BaoStock查询代码必须是SH.六位代码或SZ.六位代码")
+        raise ContractError("BaoStock查询代码必须是SH/SZ/BJ.六位代码")
     if not isinstance(target_session, str):
         raise ContractError("BaoStock目标交易日必须是YYYY-MM-DD字符串")
     try:
@@ -420,9 +463,10 @@ def query_daily_rows(
             status="DEPENDENCY_UNAVAILABLE",
             symbol=symbol,
             target_session=target_session,
+            adjustflag=adjustflag,
             started_at=started_at,
             sdk_version=sdk_version,
-            message="未安装可选BaoStock客户端；TDX结果保持不变",
+            message="未安装BaoStock客户端",
             error_type=type(error).__name__,
             completed_at=_timestamp(),
         )
@@ -431,6 +475,7 @@ def query_daily_rows(
             status="UNSUPPORTED_SDK_VERSION",
             symbol=symbol,
             target_session=target_session,
+            adjustflag=adjustflag,
             started_at=started_at,
             sdk_version=sdk_version,
             message=f"BaoStock运行包版本不符合固定合同{_PINNED_SDK_VERSION}；未发送网络请求",
@@ -484,7 +529,7 @@ def query_daily_rows(
                     start_date=target_session,
                     end_date=target_session,
                     frequency="d",
-                    adjustflag="3",
+                    adjustflag=adjustflag,
                 )
             query_code = _code(response)
             query_message = _error_message(response)
@@ -496,6 +541,11 @@ def query_daily_rows(
             if query_code != "0":
                 status = "QUERY_FAILED"
                 reason = query_message or "BaoStock查询未成功"
+            elif len(response_fields) != len(set(response_fields)) or not set(
+                _QUERY_FIELDS.split(",")
+            ).issubset(response_fields):
+                status = "PROTOCOL_INVALID"
+                reason = "BaoStock单日响应字段缺失、重复或顺序协议异常"
             else:
                 while response.next():
                     raw_values = response.get_row_data()
@@ -503,19 +553,31 @@ def query_daily_rows(
                         status = "PROTOCOL_INVALID"
                         reason = "BaoStock响应行宽与实际字段数不一致"
                         break
-                    rows.append(dict(zip(response_fields, raw_values)))
+                    row = dict(zip(response_fields, raw_values, strict=True))
+                    if (
+                        row.get("code", "").lower() != source_code
+                        or row.get("date") != target_session
+                        or row.get("adjustflag") != adjustflag
+                    ):
+                        status = "PROTOCOL_INVALID"
+                        reason = "BaoStock单日响应代码、日期或价格坐标与请求不符"
+                        break
+                    rows.append(row)
                     if len(rows) > max_rows:
                         status = "ROW_LIMIT_EXCEEDED"
                         reason = f"BaoStock响应超过{max_rows}行上限"
                         break
                 else:
                     status = "RESPONSE_RECEIVED"
-                    reason = "单日请求已收到响应；行数及日期/代码仍需逐项核验"
+                    reason = "单日来源响应完成"
+                if status == "RESPONSE_RECEIVED" and len(rows) > 1:
+                    status = "PROTOCOL_INVALID"
+                    reason = "BaoStock单日响应包含重复日期行"
     except (socket.timeout, TimeoutError) as error:
         status = "NETWORK_TIMEOUT"
         reason = "BaoStock网络socket达到有限超时；未重试"
         error_type = type(error).__name__
-    except Exception as error:  # SDK可能抛出协议或socket异常；不污染TDX主结果。
+    except Exception as error:  # SDK可能抛出协议或socket异常。
         status = "NETWORK_OR_PROTOCOL_ERROR"
         reason = _message(error) or "BaoStock客户端发生网络或协议异常"
         error_type = type(error).__name__
@@ -547,12 +609,14 @@ def query_daily_rows(
             fields=response_fields,
             rows=rows,
             completed_at=completed_at,
+            adjustflag=adjustflag,
             injected_transport=transport is not None,
         )
     return _unavailable_result(
         status=status,
         symbol=symbol,
         target_session=target_session,
+        adjustflag=adjustflag,
         started_at=started_at,
         sdk_version=sdk_version,
         message=reason,
@@ -575,7 +639,8 @@ def query_daily_rows(
             "start_date": target_session,
             "end_date": target_session,
             "frequency": "d",
-            "adjustflag": "3",
+            "adjustflag": adjustflag,
+            "coordinate": _price_coordinate(adjustflag),
             "fields": _QUERY_FIELDS.split(","),
             "socket_timeout_seconds": float(timeout_seconds),
             "max_rows": max_rows,
@@ -620,9 +685,9 @@ def query_identity_reference(
     if (
         isinstance(max_total_seconds, bool)
         or not isinstance(max_total_seconds, (int, float))
-        or not 0.5 <= float(max_total_seconds) <= 30
+        or not 0.5 <= float(max_total_seconds) <= 120
     ):
-        raise ContractError("BaoStock身份查询总预算必须在0.5至30秒之间")
+        raise ContractError("BaoStock身份查询总预算必须在0.5至120秒之间")
     if type(max_rows_per_query) is not int or not 1 <= max_rows_per_query <= 10000:
         raise ContractError("BaoStock身份探针每次响应行数上限必须在1至10000之间")
     basic_query_code = None
@@ -630,7 +695,9 @@ def query_identity_reference(
         if not isinstance(target_symbol, str) or not _SYMBOL_PATTERN.fullmatch(
             target_symbol
         ):
-            raise ContractError("BaoStock单股基本资料查询代码必须是SH./SZ.加六位数字")
+            raise ContractError(
+                "BaoStock单股基本资料查询代码必须是SH./SZ./BJ.加六位数字"
+            )
         market, code = _SYMBOL_PATTERN.fullmatch(target_symbol).groups()
         basic_query_code = f"{market.lower()}.{code}"
 
@@ -1184,12 +1251,17 @@ def query_daily_range_rows(
     end_date: str,
     *,
     timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
-    max_rows_per_symbol: int = 20,
-    max_queries_per_target_session: int = _MAX_DAILY_QUERIES_PER_SESSION,
+    max_rows_per_symbol: int | None = None,
+    adjustflag: str | int = "3",
+    max_api_calls: int = _MAX_API_QUERIES_PER_BATCH,
     target_session_count: int | None = None,
+    raw_response_sink: Callable[[str, str, Mapping[str, Any]], None] | None = None,
     transport: object | None = None,
 ) -> dict[str, Any]:
-    """一次登录按逐会话请求预算查询显式证券范围，不重试或写入来源数据。"""
+    """按显式范围和坐标查询；可选地先归档成功原始响应，再交给规范化层。"""
+    adjustflag = _validate_adjustflag(adjustflag)
+    if raw_response_sink is not None and not callable(raw_response_sink):
+        raise ContractError("BaoStock原始响应归档器必须是可调用对象")
     if (
         not isinstance(symbols, tuple)
         or not symbols
@@ -1199,7 +1271,7 @@ def query_daily_range_rows(
             for symbol in symbols
         )
     ):
-        raise ContractError("BaoStock日线范围查询必须显式提供不重复沪深代码")
+        raise ContractError("BaoStock日线范围查询必须显式提供不重复沪深/北交所代码")
     if not isinstance(start_date, str) or not isinstance(end_date, str):
         raise ContractError("BaoStock日线范围必须提供YYYY-MM-DD起止日期")
     try:
@@ -1211,46 +1283,50 @@ def query_daily_range_rows(
         raise ContractError("BaoStock日线范围日期必须为YYYY-MM-DD") from error
     if start_day.isoformat() != start_date or end_day.isoformat() != end_date:
         raise ContractError("BaoStock日线范围日期必须使用规范YYYY-MM-DD格式")
-    if end_day < start_day or (end_day - start_day).days > 14:
-        raise ContractError("BaoStock日线范围必须正序且跨度不超过14天")
+    if end_day < start_day:
+        raise ContractError("BaoStock日线范围必须按日期正序")
     calendar_day_span = (end_day - start_day).days + 1
-    if target_session_count is None:
-        target_session_count = calendar_day_span
     if (
         type(target_session_count) is not int
-        or not 1 <= target_session_count <= calendar_day_span
+        or not 1 <= target_session_count <= _MAX_OFFICIAL_SESSIONS_PER_RANGE
+        or calendar_day_span > (target_session_count * 7 + 4) // 5 + 30
     ):
-        raise ContractError("BaoStock目标官方会话数必须在请求日历范围内")
+        raise ContractError(
+            "BaoStock范围须显式提供1至250个官方会话，起止日跨度须与会话数相称"
+        )
     if (
-        type(max_queries_per_target_session) is not int
-        or not 1 <= max_queries_per_target_session <= _MAX_DAILY_QUERIES_PER_SESSION
+        type(max_api_calls) is not int
+        or not 1 <= max_api_calls <= _MAX_API_QUERIES_PER_BATCH
     ):
-        raise ContractError("BaoStock每目标会话查询预算必须在1至10次之间")
+        raise ContractError(
+            f"BaoStock单批API查询预算必须在1至{_MAX_API_QUERIES_PER_BATCH}次之间"
+        )
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
         or not 0 < float(timeout_seconds) <= 30
     ):
         raise ContractError("BaoStock日线查询超时必须大于0且不超过30秒")
-    if type(max_rows_per_symbol) is not int or not 1 <= max_rows_per_symbol <= 20:
-        raise ContractError("BaoStock每证券响应行数上限必须在1至20之间")
+    if max_rows_per_symbol is None:
+        max_rows_per_symbol = min(target_session_count, _MAX_QUERY_ROWS)
+    if (
+        type(max_rows_per_symbol) is not int
+        or not 1 <= max_rows_per_symbol <= _MAX_QUERY_ROWS
+    ):
+        raise ContractError("BaoStock每证券原始响应行数上限须在1到250行之间")
     started_at = _timestamp()
-    request_budget = max_queries_per_target_session * target_session_count
-    request_units_per_symbol = target_session_count
-    max_symbols_per_batch = request_budget // request_units_per_symbol
+    request_budget = max_api_calls
     budget_plan = {
-        "max_queries_per_target_session": max_queries_per_target_session,
+        "max_api_calls": max_api_calls,
         "target_session_count": target_session_count,
         "calendar_day_span": calendar_day_span,
-        "request_units_per_symbol": request_units_per_symbol,
+        "api_calls_per_symbol_and_coordinate": 1,
         "total_request_budget": request_budget,
-        "requests_required": len(symbols) * request_units_per_symbol,
-        "max_symbols_per_batch": max_symbols_per_batch,
+        "requests_required": len(symbols),
+        "max_symbols_per_batch": request_budget,
         "requested_symbols": len(symbols),
-        "symbols_over_batch_bound": max(0, len(symbols) - max_symbols_per_batch),
-        "not_attempted_symbols": (
-            len(symbols) if len(symbols) > max_symbols_per_batch else 0
-        ),
+        "symbols_over_batch_bound": max(0, len(symbols) - request_budget),
+        "not_attempted_symbols": max(0, len(symbols) - request_budget),
     }
     if budget_plan["requests_required"] > request_budget:
         return {
@@ -1266,7 +1342,9 @@ def query_daily_range_rows(
             "available_at": None,
             "published_at": None,
             "sdk_version": None,
-            "max_queries_per_target_session": max_queries_per_target_session,
+            "max_api_calls": max_api_calls,
+            "adjustflag": adjustflag,
+            "coordinate": _price_coordinate(adjustflag),
             "budget_plan": budget_plan,
             "login_attempted": False,
             "query_calls": 0,
@@ -1274,11 +1352,10 @@ def query_daily_range_rows(
             "responses": {},
             "verified_source_captures": {},
             "source_network_called": False,
-            "not_attempted_symbols": len(symbols),
+            "not_attempted_symbols": max(0, len(symbols) - max_api_calls),
             "error_type": None,
             "reason": (
-                f"请求{len(symbols)}只证券、{target_session_count}个目标会话，"
-                f"超过每会话{max_queries_per_target_session}次查询预算；未登录或发送请求"
+                f"本坐标请求{len(symbols)}只证券，超过单批{max_api_calls}次API调用预算；未登录或发送请求"
             ),
         }
     try:
@@ -1297,7 +1374,9 @@ def query_daily_range_rows(
             "available_at": None,
             "published_at": None,
             "sdk_version": None,
-            "max_queries_per_target_session": max_queries_per_target_session,
+            "max_api_calls": max_api_calls,
+            "adjustflag": adjustflag,
+            "coordinate": _price_coordinate(adjustflag),
             "budget_plan": budget_plan,
             "login_attempted": False,
             "query_calls": 0,
@@ -1319,7 +1398,9 @@ def query_daily_range_rows(
             "available_at": None,
             "published_at": None,
             "sdk_version": sdk_version,
-            "max_queries_per_target_session": max_queries_per_target_session,
+            "max_api_calls": max_api_calls,
+            "adjustflag": adjustflag,
+            "coordinate": _price_coordinate(adjustflag),
             "budget_plan": budget_plan,
             "login_attempted": False,
             "query_calls": 0,
@@ -1339,7 +1420,7 @@ def query_daily_range_rows(
     verified_captures: dict[str, list[dict[str, str]]] = {}
     query_calls = 0
     status = "RESPONSE_RECEIVED"
-    reason = "BaoStock未复权日线范围查询完成"
+    reason = f"BaoStock{_price_coordinate(adjustflag)}日线范围查询完成"
     error_type = None
     endpoint: dict[str, Any] = {
         "auth_mode": "PUBLIC_ANONYMOUS",
@@ -1375,59 +1456,157 @@ def query_daily_range_rows(
                         start_date=start_date,
                         end_date=end_date,
                         frequency="d",
-                        adjustflag="3",
+                        adjustflag=adjustflag,
                     )
                     fields = tuple(
                         str(value) for value in (getattr(result, "fields", None) or ())
                     )
                     code = _code(result)
                     message = _error_message(result)
-                    rows: list[dict[str, str]] = []
+                    normalized_rows: list[dict[str, str]] = []
+                    raw_row_values: list[list[str]] = []
                     complete = code == "0"
                     local_error = None
-                    if complete:
-                        while result.next():
-                            if len(rows) >= max_rows_per_symbol:
-                                complete = False
-                                local_error = "ROW_BUDGET_EXHAUSTED"
-                                break
-                            values = result.get_row_data()
-                            if not isinstance(values, (list, tuple)) or len(
-                                values
-                            ) != len(fields):
-                                complete = False
-                                local_error = "ROW_SCHEMA_LENGTH_MISMATCH"
-                                break
-                            rows.append(
-                                {
-                                    name: str(value)
-                                    for name, value in zip(fields, values, strict=True)
-                                }
+                    if complete and (
+                        len(fields) != len(set(fields))
+                        or not set(_QUERY_FIELDS.split(",")).issubset(fields)
+                    ):
+                        complete = False
+                        local_error = "RESPONSE_FIELDS_INVALID"
+                    if code == "0":
+                        seen_dates: set[str] = set()
+                        try:
+                            while result.next():
+                                if len(raw_row_values) >= max_rows_per_symbol:
+                                    complete = False
+                                    local_error = local_error or "ROW_BUDGET_EXHAUSTED"
+                                    break
+                                try:
+                                    values = result.get_row_data()
+                                except Exception as error:
+                                    complete = False
+                                    local_error = local_error or (
+                                        "ROW_READ_FAILED:" + type(error).__name__
+                                    )
+                                    break
+                                if isinstance(values, (list, tuple)):
+                                    raw_values = [str(value) for value in values]
+                                else:
+                                    raw_values = [str(values)]
+                                if not isinstance(values, (list, tuple)):
+                                    raw_row_values.append(raw_values)
+                                    complete = False
+                                    local_error = local_error or "ROW_NOT_SEQUENCE"
+                                    continue
+                                range_violation = False
+                                for date_index, field_name in enumerate(fields):
+                                    if field_name != "date" or date_index >= len(
+                                        raw_values
+                                    ):
+                                        continue
+                                    try:
+                                        raw_session = date.fromisoformat(
+                                            raw_values[date_index]
+                                        )
+                                    except ValueError:
+                                        continue
+                                    if raw_session < start_day or raw_session > end_day:
+                                        range_violation = True
+                                        break
+                                if range_violation:
+                                    complete = False
+                                    local_error = "SOURCE_RANGE_VIOLATION"
+                                    break
+                                raw_row_values.append(raw_values)
+                                if len(raw_values) != len(fields):
+                                    complete = False
+                                    local_error = (
+                                        local_error or "ROW_SCHEMA_LENGTH_MISMATCH"
+                                    )
+                                    continue
+                                if len(fields) != len(set(fields)):
+                                    continue
+                                row = dict(zip(fields, raw_values, strict=True))
+                                row_date = row.get("date", "")
+                                try:
+                                    parsed_row_date = date.fromisoformat(row_date)
+                                    valid_date = (
+                                        parsed_row_date.isoformat() == row_date
+                                        and start_day <= parsed_row_date <= end_day
+                                    )
+                                except ValueError:
+                                    valid_date = False
+                                if (
+                                    row.get("code", "").lower() != source_code
+                                    or not valid_date
+                                    or row.get("adjustflag") != adjustflag
+                                ):
+                                    complete = False
+                                    local_error = local_error or (
+                                        "RESPONSE_ROW_KEY_OR_COORDINATE_MISMATCH"
+                                    )
+                                    continue
+                                if row_date in seen_dates:
+                                    complete = False
+                                    local_error = (
+                                        local_error or "DUPLICATE_RESPONSE_SESSION"
+                                    )
+                                    continue
+                                seen_dates.add(row_date)
+                                normalized_rows.append(row)
+                        except Exception as error:
+                            complete = False
+                            local_error = local_error or (
+                                "RESPONSE_ITERATION_FAILED:" + type(error).__name__
                             )
-                    rows_by_symbol[symbol] = {
+
+                    if not complete:
+                        normalized_rows = []
+                    symbol_response = {
                         "status": "RESPONSE_RECEIVED" if complete else "QUERY_FAILED",
                         "query_error_code": code,
                         "query_error_message": message,
                         "response_fields": list(fields),
-                        "rows_seen": len(rows),
-                        "rows": rows,
+                        "raw_response_fields": list(fields),
+                        "rows_seen": len(raw_row_values),
+                        "rows": normalized_rows,
+                        "raw_row_values": raw_row_values,
                         "complete": complete,
-                        "adjustflag": "3",
-                        "coordinate": "RAW_UNADJUSTED",
+                        "adjustflag": adjustflag,
+                        "coordinate": _price_coordinate(adjustflag),
                         "request_started_at": query_started,
                         "request_completed_at": _timestamp(),
                         "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
                         "local_error": local_error,
                     }
+                    rows_by_symbol[symbol] = symbol_response
+                    if (
+                        raw_response_sink is not None
+                        and symbol_response["query_error_code"] == "0"
+                        and isinstance(symbol_response["response_fields"], list)
+                        and isinstance(symbol_response["rows"], list)
+                    ):
+                        try:
+                            raw_response_sink(symbol, adjustflag, symbol_response)
+                        except BaostockRawResponseSinkError:
+                            raise
+                        except Exception as error:
+                            raise BaostockRawResponseSinkError(
+                                symbol, adjustflag
+                            ) from error
                     if not complete:
                         status = "QUERY_FAILED"
-                        reason = "BaoStock未复权日线未完整返回"
+                        reason = "BaoStock日线响应字段、行键、重复日或范围校验失败"
                         break
+                except BaostockRawResponseSinkError:
+                    raise
                 except Exception as error:
                     status = "QUERY_FAILED"
                     error_type = type(error).__name__
-                    reason = "BaoStock未复权日线查询异常；异常文本已省略"
+                    reason = "BaoStock日线查询异常；异常文本已省略"
                     break
+    except BaostockRawResponseSinkError:
+        raise
     except Exception as error:
         status = "SOURCE_UNAVAILABLE"
         error_type = type(error).__name__
@@ -1472,7 +1651,7 @@ def query_daily_range_rows(
                 )
                 and all(
                     row.get("code", "").upper() == f"{symbol[:2]}.{symbol[3:]}".upper()
-                    and row.get("adjustflag") == "3"
+                    and row.get("adjustflag") == adjustflag
                     for row in rows
                 )
             )
@@ -1487,6 +1666,7 @@ def query_daily_range_rows(
                     fields=tuple(response["response_fields"]),
                     row=row,
                     captured_at=response["request_completed_at"],
+                    adjustflag=adjustflag,
                     injected_transport=transport is not None,
                 )
                 if capture is None:
@@ -1513,13 +1693,13 @@ def query_daily_range_rows(
         "available_at": None,
         "published_at": None,
         "sdk_version": sdk_version,
-        "max_queries_per_target_session": max_queries_per_target_session,
+        "max_api_calls": max_api_calls,
         "budget_plan": budget_plan,
         "endpoint": endpoint,
         "socket_timeout_seconds": float(timeout_seconds),
         "fields": _QUERY_FIELDS.split(","),
-        "adjustflag": "3",
-        "coordinate": "RAW_UNADJUSTED",
+        "adjustflag": adjustflag,
+        "coordinate": _price_coordinate(adjustflag),
         "max_rows_per_symbol": max_rows_per_symbol,
         "login_attempted": login_attempted,
         "login_error_code": login_code,

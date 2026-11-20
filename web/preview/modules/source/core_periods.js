@@ -4,19 +4,19 @@ function rawItems(raw, sourceVersion) {
   const pairs = [
     ["目标日Bar", `${text(raw.bar_status)} · ${text(raw.bar_reason)}`],
     [
-      "原始OHLC",
+      "未复权OHLC",
       Object.entries(raw.values)
         .filter(([key]) => ["open", "high", "low", "close"].includes(key))
         .map(([key, value]) => `${key}=${text(value)}`)
         .join(" · "),
     ],
     [
-      "原始金额",
+      "成交金额",
       `${text(raw.values.amount)} · 字段质量 ${text(raw.quality.amount_quality)} · ` +
         `原值质量 ${text(raw.quality.raw_amount_quality)} · ${text(raw.quality.amount_unit_status)}`,
     ],
     [
-      "原始数量",
+      "成交数量",
       `${text(raw.values.volume)} · 字段质量 ${text(raw.quality.volume_quality)} · ` +
         `原值质量 ${text(raw.quality.raw_volume_quality)} · ${text(raw.quality.volume_unit_status)}`,
     ],
@@ -24,22 +24,25 @@ function rawItems(raw, sourceVersion) {
       "价格质量",
       `${text(raw.quality.price_quality)} · ${text(raw.quality.price_reason)}`,
     ],
-    ["来源包ID", text(raw.source.source_package_id)],
     [
-      "PG来源捕获 / 内容",
-      `${text(sourceVersion?.source_capture_id)} · ${text(sourceVersion?.source_package_id)}`,
+      "BaoStock捕获ID",
+      text(raw.source_capture_id || raw.source.source_capture_id),
+    ],
+    [
+      "价格坐标 / 来源捕获",
+      `${text(raw.price_coordinate)} · ${text(sourceVersion?.source_capture_id)}`,
     ],
     [
       "来源对象 / 目标日Bar",
       `${text(raw.source_object_status)} · ${text(raw.target_bar_status)}`,
     ],
     [
-      "来源时钟",
+      "BaoStock捕获时钟",
       `${text(raw.source.source_clock_role)} · ${text(raw.source.source_time_quality)}`,
     ],
     [
-      "本机观察时钟",
-      `${text(raw.source.observed_started_at)} → ${text(raw.source.observed_validated_at)}`,
+      "捕获时钟",
+      `${text(raw.source.captured_at)} · ${text(raw.source.capture_clock_role)}`,
     ],
     [
       "身份与坐标",
@@ -79,7 +82,7 @@ function renderRawPeriodRows(parent, periods) {
   for (const period of periods || []) {
     const row = tableRow(parent, [
       `${period.period_key} · ${period.calendar_start_session}—${period.calendar_end_session}`,
-      `${period.calendar_closed ? "日历已闭合" : "未闭合"} · ${text(period.coverage_status)}${period.reason_codes?.length ? ` · ${period.reason_codes.join(" / ")}` : ""}`,
+      `${period.calendar_closed ? "日历已闭合" : "未闭合"} · ${text(period.coverage_status)} · ${text(period.price_coordinate)} · ${text(period.time_role)}${period.reason_codes?.length ? ` · ${period.reason_codes.join(" / ")}` : ""}`,
       formatOhlc(period.ohlc),
       `${period.valid_price_bar_count}/${period.calendar_expected_session_count} · 窗口内 ${period.elapsed_expected_session_count}`,
       `${period.target_missing_count} / ${period.read_failed_count} / ${period.missing_history_count}`,
@@ -102,9 +105,9 @@ function renderRawPeriodRows(parent, periods) {
       "交易会话",
       "Bar状态",
       "价格质量 / 原因",
-      "原始OHLC",
-      "来源包ID",
-      "捕获ID / 来源包ID",
+      `OHLC · ${state.priceCoordinate}`,
+      "来源捕获ID",
+      "时间角色",
     ]);
     const body = document.createElement("tbody");
     for (const daily of period.daily_rows) {
@@ -116,8 +119,8 @@ function renderRawPeriodRows(parent, periods) {
         `${text(daily.bar_status)} · ${text(daily.bar_reason)}`,
         `${text(daily.price_quality)} · ${text(daily.price_reason)}`,
         dailyOhlc,
-        daily.source_package_id,
-        `${text(daily.source_capture_id)} · ${text(daily.source_package_id)}`,
+        daily.source_capture_id,
+        `${text(daily.price_coordinate)} · ${text(daily.time_role)}`,
       ]);
     }
     table.append(head, body);
@@ -128,7 +131,7 @@ function renderRawPeriodRows(parent, periods) {
   if (!periods?.length) {
     tableRow(parent, [
       "无周期",
-      "官方日历或Raw历史窗口没有可展示周期。",
+      "官方日历或BaoStock历史窗口没有可展示周期。",
       "",
       "",
       "",
@@ -139,14 +142,16 @@ function renderRawPeriodRows(parent, periods) {
 function rawPeriodBinding(data) {
   return {
     target_session: data.target_session,
-    source_package_id: data.source_package_id,
+    source_capture_id: data.source_capture_id,
+    price_coordinate: data.price_coordinate,
     symbol: data.symbol || data.source_symbol,
   };
 }
 function rawPeriodCacheKey(binding) {
   return [
     binding.target_session,
-    binding.source_package_id,
+    binding.source_capture_id,
+    binding.price_coordinate,
     binding.symbol,
   ].join("|");
 }
@@ -157,7 +162,7 @@ function rawPeriodsMatch(binding) {
   );
 }
 function clearRawPeriodState(
-  message = "等待精确日期、代码及来源版本的周期查询。",
+  message = "等待精确日期、代码、捕获与价格坐标的周期查询。",
 ) {
   state.rawPeriodRequest++;
   state.rawPeriods = null;
@@ -172,7 +177,8 @@ async function loadRawPeriods(
 ) {
   const binding = {
     target_session: version.target_session,
-    source_package_id: version.source_package_id,
+    source_capture_id: version.source_capture_id,
+    price_coordinate: state.priceCoordinate,
     symbol,
   };
   if (!isCurrent()) return null;
@@ -187,17 +193,48 @@ async function loadRawPeriods(
   }
   state.rawPeriods = null;
   state.rawPeriodContext = null;
-  renderRawPeriods(null, "正在读取精确来源身份下的自然周/月PG Raw…");
+  renderRawPeriods(null, "正在读取精确BaoStock捕获与坐标下的自然周/月历史…");
   const query = new URLSearchParams({
     target_session: binding.target_session,
-    source_package_id: binding.source_package_id,
+    source_capture_id: binding.source_capture_id,
     symbol: binding.symbol,
+    price_coordinate: binding.price_coordinate,
   });
   const data = await api(`/api/source-symbol/raw-periods?${query}`);
   if (requestId !== state.rawPeriodRequest || !isCurrent()) return null;
+  if (
+    data.price_coordinate !== binding.price_coordinate ||
+    data.time_role !== "NON_PIT_RETROSPECTIVE" ||
+    data.source_capture_id !== binding.source_capture_id ||
+    data.selection?.price_coordinate !== binding.price_coordinate ||
+    data.selection?.source_capture_id !== binding.source_capture_id
+  )
+    throw new Error(
+      "周期响应没有精确回显BaoStock捕获、价格坐标和NON_PIT时间角色。",
+    );
   const actual = rawPeriodBinding(data);
   if (rawPeriodCacheKey(actual) !== cacheKey) {
-    throw new Error("周期响应日期、来源包ID或代码不匹配，已拒绝展示。");
+    throw new Error("周期响应日期、捕获、坐标或代码不匹配，已拒绝展示。");
+  }
+  for (const kind of ["week", "month"]) {
+    if (
+      !(data.periods?.[kind] || []).every(
+        (period) =>
+          period.source_capture_id === binding.source_capture_id &&
+          period.price_coordinate === binding.price_coordinate &&
+          typeof period.time_role === "string" &&
+          period.time_role === "NON_PIT_RETROSPECTIVE" &&
+          Array.isArray(period.daily_rows) &&
+          period.daily_rows.every(
+            (row) =>
+              row.source_capture_id === binding.source_capture_id &&
+              row.price_coordinate === binding.price_coordinate,
+          ),
+      )
+    )
+      throw new Error(
+        `${kind === "week" ? "周" : "月"}周期条目缺少精确捕获、坐标或time_role。`,
+      );
   }
   state.rawPeriods = data;
   state.rawPeriodContext = actual;
@@ -227,12 +264,12 @@ function renderRawPeriods(data, errorMessage = null) {
   status.textContent =
     `来源代码级 ${data.research_mode} · ${data.price_coordinate} · ${data.pit_status}；` +
     `窗口 ${window.start_session} 至 ${window.end_session}，官方会话 ${window.official_session_count}，` +
-    `PG Raw 行 ${window.stored_raw_row_count}，有效价格Bar ${window.valid_price_bar_count}，` +
+    `PG价格行 ${window.stored_price_row_count ?? window.stored_raw_row_count}，有效价格Bar ${window.valid_price_bar_count}，` +
     `缺Bar ${window.target_missing_count}，读取失败 ${window.read_failed_count}，` +
     `未保存会话 ${window.missing_history_sessions.length}。`;
   identity.textContent =
-    `${data.source_symbol} · 目标日 ${data.target_session} · 来源包ID ${data.source_package_id} · ` +
-    `日历 ${data.calendar_revision} · 复权/公司行为 ${data.adjustment_status}/${data.corporate_action_status} · ` +
+    `${data.source_symbol} · 目标日 ${data.target_session} · BaoStock捕获 ${data.source_capture_id} · ${data.price_coordinate} · ${data.time_role || "NON_PIT_RETROSPECTIVE"} · ` +
+    `日历 ${data.calendar_revision} · ` +
     `正式闭周/月 ${data.formal_period_profile.closed_week}/${data.formal_period_profile.closed_month}：${data.formal_period_profile.reason}`;
   trends.replaceChildren();
   for (const kind of ["week", "month"]) {
@@ -248,17 +285,52 @@ function renderRawPeriods(data, errorMessage = null) {
       card,
       "span",
       item.status === "OBSERVED"
-        ? `${item.value} · ${item.input_period_keys.join(" → ")} · ${item.rule_id}`
+        ? `${item.value} · ${item.input_period_keys.join(" → ")} · ${item.rule_id} · ${item.price_coordinate} · ${item.source_capture_id} · ${item.time_role}`
         : `UNKNOWN · ${item.complete_period_count}/${item.required_period_count} 个连续完整闭合周期 · ${item.reason}`,
     );
     appendText(
       card,
       "small",
-      "仅为NON_PIT_RAW_DIAGNOSTIC；不代表正式Profile或交易信号。",
+      `${data.price_coordinate} / ${item.time_role}；仅为NON_PIT研究观察，不代表正式Profile或交易信号。`,
     );
     trends.append(card);
   }
   renderRawPeriodRows($("rawWeekRows"), data.periods.week);
   renderRawPeriodRows($("rawMonthRows"), data.periods.month);
   renderCandlestickChart(state.timeline);
+}
+
+const priceCoordinateSelect = $("priceCoordinateSelect");
+if (priceCoordinateSelect) {
+  priceCoordinateSelect.value = state.priceCoordinate;
+  priceCoordinateSelect.addEventListener("change", () => {
+    state.priceCoordinate = priceCoordinateSelect.value;
+    state.chartSelection = null;
+    const timelineContext = state.timelineContext;
+    if (timelineContext) {
+      void queryTimeline({
+        origin: timelineContext.origin,
+        persistedProfileSnapshot: timelineContext.persistedProfileSnapshot,
+        returnSelection: timelineContext.returnSelection,
+        returnBinding: timelineContext.returnBinding,
+      });
+      return;
+    }
+    const version = selectedVersion();
+    const symbol = $("symbolInput").value.trim();
+    if (!version || !symbol) {
+      clearRawPeriodState(
+        "已切换价格坐标；选择目标日期和来源代码后读取历史周期。",
+      );
+      return;
+    }
+    void loadRawPeriods(
+      version,
+      symbol,
+      { source_capture_id: version.source_capture_id },
+      () =>
+        selectedVersion()?.source_capture_id === version.source_capture_id &&
+        state.priceCoordinate === priceCoordinateSelect.value,
+    ).catch((error) => renderRawPeriods(null, error.message));
+  });
 }

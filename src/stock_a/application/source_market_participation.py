@@ -22,7 +22,7 @@ from stock_a.storage.postgres.market_participation import (
 
 _SOURCE_SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _PROFILE_SCOPE = "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
-_PRICE_COORDINATE = "RAW_UNADJUSTED"
+_PRICE_COORDINATE = "FORWARD_ADJUSTED"
 _PIT_STATUS = "NON_PIT_RETROSPECTIVE"
 
 
@@ -82,7 +82,7 @@ def calculate_market_participation(
     if not profile_rows:
         raise SourceMarketParticipationError(
             "MARKET_PARTICIPATION_PROFILES_NOT_FOUND",
-            "该精确来源包与捕获没有已保存Profile；不创建空市场参与事实。",
+            "该精确BaoStock捕获没有已保存Profile；不创建空成交参与事实。",
         )
     target = market.target_session
     cohort = market.cohort
@@ -103,7 +103,9 @@ def calculate_market_participation(
     pit_statuses: set[str] = set()
     calendar_ids: set[str] = set()
     calendar_revisions: set[str] = set()
-    windows: set[tuple[Any, ...]] = set()
+    window_scopes: set[tuple[Any, ...]] = set()
+    stored_session_counts: set[int] = set()
+    incomplete_history_symbols: set[str] = set()
     amount_unit_statuses: set[str] = set()
     observed: list[Fraction] = []
     unknown_reasons: Counter[str] = Counter()
@@ -129,7 +131,7 @@ def calculate_market_participation(
         board = row.get("board")
         if (
             row.get("market") != market_code
-            or board not in {"MAIN_BOARD", "GEM"}
+            or board not in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
             or (board == "GEM" and market_code != "SZ")
         ):
             raise SourceMarketParticipationError(
@@ -160,17 +162,35 @@ def calculate_market_participation(
                 "MARKET_PARTICIPATION_PROFILE_CALENDAR_MISMATCH",
                 "Profile历史日历不包含目标会话的当前官方日历修订。",
             )
+        requested_sessions = row.get("history_requested_session_count")
+        stored_sessions = row.get("history_stored_session_count")
+        records_complete = row.get("history_records_complete")
+        records_status = row.get("history_records_status")
         if (
             row.get("history_window_end") != target
-            or row.get("history_requested_session_count")
-            != row.get("history_stored_session_count")
-            or row.get("history_records_complete") is not True
-            or row.get("history_records_status") != "RECORDS_COMPLETE"
+            or type(requested_sessions) is not int
+            or requested_sessions < 1
+            or type(stored_sessions) is not int
+            or not 0 <= stored_sessions <= requested_sessions
+            or type(records_complete) is not bool
+            or records_complete != (stored_sessions == requested_sessions)
+            or records_status
+            != ("RECORDS_COMPLETE" if records_complete else "HISTORY_ROW_NOT_STORED")
         ):
             raise SourceMarketParticipationError(
-                "MARKET_PARTICIPATION_PROFILE_HISTORY_INCOMPLETE",
-                "Profile历史会话窗口未完整闭合。",
+                "MARKET_PARTICIPATION_PROFILE_HISTORY_INVALID",
+                "Profile历史窗口计数或完整性状态不一致。",
             )
+        window_scopes.add(
+            (
+                row.get("history_window_start"),
+                row.get("history_window_end"),
+                requested_sessions,
+            )
+        )
+        stored_session_counts.add(stored_sessions)
+        if not records_complete:
+            incomplete_history_symbols.add(symbol)
 
         profile_revisions.add(str(row.get("profile_revision")))
         producer_contracts.add(str(row.get("producer_contract")))
@@ -182,14 +202,9 @@ def calculate_market_participation(
         calendar_ids.add(str(row.get("history_calendar_id")))
         calendar_revisions.add(str(row.get("history_calendar_revision")))
         amount_unit_statuses.add(str(row.get("amount_unit_status")))
-        windows.add(
-            (
-                row.get("history_window_start"),
-                row.get("history_window_end"),
-                row.get("history_requested_session_count"),
-                row.get("history_stored_session_count"),
-            )
-        )
+        if not records_complete:
+            unknown_reasons["PROFILE_HISTORY_WINDOW_INCOMPLETE"] += 1
+            continue
 
         quality = row.get("amount_ratio20_quality")
         value = row.get("amount_ratio20")
@@ -258,7 +273,7 @@ def calculate_market_participation(
             pit_statuses,
             calendar_ids,
             calendar_revisions,
-            windows,
+            window_scopes,
             amount_unit_statuses,
         )
     ):
@@ -278,7 +293,13 @@ def calculate_market_participation(
 
     median = exact_median(observed)
 
-    window_start, window_end, requested, stored = next(iter(windows))
+    window_start, window_end, requested = next(iter(window_scopes))
+    stored = max(stored_session_counts)
+    if stored != requested:
+        raise SourceMarketParticipationError(
+            "MARKET_PARTICIPATION_PROFILE_SOURCE_WINDOW_INCOMPLETE",
+            "BaoStock来源在该目标Profile窗口内没有任何完整会话覆盖。",
+        )
     profile_revision = next(iter(profile_revisions))
     producer_contract = next(iter(producer_contracts))
     producer_version = next(iter(producer_versions))
@@ -286,8 +307,11 @@ def calculate_market_participation(
     profile_history_calendar_revision = next(iter(calendar_revisions))
     amount_unit_status = next(iter(amount_unit_statuses))
     profile_unknown_count = sum(
-        1 for row in profile_rows if row["amount_ratio20_quality"] == "UNKNOWN"
-    )
+        1
+        for row in profile_rows
+        if row["history_records_complete"] is True
+        and row["amount_ratio20_quality"] == "UNKNOWN"
+    ) + len(incomplete_history_symbols)
     profile_count = len(profile_rows)
     missing_count = len(missing_symbols)
     assessable_count = len(observed)
@@ -300,13 +324,12 @@ def calculate_market_participation(
     )
     return {
         "target_session": target,
-        "source_package_id": cohort.source_package_id,
+        "research_cutoff": market.research_cutoff,
         "source_capture_id": cohort.source_capture_id,
         "contract_version": "MARKET_PARTICIPATION_R1",
         "profile_revision": profile_revision,
         "producer_contract": producer_contract,
         "producer_version": producer_version,
-        "source_dataset_id": cohort.source_dataset_id,
         "source_time_quality": cohort.source_time_quality,
         "source_available_at": cohort.source_available_at,
         "source_clock_role": cohort.source_clock_role,
@@ -344,16 +367,20 @@ def _median_decimal(value: Fraction | None) -> Decimal | None:
 
 
 def produce_market_participation(
-    config: Mapping[str, Any], market: Any
+    config: Mapping[str, Any],
+    market: Any,
+    *,
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """读取一次已存Profile集合并原子保存参与摘要。"""
     rows = read_market_participation_profiles(
         config,
         target_session=market.target_session,
-        source_package_id=market.cohort.source_package_id,
         source_capture_id=market.cohort.source_capture_id,
+        profile_revision=profile_revision,
     )
     result = calculate_market_participation(market, rows)
+    result["research_cutoff"] = market.research_cutoff
     persisted = persist_market_participation(config, result)
     readback = read_market_participation(config, market=market)
     expected_fraction = (
@@ -391,7 +418,6 @@ def produce_market_participation(
         "profile_revision": result["profile_revision"],
         "producer_version": result["producer_version"],
         "target_session": result["target_session"].isoformat(),
-        "source_package_id": result["source_package_id"],
         "source_capture_id": result["source_capture_id"],
         "calendar_revision": result["calendar_revision"],
     }

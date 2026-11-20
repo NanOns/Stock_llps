@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
@@ -14,7 +15,10 @@ from stock_a.application.source_formal_admission import (
 )
 from stock_a.domain import FieldValue, unknown
 from stock_a.research.d0_price_facts import calculate_d0_first_day_damage
-from stock_a.storage.postgres import source_raw
+from stock_a.application.pg_research import read_source_version_context
+from stock_a.storage.postgres.baostock_price_facts import (
+    read_baostock_price_history_batch,
+)
 from stock_a.storage.postgres.formal_admission import (
     list_saved_launch_sessions,
     persist_source_formal_admission_rows,
@@ -96,7 +100,6 @@ def _raw_history_for_candidates(
     config,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     candidates: list[str],
     sessions: tuple[date, ...],
@@ -104,18 +107,99 @@ def _raw_history_for_candidates(
     histories: dict[str, dict[date, dict[str, Any]]] = {}
     for start in range(0, len(candidates), 100):
         symbols = candidates[start : start + 100]
-        batch = source_raw.read_raw_daily_history_batch(
-            config,
-            source_symbols=symbols,
-            target_session=target_session,
-            research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
-            sessions=sessions,
-            expected_source_package_id=source_package_id,
-            expected_target_capture_id=source_capture_id,
+        offset = 0
+        total = None
+        batch_rows = 0
+        while True:
+            batch = read_baostock_price_history_batch(
+                config,
+                source_symbols=symbols,
+                sessions=sessions,
+                source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
+                cutoff=research_cutoff,
+                offset=offset,
+                limit=1000,
+            )
+            if (
+                batch.get("source_capture_id") != source_capture_id
+                or batch.get("price_coordinate") != "FORWARD_ADJUSTED"
+            ):
+                raise SourceFormalAdmissionProductionError(
+                    "FORMAL_ADMISSION_QFQ_HISTORY_IDENTITY_INVALID",
+                    "QFQ历史批次没有绑定请求的paired capture。",
+                )
+            page = batch.get("page", {})
+            if total is None:
+                total = int(page.get("total", -1))
+            elif int(page.get("total", -1)) != total:
+                raise SourceFormalAdmissionProductionError(
+                    "FORMAL_ADMISSION_QFQ_HISTORY_DENOMINATOR_CHANGED",
+                    "正式准入QFQ历史分页期间分母发生变化。",
+                )
+            if any(
+                item.get("coverage_status") != "COMPLETE"
+                for item in batch.get("coverage", ())
+            ):
+                raise SourceFormalAdmissionProductionError(
+                    "FORMAL_ADMISSION_QFQ_HISTORY_INCOMPLETE",
+                    "正式准入QFQ历史会话没有完整请求与行覆盖。",
+                )
+            for row in batch.get("rows", ()):
+                history = histories.setdefault(row["source_symbol"], {})
+                if row["session_date"] in history:
+                    raise SourceFormalAdmissionProductionError(
+                        "FORMAL_ADMISSION_QFQ_HISTORY_DUPLICATE",
+                        "正式准入QFQ历史会话重复。",
+                    )
+                history[row["session_date"]] = {
+                    key: row.get(key)
+                    for key in (
+                        "source_symbol",
+                        "session_date",
+                        "source_capture_id",
+                        "bar_status",
+                        "qfq_price_quality",
+                        "qfq_price_reason",
+                        "qfq_price_coordinate",
+                        "price_coordinate",
+                        "qfq_open",
+                        "qfq_high",
+                        "qfq_low",
+                        "qfq_close",
+                    )
+                }
+                batch_rows += 1
+            next_offset = page.get("next_offset")
+            if next_offset is None:
+                break
+            offset = int(next_offset)
+        expected_rows = sum(
+            int(item.get("expected_symbol_count", 0))
+            for item in batch.get("coverage", ())
         )
-        for symbol, rows in batch["history_rows_by_symbol"].items():
-            histories[symbol] = {row["session_date"]: row for row in rows}
+        if total is None or batch_rows != total or total != expected_rows:
+            coverage = batch.get("coverage", ())
+            coverage_gaps = [
+                {
+                    "session_date": item.get("session_date"),
+                    "expected": item.get("expected_symbol_count"),
+                    "rows": item.get("row_count"),
+                    "symbols": item.get("symbol_count"),
+                    "quality_rows": item.get("quality_row_count"),
+                }
+                for item in coverage
+                if item.get("coverage_status") != "COMPLETE"
+                or item.get("expected_symbol_count") != item.get("quality_row_count")
+            ][:5]
+            raise SourceFormalAdmissionProductionError(
+                "FORMAL_ADMISSION_QFQ_HISTORY_INCOMPLETE",
+                "正式准入QFQ历史分页未闭合："
+                f"候选数={len(symbols)}，批次起始索引={start}，"
+                f"分页数={offset // 1000 + 1}，最后offset={offset}，"
+                f"total={total}，累计行={batch_rows}，"
+                f"覆盖期望行={expected_rows}，缺口样例={coverage_gaps}。",
+            )
     return histories
 
 
@@ -123,18 +207,21 @@ def _line_inputs(
     *,
     symbol: str,
     target_session: date,
-    package_id: int,
-    capture_id: int,
+    source_capture_id: int,
     sessions: tuple[date, ...],
     history: dict[date, dict[str, Any]],
 ) -> tuple[FieldValue, FieldValue, Any]:
     close = None
     phc20 = None
     current = history.get(target_session)
-    if current is not None and current.get("price_quality") == "OBSERVED":
-        close = _fraction(current.get("raw_close"))
+    if (
+        current is not None
+        and current.get("source_capture_id") == source_capture_id
+        and current.get("qfq_price_quality") == "OBSERVED"
+    ):
+        close = _fraction(current.get("qfq_close"))
     if close is None:
-        close_field = unknown("T0_CLOSE_NOT_OBSERVED_IN_EXACT_RAW_CAPTURE")
+        close_field = unknown("T0_QFQ_CLOSE_NOT_OBSERVED_IN_PAIRED_CAPTURE")
     else:
         close_field = FieldValue(close)
 
@@ -145,13 +232,13 @@ def _line_inputs(
             row is None
             or row.get("session_date") != session
             or row.get("source_symbol") != symbol
-            or row.get("source_package_id") != package_id
+            or row.get("source_capture_id") != source_capture_id
             or row.get("bar_status") != "TARGET_PRESENT"
-            or row.get("price_quality") != "OBSERVED"
+            or row.get("qfq_price_quality") != "OBSERVED"
         ):
             prior_closes = []
             break
-        value = _fraction(row.get("raw_close"))
+        value = _fraction(row.get("qfq_close"))
         if value is None or value <= 0:
             prior_closes = []
             break
@@ -168,8 +255,8 @@ def _line_inputs(
         official_sessions=sessions,
         history_rows_by_session=by_session,
         source_symbol=symbol,
-        source_package_id=package_id,
-        target_capture_id=capture_id,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
     )
     return close_field, phc_field, damage
 
@@ -179,7 +266,8 @@ def run_source_formal_admission_from_saved(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    profile_revision: str | None = None,
     persist: bool,
 ) -> dict[str, Any]:
     """处理一个目标日；只消费该日已闭合Raw、D0、Core和Profile事实。"""
@@ -187,17 +275,21 @@ def run_source_formal_admission_from_saved(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or persist is not True
     ):
         raise SourceFormalAdmissionProductionError(
             "FORMAL_ADMISSION_ARGUMENT_INVALID",
-            "准入生产必须显式绑定截止内的单日来源包并持久化",
+            "准入生产必须显式绑定截止内的paired BaoStock capture并持久化",
         )
 
-    source = source_raw.read_source_version_context(
-        config, target_session=target_session, source_package_id=source_package_id
+    source = read_source_version_context(
+        config,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
     )
     if (
         source.get("status") != "AVAILABLE"
@@ -205,15 +297,17 @@ def run_source_formal_admission_from_saved(
     ):
         raise SourceFormalAdmissionProductionError(
             "FORMAL_ADMISSION_RAW_SOURCE_NOT_CLOSED",
-            "目标日原始来源分区未闭合，不生成正式准入分母",
+            "目标日paired BaoStock双坐标来源分区未闭合，不生成准入分母",
         )
     source_capture_id = source["source_capture_id"]
     expected_count = source["capture_expected_row_count"]
     d0 = read_source_d0_scenario_day(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         scenario="LAUNCH_CONFIRM",
+        price_coordinate="FORWARD_ADJUSTED",
+        research_cutoff=research_cutoff,
     )
     if (
         d0["source_pool"]["source_count"] != expected_count
@@ -263,9 +357,9 @@ def run_source_formal_admission_from_saved(
         seed_scope = read_source_pool_seed_forward_scope(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
             expected_source_count=expected_count,
+            profile_revision=profile_revision,
         )
         if (
             seed_scope["source_symbols"]
@@ -280,8 +374,9 @@ def run_source_formal_admission_from_saved(
             seed_rows = read_source_pool_seed_facts(
                 config,
                 target_session=target_session,
-                source_package_id=source_package_id,
+                research_cutoff=research_cutoff,
                 source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
                 profile_revision=seed_scope["profile_revision"],
                 producer_version=seed_scope["producer_version"],
             )
@@ -300,7 +395,6 @@ def run_source_formal_admission_from_saved(
     input_refs = read_saved_source_fact_ids(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
         source_capture_id=source_capture_id,
         producer_version=d0["producer_version"],
         algorithm_contract=d0["algorithm_contract"],
@@ -326,7 +420,6 @@ def run_source_formal_admission_from_saved(
             config=config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
             candidates=raw_true_symbols,
             sessions=sessions,
@@ -340,9 +433,8 @@ def run_source_formal_admission_from_saved(
         and d0["official_calendar"]["calendar_id"] == calendar["calendar_id"]
         and d0["official_calendar"]["calendar_revision"]
         == calendar["calendar_revision"]
-        and d0["source_version"]["source_package_id"] == source_package_id
         and d0["source_version"]["source_capture_id"] == source_capture_id
-        and source["price_coordinate"] == "RAW_UNADJUSTED"
+        and source["price_coordinate"] == "FORWARD_ADJUSTED"
     )
     rows: list[dict[str, Any]] = []
     raw_counts: Counter[str] = Counter()
@@ -358,8 +450,7 @@ def run_source_formal_admission_from_saved(
             close, phc20, damage = _line_inputs(
                 symbol=symbol,
                 target_session=target_session,
-                package_id=source_package_id,
-                capture_id=source_capture_id,
+                source_capture_id=source_capture_id,
                 sessions=sessions,
                 history=history,
             )
@@ -370,9 +461,9 @@ def run_source_formal_admission_from_saved(
             else:
                 exact_history = all(
                     session in history
-                    and history[session].get("price_quality") == "OBSERVED"
+                    and history[session].get("qfq_price_quality") == "OBSERVED"
                     and history[session].get("source_symbol") == symbol
-                    and history[session].get("source_package_id") == source_package_id
+                    and history[session].get("source_capture_id") == source_capture_id
                     and (
                         session != target_session
                         or history[session].get("source_capture_id")
@@ -381,7 +472,7 @@ def run_source_formal_admission_from_saved(
                     for session in sessions
                 )
                 coordinate_gate = unknown(
-                    "CORPORATE_ACTION_COORDINATE_NOT_PROVED"
+                    "QFQ_NON_PIT_COORDINATE_NOT_CLOSED"
                     if exact_history
                     else "STRICT_D0_WINDOW_NOT_REPRODUCED_FROM_SAVED_RAW"
                 )
@@ -463,7 +554,7 @@ def run_source_formal_admission_from_saved(
             "coordinate_window": {
                 "TRUE": "D0_COORDINATE_WINDOW_MATCHED",
                 "FALSE": "D0_COORDINATE_WINDOW_INVALID",
-                "UNKNOWN": "CORPORATE_ACTION_COORDINATE_NOT_PROVED",
+                "UNKNOWN": "QFQ_NON_PIT_COORDINATE_NOT_CLOSED",
             },
             "d0_liquidity": {
                 "TRUE": "D0_LIQ20_THRESHOLD_PROVED",
@@ -499,13 +590,12 @@ def run_source_formal_admission_from_saved(
                     gate_blocked_counts[gate_reason_labels[name]["FALSE"]] += 1
         refs = input_refs[symbol]
         evidence_ref = (
-            f"PG:{target_session.isoformat()}:{source_package_id}:"
+            f"PG:{target_session.isoformat()}:{source_capture_id}:"
             f"{source_capture_id}:{symbol}:D0_FACT:{refs['raw_fact_id']}"
         )
         prepared = prepare_source_d0_launch_formal_admission(
             entity_id=symbol,
             target_session=target_session,
-            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
             raw_fact_id=refs["raw_fact_id"],
             raw_state=raw_state,
@@ -524,7 +614,6 @@ def run_source_formal_admission_from_saved(
         row = {
             "raw_fact_id": refs["raw_fact_id"],
             "seed_fact_id": refs["seed_fact_id"],
-            "source_package_id": source_package_id,
             "source_capture_id": source_capture_id,
             "target_session": target_session,
             "source_symbol": symbol,
@@ -551,7 +640,7 @@ def run_source_formal_admission_from_saved(
             "seed_producer_version": refs["seed_producer_version"],
             "identity_scope": "SOURCE_SYMBOL_ONLY",
             "research_mode": "NON_PIT_EXPLORATORY",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "admission_contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
             "admission_status": prepared["admission_status"],
             "admission_reason": prepared["admission_reason"],
@@ -601,7 +690,6 @@ def run_source_formal_admission_from_saved(
     result = persist_source_formal_admission_rows(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
         source_capture_id=source_capture_id,
         expected_source_count=expected_count,
         rows=rows,
@@ -609,7 +697,6 @@ def run_source_formal_admission_from_saved(
     readback = read_source_formal_admission_day(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
         source_capture_id=source_capture_id,
         expected_source_count=expected_count,
     )
@@ -626,12 +713,19 @@ def run_source_formal_admission_from_saved(
     return {
         **result,
         "input_status": "SAVED_D0_AND_RAW_SCOPE_CLOSED",
+        "source_capture_id": source_capture_id,
+        "raw_producer_version": d0["producer_version"],
+        "producer_version": d0["producer_version"],
+        "calendar_revision": d0["official_calendar"]["calendar_revision"],
+        "expected_source_count": expected_count,
+        "verified_rows": expected_count,
         "raw_counts": dict(raw_counts),
         "gate_blocked_reason_counts": dict(sorted(gate_blocked_counts.items())),
         "gate_unknown_reason_counts": dict(sorted(gate_unknown_counts.items())),
         "identity_scope": "SOURCE_SYMBOL_ONLY",
         "research_mode": "NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "source_time_quality": source["source_time_quality"],
         "source_clock_role": source["source_clock_role"],
         "source_available_at": source["source_available_at"],
@@ -657,7 +751,8 @@ def run_source_formal_admission_range_from_saved(
     start_session: date,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    profile_revisions_by_session: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """仅生产指定范围内PG已经完成的LAUNCH D0分区。"""
     sessions = list_saved_launch_sessions(
@@ -665,7 +760,7 @@ def run_source_formal_admission_range_from_saved(
         start_session=start_session,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
     )
     if not sessions:
         return {
@@ -674,7 +769,7 @@ def run_source_formal_admission_range_from_saved(
             "start_session": start_session.isoformat(),
             "target_session": target_session.isoformat(),
             "research_cutoff": research_cutoff.isoformat(),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "completed_day_count": 0,
             "database_write_attempted": False,
         }
@@ -683,7 +778,12 @@ def run_source_formal_admission_range_from_saved(
             config,
             target_session=day,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            profile_revision=(
+                profile_revisions_by_session.get(day.isoformat())
+                if isinstance(profile_revisions_by_session, Mapping)
+                else None
+            ),
             persist=True,
         )
         for day in sessions
@@ -694,7 +794,7 @@ def run_source_formal_admission_range_from_saved(
         "start_session": start_session.isoformat(),
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "completed_day_count": len(reports),
         "reports": reports,
         "database_write_attempted": True,

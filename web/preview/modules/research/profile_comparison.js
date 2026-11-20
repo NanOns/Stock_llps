@@ -8,6 +8,8 @@ function selectedProfileSnapshot() {
 }
 function timelineField(field) {
   if (!field) return "—";
+  if (field.quality === "NOT_APPLICABLE" || field.quality === "NOT_COMPUTED")
+    return `NOT_COMPUTED · ${text(field.reason || "未在所选价格坐标计算")}`;
   if (field.quality !== "OBSERVED")
     return `UNKNOWN · ${text(field.reason || field.quality)}`;
   const value = field.value;
@@ -26,13 +28,13 @@ function priorHighRelationLabel(relation) {
 function comparisonIdentityOf(item) {
   return {
     target_session: item.target_session,
-    source_package_id: item.source_package_id,
+    source_capture_id: item.source_capture_id,
     profile_revision: item.profile_revision,
   };
 }
 function sameComparisonIdentity(left, right) {
   if (!left || !right) return false;
-  return ["target_session", "source_package_id", "profile_revision"].every(
+  return ["target_session", "source_capture_id", "profile_revision"].every(
     (key) => left[key] === right[key],
   );
 }
@@ -43,17 +45,17 @@ function relationComparisonCandidate(item) {
   return {
     source_symbol: item.source_symbol,
     target_session: snapshot.target_session,
-    source_package_id: item.after_source_package_id,
+    source_capture_id: item.after_source_capture_id,
     profile_revision: item.after_profile_revision,
-    origin_label: "两日RAW结构结果",
+    origin_label: "两日前复权结构结果",
   };
 }
 function addComparisonCandidate(candidate) {
   if (
     !candidate?.source_symbol ||
     !candidate.target_session ||
-    !Number.isSafeInteger(candidate.source_package_id) ||
-    candidate.source_package_id <= 0 ||
+    !Number.isSafeInteger(candidate.source_capture_id) ||
+    candidate.source_capture_id <= 0 ||
     typeof candidate.profile_revision !== "string" ||
     !candidate.profile_revision ||
     !/^(SH|SZ)\.[0-9]{6}$/.test(candidate.source_symbol)
@@ -69,7 +71,7 @@ function addComparisonCandidate(candidate) {
     : null;
   if (currentIdentity && !sameComparisonIdentity(identity, currentIdentity)) {
     state.comparisonMessage =
-      "该来源属于不同目标日、来源包或画像修订；请先清空对照篮再选。";
+      "该来源属于不同目标日、来源捕获或画像修订；请先清空对照篮再选。";
     renderComparisonBasket();
     return;
   }
@@ -90,7 +92,7 @@ function addComparisonCandidate(candidate) {
   state.comparisonBasket.push({ ...candidate });
   state.comparisonMessage =
     `已加入 ${candidate.source_symbol}（${candidate.origin_label}）；选择身份固定为 ` +
-    `${candidate.target_session} / ${candidate.source_package_id} / ${candidate.profile_revision}。`;
+    `${candidate.target_session} / ${candidate.source_capture_id} / ${candidate.profile_revision}。`;
   invalidateComparisonResults(
     "选择已变化；请重新读取同一快照下的75个官方会话。",
   );
@@ -139,8 +141,8 @@ function renderComparisonBasket() {
   $("comparisonNotice").textContent =
     state.comparisonMessage ||
     (basket.length
-      ? `同一快照 ${basket[0].target_session} · 来源包ID ${basket[0].source_package_id} · profile_revision ${basket[0].profile_revision}。`
-      : "从两日RAW关系结果或完整PG画像页加入同一来源快照的代码。");
+      ? `同一快照 ${basket[0].target_session} · 来源捕获ID ${basket[0].source_capture_id} · profile_revision ${basket[0].profile_revision}。`
+      : "从两日前复权关系结果或完整PG画像页加入同一来源快照的代码。");
   if (!basket.length) {
     appendText(root, "span", "尚未选择来源代码。", "muted");
     return;
@@ -219,13 +221,16 @@ function exactFraction(raw) {
   }
   return { numerator, denominator: 10n ** BigInt(scale) };
 }
-function rawCloseFraction(field) {
+function priceCloseFraction(field) {
   if (!field || field.quality !== "OBSERVED") return null;
   const value = field.value;
   const exact =
     value && typeof value === "object" ? (value.exact ?? value.decimal) : value;
   const fraction = exactFraction(exact);
   return fraction?.numerator > 0n ? fraction : null;
+}
+function comparisonQfqClose(point) {
+  return point?.qfq_close || point?.qfq_ohlc?.close || null;
 }
 function normalizedIndexFraction(close, base) {
   if (!close || !base || base.numerator <= 0n) return null;
@@ -247,6 +252,9 @@ function formatIndexFraction(fraction) {
 function comparisonPeriodCloseFraction(period) {
   if (
     !period ||
+    period.price_coordinate !== "FORWARD_ADJUSTED" ||
+    period.time_role !== "NON_PIT_RETROSPECTIVE" ||
+    !Number.isSafeInteger(period.source_capture_id) ||
     period.calendar_closed !== true ||
     period.coverage_status !== "COMPLETE" ||
     period.reason_codes?.length ||
@@ -353,7 +361,7 @@ function comparisonPeriodAxis(entries, selectionCount, periodKind) {
         } else if (period.coverage_status !== "COMPLETE") {
           reason = `周期覆盖${period.coverage_status}：${period.reason_codes.join("、") || "来源覆盖不完整"}`;
         } else if (!validClose) {
-          reason = "完整闭合周期没有合法RAW收盘价";
+          reason = "完整闭合周期没有合法BaoStock QFQ收盘价";
         } else if (!baseRow) {
           reason = "没有所有篮内代码共同完整闭合的基准周期";
         } else if (
@@ -365,7 +373,7 @@ function comparisonPeriodAxis(entries, selectionCount, periodKind) {
             validClose,
             bases.get(entry.selection.source_symbol),
           );
-          if (!indexFraction) reason = "RAW收盘或共同基准不是正数";
+          if (!indexFraction) reason = "BaoStock QFQ收盘或共同基准不是正数";
         }
         return { entry, period, close, indexFraction, reason };
       }),
@@ -414,8 +422,10 @@ function comparisonAxis(entries, selectionCount) {
     baseSession =
       sessionDates.find((session) =>
         valid.every((entry) =>
-          rawCloseFraction(
-            maps.get(entry.selection.source_symbol)?.get(session)?.raw_close,
+          priceCloseFraction(
+            comparisonQfqClose(
+              maps.get(entry.selection.source_symbol)?.get(session),
+            ),
           ),
         ),
       ) || null;
@@ -425,8 +435,10 @@ function comparisonAxis(entries, selectionCount) {
     for (const entry of valid) {
       bases.set(
         entry.selection.source_symbol,
-        rawCloseFraction(
-          maps.get(entry.selection.source_symbol).get(baseSession)?.raw_close,
+        priceCloseFraction(
+          comparisonQfqClose(
+            maps.get(entry.selection.source_symbol).get(baseSession),
+          ),
         ),
       );
     }
@@ -452,7 +464,7 @@ function renderComparisonSummary(entry) {
   appendText(
     card,
     "p",
-    `RAW收盘 ${comparisonFieldText(target?.raw_close)} · Bar ${text(target?.raw_status)} · ${text(target?.price_reason || "无价格原因")}`,
+    `前复权收盘 ${comparisonFieldText(comparisonQfqClose(target))} · Bar ${text(target?.raw_status)} · ${text(target?.price_reason || "无价格原因")}`,
   );
   appendText(
     card,
@@ -472,7 +484,7 @@ function renderComparisonSummary(entry) {
   appendText(
     card,
     "p",
-    `来源包ID ${data.source_package_id} · profile_revision ${entry.selection.profile_revision}`,
+    `来源捕获ID ${data.source_capture_id} · profile_revision ${entry.selection.profile_revision}`,
   );
   appendText(
     card,

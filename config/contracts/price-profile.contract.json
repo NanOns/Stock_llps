@@ -1,7 +1,7 @@
 {
-  "format": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+  "format": "STOCK-A-PRICE-PROFILE-SEMANTICS/R2",
   "contract_id": "STOCK-A-PRICE-PROFILE-SEMANTICS",
-  "version": "R1",
+  "version": "R2",
   "modules": [
     {
       "id": "fields-source",

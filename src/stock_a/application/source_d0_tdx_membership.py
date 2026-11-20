@@ -73,19 +73,25 @@ def build_d0_launch_watch_membership_result(
     ):
         raise TdxSectorMembersApplicationError(
             "D0_MEMBERSHIP_SOURCE_IDENTITY_INVALID",
-            "TDX联接需要同数字来源包的完整D0 Raw端点及后验快照",
+            "TDX联接需要BaoStock paired capture的完整D0端点及后验快照",
         )
     if (
         not isinstance(snapshots, list)
         or not isinstance(memberships, list)
         or membership_read.get("membership_mode")
         != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-        or before_version.get("source_package_id")
-        != after_version.get("source_package_id")
+        or before_version.get("source_capture_id")
+        != after_version.get("source_capture_id")
+        or before_version.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or after_version.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or before_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or after_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or changes.get("source_capture_id") != after_version.get("source_capture_id")
+        or changes.get("price_coordinate") != "FORWARD_ADJUSTED"
     ):
         raise TdxSectorMembersApplicationError(
             "D0_MEMBERSHIP_SOURCE_IDENTITY_INVALID",
-            "TDX联接需要同数字来源包的完整D0 Raw端点及后验快照",
+            "TDX联接需要同一BaoStock paired capture的完整QFQ D0端点及后验快照",
         )
 
     snapshot_by_id: dict[int, Mapping[str, Any]] = {}
@@ -317,7 +323,9 @@ def build_d0_launch_watch_membership_result(
         {
             "target_session": target_session,
             "research_cutoff": after.get("research_cutoff"),
-            "source_package_id": after_version.get("source_package_id"),
+            "source_capture_id": after_version.get("source_capture_id"),
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "time_role": "NON_PIT_RETROSPECTIVE",
             "global_new_stock_count": len(ft_symbols),
             "global_unique_source_symbol_count": len(ft_symbols),
             "mapped_distinct_source_symbol_count": mapped_count,

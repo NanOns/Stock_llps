@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
@@ -35,7 +36,11 @@ from stock_a.storage.postgres.price_profiles import (
 )
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
-    read_raw_daily_history_page,
+)
+from stock_a.storage.postgres.baostock_price_facts import (
+    BaoStockPriceFactsError,
+    read_baostock_capture_roster,
+    read_baostock_price_history_batch,
 )
 
 
@@ -163,7 +168,7 @@ def _records_for_page(
     page: Mapping[str, Any],
     preview: Mapping[str, Any],
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     source_context: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
@@ -204,12 +209,11 @@ def _records_for_page(
             "market": candidate["market"],
             "board": candidate["board"],
             "target_session": target_session,
-            "source_package_id": source_package_id,
             "profile_revision": profile_revision,
             "calculation_scope": SOURCE_SYMBOL_PROFILE_SCOPE,
             "producer_contract": _PRODUCER_CONTRACT,
             "producer_version": _PRODUCER_SEMANTICS_VERSION,
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
             "listing_status": "LISTING_STATUS_UNKNOWN",
@@ -247,8 +251,8 @@ def _records_for_page(
             "price_window_usable": bool(result["price_window_usable"]),
             "price_window_status": result["price_window_status"],
             "price_window_reason": result["price_window_reason"],
-            "amount_unit_status": "UNIT_UNVERIFIED",
-            "volume_unit_status": "UNIT_UNVERIFIED",
+            "amount_unit_status": target_row["amount_unit_status"],
+            "volume_unit_status": target_row["volume_unit_status"],
         }
         for field_id, column in _CORE_FIELDS.items():
             field = core_fields.get(field_id)
@@ -355,11 +359,131 @@ def _records_for_page(
     return records
 
 
+def _read_baostock_profile_page(
+    config: Mapping[str, Any],
+    *,
+    source_symbols: tuple[str, ...],
+    source_capture_id: int,
+    sessions: tuple[date, ...],
+    cutoff: date,
+) -> dict[str, Any]:
+    histories: dict[str, list[dict[str, Any]]] = {
+        symbol: [] for symbol in source_symbols
+    }
+    offset = 0
+    expected_total: int | None = None
+    while True:
+        batch = read_baostock_price_history_batch(
+            config,
+            source_symbols=source_symbols,
+            sessions=sessions,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            cutoff=cutoff,
+            offset=offset,
+            limit=5000,
+        )
+        page_info = batch.get("page", {})
+        total = page_info.get("total")
+        next_offset = page_info.get("next_offset")
+        if batch.get("status") != "AVAILABLE" or type(total) is not int:
+            raise PgPriceProfileError(
+                "PROFILE_SOURCE_PAGE_UNAVAILABLE", "BaoStock QFQ分页未返回完整PG读结果"
+            )
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise PgPriceProfileError(
+                "PROFILE_SOURCE_PARTITION_CHANGED", "BaoStock QFQ分页期间分母发生变化"
+            )
+        if any(
+            item.get("coverage_status") != "COMPLETE"
+            or item.get("row_count") != item.get("expected_symbol_count")
+            or item.get("completed_request_count") != item.get("expected_symbol_count")
+            for item in batch.get("coverage", ())
+        ):
+            raise PgPriceProfileError(
+                "PROFILE_SOURCE_PARTITION_OPEN",
+                "BaoStock QFQ来源请求或逐会话读回不完整",
+            )
+        for row in batch.get("rows", ()):
+            symbol = row.get("source_symbol")
+            if symbol not in histories:
+                raise PgPriceProfileError(
+                    "PROFILE_SOURCE_SYMBOL_MISMATCH", "BaoStock QFQ分页包含范围外证券"
+                )
+            histories[symbol].append(row)
+        if next_offset is None:
+            break
+        if type(next_offset) is not int or next_offset <= offset:
+            raise PgPriceProfileError(
+                "PROFILE_SOURCE_PAGE_INVALID", "BaoStock QFQ分页游标无效"
+            )
+        offset = next_offset
+
+    actual_total = sum(len(rows) for rows in histories.values())
+    if expected_total is None or actual_total != expected_total:
+        raise PgPriceProfileError(
+            "PROFILE_SOURCE_ROW_COUNT_MISMATCH", "BaoStock QFQ历史分页行数没有闭合"
+        )
+    candidates = []
+    target_session = sessions[-1]
+    target_status_counts: Counter[str] = Counter()
+    for symbol in source_symbols:
+        rows = sorted(histories[symbol], key=lambda item: item["session_date"])
+        row_dates = {item["session_date"] for item in rows}
+        target_row = next(
+            (item for item in rows if item["session_date"] == target_session), None
+        )
+        if target_row is None:
+            raise PgPriceProfileError(
+                "PROFILE_TARGET_RAW_MISSING", f"BaoStock QFQ分页缺少目标日{symbol}"
+            )
+        target_status_counts[str(target_row.get("bar_status") or "READ_FAILED")] += 1
+        candidates.append(
+            {
+                "source_symbol": symbol,
+                "market": target_row["market"],
+                "board": target_row["board"],
+                "history_rows": rows,
+                "missing_sessions": [
+                    session.isoformat()
+                    for session in sessions
+                    if session not in row_dates
+                ],
+            }
+        )
+    if len(candidates) != len(source_symbols):
+        raise PgPriceProfileError(
+            "PROFILE_BATCH_DENOMINATOR_MISMATCH", "BaoStock QFQ来源代码分页没有闭合"
+        )
+    return {
+        "status": "AVAILABLE",
+        "total_count": len(candidates),
+        "version_status": "CLOSED",
+        "version_row_count": len(candidates),
+        "version_expected_row_count": len(candidates),
+        "partition_closed": True,
+        "market_filter": "ALL",
+        "board_filter": "ALL",
+        "session_start": sessions[0].isoformat(),
+        "session_end": sessions[-1].isoformat(),
+        "session_count": len(sessions),
+        "offset": 0,
+        "limit": len(candidates),
+        "page_count": len(candidates),
+        "next_offset": None,
+        "bar_status_counts": dict(sorted(target_status_counts.items())),
+        "candidates": candidates,
+    }
+
+
 def run_source_symbol_price_profile(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
+    source_capture_id: int,
+    research_cutoff: date,
     scope: str,
     session_count: int,
     page_size: int,
@@ -399,6 +523,10 @@ def run_source_symbol_price_profile(
         )
     _validate_profile_semantics(profile_contract)
     try:
+        if type(research_cutoff) is not date or research_cutoff < target_session:
+            raise PgPriceProfileError(
+                "PROFILE_RESEARCH_CUTOFF_INVALID", "画像研究截止日必须不早于目标会话"
+            )
         resolved_target, session_dates, calendar_revision = resolve_pg_history_window(
             target_session.isoformat(), session_count
         )
@@ -409,43 +537,63 @@ def run_source_symbol_price_profile(
         source_context = read_source_version_context(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            research_cutoff=research_cutoff,
+            price_coordinate="FORWARD_ADJUSTED",
         )
-        offset = 0
-        raw_total: int | None = None
+        roster = read_baostock_capture_roster(
+            config,
+            source_capture_id=source_capture_id,
+            cutoff=research_cutoff,
+        )
+        if roster.get("status") != "AVAILABLE":
+            raise PgPriceProfileError(
+                "PROFILE_CAPTURE_ROSTER_UNAVAILABLE",
+                "paired BaoStock捕获代码目录不可读",
+            )
+        source_symbols = tuple(
+            sorted(
+                item["source_symbol"]
+                for item in roster.get("symbols", ())
+                if item.get("source_symbol")
+                and item.get("eligible_start_session")
+                <= target_session.isoformat()
+                <= item.get("eligible_end_session")
+                and item.get("request_complete") is True
+            )
+        )
+        raw_total = int(source_context["raw_row_count"])
+        if (
+            source_context.get("version_status") != "COMPLETE"
+            or source_context.get("raw_coverage_status") != "COMPLETE"
+            or source_context.get("qfq_coverage_status") != "COMPLETE"
+            or raw_total <= 0
+            or len(source_symbols) != raw_total
+        ):
+            raise PgPriceProfileError(
+                "PROFILE_SOURCE_PARTITION_OPEN",
+                "paired BaoStock价格目录或来源代码总体未闭合",
+            )
         records: list[dict[str, Any]] = []
         consumer_failures = 0
-        while True:
-            page = read_raw_daily_history_page(
+        source_status_counts: Counter[str] = Counter()
+        for start in range(0, len(source_symbols), page_size):
+            symbols_page = source_symbols[start : start + page_size]
+            page = _read_baostock_profile_page(
                 config,
-                target_session=target_session,
-                source_package_id=source_package_id,
-                sessions=session_dates,
-                offset=offset,
-                limit=page_size,
-                market="ALL",
-                board="ALL",
+                source_symbols=symbols_page,
+                source_capture_id=source_capture_id,
+                sessions=tuple(session_dates),
+                cutoff=research_cutoff,
             )
-            if raw_total is None:
-                raw_total = int(page["total_count"])
-                if (
-                    page["version_status"] != "CLOSED"
-                    or not page["partition_closed"]
-                    or raw_total != source_context["raw_row_count"]
-                    or raw_total != source_context["capture_expected_row_count"]
-                ):
-                    raise PgPriceProfileError(
-                        "PROFILE_SOURCE_PARTITION_OPEN", "PG Raw或来源捕获分母未闭合"
-                    )
-            if page["total_count"] != raw_total or page["version_status"] != "CLOSED":
+            if page["total_count"] != len(symbols_page):
                 raise PgPriceProfileError(
-                    "PROFILE_SOURCE_PARTITION_CHANGED", "分页期间PG Raw分母发生变化"
+                    "PROFILE_SOURCE_PARTITION_CHANGED", "BaoStock QFQ来源分母发生变化"
                 )
-            if not page["candidates"]:
-                break
+            source_status_counts.update(page["bar_status_counts"])
             preview = research_universe_pg_history_preview(
                 target_session=target_session.isoformat(),
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 session_dates=session_dates,
                 page=page,
                 profile_contract=profile_contract,
@@ -454,7 +602,7 @@ def run_source_symbol_price_profile(
                 page=page,
                 preview=preview,
                 target_session=target_session,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 profile_revision=_PROFILE_REVISION,
                 source_context=source_context,
             )
@@ -463,12 +611,8 @@ def run_source_symbol_price_profile(
                 for item in preview.get("results", ())
             )
             records.extend(page_records)
-            offset = int(page["next_offset"] or raw_total)
-            if page["next_offset"] is None:
-                break
         if (
-            raw_total is None
-            or len(records) != raw_total
+            len(records) != raw_total
             or len({item["source_symbol"] for item in records}) != raw_total
         ):
             raise PgPriceProfileError(
@@ -498,7 +642,7 @@ def run_source_symbol_price_profile(
                 else result["status"],
                 "source_candidate_count": raw_total,
                 "consumer_failure_count": consumer_failures,
-                "source_status_counts": page.get("bar_status_counts"),
+                "source_status_counts": dict(sorted(source_status_counts.items())),
                 "scope": scope,
                 "session_count": session_count,
                 "session_start": session_dates[0].isoformat(),
@@ -514,12 +658,16 @@ def run_source_symbol_price_profile(
         return result
     except (
         RawSourcePgError,
+        BaoStockPriceFactsError,
         PgResearchBindingError,
         PriceProfilePgError,
         ResearchEntryError,
     ) as error:
         code = getattr(error, "code", "PG_PRICE_PROFILE_FAILED")
-        raise PgPriceProfileError(code, str(error)) from error
+        cause = getattr(error, "__cause__", None)
+        column_name = getattr(getattr(cause, "diag", None), "column_name", None)
+        detail = f"（数据库列{column_name}）" if column_name else ""
+        raise PgPriceProfileError(code, f"{error}{detail}") from error
 
 
 def source_symbol_price_profile_snapshots(
@@ -550,7 +698,6 @@ def read_source_symbol_price_profile_observation(
     profile_contract: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
 ) -> dict[str, Any]:
     """按Raw捕获、来源包和现存画像修订投影已保存Core/Profile画像及质量。"""
@@ -559,7 +706,7 @@ def read_source_symbol_price_profile_observation(
             "status": "NOT_COMPUTED",
             "reason_code": "RAW_SOURCE_VERSION_UNAVAILABLE",
             "target_session": target_session.isoformat(),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "profile_revision_selection": {
                 "rule": "REQUIRES_EXACT_RAW_CAPTURE_AND_STORED_PROFILE_REVISION",
                 "selected_profile_revision": None,
@@ -574,7 +721,6 @@ def read_source_symbol_price_profile_observation(
         observation = read_source_profile_observability(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
             current_profile_revision=_PROFILE_REVISION,
             current_producer_version=_PRODUCER_SEMANTICS_VERSION,

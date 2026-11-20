@@ -1,40 +1,47 @@
-"""Stock A研究comparison职责模块。"""
+"""基于paired BaoStock捕获的多代码Core/Profile读取预览。"""
 
 from __future__ import annotations
 
-import time
+from datetime import date
 from typing import Any, Iterable, Mapping, Sequence
-from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
-from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
-from stock_a.sources.tdx.vipdata import VipdataEntryCapture, VipdataTargetQualityReport
 
 from stock_a.research.entry_context.errors import ResearchEntryError
-from stock_a.research.entry_context.windows import CompareBudget
-from stock_a.research.entry_context.sessions import _load_calendar, _parse_target
+from stock_a.research.entry_context.sessions import _parse_target
+from stock_a.research.entry_context.source_discovery import _normalize_symbol
+from stock_a.research.entry_context.windows import CompareBudget, _MAX_COMPARE_SYMBOLS
 from stock_a.research.entry_core.single_stock import research_stock
-from stock_a.research.entry_context.source_discovery import (
-    _aggregate_availability,
-    _normalize_symbol,
+
+
+_COMPARE_FIELDS = (
+    "core.ma5",
+    "core.ma10",
+    "core.ma20",
+    "core.ma60",
+    "core.atr5",
+    "core.atr20",
+    "core.ret1",
+    "core.ret5",
+    "core.ret20",
+    "core.amount_ratio5",
+    "core.amount_ratio20",
+    "core.volume_ratio5",
+    "core.volume_ratio20",
 )
-from stock_a.research.entry_context.windows import _MAX_COMPARE_SYMBOLS
-from stock_a.research.entry_core.profile_preview import _COMPARE_FIELDS
 
 
 def research_compare(
     *,
     symbols: Iterable[str],
     target_session: str,
-    source_roots: Iterable[str],
-    units: UnitContract,
-    limits: ReadLimits,
-    budget: CompareBudget | None = None,
+    source_capture_id: int | None = None,
+    price_coordinate: str | None = None,
+    session_dates: Sequence[date] | None = None,
+    history_rows_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     profile_contract: dict[str, Any] | None = None,
-    source_captures: Mapping[str, VipdataEntryCapture] | None = None,
+    budget: CompareBudget | None = None,
+    **legacy_source_inputs: Any,
 ) -> dict[str, Any]:
-    """同一日期逐代码只读计算，并对整批请求共享字节、记录和耗时预算。"""
-    budget = budget or CompareBudget()
-    if not isinstance(budget, CompareBudget):
-        raise ResearchEntryError("COMPARE_BUDGET_INVALID", "缺少有效的全批累计预算")
+    """只对绑定paired capture的PG历史输入求Core/Profile；旧文件请求保持未计算。"""
     requested = tuple(symbols)
     if not requested or len(requested) > _MAX_COMPARE_SYMBOLS:
         raise ResearchEntryError(
@@ -43,242 +50,190 @@ def research_compare(
     normalized = tuple(_normalize_symbol(item)[0] for item in requested)
     if len(set(normalized)) != len(normalized):
         raise ResearchEntryError("DUPLICATE_SYMBOL", "对比代码重复；拒绝静默去重")
-    if source_captures is not None:
-        if (
-            not isinstance(source_captures, Mapping)
-            or any(
-                not isinstance(key, str) or not isinstance(value, VipdataEntryCapture)
-                for key, value in source_captures.items()
-            )
-            or not set(normalized).issubset(source_captures)
-        ):
-            raise ResearchEntryError(
-                "VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获没有覆盖本次对比请求"
-            )
-        if any(
-            source_captures[symbol].target_session.isoformat() != target_session
-            for symbol in normalized
-        ):
-            raise ResearchEntryError(
-                "VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获目标日与本次对比不一致"
-            )
-    roots = tuple(source_roots)
     target = _parse_target(target_session)
-    started = time.monotonic()
-    _load_calendar(target)
-    results: list[dict[str, Any]] = []
-    total_bytes = 0
-    total_records = 0
-    stop_code: str | None = None
+    if budget is not None and not isinstance(budget, CompareBudget):
+        raise ResearchEntryError("COMPARE_BUDGET_INVALID", "对比预算参数无效")
+    valid_capture_id = (
+        source_capture_id
+        if type(source_capture_id) is int and source_capture_id > 0
+        else None
+    )
 
-    def mark_not_evaluated(items: Iterable[str], code: str) -> None:
-        for symbol in items:
-            results.append(
-                {
-                    "status": "NOT_EVALUATED",
-                    "requested_symbol": symbol,
-                    "error_code": code,
-                    "message": "全批读取预算已耗尽；该请求保留在分母中且未读取",
-                    "read_usage": {"bytes": 0, "records": 0},
-                }
+    def result_not_computed(symbol: str, code: str, message: str) -> dict[str, Any]:
+        return {
+            "status": "NOT_COMPUTED",
+            "requested_symbol": symbol,
+            "target_session": target.isoformat(),
+            "source_capture_id": valid_capture_id,
+            "price_coordinate": price_coordinate,
+            "time_role": "NON_PIT_RETROSPECTIVE",
+            "error_code": code,
+            "message": message,
+            "database_write": False,
+        }
+
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        results = [
+            result_not_computed(
+                symbol,
+                "PG_BAOSTOCK_CAPTURE_REQUIRED",
+                "多代码读取必须绑定paired BaoStock source_capture_id；不会读取本地TDX/VIPDATA。",
             )
-
-    def usage_from_error(error: ResearchEntryError | DayReadError) -> tuple[int, int]:
-        context = getattr(error, "context", {})
-        byte_count = context.get("byte_count", 0)
-        record_count = context.get("records_attempted", context.get("record_count", 0))
-        if type(byte_count) is not int or byte_count < 0:
-            byte_count = 0
-        if type(record_count) is not int or record_count < 0:
-            record_count = 0
-        return byte_count, record_count
-
-    def exhausted_code() -> str | None:
-        if time.monotonic() - started >= budget.max_total_seconds:
-            return "MAX_TOTAL_SECONDS_EXCEEDED"
-        if total_bytes >= budget.max_total_bytes:
-            return "MAX_TOTAL_BYTES_EXCEEDED"
-        if total_records >= budget.max_total_records:
-            return "MAX_TOTAL_RECORDS_EXCEEDED"
-        return None
-
-    for item in normalized:
-        stop_code = exhausted_code()
-        if stop_code:
-            mark_not_evaluated((item, *normalized[len(results) + 1 :]), stop_code)
-            break
-        remaining_bytes = budget.max_total_bytes - total_bytes
-        remaining_records = budget.max_total_records - total_records
-        remaining_seconds = budget.max_total_seconds - (time.monotonic() - started)
-        if remaining_seconds <= 0:
-            stop_code = "MAX_TOTAL_SECONDS_EXCEEDED"
-            mark_not_evaluated((item, *normalized[len(results) + 1 :]), stop_code)
-            break
-        per_symbol_limits = ReadLimits(
-            min(limits.max_bytes, remaining_bytes),
-            min(limits.max_records, remaining_records),
-            limits.chunk_records,
-            min(float(limits.max_seconds), remaining_seconds),
-        )
-        try:
-            result = research_stock(
-                symbol=item,
-                target_session=target_session,
-                source_roots=roots,
-                units=units,
-                limits=per_symbol_limits,
-                profile_contract=profile_contract,
-                vipdata_capture=source_captures.get(item)
-                if source_captures is not None
-                else None,
+            for symbol in normalized
+        ]
+    elif price_coordinate != "FORWARD_ADJUSTED":
+        results = [
+            result_not_computed(
+                symbol,
+                "COMPARE_REQUIRES_QFQ_COORDINATE",
+                "跨日Core/Profile对比必须绑定BaoStock QFQ坐标。",
             )
-            item_bytes = result["source"]["byte_count"]
-            item_records = result["source"]["record_count"]
-            total_bytes += item_bytes
-            total_records += item_records
-            result["read_usage"] = {"bytes": item_bytes, "records": item_records}
-            if time.monotonic() - started > budget.max_total_seconds:
-                result = {
-                    "status": "FAILED",
-                    "requested_symbol": item,
-                    "error_code": "MAX_TOTAL_SECONDS_EXCEEDED",
-                    "message": "完成当前扫描时已超过全批耗时预算；结果不纳入已评价输出",
-                    "read_usage": {"bytes": item_bytes, "records": item_records},
-                }
-                stop_code = "MAX_TOTAL_SECONDS_EXCEEDED"
-            results.append(result)
-        except (ResearchEntryError, DayReadError) as error:
-            code = error.code if isinstance(error, ResearchEntryError) else error.code
-            item_bytes, item_records = usage_from_error(error)
-            total_bytes += item_bytes
-            total_records += item_records
-            global_limit_code = None
-            if isinstance(error, DayReadError) and error.code == "READ_LIMIT_EXCEEDED":
-                source_size = error.context.get("source_size_bytes", 0)
-                source_record_limit = error.context.get("source_record_limit_bytes", 0)
-                if per_symbol_limits.max_bytes < limits.max_bytes and (
-                    item_bytes >= per_symbol_limits.max_bytes
-                    or (
-                        type(source_size) is int
-                        and source_size > per_symbol_limits.max_bytes
+            for symbol in normalized
+        ]
+    elif (
+        not isinstance(session_dates, Sequence)
+        or isinstance(session_dates, (str, bytes))
+        or not session_dates
+        or len(session_dates) > 250
+        or any(type(day) is not date for day in session_dates)
+        or tuple(sorted(set(session_dates))) != tuple(session_dates)
+        or session_dates[-1] != target
+        or not isinstance(history_rows_by_symbol, Mapping)
+        or profile_contract is None
+    ):
+        results = [
+            result_not_computed(
+                symbol,
+                "PG_BAOSTOCK_HISTORY_INPUT_UNAVAILABLE",
+                "缺少显式官方会话、PG双坐标历史行或R2价格画像合同。",
+            )
+            for symbol in normalized
+        ]
+    else:
+        results = []
+        for symbol in normalized:
+            symbol_rows = history_rows_by_symbol.get(symbol)
+            if not isinstance(symbol_rows, Sequence) or isinstance(
+                symbol_rows, (str, bytes)
+            ):
+                results.append(
+                    result_not_computed(
+                        symbol,
+                        "PG_BAOSTOCK_SYMBOL_HISTORY_UNAVAILABLE",
+                        "该来源代码缺少显式capture内的PG历史行；不回退其它代码或坐标。",
                     )
-                ):
-                    global_limit_code = "MAX_TOTAL_BYTES_EXCEEDED"
-                elif per_symbol_limits.max_records < limits.max_records and (
-                    item_records >= per_symbol_limits.max_records
-                    or (
-                        type(source_record_limit) is int
-                        and type(source_size) is int
-                        and source_size > source_record_limit
-                    )
-                ):
-                    global_limit_code = "MAX_TOTAL_RECORDS_EXCEEDED"
-            elif isinstance(error, DayReadError) and error.code == "READ_TIMEOUT":
-                if per_symbol_limits.max_seconds < float(limits.max_seconds):
-                    global_limit_code = "MAX_TOTAL_SECONDS_EXCEEDED"
-            result = {
-                "status": "FAILED",
-                "requested_symbol": item,
-                "error_code": global_limit_code or code,
-                "message": str(error),
-                "read_usage": {"bytes": item_bytes, "records": item_records},
-            }
-            if global_limit_code:
-                result["source_error_code"] = code
-                stop_code = global_limit_code
-            results.append(result)
-        if stop_code:
-            remaining = normalized[len(results) :]
-            mark_not_evaluated(remaining, stop_code)
-            break
-    available = sum(item["status"] == "AVAILABLE" for item in results)
-    failed = sum(item["status"] == "FAILED" for item in results)
-    unknown_symbols = sum(item["status"] == "PARTIAL_UNKNOWN" for item in results)
-    not_evaluated = sum(item["status"] == "NOT_EVALUATED" for item in results)
-    classified = available + failed + unknown_symbols + not_evaluated
-    if classified != len(requested):
-        raise ResearchEntryError(
-            "COMPARE_CLASSIFICATION_INCOMPLETE",
-            "多标的结果未能按可用、失败、部分未知和未评价完整分区",
-        )
-    unknown_identity = sum(
-        item.get("status") not in ("FAILED", "NOT_EVALUATED")
-        and item.get("identity", {}).get("status") != "RESOLVED"
-        for item in results
-    )
-    unknown_adjustment = sum(
-        item.get("status") not in ("FAILED", "NOT_EVALUATED")
-        and item.get("adjustment", {}).get("status") != "APPLIED"
-        for item in results
-    )
-    unknown_core_fields = sum(
-        item.get("coverage", {}).get("unknown_core_fields", 0) for item in results
-    )
-    unknown_raw_fields = sum(
-        item.get("coverage", {}).get("unknown_target_raw_fields", 0) for item in results
-    )
-    elapsed = time.monotonic() - started
-    complete = failed == 0 and unknown_symbols == 0 and not_evaluated == 0
-    return {
-        "status": "COMPLETE_WITH_DISCLOSURES" if complete else "PARTIAL",
-        "status_explanation": "COMPLETE_WITH_DISCLOSURES仅表示请求对象已处理且披露已附上；不表示所有Raw/Core字段均已知。请分别检查raw_availability、core_availability及逐字段quality/reason。",
-        "target_session": target_session,
-        "denominators": {
-            "requested": len(requested),
-            "evaluated": len(requested) - not_evaluated,
-            "available": available,
-            "failed": failed,
-            "not_evaluated": not_evaluated,
-            "unknown": sum(
-                item.get("status") == "PARTIAL_UNKNOWN"
-                or (
-                    item.get("status") not in ("FAILED", "NOT_EVALUATED")
-                    and item.get("identity", {}).get("status") != "RESOLVED"
                 )
-                for item in results
-            ),
-            "partial_unknown": unknown_symbols,
-            "unknown_identity": unknown_identity,
-            "unknown_adjustment": unknown_adjustment,
-            "unknown_core_fields": unknown_core_fields,
-            "unknown_raw_fields": unknown_raw_fields,
-        },
-        "classification": {
-            "available": available,
-            "failed": failed,
-            "partial_unknown": unknown_symbols,
-            "not_evaluated": not_evaluated,
-            "classified": classified,
-            "requested": len(requested),
-            "partition_complete": True,
-        },
-        "raw_availability": _aggregate_availability(results, "raw_availability"),
-        "core_availability": _aggregate_availability(results, "core_availability"),
-        "budget": {
-            "max_total_bytes": budget.max_total_bytes,
-            "max_total_records": budget.max_total_records,
-            "max_total_seconds": budget.max_total_seconds,
-            "byte_scope": "TDX_SOURCE_BYTES_ONLY",
-            "record_scope": "TDX_DAY_RECORDS_ONLY",
-            "used_bytes": total_bytes,
-            "used_records": total_records,
-            "elapsed_seconds": round(elapsed, 6),
-            "enforcement": "PER_FILE_SCANNER_CHECKS_AND_BETWEEN_SYMBOLS",
-            "exhausted_by": stop_code,
-        },
-        "comparison_fields": {
-            name: {
-                item["requested_symbol"]: item.get("core_fields", {}).get(
+                continue
+            try:
+                item = research_stock(
+                    symbol=symbol,
+                    target_session=target.isoformat(),
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
+                    session_dates=session_dates,
+                    history_rows=symbol_rows,
+                    profile_contract=profile_contract,
+                )
+            except ResearchEntryError as error:
+                item = result_not_computed(
+                    symbol,
+                    error.code,
+                    str(error),
+                )
+            item["requested_symbol"] = symbol
+            item["source_capture_id"] = source_capture_id
+            item["price_coordinate"] = price_coordinate
+            item["time_role"] = "NON_PIT_RETROSPECTIVE"
+            results.append(item)
+
+    for item in results:
+        qfq_fields = item.get("qfq")
+        if isinstance(qfq_fields, Mapping):
+            qfq_ohlc = {
+                name: qfq_fields.get(
                     name,
                     {
                         "value": None,
-                        "quality": "UNKNOWN_DATA",
-                        "reason": item.get("error_code", "NOT_AVAILABLE"),
+                        "quality": "UNKNOWN",
+                        "reason": "QFQ_FIELD_NOT_RETURNED",
                     },
                 )
-                for item in results
+                for name in ("open", "high", "low", "close")
             }
-            for name in _COMPARE_FIELDS
+        else:
+            unavailable = {
+                "value": None,
+                "quality": "UNKNOWN",
+                "reason": item.get("message") or "QFQ_PRICE_NOT_COMPUTED",
+            }
+            qfq_ohlc = {
+                name: dict(unavailable) for name in ("open", "high", "low", "close")
+            }
+        qfq_qualities = [
+            value.get("quality")
+            for value in qfq_ohlc.values()
+            if isinstance(value, Mapping)
+        ]
+        qfq_quality = (
+            "OBSERVED"
+            if len(qfq_qualities) == 4
+            and all(value == "OBSERVED" for value in qfq_qualities)
+            else "UNKNOWN"
+        )
+        qfq_reason = next(
+            (
+                value.get("reason") or value.get("quality")
+                for value in qfq_ohlc.values()
+                if isinstance(value, Mapping) and value.get("quality") != "OBSERVED"
+            ),
+            None,
+        )
+        item["qfq_ohlc"] = qfq_ohlc | {
+            "quality": qfq_quality,
+            "reason": qfq_reason,
+        }
+        item["qfq_close"] = qfq_ohlc["close"]
+        item["selected_qfq_close"] = qfq_ohlc["close"]
+
+    not_computed = sum(item.get("status") == "NOT_COMPUTED" for item in results)
+    evaluated = len(results) - not_computed
+    comparison_fields = {
+        field_id: {
+            item["requested_symbol"]: item.get("core", {})
+            .get("fields", {})
+            .get(
+                field_id,
+                {
+                    "value": None,
+                    "quality": "UNKNOWN_DATA",
+                    "reason": item.get("reason_code", "NOT_COMPUTED"),
+                },
+            )
+            for item in results
+        }
+        for field_id in _COMPARE_FIELDS
+    }
+    return {
+        "contract": "STOCK_A_PG_BAOSTOCK_CAPTURE_COMPARISON_R2",
+        "status": (
+            "NOT_COMPUTED"
+            if not_computed == len(results)
+            else "AVAILABLE"
+            if not not_computed
+            else "PARTIAL_NOT_COMPUTED"
+        ),
+        "target_session": target.isoformat(),
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "denominators": {
+            "requested": len(normalized),
+            "evaluated": evaluated,
+            "not_computed": not_computed,
         },
         "results": results,
+        "comparison_fields": comparison_fields,
+        "database_write": False,
+        "source_file_read": False,
+        "network_access": False,
     }

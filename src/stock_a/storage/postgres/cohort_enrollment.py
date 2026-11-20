@@ -40,7 +40,7 @@ def read_cohort_enrollment_datewise_comparison(
     *,
     dates: list[dict[str, Any]],
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     rule: str,
 ) -> dict[str, Any]:
     """对已保存T0范围一次批量读取ENTRY/REENTRY及其Forward事实。"""
@@ -48,8 +48,8 @@ def read_cohort_enrollment_datewise_comparison(
 
     if (
         type(research_cutoff) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or rule not in RULES
         or not isinstance(dates, list)
         or len(dates) > 20
@@ -147,10 +147,10 @@ def read_cohort_enrollment_datewise_comparison(
                           e.id,e.enrollment_kind,e.reason_code,e.parent_enrollment_id,
                           e.previous_rule_fact_id,parent_e.id,parent_e.enrollment_kind,
                           parent_r.target_session,parent_r.source_symbol,parent_r.rule_id,
-                          parent_r.state,parent_r.rule_version,parent_r.source_package_id,
+                          parent_r.state,parent_r.rule_version,parent_r.source_capture_id,
                           previous_r.target_session,previous_r.source_symbol,
                           previous_r.rule_id,previous_r.state,previous_r.rule_version,
-                          previous_r.source_package_id,
+                          previous_r.source_capture_id,
                           f.horizon,f.endpoint_session,f.maturity,f.endpoint_quality,
                           f.endpoint_reason,f.endpoint_numerator::text,
                           f.endpoint_denominator::text,f.path_quality,f.path_reasons,
@@ -158,7 +158,7 @@ def read_cohort_enrollment_datewise_comparison(
                    FROM selected s
                    JOIN source_rule_evaluations r
                      ON r.target_session=s.target_session
-                    AND r.source_package_id=%s AND r.source_capture_id=s.source_capture_id
+                    AND r.source_capture_id=%s AND r.source_capture_id=s.source_capture_id
                     AND r.rule_id=%s AND r.rule_version=%s
                     AND r.profile_revision=s.profile_revision
                     AND r.history_session_count=s.history_session_count
@@ -174,7 +174,7 @@ def read_cohort_enrollment_datewise_comparison(
                      ON previous_r.id=e.previous_rule_fact_id
                    LEFT JOIN source_forward_path_facts f
                      ON f.target_session=r.target_session
-                    AND f.source_package_id=r.source_package_id
+                    AND f.source_capture_id=r.source_capture_id
                     AND f.source_capture_id=r.source_capture_id
                     AND f.source_symbol=r.source_symbol
                     AND f.horizon=ANY(%s::smallint[])
@@ -194,7 +194,7 @@ def read_cohort_enrollment_datewise_comparison(
                     windows,
                     calendars,
                     pool_counts,
-                    source_package_id,
+                    source_capture_id,
                     rule,
                     RULE_VERSION,
                     SCOPE,
@@ -315,7 +315,7 @@ def read_cohort_enrollment_datewise_comparison(
                     and parent_rule == rule
                     and parent_state == "TRUE"
                     and parent_version == RULE_VERSION
-                    and parent_package == source_package_id
+                    and parent_package == source_capture_id
                     and reason_code == "MATCH_AFTER_PROVED_EXIT"
                     and previous_rule_fact_id is not None
                     and previous_target is not None
@@ -323,7 +323,7 @@ def read_cohort_enrollment_datewise_comparison(
                     and previous_rule == rule
                     and previous_state == "FALSE"
                     and previous_version == RULE_VERSION
-                    and previous_package == source_package_id
+                    and previous_package == source_capture_id
                     and parent_session < previous_target < target
                 )
                 if not proved:
@@ -588,7 +588,7 @@ def read_cohort_enrollment_lifecycle_groups(
     *,
     target: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     history_session_count: int,
     d1_history_session_count: int,
@@ -603,8 +603,8 @@ def read_cohort_enrollment_lifecycle_groups(
         type(target) is not date
         or type(research_cutoff) is not date
         or target > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or rule not in RULES
         or not isinstance(profile_revision, str)
         or not profile_revision
@@ -632,7 +632,7 @@ def read_cohort_enrollment_lifecycle_groups(
 
     key = (
         target,
-        source_package_id,
+        source_capture_id,
         rule,
         RULE_VERSION,
         profile_revision,
@@ -653,7 +653,7 @@ def read_cohort_enrollment_lifecycle_groups(
                       count(DISTINCT source_capture_id)::bigint,
                       min(source_capture_id),max(source_capture_id)
                FROM source_rule_evaluations
-               WHERE target_session=%s AND source_package_id=%s AND rule_id=%s
+               WHERE target_session=%s AND source_capture_id=%s AND rule_id=%s
                  AND rule_version=%s AND profile_revision=%s
                  AND history_session_count=%s AND d1_history_session_count=%s
                  AND event_window_start=%s AND calendar_revision=%s AND scope=%s""",
@@ -686,7 +686,7 @@ def read_cohort_enrollment_lifecycle_groups(
             """SELECT r.state,count(*)::bigint,count(e.id)::bigint
                FROM source_rule_evaluations r
                LEFT JOIN source_research_enrollments e ON e.rule_fact_id=r.id
-               WHERE r.target_session=%s AND r.source_package_id=%s AND r.rule_id=%s
+               WHERE r.target_session=%s AND r.source_capture_id=%s AND r.rule_id=%s
                  AND r.rule_version=%s AND r.profile_revision=%s
                  AND r.history_session_count=%s AND r.d1_history_session_count=%s
                  AND r.event_window_start=%s AND r.calendar_revision=%s AND r.scope=%s
@@ -704,10 +704,10 @@ def read_cohort_enrollment_lifecycle_groups(
                       e.parent_enrollment_id,e.previous_rule_fact_id,r.state,
                       r.source_capture_id,parent_e.id,parent_e.enrollment_kind,
                       parent_r.target_session,parent_r.source_symbol,parent_r.rule_id,
-                      parent_r.state,parent_r.rule_version,parent_r.source_package_id,
+                      parent_r.state,parent_r.rule_version,parent_r.source_capture_id,
                       previous_r.target_session,previous_r.source_symbol,
                       previous_r.rule_id,previous_r.state,previous_r.rule_version,
-                      previous_r.source_package_id
+                      previous_r.source_capture_id
                FROM source_rule_evaluations r
                JOIN source_research_enrollments e ON e.rule_fact_id=r.id
                LEFT JOIN source_research_enrollments parent_e
@@ -716,7 +716,7 @@ def read_cohort_enrollment_lifecycle_groups(
                  ON parent_r.id=parent_e.rule_fact_id
                LEFT JOIN source_rule_evaluations previous_r
                  ON previous_r.id=e.previous_rule_fact_id
-               WHERE r.target_session=%s AND r.source_package_id=%s AND r.rule_id=%s
+               WHERE r.target_session=%s AND r.source_capture_id=%s AND r.rule_id=%s
                  AND r.rule_version=%s AND r.profile_revision=%s
                  AND r.history_session_count=%s AND r.d1_history_session_count=%s
                  AND r.event_window_start=%s AND r.calendar_revision=%s AND r.scope=%s
@@ -771,7 +771,7 @@ def read_cohort_enrollment_lifecycle_groups(
                     and parent_rule == rule
                     and parent_state == "TRUE"
                     and parent_version == RULE_VERSION
-                    and parent_package == source_package_id
+                    and parent_package == source_capture_id
                     and reason_code == "MATCH_AFTER_PROVED_EXIT"
                     and previous_rule_fact_id is not None
                     and previous_session is not None
@@ -780,7 +780,7 @@ def read_cohort_enrollment_lifecycle_groups(
                     and previous_rule == rule
                     and previous_state == "FALSE"
                     and previous_version == RULE_VERSION
-                    and previous_package == source_package_id
+                    and previous_package == source_capture_id
                     and parent_session < previous_session < target
                 )
                 if not proved:
@@ -803,7 +803,7 @@ def read_cohort_enrollment_lifecycle_groups(
                JOIN LATERAL (
                  SELECT h.id,h.state
                  FROM source_rule_evaluations h
-                 WHERE h.source_package_id=r.source_package_id
+                 WHERE h.source_capture_id=r.source_capture_id
                    AND h.source_symbol=r.source_symbol AND h.rule_id=r.rule_id
                    AND h.rule_version=r.rule_version AND h.scope=r.scope
                    AND h.target_session<r.target_session
@@ -812,7 +812,7 @@ def read_cohort_enrollment_lifecycle_groups(
                ) latest ON TRUE
                JOIN source_research_enrollments active_e
                  ON active_e.rule_fact_id=latest.id
-               WHERE r.target_session=%s AND r.source_package_id=%s
+               WHERE r.target_session=%s AND r.source_capture_id=%s
                  AND r.rule_id=%s AND r.rule_version=%s
                  AND r.profile_revision=%s AND r.history_session_count=%s
                  AND r.d1_history_session_count=%s
@@ -859,7 +859,7 @@ def read_cohort_enrollment_lifecycle_groups(
                JOIN source_research_enrollments e ON e.rule_fact_id=r.id
                LEFT JOIN source_forward_path_facts f
                  ON f.target_session=r.target_session
-                AND f.source_package_id=r.source_package_id
+                AND f.source_capture_id=r.source_capture_id
                 AND f.source_capture_id=r.source_capture_id
                 AND f.source_symbol=r.source_symbol
                 AND f.horizon=ANY(%s::smallint[])
@@ -867,7 +867,7 @@ def read_cohort_enrollment_lifecycle_groups(
                 AND f.calendar_revision=r.calendar_revision
                 AND f.endpoint_session<=%s
                 AND f.price_coordinate='RAW_UNADJUSTED' AND f.scope=%s
-               WHERE r.target_session=%s AND r.source_package_id=%s AND r.rule_id=%s
+               WHERE r.target_session=%s AND r.source_capture_id=%s AND r.rule_id=%s
                  AND r.rule_version=%s AND r.profile_revision=%s
                  AND r.history_session_count=%s AND r.d1_history_session_count=%s
                  AND r.event_window_start=%s AND r.calendar_revision=%s AND r.scope=%s
@@ -1059,7 +1059,7 @@ def read_cohort_enrollment_lifecycle_groups(
             closed_sessions = []
             for session in horizon_sessions:
                 version_status, actual, expected = _page_version_status(
-                    cursor, session, source_package_id
+                    cursor, session, source_capture_id
                 )
                 raw_session_versions.append(
                     {
@@ -1079,7 +1079,7 @@ def read_cohort_enrollment_lifecycle_groups(
                             r.frozen_line_numerator,r.frozen_line_denominator
                      FROM source_rule_evaluations r
                      JOIN source_research_enrollments e ON e.rule_fact_id=r.id
-                     WHERE r.target_session=%s AND r.source_package_id=%s
+                     WHERE r.target_session=%s AND r.source_capture_id=%s
                        AND r.rule_id=%s AND r.rule_version=%s
                        AND r.profile_revision=%s AND r.history_session_count=%s
                        AND r.d1_history_session_count=%s
@@ -1113,10 +1113,10 @@ def read_cohort_enrollment_lifecycle_groups(
                      ) s ON TRUE
                      LEFT JOIN source_raw_daily p
                        ON p.source_symbol=l.source_symbol
-                      AND p.session_date=s.session_date AND p.source_package_id=%s
+                      AND p.session_date=s.session_date AND p.source_capture_id=%s
                      LEFT JOIN source_captures c
                        ON c.capture_id=p.source_capture_id
-                      AND c.source_package_id=p.source_package_id
+                      AND c.source_capture_id=p.source_capture_id
                       AND c.target_session=p.session_date
                    ), touch_points AS (
                      SELECT p.*,
@@ -1174,7 +1174,7 @@ def read_cohort_enrollment_lifecycle_groups(
                     *key,
                     closed_sessions,
                     list(horizon_sessions),
-                    source_package_id,
+                    source_capture_id,
                     len(horizon_sessions),
                     len(horizon_sessions),
                 ),
@@ -1217,7 +1217,6 @@ def read_cohort_enrollment_lifecycle_groups(
             "rule": rule,
             "rule_version": RULE_VERSION,
             "path_rule_version": PATH_VERSION,
-            "source_package_id": source_package_id,
             "source_capture_id": source_capture_id,
             "profile_revision": profile_revision,
             "history_session_count": history_session_count,

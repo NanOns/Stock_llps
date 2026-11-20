@@ -23,7 +23,6 @@ def read_source_board_relative_history(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     source_symbol: str,
     board_kind: str,
@@ -34,8 +33,6 @@ def read_source_board_relative_history(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or not isinstance(source_symbol, str)
@@ -69,7 +66,6 @@ def read_source_board_relative_history(
     inputs = read_source_board_relative_history_inputs(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
         source_capture_id=source_capture_id,
         source_symbol=source_symbol,
         board_kind=board_kind,
@@ -85,7 +81,7 @@ def read_source_board_relative_history(
             "membership_mode", "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
         ),
         "research_mode": inputs.get("research_mode", "NON_PIT_EXPLORATORY"),
-        "price_coordinate": inputs.get("price_coordinate", "RAW_UNADJUSTED"),
+        "price_coordinate": inputs.get("price_coordinate", "FORWARD_ADJUSTED"),
         "calendar_revision": calendar_revision,
         "sessions": [],
         "comparisons": [],
@@ -138,7 +134,6 @@ def read_source_board_relative_history(
             comparison = read_source_launch_watch_board_rps_comparison(
                 config,
                 target_session=day["target_session"],
-                source_package_id=source_package_id,
                 source_capture_id=day["source_capture_id"],
                 source_symbols=[source_symbol],
                 seed_scope=scope,
@@ -252,8 +247,8 @@ def _scope_reasons(
     ):
         if previous_scope.get(field) != current_scope.get(field):
             reasons.append(f"Seed输入{field}发生变化")
-    if previous_scope.get("price_coordinate") != "RAW_UNADJUSTED":
-        reasons.append("Seed价格坐标不是RAW_UNADJUSTED")
+    if previous_scope.get("price_coordinate") != "FORWARD_ADJUSTED":
+        reasons.append("Seed价格坐标不是FORWARD_ADJUSTED")
     if previous_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE":
         reasons.append("Seed研究模式不是NON_PIT_RETROSPECTIVE")
     if (

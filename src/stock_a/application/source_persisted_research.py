@@ -1,8 +1,10 @@
 """从冻结研究事实直接计算三态分母及后验路径统计。"""
 
 from collections import Counter
+from datetime import date
 from fractions import Fraction
 from statistics import median
+from typing import Any, Mapping
 
 from stock_a.application.source_cohort_forward import _frozen_line_followup
 from stock_a.application.source_d0_raw import attach_stock_risk_readiness
@@ -17,14 +19,19 @@ from stock_a.storage.postgres.research_facts import (
     read_research_keys,
     read_research_rows,
 )
-from stock_a.storage.postgres.source_raw import read_raw_daily_forward_pool
+from stock_a.storage.postgres.baostock_price_facts import (
+    RAW_COORDINATE,
+    QFQ_COORDINATE,
+    read_baostock_capture_roster,
+    read_baostock_price_history_batch,
+)
 
 
 class ResearchSymbolNotFound(ValueError):
     """所选来源代码不在指定的冻结来源池中。"""
 
 
-def read_persisted_cohort_keys(config, *, target, research_cutoff, source_package_id):
+def read_persisted_cohort_keys(config, *, target, research_cutoff, source_capture_id):
     """目录和结果使用同一个截止日所绑定的规则与日历修订。"""
     if target > research_cutoff:
         raise ValueError("目标日不得晚于研究截止日")
@@ -34,9 +41,130 @@ def read_persisted_cohort_keys(config, *, target, research_cutoff, source_packag
     return read_research_keys(
         config,
         target=target,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         calendar_revision=revision,
     )
+
+
+def _read_qfq_forward_rows(
+    config,
+    *,
+    source_symbol: str,
+    sessions: tuple[date, ...],
+    research_cutoff: date,
+    source_capture_id: int,
+) -> tuple[list[dict[str, Any]], date | None]:
+    """以同一捕获的QFQ价格读路径行及完整请求水位。"""
+    roster = read_baostock_capture_roster(
+        config, source_capture_id=source_capture_id, cutoff=research_cutoff
+    )
+    symbol_entry = next(
+        (
+            item
+            for item in roster.get("symbols", ())
+            if item.get("source_symbol") == source_symbol
+        ),
+        None,
+    )
+    if roster.get("status") != "AVAILABLE" or symbol_entry is None:
+        raise ValueError("BaoStock捕获目录中没有该代码或闭合请求窗口")
+    if tuple(roster.get("price_coordinates", ())) != (RAW_COORDINATE, QFQ_COORDINATE):
+        raise ValueError("BaoStock后继价格必须绑定配对RAW/QFQ捕获")
+
+    batch = read_baostock_price_history_batch(
+        config,
+        source_symbols=(source_symbol,),
+        sessions=sessions,
+        source_capture_id=source_capture_id,
+        price_coordinate=QFQ_COORDINATE,
+        cutoff=research_cutoff,
+        offset=0,
+        limit=max(1, len(sessions)),
+    )
+    if (
+        batch.get("status") != "AVAILABLE"
+        or batch.get("source_capture_id") != source_capture_id
+        or batch.get("price_coordinate") != QFQ_COORDINATE
+        or batch.get("page", {}).get("next_offset") is not None
+    ):
+        raise ValueError("BaoStock QFQ后继窗口未从PG一次完整读回")
+
+    rows_by_session = {
+        row["session_date"]: row
+        for row in batch.get("rows", ())
+        if row.get("source_symbol") == source_symbol
+    }
+    coverage_by_session = {
+        date.fromisoformat(row["session_date"]): row
+        for row in batch.get("coverage", ())
+        if isinstance(row.get("session_date"), str)
+    }
+    start = date.fromisoformat(symbol_entry["eligible_start_session"])
+    end = date.fromisoformat(symbol_entry["eligible_end_session"])
+    output: list[dict[str, Any]] = []
+    saved_through: date | None = None
+    contiguous_open = True
+    for session in sessions:
+        row = rows_by_session.get(session)
+        is_eligible = start <= session <= end
+        coverage = coverage_by_session.get(session)
+        request_closed = (
+            isinstance(coverage, Mapping)
+            and coverage.get("coverage_status") == "COMPLETE"
+            and int(coverage.get("expected_symbol_count", 0)) == 1
+            and int(coverage.get("row_count", 0)) == 1
+            and int(coverage.get("symbol_count", 0)) == 1
+        )
+        if row is not None:
+            if (
+                row.get("source_capture_id") != source_capture_id
+                or row.get("price_coordinate") != QFQ_COORDINATE
+            ):
+                raise ValueError("BaoStock后继价格行与捕获或QFQ坐标不一致")
+            output.append(row)
+        elif not is_eligible:
+            output.append(
+                {
+                    "source_symbol": source_symbol,
+                    "session_date": session,
+                    "source_capture_id": source_capture_id,
+                    "price_coordinate": QFQ_COORDINATE,
+                    "bar_status": "TARGET_MISSING",
+                    "bar_reason": "SOURCE_SYMBOL_OUTSIDE_ELIGIBLE_SESSION_WINDOW",
+                    "qfq_price_quality": "UNKNOWN",
+                    "qfq_price_reason": "SOURCE_SYMBOL_OUTSIDE_ELIGIBLE_SESSION_WINDOW",
+                    "qfq_open": None,
+                    "qfq_high": None,
+                    "qfq_low": None,
+                    "qfq_close": None,
+                }
+            )
+        elif not request_closed:
+            output.append(
+                {
+                    "source_symbol": source_symbol,
+                    "session_date": session,
+                    "source_capture_id": source_capture_id,
+                    "price_coordinate": QFQ_COORDINATE,
+                    "bar_status": "READ_FAILED",
+                    "bar_reason": "QFQ_CAPTURE_REQUEST_NOT_CLOSED",
+                    "qfq_price_quality": "UNKNOWN",
+                    "qfq_price_reason": "QFQ_CAPTURE_REQUEST_NOT_CLOSED",
+                    "qfq_open": None,
+                    "qfq_high": None,
+                    "qfq_low": None,
+                    "qfq_close": None,
+                }
+            )
+        else:
+            raise ValueError("BaoStock完整QFQ请求没有对应的typed历史行，不能推断无Bar")
+
+        if contiguous_open:
+            if request_closed and row is not None:
+                saved_through = session
+            else:
+                contiguous_open = False
+    return output, saved_through
 
 
 def summarize_cohort_rows(rows, *, rule, due):
@@ -95,7 +223,7 @@ def read_persisted_cohort(
     *,
     target,
     research_cutoff,
-    source_package_id,
+    source_capture_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -123,7 +251,7 @@ def read_persisted_cohort(
     common = dict(
         config=config,
         target=target,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         history_session_count=history_session_count,
         d1_history_session_count=d1_history_session_count,
@@ -165,15 +293,13 @@ def read_persisted_cohort(
             for day in calendar[calendar.index(target) : index + 1]
             if day <= research_cutoff
         )
-        raw = read_raw_daily_forward_pool(
+        source_rows, saved_through = _read_qfq_forward_rows(
             config,
-            source_symbols=(symbol,),
+            source_symbol=symbol,
             sessions=days,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
-            include_parser_contract=True,
+            source_capture_id=source_capture_id,
         )
-        source_rows = raw["rows_by_symbol"][symbol]
         birth = next(
             (row for row in source_rows if row["session_date"] == target), None
         )
@@ -184,7 +310,9 @@ def read_persisted_cohort(
             source_rows,
             horizon,
             target_session=endpoint_day,
-            saved_through=raw["saved_through"],
+            source_capture_id=source_capture_id,
+            price_coordinate=QFQ_COORDINATE,
+            saved_through=saved_through,
         )
         followup = _frozen_line_followup(
             {
@@ -192,7 +320,7 @@ def read_persisted_cohort(
                 "failure_line_candidate": {
                     "value": line,
                     "source": selected[20],
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "price_coordinate": QFQ_COORDINATE,
                     "scope": "NON_PIT_EXPLORATORY",
                 },
             },
@@ -212,7 +340,7 @@ def read_persisted_cohort(
                 symbol=symbol,
                 target=target,
                 cutoff=research_cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 target_capture_id=selected[21],
                 calendar=calendar,
                 horizon=horizon,
@@ -229,7 +357,7 @@ def read_persisted_cohort(
         events = read_source_events(
             config,
             target=target,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             symbol=symbol,
             d1_history_session_count=d1_history_session_count,
             calendar_revision=revision,
@@ -268,7 +396,7 @@ def read_persisted_cohort(
                         "failure_line_candidate": {
                             "value": lower,
                             "source": "D1_PLATFORM_LOWER",
-                            "price_coordinate": "RAW_UNADJUSTED",
+                            "price_coordinate": QFQ_COORDINATE,
                             "scope": "NON_PIT_EXPLORATORY",
                         },
                     },
@@ -311,7 +439,7 @@ def read_persisted_cohort(
             rps_unavailable = {
                 "target_session": target,
                 "research_cutoff": research_cutoff,
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
                 "facts": {},
             }
             attach_stock_risk_readiness(
@@ -319,7 +447,7 @@ def read_persisted_cohort(
                 diagnostic,
                 target=target,
                 cutoff=research_cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 rps_read=rps_unavailable,
             )
             risk_readiness = diagnostic["results"][0]["risk_priority_readiness"]
@@ -373,7 +501,7 @@ def compare_persisted_cohorts(
     before,
     after,
     research_cutoff,
-    source_package_id,
+    source_capture_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -399,7 +527,7 @@ def compare_persisted_cohorts(
         raise ValueError("跨日对照必须是官方会话")
     common = dict(
         config=config,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         history_session_count=history_session_count,
         d1_history_session_count=d1_history_session_count,

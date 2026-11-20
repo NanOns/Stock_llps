@@ -7,7 +7,7 @@ from datetime import date
 from fractions import Fraction
 from statistics import median
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from stock_a.application.source_market_context import (
     SourceMarketContextError,
@@ -34,11 +34,10 @@ from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.entry_history.history_timeline import post_signal_price_facts
 from stock_a.research.admission import line_breached
 from stock_a.domain import FieldValue
-from stock_a.storage.postgres.source_raw import (
-    read_raw_daily_catalog,
-    read_raw_daily_history_batch,
-    read_raw_daily_history_page,
-    read_raw_daily_history_stock,
+from stock_a.storage.postgres.baostock_price_facts import (
+    BaoStockPriceFactsError,
+    read_baostock_price_catalog,
+    read_baostock_price_history_batch,
 )
 from stock_a.application.tdx_sector_members import (
     read_tdx_sector_strength,
@@ -56,6 +55,92 @@ class SourceObservationError(ValueError):
     """实际来源身份、分母或版本不能闭合。"""
 
     code = "OBSERVATION_SOURCE_MISMATCH"
+
+
+def _read_qfq_price_history(
+    config: Mapping[str, Any],
+    *,
+    source_symbols: Sequence[str],
+    sessions: Sequence[date],
+    research_cutoff: date,
+    source_capture_id: int,
+    page_size: int = 5000,
+) -> dict[str, Any]:
+    """分页读取同一BaoStock capture的QFQ后验历史；不读取TDX价格。"""
+    symbols = tuple(sorted(set(source_symbols)))
+    target_sessions = tuple(sessions)
+    if (
+        not symbols
+        or len(symbols) != len(source_symbols)
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or type(research_cutoff) is not date
+        or any(day > research_cutoff for day in target_sessions)
+    ):
+        raise SourceObservationError("QFQ批量价格读取范围无效")
+    rows_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
+    total_rows = 0
+    page_reads = 0
+    for symbol_offset in range(0, len(symbols), 100):
+        batch_symbols = symbols[symbol_offset : symbol_offset + 100]
+        offset = 0
+        while True:
+            try:
+                batch = read_baostock_price_history_batch(
+                    config,
+                    source_symbols=batch_symbols,
+                    sessions=target_sessions,
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
+                    cutoff=research_cutoff,
+                    offset=offset,
+                    limit=page_size,
+                )
+            except BaoStockPriceFactsError as error:
+                raise SourceObservationError(
+                    f"QFQ批量价格读取失败：{error.code}:{error}"
+                ) from error
+            page_reads += 1
+            if (
+                batch.get("source_capture_id") != source_capture_id
+                or batch.get("price_coordinate") != "FORWARD_ADJUSTED"
+                or batch.get("cutoff") != research_cutoff.isoformat()
+            ):
+                raise SourceObservationError("QFQ批量价格响应capture/坐标/cutoff不一致")
+            for row in batch.get("rows", []):
+                symbol = row.get("source_symbol")
+                if symbol not in rows_by_symbol:
+                    raise SourceObservationError("QFQ批量价格响应包含请求证券以外的行")
+                if (
+                    row.get("source_capture_id") != source_capture_id
+                    or row.get("price_coordinate") != "FORWARD_ADJUSTED"
+                    or row.get("time_role") != "NON_PIT_RETROSPECTIVE"
+                ):
+                    raise SourceObservationError("QFQ价格行身份或NON_PIT时间角色不一致")
+                rows_by_symbol[symbol].append(row)
+            total_rows += len(batch.get("rows", []))
+            page = batch.get("page") or {}
+            next_offset = page.get("next_offset")
+            if next_offset is None:
+                break
+            if type(next_offset) is not int or next_offset <= offset:
+                raise SourceObservationError("QFQ批量价格分页游标无效")
+            offset = next_offset
+    for symbol, rows in rows_by_symbol.items():
+        rows.sort(key=lambda row: row["session_date"])
+        sessions_seen = [row["session_date"] for row in rows]
+        if len(sessions_seen) != len(set(sessions_seen)):
+            raise SourceObservationError(f"{symbol}QFQ批量历史含重复会话")
+    return {
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "rows_by_symbol": rows_by_symbol,
+        "row_count": total_rows,
+        "page_read_count": page_reads,
+        "database_write_attempted": False,
+        "source_io_attempted": False,
+    }
 
 
 def classify_source_transition(before: str | None, after: str | None) -> str:
@@ -102,7 +187,8 @@ def read_market_observation_sessions(
     *,
     sessions: tuple[date, ...],
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     profile_revision: str,
     profile_contract: dict[str, Any],
     history_session_count: int,
@@ -113,6 +199,8 @@ def read_market_observation_sessions(
         raise ValueError("研究会话必须非空、唯一且递增")
     if sessions[-1] > research_cutoff:
         raise ValueError("研究会话不得晚于截止日")
+    if price_coordinate != "FORWARD_ADJUSTED":
+        raise ValueError("D0/D1/Seed跨会话观察固定使用BaoStock QFQ坐标")
     _, _, _, calendar_sessions = _load_calendar(sessions[-1])
     try:
         positions = [calendar_sessions.index(day) for day in sessions]
@@ -131,7 +219,9 @@ def read_market_observation_sessions(
             page = read_source_d0_scenario_day(
                 config,
                 target_session=session,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
+                research_cutoff=research_cutoff,
                 scenario=scenario,
             )
             scenarios[scenario] = page
@@ -139,8 +229,12 @@ def read_market_observation_sessions(
             for scenario, current_result in scenarios.items():
                 prior_result = previous_scenarios[scenario]
                 if (
-                    prior_result["source_version"]["source_package_id"]
-                    != current_result["source_version"]["source_package_id"]
+                    prior_result["source_version"]["source_capture_id"]
+                    != current_result["source_version"]["source_capture_id"]
+                    or prior_result["source_version"].get("price_coordinate")
+                    != price_coordinate
+                    or current_result["source_version"].get("price_coordinate")
+                    != price_coordinate
                     or prior_result["official_calendar"]
                     != current_result["official_calendar"]
                     or prior_result["session_contract"]
@@ -162,12 +256,13 @@ def read_market_observation_sessions(
                 config,
                 target_session=session,
                 research_cutoff=research_cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
                 profile_revision=profile_revision,
                 profile_contract=profile_contract,
                 history_session_count=history_session_count,
                 include_rps_read=True,
-                allow_raw_profile_recompute=True,
+                allow_qfq_profile_recompute=True,
             )
         except PgPriceProfileError as error:
             if error.code != "PROFILE_CHANGE_SNAPSHOT_MISSING":
@@ -222,7 +317,8 @@ def read_market_observation_sessions(
                 config,
                 target_session=session,
                 research_cutoff=research_cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
             )
         except SourceMarketContextError as error:
             if not allow_missing_market or error.category != "NOT_EVALUABLE":
@@ -235,8 +331,9 @@ def read_market_observation_sessions(
             }
         source_version = scenarios["LAUNCH_CONFIRM"]["source_version"]
         if market is not None and (
-            market.cohort.source_package_id != source_version["source_package_id"]
-            or market.cohort.source_capture_id != source_version["source_capture_id"]
+            market.cohort.source_capture_id != source_version["source_capture_id"]
+            or market.cohort.price_coordinate != price_coordinate
+            or source_version.get("price_coordinate") != price_coordinate
         ):
             raise SourceObservationError("市场宽度与D0来源捕获身份不一致")
         if market is not None:
@@ -244,6 +341,9 @@ def read_market_observation_sessions(
         outputs.append(
             {
                 "session": session,
+                "source_capture_id": source_capture_id,
+                "price_coordinate": price_coordinate,
+                "time_role": "NON_PIT_RETROSPECTIVE",
                 "market": market_payload,
                 "scenarios": scenarios,
                 "seed": seed,
@@ -313,9 +413,11 @@ def assemble_observation_changes(
                             "signal": signal,
                             "transition": transition,
                             "source_binding": {
-                                "source_package_id": day["scenarios"]["LAUNCH_CONFIRM"][
+                                "source_capture_id": day["scenarios"]["LAUNCH_CONFIRM"][
                                     "source_version"
-                                ]["source_package_id"],
+                                ]["source_capture_id"],
+                                "price_coordinate": "FORWARD_ADJUSTED",
+                                "time_role": "NON_PIT_RETROSPECTIVE",
                                 "profile_revision": day["seed"].get("profile_revision"),
                                 "runtime_profile_revision": day["seed"].get(
                                     "runtime_profile_revision"
@@ -347,14 +449,12 @@ def assemble_observation_changes(
             discovery = d1_by_session[day["session"]]
             if (
                 discovery["source_pool_count"] != len(states)
-                or discovery["source"]["source_package_id"]
-                != day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
-                    "source_package_id"
-                ]
                 or discovery["source"]["source_capture_id"]
                 != day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
                     "source_capture_id"
                 ]
+                or discovery.get("price_coordinate") != "FORWARD_ADJUSTED"
+                or discovery["source"].get("price_coordinate") != "FORWARD_ADJUSTED"
             ):
                 raise SourceObservationError("D1与来源池分母或数字来源键不一致")
             d1_details = {
@@ -479,6 +579,8 @@ def assemble_observation_changes(
         "events": events,
         "event_count": len(events),
         "distinct_symbol_count": len({event["source_symbol"] for event in events}),
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "boards": daily_boards,
         "memberships_by_symbol": memberships,
         "snapshot_metadata": [snapshot["snapshot"] for snapshot in snapshots],
@@ -706,10 +808,13 @@ def attach_board_strengths(
     industry_snapshot_id: str,
     concept_snapshot_id: str,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     profile_revision: str,
 ) -> None:
     """在完整行业/GN成员上复用现役跨期强弱，缺画像时局部未知。"""
+    if price_coordinate != "FORWARD_ADJUSTED":
+        raise SourceObservationError("板块强弱跨期计算固定使用BaoStock QFQ坐标")
     boards = {
         (row["session"], row["board_kind"], row["board_native_id"]): row
         for row in observation["boards"]
@@ -731,7 +836,7 @@ def attach_board_strengths(
                         "reason": day["seed"]["reason"],
                     }
             continue
-        if day["seed"].get("stored_profile_status") == "MISSING_RAW_RECOMPUTED":
+        if day["seed"].get("stored_profile_status") == "MISSING_QFQ_RECOMPUTED":
             for kind, snapshot_id in (
                 ("INDUSTRY", industry_snapshot_id),
                 ("CONCEPT", concept_snapshot_id),
@@ -754,7 +859,8 @@ def attach_board_strengths(
                     start_session=day["session"],
                     target_session=day["session"],
                     research_cutoff=research_cutoff,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
                     peer_target_only=True,
                 )
                 for board_id, members in peers.items():
@@ -785,7 +891,8 @@ def attach_board_strengths(
                     board_native_id=None,
                     target_session=day["session"],
                     research_cutoff=research_cutoff,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
+                    price_coordinate=price_coordinate,
                     profile_revision=profile_revision,
                     changed_only=False,
                     sort_by="delta20",
@@ -841,7 +948,8 @@ def read_observation_d1(
     *,
     sessions: tuple[date, ...],
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     event_window_start: date,
     history_session_count: int,
 ) -> dict[date, dict[str, Any]]:
@@ -858,11 +966,12 @@ def read_observation_d1(
             research_cutoff,
             history,
             revision,
-            source_package_id,
+            source_capture_id,
             event_window_start,
             0,
             1,
             include_symbol_details=True,
+            price_coordinate=price_coordinate,
         )
     return result
 
@@ -1242,7 +1351,7 @@ def _d1_material_outcomes(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     horizon: int | None,
     source: Mapping[str, Any],
     source_symbol_summary: Mapping[str, Mapping[str, Any]],
@@ -1265,7 +1374,7 @@ def _d1_material_outcomes(
             "comparison_group_denominator": 0,
             "groups": [],
             "history_rows_read": 0,
-            "raw_batch_reads": 0,
+            "price_batch_reads": 0,
             "database_write_attempted": False,
             "post_cutoff_rows_read": 0,
             "wall_seconds": round(time.perf_counter() - started_wall, 6),
@@ -1290,30 +1399,31 @@ def _d1_material_outcomes(
             "mature_session_count": len(horizon_sessions) - 1,
             "required_session_count": horizon,
             "history_rows_read": 0,
-            "raw_batch_reads": 0,
+            "price_batch_reads": 0,
             "reason": "NO_SAVED_POST_SIGNAL_SESSION_WITHIN_RESEARCH_CUTOFF",
             "database_write_attempted": False,
             "post_cutoff_rows_read": 0,
         }
 
-    catalog = read_raw_daily_catalog(
+    catalog = read_baostock_price_catalog(
         config,
-        max_target_session=research_cutoff,
-        year=target_session.year,
-        offset=0,
-        limit=200,
+        cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
     )
     versions = {
-        (date.fromisoformat(row["session_date"]), row["source_package_id"]): row
-        for row in catalog["versions"]
+        (
+            date.fromisoformat(row["session_date"]),
+            row["source_capture_id"],
+            row["price_coordinate"],
+        ): row
+        for row in catalog["price_coordinate_versions"]
     }
     for session in horizon_sessions:
-        version = versions.get((session, source_package_id))
+        version = versions.get((session, source_capture_id, "FORWARD_ADJUSTED"))
         if (
             version is None
-            or version["version_status"] != "CLOSED"
-            or version["row_count"] != source["raw_row_count"]
-            or version["expected_row_count"] != source["raw_row_count"]
+            or version["coverage_status"] != "COMPLETE"
+            or version["row_count"] != version["expected_row_count"]
         ):
             return {
                 "status": "SOURCE_VERSION_NOT_CLOSED",
@@ -1324,7 +1434,7 @@ def _d1_material_outcomes(
                 "failed_session": session.isoformat(),
                 "failed_version": version,
                 "history_rows_read": 0,
-                "raw_batch_reads": 0,
+                "price_batch_reads": 0,
                 "database_write_attempted": False,
                 "post_cutoff_rows_read": 0,
             }
@@ -1339,28 +1449,22 @@ def _d1_material_outcomes(
         if item["group"] in included_groups
     )
     rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    raw_history_rows_read = 0
-    raw_batch_reads = 0
-    expected_source_package_id = source.get("source_package_id")
-    target_capture_id = int(source.get("source_capture_id"))
+    price_history_rows_read = 0
+    price_batch_reads = 0
     for offset in range(0, len(cohort_symbols), 100):
         batch_symbols = cohort_symbols[offset : offset + 100]
-        batch = read_raw_daily_history_batch(
+        batch = _read_qfq_price_history(
             config,
             source_symbols=batch_symbols,
-            target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             sessions=horizon_sessions,
-            expected_source_package_id=expected_source_package_id,
-            expected_target_capture_id=target_capture_id,
-            starts_at_target=True,
         )
         if any(day > research_cutoff for day in horizon_sessions):
             raise SourceObservationError("后续Raw请求越过显式研究截止")
-        rows_by_symbol.update(batch["history_rows_by_symbol"])
-        raw_history_rows_read += batch["raw_history_rows_read"]
-        raw_batch_reads += batch["raw_history_batch_reads"]
+        rows_by_symbol.update(batch["rows_by_symbol"])
+        price_history_rows_read += batch["row_count"]
+        price_batch_reads += batch["page_read_count"]
 
     points_by_group: dict[str, list[dict[str, Any]]] = {
         "MATERIAL_CHANGE": [],
@@ -1373,14 +1477,14 @@ def _d1_material_outcomes(
         t0_quality = facts["t0"]["ohlc"]["quality"]
         endpoint = facts["points"][horizon - 1]
         endpoint_quality = endpoint["ohlc"]["quality"]
-        change = endpoint["raw_close_relative_change"]
+        change = endpoint["qfq_close_relative_change"]
         if change.get("quality") == "OBSERVED":
-            raw_value = Fraction(change["value"]["exact"])
-            raw_status = "OBSERVED_RAW_CLOSE_CHANGE"
+            qfq_value = Fraction(change["value"]["exact"])
+            qfq_status = "OBSERVED_QFQ_CLOSE_CHANGE"
             reason = None
         else:
-            raw_value = None
-            raw_status = "UNKNOWN_PRICE_QUALITY"
+            qfq_value = None
+            qfq_status = "UNKNOWN_PRICE_QUALITY"
             reason = (
                 "T0:" + str(facts["t0"]["ohlc"].get("reason"))
                 if t0_quality != "OBSERVED"
@@ -1389,10 +1493,10 @@ def _d1_material_outcomes(
         points_by_group[source_symbol_summary[symbol]["group"]].append(
             {
                 "source_symbol": symbol,
-                "raw_status": raw_status,
-                "raw_close_change": raw_value,
-                "raw_reason": reason,
-                "raw_quality": change.get("quality"),
+                "price_status": qfq_status,
+                "qfq_close_change": qfq_value,
+                "price_reason": reason,
+                "qfq_quality": change.get("quality"),
                 "corporate_action_continuity": "UNKNOWN_NOT_EVALUATED",
             }
         )
@@ -1406,14 +1510,14 @@ def _d1_material_outcomes(
         ]
         group_points = points_by_group[group]
         observed = [
-            item["raw_close_change"]
+            item["qfq_close_change"]
             for item in group_points
-            if item["raw_close_change"] is not None
+            if item["qfq_close_change"] is not None
         ]
         reasons = Counter(
-            item["raw_reason"]
+            item["price_reason"]
             for item in group_points
-            if item["raw_reason"] is not None
+            if item["price_reason"] is not None
         )
         positive_count = sum(value > 0 for value in observed)
         groups.append(
@@ -1426,23 +1530,23 @@ def _d1_material_outcomes(
                 ),
                 "source_symbol_count": len(symbols),
                 "outcome_symbols_read": len(group_points),
-                "raw_close_change_observed_count": len(observed),
-                "raw_close_change_unknown_count": len(group_points) - len(observed),
-                "raw_close_change_unknown_reasons": dict(sorted(reasons.items())),
+                "qfq_close_change_observed_count": len(observed),
+                "qfq_close_change_unknown_count": len(group_points) - len(observed),
+                "qfq_close_change_unknown_reasons": dict(sorted(reasons.items())),
                 "non_comparable_count": len(observed),
                 "non_comparable_reason": (
                     "CORPORATE_ACTION_CONTINUITY_NOT_PROVED_FOR_RAW_CLOSE_RATIO"
                 ),
-                "median_raw_close_change_unadjusted": (
+                "median_qfq_close_change": (
                     str(median(observed)) if observed else None
                 ),
-                "positive_raw_close_ratio_unadjusted": (
+                "positive_qfq_close_ratio": (
                     str(Fraction(positive_count, len(observed))) if observed else None
                 ),
                 "median_comparable_outcome": None,
                 "positive_comparable_ratio": None,
                 "corporate_action_continuity": "UNKNOWN_NOT_EVALUATED",
-                "result_scope": "RAW_CLOSE_DESCRIPTION_ONLY_NOT_RETURN_VALIDATION",
+                "result_scope": "QFQ_CLOSE_NON_PIT_DESCRIPTION_ONLY_NOT_RETURN_VALIDATION",
             }
         )
     excluded_groups = Counter(
@@ -1451,7 +1555,7 @@ def _d1_material_outcomes(
         if item["group"] not in included_groups
     )
     return {
-        "status": "MATURED_RAW_DESCRIPTIVE_PARTIAL_COMPARABILITY",
+        "status": "MATURED_QFQ_DESCRIPTIVE_PARTIAL_COMPARABILITY",
         "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
         "selection_time_role": "T0_D1_ONLY_FUTURE_OUTCOMES_NOT_USED_FOR_GROUPING",
         "selection": {
@@ -1465,11 +1569,12 @@ def _d1_material_outcomes(
         "comparison_group_denominator": len(cohort_symbols),
         "excluded_t0_group_counts": dict(sorted(excluded_groups.items())),
         "groups": groups,
-        "price_coordinate": "RAW_UNADJUSTED",
-        "raw_close_formula": "C[T0+N]/C[T0]-1",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "qfq_close_formula": "QFQ_C[T0+N]/QFQ_C[T0]-1",
         "corporate_action_continuity": "UNKNOWN_NOT_EVALUATED",
-        "history_rows_read": raw_history_rows_read,
-        "raw_batch_reads": raw_batch_reads,
+        "history_rows_read": price_history_rows_read,
+        "price_batch_reads": price_batch_reads,
         "rows_read_after_cutoff": 0,
         "database_transaction": "REPEATABLE_READ_READ_ONLY",
         "database_write_attempted": False,
@@ -1485,7 +1590,8 @@ def prepare_d1_material_observation(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
@@ -1500,7 +1606,8 @@ def prepare_d1_material_observation(
         target_session=target_session,
         research_cutoff=research_cutoff,
         sessions=sessions,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
         offset=0,
         limit=1,
         structure_changes=True,
@@ -1521,6 +1628,8 @@ def prepare_d1_material_observation(
     ]
     return {
         "d1": d1,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "sessions": sessions,
         "calendar_revision": calendar_revision,
         "snapshots": snapshots,
@@ -1532,7 +1641,8 @@ def prepare_saved_d1_material_observation(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
@@ -1544,7 +1654,7 @@ def prepare_saved_d1_material_observation(
     saved = read_source_research_day(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         d1_history_session_count=d1_history_session_count,
         industry_snapshot_id=industry_snapshot_id,
         concept_snapshot_id=concept_snapshot_id,
@@ -1552,6 +1662,8 @@ def prepare_saved_d1_material_observation(
     )
     if saved.get("storage_status") != "SAVED":
         raise SourceObservationError("PG没有完整D1 typed事实，拒绝读时重算")
+    if saved.get("price_coordinate") != price_coordinate:
+        raise SourceObservationError("PG已存D1事实坐标与BaoStock QFQ请求不一致")
     rows = saved.get("results") or []
     source_count = saved.get("d1", {}).get("source_symbol_count")
     if (
@@ -1653,7 +1765,7 @@ def prepare_saved_d1_material_observation(
         "status": "SOURCE_LEVEL_D1_STRUCTURE_CHANGE_DISCOVERY",
         "contract": "SOURCE_D1_STRUCTURE_R1",
         "research_mode": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
         "calendar": {
@@ -1664,7 +1776,6 @@ def prepare_saved_d1_material_observation(
             "history_end": sessions[-1].isoformat(),
         },
         "source": {
-            "source_package_id": saved["source_package_id"],
             "source_capture_id": saved["target_capture_id"],
             "raw_row_count": source_count,
             "capture_expected_row_count": source_count,
@@ -1746,6 +1857,8 @@ def prepare_saved_d1_material_observation(
     ]
     return {
         "d1": d1,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "sessions": sessions,
         "calendar_revision": calendar_revision,
         "snapshots": snapshots,
@@ -1787,7 +1900,8 @@ def read_d1_material_observation(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
@@ -1839,7 +1953,8 @@ def read_d1_material_observation(
             target_session=target_session,
             research_cutoff=research_cutoff,
             sessions=sessions,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
             offset=offset,
             limit=limit,
             structure_symbol=symbol,
@@ -2053,7 +2168,7 @@ def read_d1_material_observation(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         horizon=horizon,
         source=d1["source"],
         source_symbol_summary=source_symbol_summary,
@@ -2149,8 +2264,10 @@ def read_d1_material_observation(
         "qualification_scope": "SOURCE_D1_MATERIAL_CHANGE_NOT_FORMAL_D2_OR_TRADING_SIGNAL",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
-        "profile_revision": "NOT_REQUIRED_FOR_D1_RAW_MATERIAL_VIEW",
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "profile_revision": "NOT_REQUIRED_FOR_D1_QFQ_MATERIAL_VIEW",
         "membership_availability": {
             "INDUSTRY": "AVAILABLE" if industry_snapshot_id is not None else "UNKNOWN",
             "CONCEPT": "AVAILABLE" if concept_snapshot_id is not None else "UNKNOWN",
@@ -2161,8 +2278,8 @@ def read_d1_material_observation(
         "source": {
             key: d1["source"].get(key)
             for key in (
-                "source_package_id",
                 "source_capture_id",
+                "price_coordinate",
                 "raw_row_count",
                 "capture_expected_row_count",
                 "capture_read_started_at",
@@ -2269,7 +2386,8 @@ def read_observation_board_details(
     snapshot_id: str,
     board_kind: str,
     board_native_id: str,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     profile_revision: str,
     research_cutoff: date,
     rotation_start: date,
@@ -2285,7 +2403,7 @@ def read_observation_board_details(
     peer_members = {key: row["members"] for key, row in snapshot["boards"].items()}
     if board_native_id not in peer_members:
         return {"status": "UNKNOWN_DATA", "reason": "BOARD_NOT_IN_EXACT_SNAPSHOT"}
-    if day["seed"].get("stored_profile_status") == "MISSING_RAW_RECOMPUTED":
+    if day["seed"].get("stored_profile_status") == "MISSING_QFQ_RECOMPUTED":
         members = peer_members[board_native_id]
         native = _board_native(day["seed"], members, peer_members, board_native_id)
         loo = {"state": "NOT_REQUESTED"}
@@ -2315,7 +2433,8 @@ def read_observation_board_details(
             start_session=rotation_start,
             target_session=day["session"],
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
         )
         return {
             "status": "COMPUTED",
@@ -2334,7 +2453,8 @@ def read_observation_board_details(
         board_native_id=None,
         target_session=day["session"],
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
         profile_revision=profile_revision,
         changed_only=False,
         sort_by="delta20",
@@ -2372,7 +2492,8 @@ def read_observation_board_details(
         start_session=rotation_start,
         target_session=day["session"],
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
         profile_revision=profile_revision,
         profile_contract=profile_contract,
         profile_history_session_count=day["seed"]["history_session_count"],
@@ -2392,7 +2513,7 @@ def attach_observation_outcomes(
     observation: dict[str, Any],
     *,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     horizon: int,
     history_cache: Mapping[tuple[date, str], dict[str, Any]] | None = None,
     read_metrics: dict[str, int] | None = None,
@@ -2416,32 +2537,16 @@ def attach_observation_outcomes(
                 read_metrics["event_stock_reads"] += 1
             start = available.index(target)
             sessions = available[start : start + horizon + 1]
-            history = read_raw_daily_history_stock(
+            batch = _read_qfq_price_history(
                 config,
-                source_symbol=symbol,
-                target_session=target,
-                source_package_id=source_package_id,
+                source_symbols=(symbol,),
                 sessions=sessions,
-                starts_at_target=True,
                 research_cutoff=research_cutoff,
+                source_capture_id=source_capture_id,
             )
-            rows = history["history_rows"]
-            birth = next(row for row in rows if row["session_date"] == target)
-            safe_rows = []
-            for row in rows:
-                if row["session_date"] != target and (
-                    row.get("source_package_id") != birth.get("source_package_id")
-                    or row.get("price_coordinate") != "RAW_UNADJUSTED"
-                ):
-                    safe_rows.append(
-                        {
-                            "session_date": row["session_date"],
-                            "bar_status": "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH",
-                        }
-                    )
-                else:
-                    safe_rows.append(row)
-            histories[key] = post_signal_price_facts(sessions, safe_rows, horizon)
+            histories[key] = post_signal_price_facts(
+                sessions, batch["rows_by_symbol"].get(symbol, []), horizon
+            )
         facts = histories[key]
         line = None
         signal = event["signal"]
@@ -2595,7 +2700,7 @@ def attach_comparison_continuity(
                 ] += 1
             facts = event["post_signal_price_facts"]["points"]
             change = (
-                facts[n - 1]["raw_close_relative_change"] if len(facts) >= n else {}
+                facts[n - 1]["qfq_close_relative_change"] if len(facts) >= n else {}
             )
             if change.get("quality") == "OBSERVED" and state in {
                 "TRUE",
@@ -2632,15 +2737,15 @@ def attach_comparison_continuity(
 
 def _comparison_price_point(facts: Mapping[str, Any], horizon: int) -> dict[str, Any]:
     point = facts["points"][horizon - 1]
-    value = dict(point["raw_close_relative_change"])
-    if value.get("reason") == "T0_OR_ENDPOINT_BAR_UNKNOWN":
+    value = dict(point["qfq_close_relative_change"])
+    if value.get("reason") == "T0_OR_ENDPOINT_QFQ_BAR_UNKNOWN":
         base = facts["t0"]["ohlc"]
         endpoint = point["ohlc"]
         if base.get("quality") != "OBSERVED":
-            value["reason"] = "T0:" + str(base.get("reason") or "RAW_BAR_UNKNOWN")
+            value["reason"] = "T0:" + str(base.get("reason") or "QFQ_BAR_UNKNOWN")
         elif endpoint.get("quality") != "OBSERVED":
             value["reason"] = "FOLLOWUP:" + str(
-                endpoint.get("reason") or "RAW_BAR_UNKNOWN"
+                endpoint.get("reason") or "QFQ_BAR_UNKNOWN"
             )
     return value
 
@@ -2651,7 +2756,7 @@ def compare_source_outcomes(
     observation: Mapping[str, Any],
     *,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     horizon: int,
     history_cache: dict[tuple[date, str], dict[str, Any]] | None = None,
     read_metrics: dict[str, int] | None = None,
@@ -2667,94 +2772,40 @@ def compare_source_outcomes(
         start = available.index(target)
         sessions = available[start : start + horizon + 1]
         histories = {}
-        cached = history_cache is not None and all(
-            (target, symbol) in history_cache for symbol in day["states"]
-        )
-        offset = 0
-        if read_metrics is not None:
-            read_metrics[
-                "comparison_cache_reuses" if cached else "comparison_pool_scans"
-            ] += 1
-        while not cached:
-            if read_metrics is not None:
-                read_metrics["comparison_page_reads"] += 1
-            page = read_raw_daily_history_page(
-                config,
-                target_session=sessions[-1],
-                source_package_id=source_package_id,
-                sessions=sessions,
-                offset=offset,
-                limit=100,
-                market="ALL",
-                board="ALL",
+        missing_symbols = []
+        for symbol in sorted(day["states"]):
+            cached_facts = (
+                history_cache.get((target, symbol)) if history_cache else None
             )
-            for candidate in page["candidates"]:
-                symbol = candidate["source_symbol"]
-                rows = candidate["history_rows"]
-                birth = next(
-                    (row for row in rows if row["session_date"] == target), None
+            if cached_facts is None:
+                missing_symbols.append(symbol)
+            else:
+                histories[symbol] = _comparison_price_point(cached_facts, horizon)
+        if read_metrics is not None:
+            read_metrics["comparison_pool_scans"] += int(bool(missing_symbols))
+            read_metrics["comparison_cache_reuses"] += len(day["states"]) - len(
+                missing_symbols
+            )
+        for symbol_offset in range(0, len(missing_symbols), 100):
+            batch_symbols = missing_symbols[symbol_offset : symbol_offset + 100]
+            batch = _read_qfq_price_history(
+                config,
+                source_symbols=batch_symbols,
+                sessions=sessions,
+                research_cutoff=research_cutoff,
+                source_capture_id=source_capture_id,
+            )
+            if read_metrics is not None:
+                read_metrics["comparison_page_reads"] += batch["page_read_count"]
+            for symbol in batch_symbols:
+                facts = post_signal_price_facts(
+                    sessions,
+                    batch["rows_by_symbol"].get(symbol, []),
+                    horizon,
                 )
-                safe = []
-                for row in rows:
-                    if row["session_date"] != target and (
-                        birth is None
-                        or row.get("source_package_id")
-                        != birth.get("source_package_id")
-                        or row.get("price_coordinate") != "RAW_UNADJUSTED"
-                    ):
-                        safe.append(
-                            {
-                                "session_date": row["session_date"],
-                                "bar_status": "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH",
-                            }
-                        )
-                    else:
-                        safe.append(row)
-                facts = post_signal_price_facts(sessions, safe, horizon)
                 histories[symbol] = _comparison_price_point(facts, horizon)
                 if history_cache is not None:
                     history_cache[(target, symbol)] = facts
-            offset = page["next_offset"]
-            if offset is None:
-                break
-        if history_cache is not None:
-            for symbol in day["states"]:
-                facts = history_cache.get((target, symbol))
-                if facts is None:
-                    # 最新会话可能没有T0代码；补读该代码，不能把其T0误判为缺失。
-                    if read_metrics is not None:
-                        read_metrics["comparison_missing_stock_reads"] += 1
-                    history = read_raw_daily_history_stock(
-                        config,
-                        source_symbol=symbol,
-                        target_session=target,
-                        source_package_id=source_package_id,
-                        sessions=sessions,
-                        starts_at_target=True,
-                        research_cutoff=research_cutoff,
-                    )
-                    rows = history["history_rows"]
-                    birth = next(
-                        (row for row in rows if row["session_date"] == target), None
-                    )
-                    safe = [
-                        row
-                        if row["session_date"] == target
-                        or (
-                            birth is not None
-                            and row.get("source_package_id")
-                            == birth.get("source_package_id")
-                            and row.get("price_coordinate") == "RAW_UNADJUSTED"
-                        )
-                        else {
-                            "session_date": row["session_date"],
-                            "bar_status": "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH",
-                        }
-                        for row in rows
-                    ]
-                    facts = post_signal_price_facts(sessions, safe, horizon)
-                    history_cache[(target, symbol)] = facts
-                histories[symbol] = _comparison_price_point(facts, horizon)
         groups: dict[str, list[str]] = {}
         for name in ("LAUNCH_CONFIRM", "RECOVERY_TURN", "s1", "s2", "seed"):
             groups[f"{name}:FALSE_TO_TRUE"] = []

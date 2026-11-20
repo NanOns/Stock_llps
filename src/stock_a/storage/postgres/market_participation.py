@@ -43,13 +43,11 @@ _PROFILE_COLUMNS = (
 )
 _DAY_COLUMNS = (
     "target_session",
-    "source_package_id",
     "source_capture_id",
     "contract_version",
     "profile_revision",
     "producer_contract",
     "producer_version",
-    "source_dataset_id",
     "source_time_quality",
     "source_available_at",
     "source_clock_role",
@@ -77,7 +75,6 @@ _DAY_COLUMNS = (
 )
 _KEY_COLUMNS = (
     "target_session",
-    "source_package_id",
     "source_capture_id",
     "contract_version",
     "profile_revision",
@@ -101,22 +98,27 @@ def read_market_participation_profiles(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
+    profile_revision: str | None = None,
 ) -> list[dict[str, Any]]:
-    """离线生产时一次性读取指定日期、来源包和捕获的已存Profile。"""
+    """离线生产时一次性读取指定日期和BaoStock捕获的已存Profile。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
+        or profile_revision is not None
+        and (not isinstance(profile_revision, str) or not profile_revision)
     ):
         raise MarketParticipationPgError(
             "MARKET_PARTICIPATION_INPUT_KEY_INVALID",
-            "画像读取键必须是明确的日期、包和捕获ID",
+            "画像读取键必须是明确日期和来源捕获ID",
         )
     columns = ", ".join(_PROFILE_COLUMNS)
+    profile_scope = ""
+    parameters: tuple[Any, ...] = (target_session, source_capture_id)
+    if profile_revision is not None:
+        profile_scope = " AND profile_revision=%s"
+        parameters = (*parameters, profile_revision)
     try:
         with source_raw._transaction(
             config, write=False, statement_timeout_ms=30000
@@ -124,9 +126,10 @@ def read_market_participation_profiles(
             cursor.execute(
                 f"""SELECT {columns}
 FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
+WHERE target_session=%s AND source_capture_id=%s
+  AND price_coordinate='FORWARD_ADJUSTED'{profile_scope}
 ORDER BY source_symbol""",
-                (target_session, source_package_id, source_capture_id),
+                parameters,
             )
             return [
                 dict(zip(_PROFILE_COLUMNS, row, strict=True))
@@ -152,11 +155,8 @@ def persist_market_participation(
     """在一个SERIALIZABLE事务内幂等保存父事实及UNKNOWN原因分解。"""
     day = dict(result)
     day["contract_version"] = MARKET_PARTICIPATION_CONTRACT
-    day["source_available_at"] = _clock(day.get("source_available_at"))
     if day["median_value"] is None:
         day["median_value"] = None
-    expected_day = _expected_day_values(day)
-    key = tuple(day[name] for name in _KEY_COLUMNS)
     reason_counts = {
         str(reason): int(count)
         for reason, count in sorted(day["unknown_reason_counts"].items())
@@ -182,6 +182,49 @@ def persist_market_participation(
         with source_raw._transaction(
             config, write=True, statement_timeout_ms=30000
         ) as (_, cursor, _):
+            source_capture_id = day.get("source_capture_id")
+            target_session = day.get("target_session")
+            research_cutoff = day.get("research_cutoff")
+            if (
+                type(source_capture_id) is not int
+                or source_capture_id <= 0
+                or type(target_session) is not date
+                or type(research_cutoff) is not date
+                or target_session > research_cutoff
+            ):
+                raise MarketParticipationPgError(
+                    "MARKET_PARTICIPATION_CAPTURE_INVALID",
+                    "成交参与写入必须绑定官方会话和source_capture_id",
+                )
+            cursor.execute(
+                """SELECT provider,range_start_session,range_end_session,source_time_quality,
+                          source_available_at,source_clock_role,price_coordinates
+                   FROM stock.source_captures WHERE capture_id=%s""",
+                (source_capture_id,),
+            )
+            capture = cursor.fetchone()
+            if (
+                capture is None
+                or capture[0] != "BAOSTOCK"
+                or capture[1] > target_session
+                or capture[2] < target_session
+                or capture[2] > research_cutoff
+                or set(capture[6] or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+                or day.get("price_coordinate") not in (None, "FORWARD_ADJUSTED")
+                or day.get("amount_unit_status") not in (None, "CNY_VERIFIED")
+            ):
+                raise MarketParticipationPgError(
+                    "MARKET_PARTICIPATION_CAPTURE_INVALID",
+                    "成交参与来源捕获不是研究截止内覆盖目标日的BaoStock双坐标价格捕获",
+                )
+            day["source_time_quality"] = capture[3]
+            day["source_available_at"] = _clock(capture[4])
+            day["source_clock_role"] = capture[5]
+            day["price_coordinate"] = "FORWARD_ADJUSTED"
+            day["amount_unit_status"] = "CNY_VERIFIED"
+            day["pit_status"] = "NON_PIT_RETROSPECTIVE"
+            expected_day = _expected_day_values(day)
+            key = tuple(day[name] for name in _KEY_COLUMNS)
             cursor.execute(
                 f"""INSERT INTO {_DAY_TABLE} ({", ".join(_DAY_COLUMNS)})
 VALUES ({", ".join(["%s"] * len(_DAY_COLUMNS))})
@@ -258,7 +301,6 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
     return {
         "status": "WRITTEN" if inserted else "IDEMPOTENT_ALREADY_PRESENT",
         "target_session": day["target_session"].isoformat(),
-        "source_package_id": day["source_package_id"],
         "source_capture_id": day["source_capture_id"],
         "profile_revision": day["profile_revision"],
         "profile_count": day["profile_count"],
@@ -308,9 +350,8 @@ def read_market_participation(
     *,
     market: Any,
 ) -> dict[str, Any]:
-    """只读指定宽度来源包、捕获与日历下唯一已保存成交参与结果。"""
+    """只读指定BaoStock捕获与日历下唯一已保存成交参与结果。"""
     target_session = market.target_session
-    package_id = market.cohort.source_package_id
     capture_id = market.cohort.source_capture_id
     try:
         with source_raw._transaction(
@@ -318,11 +359,10 @@ def read_market_participation(
         ) as (_, cursor, _):
             cursor.execute(
                 f"""SELECT id, {", ".join(_DAY_COLUMNS)} FROM {_DAY_TABLE}
-WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
+WHERE target_session=%s AND source_capture_id=%s
   AND contract_version=%s ORDER BY profile_revision, producer_version""",
                 (
                     target_session,
-                    package_id,
                     capture_id,
                     MARKET_PARTICIPATION_CONTRACT,
                 ),
@@ -331,7 +371,7 @@ WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
             if not rows:
                 return {
                     "status": "NOT_COMPUTED",
-                    "reason": "此精确日期、来源包和捕获尚无已保存成交参与事实。",
+                    "reason": "此精确日期和BaoStock捕获尚无已保存成交参与事实。",
                 }
             if len(rows) != 1:
                 return {
@@ -353,17 +393,15 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
     cohort = market.cohort
     if (
         day["target_session"] != target_session
-        or day["source_package_id"] != package_id
         or day["source_capture_id"] != capture_id
         or day["source_pool_count"] != calculation.n_source
-        or day["source_dataset_id"] != cohort.source_dataset_id
         or day["source_time_quality"] != cohort.source_time_quality
         or _market_clock(day["source_available_at"])
         != _market_clock(cohort.source_available_at)
         or day["source_clock_role"] != cohort.source_clock_role
         or day["calendar_id"] != market.calendar["calendar_id"]
         or day["calendar_revision"] != market.calendar["calendar_revision"]
-        or day["price_coordinate"] != "RAW_UNADJUSTED"
+        or day["price_coordinate"] != "FORWARD_ADJUSTED"
         or day["pit_status"] != "NON_PIT_RETROSPECTIVE"
         or not _history_calendar_covers_target(
             day["profile_history_calendar_id"],
@@ -439,9 +477,7 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
         "pit_status": day["pit_status"],
         "price_coordinate": day["price_coordinate"],
         "source_cohort": {
-            "source_package_id": package_id,
             "source_capture_id": capture_id,
-            "source_dataset_id": day["source_dataset_id"],
             "source_time_quality": day["source_time_quality"],
             "source_available_at": (
                 day["source_available_at"].isoformat()

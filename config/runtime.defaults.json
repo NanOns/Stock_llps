@@ -1,5 +1,5 @@
 {
-  "contract": "STOCK-A-RUNTIME-DEFAULTS/R9",
+  "contract": "STOCK-A-RUNTIME-DEFAULTS/R10",
   "paths": {
     "workspace_root": "G:/codex work/Stock A",
     "delivery_root": "G:/codex work/Stock A 交付",
@@ -35,20 +35,18 @@
       "D:/new_tdx"
     ],
     "all_source_roots_read_only": true,
-    "vipdata_official": {
-      "page_url": "https://www.tdx.com.cn/article/vipdata.html",
-      "package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
-      "metadata_url": "https://data.tdx.com.cn/vipdoc/_hsjdayinfo.js"
-    },
-    "baostock_supplement": {
-      "contract": "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1",
-      "request_policy": "NOT_REQUESTED",
-      "reason_code": "OPTIONAL_SOURCE_NOT_REQUESTED",
-      "required_for_core": false,
+    "baostock_primary": {
+      "contract": "STOCK-A-BAOSTOCK-PRIMARY-PRICE-SOURCE/R1",
+      "request_policy": "MANUAL_BOUNDED_JOB",
+      "required_for_core": true,
       "request_budget": {
-        "max_logins": 1,
-        "max_queries_per_target_session": 10,
-        "query_timeout_seconds": 30
+        "max_login_batches": 200,
+        "max_api_calls_per_batch": 100,
+        "query_timeout_seconds": 30,
+        "max_identity_total_seconds": 120,
+        "max_history_session_count": 250,
+        "max_retry_attempts": 0,
+        "retry_backoff_seconds": 2
       }
     }
   },
@@ -81,31 +79,31 @@
       {
         "path": "runtime.defaults.json",
         "role": "BUSINESS_RUNTIME_CONFIGURATION",
-        "contract": "STOCK-A-RUNTIME-DEFAULTS/R9",
-        "consumer": "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official; single-stock research reads source_policy.baostock_supplement"
+        "contract": "STOCK-A-RUNTIME-DEFAULTS/R10",
+        "consumer": "application startup / configuration resolver and BaoStock price source request budget"
       },
       {
         "path": "contracts/price-profile.contract.json",
         "role": "PRICE_PROFILE_SEMANTICS_CONTRACT",
-        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R2",
         "consumer": "stock_a.contracts.load_price_profile_contract（唯一入口清单）"
       },
       {
         "path": "contracts/price-profile/fields-source.json",
         "role": "PRICE_PROFILE_SEMANTICS_MODULE",
-        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R2",
         "consumer": "stock_a.contracts.load_price_profile_contract（fields-source）"
       },
       {
         "path": "contracts/price-profile/fields-core.json",
         "role": "PRICE_PROFILE_SEMANTICS_MODULE",
-        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R2",
         "consumer": "stock_a.contracts.load_price_profile_contract（fields-core）"
       },
       {
         "path": "contracts/price-profile/fields-profile.json",
         "role": "PRICE_PROFILE_SEMANTICS_MODULE",
-        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R2",
         "consumer": "stock_a.contracts.load_price_profile_contract（fields-profile）"
       }
     ],
@@ -166,7 +164,7 @@
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
     "business_login": "stock_a",
-    "migration_version": 53,
+    "migration_version": 59,
     "project_id": 1,
     "deployment_instance_id": 1
   }

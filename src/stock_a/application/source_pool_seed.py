@@ -30,16 +30,19 @@ from stock_a.application.pg_price_profiles import (
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.application.source_pool_factors import read_source_pool_rps
 from stock_a.application.tdx_sector_members import (
-    _raw_window_observation,
     read_tdx_sector_members,
 )
 from stock_a.research.core import MarketSessionCalendar, calculate_core_ma20
+from stock_a.research.entry_history.support import _core_observation_from_pg_price_row
 from stock_a.research.entry_history.history_preview import (
     research_stock_pg_history_preview,
 )
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
-from stock_a.storage.postgres.source_raw import read_raw_daily_history_page
+from stock_a.storage.postgres.baostock_price_facts import (
+    read_baostock_price_history_batch,
+    read_baostock_price_page,
+)
 from stock_a.storage.postgres.static_research_facts import (
     StaticResearchPgError,
     read_source_d0_scenario_day,
@@ -387,12 +390,12 @@ def source_seed_predicates(
     liquidity = _tri(None, "UNKNOWN_UNIT_UNVERIFIED")
     actual = (
         _tri(True)
-        if preview["target_bar_status"] == "TDX_TARGET_BAR_PRESENT"
+        if preview["target_bar_status"] == "BAOSTOCK_TARGET_BAR_PRESENT"
         and preview["price_research_status"] == "AVAILABLE"
         else _tri(None, "TARGET_ACTUAL_OR_PRICE_UNKNOWN")
     )
     formal_universe = _tri(None, "DATE_VALID_IDENTITY_LIFECYCLE_EVIDENCE_MISSING")
-    formal_coordinate = _tri(None, "RAW_UNADJUSTED_COORDINATE_CONTINUITY_UNPROVED")
+    formal_coordinate = _tri(None, "QFQ_NON_PIT_COORDINATE_IS_NOT_FORMAL_PIT")
     non_st = _tri(None, "DATE_VALID_ST_STATUS_EVIDENCE_MISSING")
     normal_listing = _tri(None, "DATE_VALID_LISTING_PHASE_EVIDENCE_MISSING")
     limited_price_rule = _tri(None, "DATE_VALID_LIMIT_APPLICABILITY_EVIDENCE_MISSING")
@@ -469,7 +472,7 @@ def _stored_seed_core(candidate: Mapping[str, Any], saved: Mapping[str, Any]):
     if (
         not saved
         or saved.get("source_symbol") != candidate["source_symbol"]
-        or saved.get("price_coordinate") != "RAW_UNADJUSTED"
+        or saved.get("price_coordinate") != "FORWARD_ADJUSTED"
         or not rows
         or str(saved.get("source_capture_id")) != str(rows[-1].get("source_capture_id"))
         or saved.get("history_window_start") != rows[0].get("session_date")
@@ -528,12 +531,13 @@ def _seed_preview_init(context: tuple[Any, ...]) -> None:
 
 
 def _seed_preview(candidate: Mapping[str, Any], context: tuple[Any, ...]):
-    target_session, source_package_id, sessions, profile_contract = context
+    target_session, source_capture_id, sessions, profile_contract = context
     try:
         preview = research_stock_pg_history_preview(
             symbol=candidate["source_symbol"],
             target_session=target_session.isoformat(),
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
             session_dates=sessions,
             history_rows=candidate["history_rows"],
             profile_contract=profile_contract,
@@ -579,13 +583,13 @@ def compute_source_pool_seed(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     profile_contract: dict[str, Any],
     history_session_count: int,
     selected_symbols: frozenset[str] | None = None,
     include_rps_read: bool = False,
-    allow_raw_profile_recompute: bool = False,
+    allow_qfq_profile_recompute: bool = False,
     worker_count: int = 1,
 ) -> dict[str, Any]:
     """按现役Core/Profile公式从已存PG原始行计算Seed，供初始化生产使用。"""
@@ -599,7 +603,7 @@ def compute_source_pool_seed(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
     )
     _, sessions, revision = resolve_pg_history_window(
         target_session.isoformat(), history_session_count
@@ -613,14 +617,14 @@ def compute_source_pool_seed(
                 config,
                 target_session=target_session,
                 max_target_session=research_cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 profile_revision=profile_revision,
                 offset=profile_offset,
                 limit=100,
             )
         except PgPriceProfileError as error:
             if (
-                not allow_raw_profile_recompute
+                not allow_qfq_profile_recompute
                 or profile_offset != 0
                 or error.code != "PROFILE_CHANGE_SNAPSHOT_MISSING"
             ):
@@ -656,7 +660,7 @@ def compute_source_pool_seed(
     )
     seed_facts = {}
     offset = 0
-    context = (target_session, source_package_id, sessions, profile_contract)
+    context = (target_session, source_capture_id, sessions, profile_contract)
     with ExitStack() as stack:
         pool = (
             stack.enter_context(
@@ -671,26 +675,76 @@ def compute_source_pool_seed(
             else None
         )
         while True:
-            page = read_raw_daily_history_page(
+            target_page = read_baostock_price_page(
                 config,
                 target_session=target_session,
-                source_package_id=source_package_id,
-                sessions=sessions,
+                cutoff=research_cutoff,
+                source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
                 offset=offset,
                 limit=100,
                 market="ALL",
                 board="ALL",
             )
             if (
-                page["total_count"] != len(profiles)
-                or page["version_status"] != "CLOSED"
+                target_page["total_count"] != len(profiles)
+                or target_page["version_status"] != "CLOSED"
+                or target_page["partition_closed"] is not True
             ):
-                raise ValueError("来源池与画像身份不一致")
+                raise ValueError("BaoStock QFQ来源池与画像身份不一致")
+            selected_target_rows = [
+                row
+                for row in target_page["rows"]
+                if selected_symbols is None or row["source_symbol"] in selected_symbols
+            ]
+            page_symbols = tuple(row["source_symbol"] for row in selected_target_rows)
+            histories_by_symbol = {symbol: [] for symbol in page_symbols}
+            history_offset = 0
+            history_total = None
+            while page_symbols:
+                history_page = read_baostock_price_history_batch(
+                    config,
+                    source_symbols=page_symbols,
+                    sessions=sessions,
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
+                    cutoff=research_cutoff,
+                    offset=history_offset,
+                    limit=1000,
+                )
+                page_info = history_page["page"]
+                if history_total is None:
+                    history_total = int(page_info["total"])
+                elif int(page_info["total"]) != history_total:
+                    raise ValueError("Seed QFQ历史分页期间分母发生变化")
+                if any(
+                    item.get("coverage_status") != "COMPLETE"
+                    for item in history_page.get("coverage", ())
+                ):
+                    raise ValueError("Seed QFQ历史请求或行覆盖未闭合")
+                for row in history_page.get("rows", ()):
+                    histories_by_symbol[row["source_symbol"]].append(row)
+                next_history = page_info.get("next_offset")
+                if next_history is None:
+                    break
+                history_offset = int(next_history)
+            if (
+                history_total is not None
+                and sum(map(len, histories_by_symbol.values())) != history_total
+            ):
+                raise ValueError("Seed QFQ历史页没有闭合")
+            target_row_by_symbol = {
+                row["source_symbol"]: row for row in selected_target_rows
+            }
             candidates = [
-                {**candidate, "saved_profile": profiles[candidate["source_symbol"]]}
-                for candidate in page["candidates"]
-                if selected_symbols is None
-                or candidate["source_symbol"] in selected_symbols
+                {
+                    "source_symbol": symbol,
+                    "market": target_row_by_symbol[symbol].get("market"),
+                    "board": target_row_by_symbol[symbol].get("board"),
+                    "history_rows": histories_by_symbol[symbol],
+                    "saved_profile": profiles[symbol],
+                }
+                for symbol in page_symbols
             ]
             previews = (
                 pool.map(_seed_preview_worker, candidates, chunksize=5)
@@ -718,21 +772,17 @@ def compute_source_pool_seed(
                         "reason": error_code,
                     }
                     continue
-                by_key = {(symbol, row["session_date"]): row for row in rows}
-                counts = {
-                    key: {"row_count": 1, "package_count": 1, "capture_count": 1}
-                    for key in by_key
-                }
-                target_row = by_key[(symbol, target_session)]
+                by_date = {row["session_date"]: row for row in rows}
+                target_row = by_date[target_session]
+                coordinate_id = f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
                 observations = tuple(
-                    _raw_window_observation(
-                        source_symbol=symbol,
+                    _core_observation_from_pg_price_row(
+                        by_date.get(day),
                         session=day,
-                        raw_by_key=by_key,
-                        revision_counts=counts,
-                        target_session=target_session,
-                        target_capture_id=target_row["source_capture_id"],
-                    )[0]
+                        source_capture_id=source_capture_id,
+                        price_coordinate="FORWARD_ADJUSTED",
+                        coordinate_id=coordinate_id,
+                    )
                     for day in sessions
                 )
                 previous = None
@@ -746,21 +796,20 @@ def compute_source_pool_seed(
                     )
                     prior_close = observations[-2].close
                 current_close = observations[-1].close
-                current_bar = observations[-1]
-                quote_fields = (
-                    current_bar.open,
-                    current_bar.high,
-                    current_bar.low,
-                    current_bar.close,
+                raw_quote = tuple(
+                    target_row.get(column)
+                    for column in ("raw_open", "raw_high", "raw_low", "raw_close")
                 )
-                valid_quote = current_bar.state == "ACTUAL" and all(
-                    value is not None and value.quality == "OBSERVED"
-                    for value in quote_fields
+                valid_quote = (
+                    target_row.get("bar_status") == "TARGET_PRESENT"
+                    and target_row.get("price_quality") == "OBSERVED"
+                    and all(
+                        value is not None and not isinstance(value, bool)
+                        for value in raw_quote
+                    )
                 )
                 if valid_quote:
-                    opening, high, low, close = (
-                        Fraction(value.value) for value in quote_fields
-                    )
+                    opening, high, low, close = (Fraction(value) for value in raw_quote)
                     valid_quote = (
                         min(opening, high, low, close) > 0
                         and low <= min(opening, close)
@@ -804,7 +853,8 @@ def compute_source_pool_seed(
                 }
                 seed["native_price"] = {
                     "actual_quote": valid_quote,
-                    "close": str(current_close.value)
+                    "raw_close": str(Fraction(raw_quote[3])) if valid_quote else None,
+                    "qfq_close": str(current_close.value)
                     if current_close and current_close.quality == "OBSERVED"
                     else None,
                     "fields": {
@@ -848,7 +898,7 @@ def compute_source_pool_seed(
                     for key, value in rps["facts"][symbol].items()
                 }
                 seed_facts[symbol] = seed
-            offset = page["next_offset"]
+            offset = target_page["next_offset"]
             if offset is None:
                 break
     expected_symbols = (
@@ -860,7 +910,7 @@ def compute_source_pool_seed(
     result = {
         "target_session": target_session,
         "research_cutoff": research_cutoff,
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "profile_revision": profile_revision,
         "runtime_profile_revision": runtime_revision,
         "profile_revision_matches_runtime": runtime_revision == profile_revision,
@@ -878,9 +928,9 @@ def compute_source_pool_seed(
         },
         "history_session_count": history_session_count,
         "profile_input_note": (
-            "该日无已存画像；以同包Raw和现役Core/Profile合同即时计算，标明实际运行修订，未生成画像快照。"
+            "该日无已存画像；以同一BaoStock paired capture的QFQ与现役Core/Profile合同即时计算，标明实际运行修订，未生成画像快照。"
             if profile_snapshot_missing
-            else "同源、同窗口摘要且质量完整的已存Core字段直接复用；未保存的比率和画像分项按现役合同从Raw计算，画像不合格时回算。"
+            else "同源、同窗口摘要且质量完整的已存Core字段直接复用；未保存的比率和画像分项按现役合同从QFQ计算，画像不合格时回算。"
         ),
         "stored_profile_status": "MISSING_RAW_RECOMPUTED"
         if profile_snapshot_missing
@@ -910,13 +960,13 @@ def read_source_pool_seed(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     profile_contract: dict[str, Any],
     history_session_count: int,
     selected_symbols: frozenset[str] | None = None,
     include_rps_read: bool = False,
-    allow_raw_profile_recompute: bool = False,
+    allow_qfq_profile_recompute: bool = False,
 ) -> dict[str, Any]:
     """读取完整PG Seed事实；没有精确已存结果时明确失败，不在GET重算全池。"""
     if target_session > research_cutoff:
@@ -929,8 +979,10 @@ def read_source_pool_seed(
     d0 = read_source_d0_scenario_day(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
         scenario="LAUNCH_CONFIRM",
+        price_coordinate="FORWARD_ADJUSTED",
     )
     source_capture_id = d0["source_version"]["source_capture_id"]
     if type(source_capture_id) is not int or source_capture_id <= 0:
@@ -940,8 +992,9 @@ def read_source_pool_seed(
     rows = read_source_pool_seed_facts(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
         profile_revision=profile_revision,
     )
     d0_by_symbol = {item["source_symbol"]: item for item in d0["results"]}
@@ -951,7 +1004,7 @@ def read_source_pool_seed(
         or any(
             str(item["source_capture_id"])
             != str(d0["source_version"]["source_capture_id"])
-            or item["source_package_id"] != d0["source_version"]["source_package_id"]
+            or item["source_capture_id"] != d0["source_version"]["source_capture_id"]
             for item in rows
         )
     ):
@@ -990,7 +1043,6 @@ def read_source_pool_seed(
         read_seed_profile_returns(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
             profile_revision=profile_revision,
         )
@@ -1219,8 +1271,10 @@ def read_source_pool_seed(
             prior_d0 = read_source_d0_scenario_day(
                 config,
                 target_session=previous_rps_session,
-                source_package_id=source_package_id,
+                research_cutoff=research_cutoff,
+                source_capture_id=source_capture_id,
                 scenario="LAUNCH_CONFIRM",
+                price_coordinate="FORWARD_ADJUSTED",
             )
             prior_capture_id = prior_d0["source_version"]["source_capture_id"]
             if type(prior_capture_id) is not int or prior_capture_id <= 0:
@@ -1230,8 +1284,9 @@ def read_source_pool_seed(
             prior_rows = read_source_pool_seed_facts(
                 config,
                 target_session=previous_rps_session,
-                source_package_id=source_package_id,
+                research_cutoff=research_cutoff,
                 source_capture_id=prior_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
                 profile_revision=prior_revision,
             )
             if (
@@ -1241,8 +1296,8 @@ def read_source_pool_seed(
                 or any(
                     str(item["source_capture_id"])
                     != str(prior_d0["source_version"]["source_capture_id"])
-                    or item["source_package_id"]
-                    != prior_d0["source_version"]["source_package_id"]
+                    or item["source_capture_id"]
+                    != prior_d0["source_version"]["source_capture_id"]
                     for item in prior_rows
                 )
             ):
@@ -1288,7 +1343,7 @@ def read_source_pool_seed(
         "status": "SAVED",
         "target_session": target_session,
         "research_cutoff": research_cutoff,
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "profile_revision": profile_revision,
         "runtime_profile_revision": runtime_revision,
         "profile_revision_matches_runtime": True,
@@ -1302,7 +1357,8 @@ def read_source_pool_seed(
         "profile_input_note": "Seed、D0和RPS读取已存事实；旧Seed遗漏的收益字段仅从同捕获、同窗口及精确画像修订补充，保留来源标记。",
         "stored_profile_status": "AVAILABLE",
         "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "corporate_action_continuity": "UNKNOWN",
         "formal_research_universe": "UNKNOWN",
         "calendar_revision": first["calendar_revision"],
@@ -1321,9 +1377,11 @@ def read_source_pool_seed(
         result["rps_read"] = {
             "target_session": target_session,
             "research_cutoff": research_cutoff,
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
-            "coordinate": "RAW_UNADJUSTED",
+            "coordinate": "FORWARD_ADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "time_role": "NON_PIT_RETROSPECTIVE",
             "corporate_action_continuity": "UNKNOWN",
             "formal_research_universe": "UNKNOWN",
             "calendar_revision": first["calendar_revision"],
@@ -1501,7 +1559,9 @@ def _board_native(pool, symbols, peer_members, board_id, *, peer_cache=None):
     }
     result["formal_eligibility"] = "NOT_AUTHORIZED"
     result["scope"] = "SOURCE_POOL_NON_PIT_EXPLORATORY"
-    result["price_coordinate"] = "RAW_UNADJUSTED"
+    result["source_capture_id"] = pool["source_capture_id"]
+    result["price_coordinate"] = "FORWARD_ADJUSTED"
+    result["time_role"] = "NON_PIT_RETROSPECTIVE"
     return result
 
 
@@ -1529,7 +1589,7 @@ def _cross_period_boards(peer_members, inputs):
         result = {
             "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "member_count": n,
             "mapped_count": sum(bool(inputs.get(s, {}).get("mapped")) for s in members),
             "unmapped_count": sum(not inputs.get(s, {}).get("mapped") for s in members),
@@ -1683,7 +1743,7 @@ def read_board_seed_facts(
             board_native_id=board_native_id,
             target_session=pool["target_session"],
             research_cutoff=pool["research_cutoff"],
-            source_package_id=pool["source_package_id"],
+            source_capture_id=pool["source_capture_id"],
             profile_revision=pool["profile_revision"],
             offset=offset,
             limit=100,

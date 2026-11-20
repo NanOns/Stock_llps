@@ -65,6 +65,12 @@ _MIGRATION_FILES = (
     "0051_r08_biz11_reset_input_preflight_fingerprint.sql",
     "0052_r00_adjusted_price_facts.sql",
     "0053_r00_register_adjusted_price_module.sql",
+    "0054_source_switch_baostock_price_identity.sql",
+    "0055_source_switch_capture_key_finalize.sql",
+    "0056_source_switch_profile_baostock_qfq_contract.sql",
+    "0057_source_switch_star_board_research_scope.sql",
+    "0058_source_switch_full_baostock_response_fields.sql",
+    "0059_source_switch_multisession_capture_business_keys.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -110,6 +116,9 @@ _TASK_SCOPE_MIGRATIONS = {
     "R08_BIZ10_RESET_INITIALIZE_LAYERED_DAILY_R1": frozenset({48, 49, 50}),
     "R08_BIZ11_RESET_SOURCE_PREFLIGHT_R1": frozenset({51}),
     "R00_ADJUSTED_PRICE_PG_CLOSURE_R1": frozenset({52, 53}),
+    "SOURCE_SWITCH_01_BAOSTOCK_PRICE_PG_RESET_E2E_R1_20261119": frozenset(
+        {54, 55, 56, 57, 58, 59}
+    ),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -289,6 +298,19 @@ _RELATIONS_BY_MIGRATION_COUNT[52] = _RELATIONS_BY_MIGRATION_COUNT[51] | {
     "source_adjusted_daily_prices",
 }
 _RELATIONS_BY_MIGRATION_COUNT[53] = _RELATIONS_BY_MIGRATION_COUNT[52]
+_RELATIONS_BY_MIGRATION_COUNT[54] = _RELATIONS_BY_MIGRATION_COUNT[53] | {
+    "source_capture_requests",
+}
+_RELATIONS_BY_MIGRATION_COUNT[55] = _RELATIONS_BY_MIGRATION_COUNT[54] - {
+    "source_packages",
+    "source_baostock_daily",
+    "source_corporate_action_events",
+    "source_adjusted_daily_prices",
+}
+_RELATIONS_BY_MIGRATION_COUNT[56] = _RELATIONS_BY_MIGRATION_COUNT[55]
+_RELATIONS_BY_MIGRATION_COUNT[57] = _RELATIONS_BY_MIGRATION_COUNT[56]
+_RELATIONS_BY_MIGRATION_COUNT[58] = _RELATIONS_BY_MIGRATION_COUNT[57]
+_RELATIONS_BY_MIGRATION_COUNT[59] = _RELATIONS_BY_MIGRATION_COUNT[58]
 
 
 class BindingRefused(Exception):

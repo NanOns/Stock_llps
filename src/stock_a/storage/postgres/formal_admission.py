@@ -30,7 +30,6 @@ _GATE_COLUMNS = {
 _ROW_COLUMNS = (
     "raw_fact_id",
     "seed_fact_id",
-    "source_package_id",
     "source_capture_id",
     "target_session",
     "source_symbol",
@@ -88,7 +87,6 @@ _ROW_COLUMNS = (
 )
 _UNIQUE_COLUMNS = (
     "target_session",
-    "source_package_id",
     "source_capture_id",
     "source_symbol",
     "scenario",
@@ -115,7 +113,7 @@ def list_saved_launch_sessions(
     start_session: date,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
 ) -> list[date]:
     """只枚举截止日内已有的LAUNCH D0分区，不扩展或回填日期。"""
     if (
@@ -124,8 +122,8 @@ def list_saved_launch_sessions(
         or type(research_cutoff) is not date
         or start_session > target_session
         or target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise ValueError("正式准入日期范围、截止或来源包编号无效")
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
@@ -136,11 +134,11 @@ def list_saved_launch_sessions(
         cursor.execute(
             """SELECT DISTINCT target_session
                FROM source_d0_scenario_day_facts
-               WHERE scenario='LAUNCH_CONFIRM' AND source_package_id=%s
+               WHERE scenario='LAUNCH_CONFIRM' AND source_capture_id=%s
                  AND target_session >= %s AND target_session <= %s
                  AND target_session <= %s
                ORDER BY target_session""",
-            (source_package_id, start_session, target_session, research_cutoff),
+            (source_capture_id, start_session, target_session, research_cutoff),
         )
         return [row[0] for row in cursor.fetchall()]
 
@@ -149,7 +147,6 @@ def read_saved_source_fact_ids(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     producer_version: str,
     algorithm_contract: str,
@@ -172,12 +169,10 @@ def read_saved_source_fact_ids(
                LEFT JOIN source_pool_seed_day_facts s
                  ON s.target_session=d.target_session
                 AND s.source_symbol=d.source_symbol
-                AND s.source_package_id=d.source_package_id
                 AND s.source_capture_id=d.source_capture_id
                 AND s.profile_revision=%s
                 AND s.producer_version=%s
-               WHERE d.target_session=%s AND d.source_package_id=%s
-                 AND d.source_capture_id=%s AND d.scenario='LAUNCH_CONFIRM'
+               WHERE d.target_session=%s AND d.source_capture_id=%s AND d.scenario='LAUNCH_CONFIRM'
                  AND d.producer_version=%s AND d.algorithm_contract=%s
                  AND d.session_contract=%s AND d.calendar_revision=%s
                ORDER BY d.source_symbol""",
@@ -185,7 +180,6 @@ def read_saved_source_fact_ids(
                 profile_revision,
                 seed_producer_version,
                 target_session,
-                source_package_id,
                 source_capture_id,
                 producer_version,
                 algorithm_contract,
@@ -238,7 +232,6 @@ def persist_source_formal_admission_rows(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     expected_source_count: int,
     rows: Sequence[Mapping[str, Any]],
@@ -246,8 +239,8 @@ def persist_source_formal_admission_rows(
     """事务内幂等写入完整来源池；同键异内容拒绝并回滚。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(expected_source_count) is not int
@@ -259,7 +252,6 @@ def persist_source_formal_admission_rows(
         _validate_row(row)
         if (
             row["target_session"] != target_session
-            or row["source_package_id"] != source_package_id
             or row["source_capture_id"] != source_capture_id
             or row["source_count"] != expected_source_count
         ):
@@ -280,7 +272,6 @@ def persist_source_formal_admission_rows(
     ):
         exact_scope = (
             target_session,
-            source_package_id,
             source_capture_id,
             "LAUNCH_CONFIRM",
             rows[0]["raw_producer_version"],
@@ -290,7 +281,7 @@ def persist_source_formal_admission_rows(
         )
         cursor.execute(
             f"SELECT count(*)::bigint FROM {_TABLE} "
-            "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s "
             "AND scenario=%s AND raw_producer_version=%s AND algorithm_contract=%s "
             "AND session_contract=%s AND calendar_revision=%s",
             exact_scope,
@@ -303,9 +294,9 @@ def persist_source_formal_admission_rows(
         )
         cursor.execute(
             f"SELECT {columns_sql} FROM {_TABLE} "
-            "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+            "WHERE target_session=%s AND source_capture_id=%s "
             "AND scenario='LAUNCH_CONFIRM' ORDER BY source_symbol",
-            (target_session, source_package_id, source_capture_id),
+            (target_session, source_capture_id),
         )
         existing = cursor.fetchall()
         if len(existing) != expected_source_count:
@@ -328,11 +319,11 @@ def persist_source_formal_admission_rows(
             f"count(*) FILTER (WHERE admission_status='BLOCKED')::bigint, "
             f"count(*) FILTER (WHERE admission_status='NOT_READY')::bigint, "
             f"count(*) FILTER (WHERE admission_status='NOT_REQUIRED')::bigint "
-            f"FROM {_TABLE} WHERE target_session=%s AND source_package_id=%s "
-            "AND source_capture_id=%s AND scenario='LAUNCH_CONFIRM' "
+            f"FROM {_TABLE} WHERE target_session=%s AND source_capture_id=%s "
+            "AND scenario='LAUNCH_CONFIRM' "
             "AND raw_producer_version=%s AND algorithm_contract=%s "
             "AND session_contract=%s AND calendar_revision=%s",
-            exact_scope[:3] + exact_scope[4:],
+            (*exact_scope[:2], *exact_scope[3:]),
         )
         stored, distinct_symbols, ready, blocked, not_ready, not_required = (
             cursor.fetchone()
@@ -349,7 +340,6 @@ def persist_source_formal_admission_rows(
     return {
         "status": "PERSISTED",
         "target_session": target_session.isoformat(),
-        "source_package_id": source_package_id,
         "source_capture_id": source_capture_id,
         "source_count": int(stored),
         "distinct_source_count": int(distinct_symbols),
@@ -370,7 +360,6 @@ def read_source_formal_admission_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     expected_source_count: int,
     source_symbols: Sequence[str] | None = None,
@@ -378,8 +367,8 @@ def read_source_formal_admission_day(
     """只读已完成准入事实；不计算Raw、不修复缺失分区。"""
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(expected_source_count) is not int
@@ -406,9 +395,8 @@ def read_source_formal_admission_day(
                        count(*) FILTER (WHERE admission_status='NOT_READY')::bigint,
                        count(*) FILTER (WHERE admission_status='NOT_REQUIRED')::bigint
                 FROM {_TABLE}
-                WHERE target_session=%s AND source_package_id=%s
-                  AND source_capture_id=%s AND scenario='LAUNCH_CONFIRM'""",
-            (target_session, source_package_id, source_capture_id),
+                WHERE target_session=%s AND source_capture_id=%s AND scenario='LAUNCH_CONFIRM'""",
+            (target_session, source_capture_id),
         )
         row_count, distinct_count, min_source_count, max_source_count, *counts = (
             cursor.fetchone()
@@ -418,7 +406,6 @@ def read_source_formal_admission_day(
                 "status": "NOT_COMPUTED",
                 "reason_code": "FORMAL_ADMISSION_NOT_COMPUTED_FOR_EXACT_INPUT",
                 "target_session": target_session.isoformat(),
-                "source_package_id": source_package_id,
                 "source_capture_id": source_capture_id,
                 "source_count": expected_source_count,
                 "counts": None,
@@ -436,7 +423,6 @@ def read_source_formal_admission_day(
                 "status": "INCOMPLETE",
                 "reason_code": "FORMAL_ADMISSION_PARTITION_NOT_CLOSED",
                 "target_session": target_session.isoformat(),
-                "source_package_id": source_package_id,
                 "source_capture_id": source_capture_id,
                 "source_count": expected_source_count,
                 "stored_rows": int(row_count),
@@ -505,10 +491,10 @@ def read_source_formal_admission_day(
             )
             cursor.execute(
                 f"SELECT {', '.join(columns)} FROM {_TABLE} "
-                "WHERE target_session=%s AND source_package_id=%s "
-                "AND source_capture_id=%s AND scenario='LAUNCH_CONFIRM' "
+                "WHERE target_session=%s AND source_capture_id=%s "
+                "AND scenario='LAUNCH_CONFIRM' "
                 "AND source_symbol=ANY(%s) ORDER BY source_symbol",
-                (target_session, source_package_id, source_capture_id, list(selected)),
+                (target_session, source_capture_id, list(selected)),
             )
             for values in cursor.fetchall():
                 item = dict(zip(columns, values, strict=True))
@@ -569,11 +555,10 @@ def read_source_formal_admission_day(
             "status": "AVAILABLE",
             "contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
             "target_session": target_session.isoformat(),
-            "source_package_id": source_package_id,
             "source_capture_id": source_capture_id,
             "identity_scope": "SOURCE_SYMBOL_ONLY",
             "research_mode": "NON_PIT_EXPLORATORY",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "source_count": expected_source_count,
             "stored_rows": int(row_count),
             "distinct_source_count": int(distinct_count),

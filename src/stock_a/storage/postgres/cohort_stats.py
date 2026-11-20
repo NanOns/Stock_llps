@@ -19,7 +19,7 @@ def read_cohort_page(
     *,
     target,
     research_cutoff,
-    source_package_id,
+    source_capture_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -47,7 +47,7 @@ def read_cohort_page(
                       maturity_codes,maturity_counts,path_quality_codes,path_quality_counts,
                       reason_codes,reason_counts
                FROM source_cohort_group_stats
-               WHERE target_session=%s AND research_cutoff=%s AND source_package_id=%s
+               WHERE target_session=%s AND research_cutoff=%s AND source_capture_id=%s
                  AND rule_id=%s AND rule_version=%s AND profile_revision=%s
                  AND history_session_count=%s AND d1_history_session_count=%s
                  AND event_window_start=%s AND calendar_revision=%s
@@ -56,7 +56,7 @@ def read_cohort_page(
             (
                 target,
                 research_cutoff,
-                source_package_id,
+                source_capture_id,
                 rule,
                 RULE_VERSION,
                 profile_revision,
@@ -135,7 +135,7 @@ def read_cohort_page(
         rows = _read_research_rows_cursor(
             cursor,
             target=target,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             profile_revision=profile_revision,
             history_session_count=history_session_count,
             d1_history_session_count=d1_history_session_count,
@@ -157,16 +157,15 @@ def read_cohort_page(
                           e.reason_code,e.parent_enrollment_id
                    FROM source_rule_evaluations r
                    LEFT JOIN source_research_enrollments e ON e.rule_fact_id=r.id
-                   WHERE r.target_session=%s AND r.source_package_id=%s
-                     AND r.source_capture_id=%s AND r.source_symbol=%s
+                   WHERE r.target_session=%s AND r.source_capture_id=%s
+                     AND r.source_symbol=%s
                      AND r.rule_version=%s AND r.profile_revision=%s
                      AND r.history_session_count=%s AND r.d1_history_session_count=%s
                      AND r.event_window_start=%s AND r.calendar_revision=%s
                    ORDER BY r.rule_id LIMIT 10""",
                 (
                     target,
-                    source_package_id,
-                    next(iter(captures)),
+                    source_capture_id,
                     symbol,
                     RULE_VERSION,
                     profile_revision,
@@ -207,7 +206,6 @@ def read_cohort_page(
                 cursor,
                 target=target,
                 research_cutoff=research_cutoff,
-                source_package_id=source_package_id,
                 source_capture_id=next(iter(captures)),
                 profile_revision=profile_revision,
                 history_session_count=history_session_count,
@@ -226,7 +224,7 @@ def read_cohort_date_comparison(
     config,
     *,
     research_cutoff,
-    source_package_id,
+    source_capture_id,
     rule,
     horizon,
     limit=20,
@@ -239,8 +237,8 @@ def read_cohort_date_comparison(
         or horizon not in (1, 3, 5)
         or type(limit) is not int
         or not 1 <= limit <= 20
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise ValueError("Cohort跨日读取的规则、期限、分页或来源包参数无效")
 
@@ -253,7 +251,7 @@ def read_cohort_date_comparison(
             """WITH selected_sessions AS (
                    SELECT DISTINCT target_session
                    FROM source_cohort_group_stats
-                   WHERE research_cutoff=%s AND source_package_id=%s
+                   WHERE research_cutoff=%s AND source_capture_id=%s
                      AND rule_id=%s AND rule_version=%s
                      AND path_rule_version=%s AND horizon=%s
                    ORDER BY target_session DESC LIMIT %s
@@ -267,7 +265,7 @@ def read_cohort_date_comparison(
                       s.path_quality_counts,s.reason_codes,s.reason_counts
                FROM source_cohort_group_stats s
                JOIN selected_sessions x USING (target_session)
-               WHERE s.research_cutoff=%s AND s.source_package_id=%s
+               WHERE s.research_cutoff=%s AND s.source_capture_id=%s
                  AND s.rule_id=%s AND s.rule_version=%s
                  AND s.path_rule_version=%s AND s.horizon=%s
                ORDER BY s.target_session DESC,s.source_capture_id,
@@ -276,14 +274,14 @@ def read_cohort_date_comparison(
                         s.calendar_revision,s.state,s.weighting""",
             (
                 research_cutoff,
-                source_package_id,
+                source_capture_id,
                 rule,
                 RULE_VERSION,
                 PATH_VERSION,
                 horizon,
                 limit,
                 research_cutoff,
-                source_package_id,
+                source_capture_id,
                 rule,
                 RULE_VERSION,
                 PATH_VERSION,
@@ -449,14 +447,14 @@ def read_cohort_date_comparison(
         config,
         dates=dates,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         rule=rule,
     )
     return {
         "status": "AVAILABLE" if dates else "NO_STORED_FACT",
         "scope": "NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
-        "source_package_id": source_package_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "source_capture_id": source_capture_id,
         "rule": rule,
         "rule_version": RULE_VERSION,
         "horizon": horizon,
@@ -479,7 +477,7 @@ def read_cohort_symbol_forward_paths(
     *,
     target,
     research_cutoff,
-    source_package_id,
+    source_capture_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -529,14 +527,14 @@ def read_cohort_symbol_forward_paths(
         cursor.execute(
             """SELECT id,source_capture_id,calendar_revision,scope,state
                FROM source_rule_evaluations
-               WHERE target_session=%s AND source_package_id=%s
+               WHERE target_session=%s AND source_capture_id=%s
                  AND source_symbol=%s AND rule_id=%s AND rule_version=%s
                  AND profile_revision=%s AND history_session_count=%s
                  AND d1_history_session_count=%s AND event_window_start=%s
                ORDER BY source_capture_id,id LIMIT 2""",
             (
                 target,
-                source_package_id,
+                source_capture_id,
                 symbol,
                 rule,
                 RULE_VERSION,
@@ -551,7 +549,7 @@ def read_cohort_symbol_forward_paths(
             return {
                 "status": "NO_STORED_FACT" if not rule_rows else "AMBIGUOUS",
                 "target_session": target.isoformat(),
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
                 "source_symbol": symbol,
                 "rule": rule,
                 "paths": [],
@@ -562,6 +560,8 @@ def read_cohort_symbol_forward_paths(
                 ],
             }
         fact_id, capture_id, calendar_revision, scope, state = rule_rows[0]
+        if capture_id != source_capture_id:
+            raise ResearchFactConflict("规则事实来源捕获与请求捕获不一致")
         stored_paths = []
         if due_horizons:
             cursor.execute(
@@ -569,10 +569,10 @@ def read_cohort_symbol_forward_paths(
                           maturity,endpoint_quality,endpoint_reason,endpoint_numerator,
                           endpoint_denominator,path_quality,path_reasons,price_coordinate,scope
                    FROM source_forward_path_facts
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s AND source_symbol=%s AND horizon=ANY(%s)
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND source_symbol=%s AND horizon=ANY(%s)
                    ORDER BY horizon,path_rule_version,calendar_revision""",
-                (target, source_package_id, capture_id, symbol, due_horizons),
+                (target, capture_id, symbol, due_horizons),
             )
             stored_paths = cursor.fetchall()
 
@@ -594,7 +594,7 @@ def read_cohort_symbol_forward_paths(
             "path_reasons": [],
             "path_rule_version": PATH_VERSION,
             "calendar_revision": calendar_revision,
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "scope": "NON_PIT_EXPLORATORY",
         }
         if due_session is None:
@@ -646,7 +646,7 @@ def read_cohort_symbol_forward_paths(
                 ]
                 valid = (
                     endpoint_session == due_session
-                    and coordinate == "RAW_UNADJUSTED"
+                    and coordinate == "FORWARD_ADJUSTED"
                     and path_scope == "NON_PIT_EXPLORATORY"
                 )
                 observed = (
@@ -693,8 +693,7 @@ def read_cohort_symbol_forward_paths(
         "status": "AVAILABLE",
         "target_session": target.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
-        "source_capture_id": capture_id,
+        "source_capture_id": source_capture_id,
         "source_symbol": symbol,
         "rule": rule,
         "rule_fact_id": fact_id,
@@ -702,7 +701,7 @@ def read_cohort_symbol_forward_paths(
         "rule_scope": scope,
         "rule_version": RULE_VERSION,
         "calendar_revision": calendar_revision,
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "scope": "NON_PIT_EXPLORATORY",
         "paths": paths,
     }

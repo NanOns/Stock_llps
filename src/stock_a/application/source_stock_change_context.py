@@ -62,8 +62,8 @@ def query_source_stock_change_context(
     before_session: date,
     target_session: date,
     research_cutoff: date,
-    before_source_package_id: int,
-    source_package_id: int,
+    before_source_capture_id: int,
+    source_capture_id: int,
     symbol: str,
     before_profile_revision: str | None = None,
     after_profile_revision: str | None = None,
@@ -77,11 +77,11 @@ def query_source_stock_change_context(
         )
     if any(
         type(value) is not int or value <= 0
-        for value in (before_source_package_id, source_package_id)
+        for value in (before_source_capture_id, source_capture_id)
     ):
         raise SourceStockChangeContextError(
-            "D0_CHANGE_PACKAGE_ID_INVALID",
-            "前后来源包必须使用正BIGINT来源包ID。",
+            "D0_CHANGE_CAPTURE_ID_INVALID",
+            "前后来源必须使用正BIGINT source_capture_id。",
             category="ARGUMENT",
         )
     profile_requested = _validate_profile_identity(
@@ -94,10 +94,10 @@ def query_source_stock_change_context(
         scenario="LAUNCH_CONFIRM",
         action="changes",
         before_session=before_session,
-        before_source_package_id=before_source_package_id,
+        before_source_capture_id=before_source_capture_id,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         symbol=symbol,
         transition="ALL",
         offset=0,
@@ -134,9 +134,9 @@ def query_source_stock_change_context(
                 offset=0,
                 limit=1,
                 source_symbol=symbol,
-                before_source_package_id=before_source_package_id,
+                before_source_capture_id=before_source_capture_id,
                 before_profile_revision=before_profile_revision,
-                after_source_package_id=source_package_id,
+                after_source_capture_id=source_capture_id,
                 after_profile_revision=after_profile_revision,
             )
         except PgPriceProfileError as error:
@@ -156,27 +156,27 @@ def query_source_stock_change_context(
                 (
                     profile_result.get("before_snapshot"),
                     before_session,
-                    before_source_package_id,
+                    before_source_capture_id,
                     before_profile_revision,
                 ),
                 (
                     profile_result.get("after_snapshot"),
                     target_session,
-                    source_package_id,
+                    source_capture_id,
                     after_profile_revision,
                 ),
             )
             for (
                 snapshot,
                 session,
-                package_id,
+                capture_id,
                 revision,
             ) in expected_snapshots:
                 if not isinstance(snapshot, Mapping) or any(
                     snapshot.get(key) != expected
                     for key, expected in (
                         ("target_session", session),
-                        ("source_package_id", package_id),
+                        ("source_capture_id", capture_id),
                         ("profile_revision", revision),
                     )
                     if expected is not None

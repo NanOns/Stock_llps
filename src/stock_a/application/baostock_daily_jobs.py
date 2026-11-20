@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
+from math import isfinite
+from time import perf_counter, sleep
 from typing import Any
 from uuid import UUID
 
 from stock_a.domain import ContractError, FieldValue
-from stock_a.sources.baostock.client import query_daily_range_rows
-from stock_a.sources.baostock.daily import BaoUnitContract, normalize_daily_row
+from stock_a.sources.baostock.client import (
+    BaostockRawResponseSinkError,
+    query_daily_range_rows,
+)
+from stock_a.sources.baostock.daily import (
+    BaoDailyObservation,
+    BaoUnitContract,
+    normalize_daily_row,
+)
 from stock_a.sources.baostock.identity import normalize_baostock_symbol
 from stock_a.storage.postgres import baostock as postgres_baostock
 
@@ -21,6 +31,7 @@ _FIELD_MAP = {
     "high": "high",
     "low": "low",
     "close": "close",
+    "preclose": "preclose",
     "volume": "volume",
     "amount": "amount",
     "turn": "turn",
@@ -31,6 +42,7 @@ _MAX_CALENDAR_DAYS_PER_RANGE = 14
 _MAX_ROWS_PER_SYMBOL = 20
 _MAX_QUERIES_PER_TARGET_SESSION = 10
 _MAX_LOGIN_BATCHES_PER_JOB = 10000
+_MAX_RAW_SOURCE_ROWS_PER_SYMBOL = 250
 _CAPTURE_CLOCK_ROLE = "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE"
 _FIELD_NAMES = (
     "open",
@@ -51,6 +63,35 @@ class BaoStockDailyJobError(ValueError):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class BaoStockQfqOhlc:
+    """BaoStock前复权价格坐标，保持原始精度并与未复权事实隔离。"""
+
+    open: FieldValue
+    high: FieldValue
+    low: FieldValue
+    close: FieldValue
+    preclose: FieldValue
+
+
+@dataclass(frozen=True)
+class BaoStockPriceWindowRecord:
+    """一证券一官方会话的双坐标内存配对；缺Bar保持未知，不推断停牌。"""
+
+    source_symbol: str
+    requested_source_code: str
+    source_code: str
+    session_date: date
+    raw_observation: BaoDailyObservation | None
+    qfq_ohlc: BaoStockQfqOhlc | None
+    qfq_observation: BaoDailyObservation | None
+    response_fields_by_coordinate: Mapping[str, tuple[str, ...]]
+    raw_captured_at: datetime | None
+    qfq_captured_at: datetime | None
+    coverage_status: str
+    time_role: str = "NON_PIT_RETROSPECTIVE"
 
 
 def _readback_record_matches(
@@ -339,6 +380,838 @@ def _response_time(value: object) -> datetime:
     if captured_at.tzinfo is None or captured_at.utcoffset() is None:
         raise BaoStockDailyJobError("CAPTURE_CLOCK_INVALID", "来源捕获时钟必须包含时区")
     return captured_at
+
+
+def fetch_baostock_price_window(
+    symbols: Sequence[str],
+    official_sessions: Sequence[date],
+    *,
+    cutoff: date,
+    units: BaoUnitContract,
+    max_api_calls_per_batch: int,
+    max_login_batches: int,
+    query_timeout_seconds: float,
+    max_history_session_count: int,
+    max_retry_attempts: int,
+    retry_backoff_seconds: float,
+    coordinates: Sequence[str] | None = None,
+    transport: object | None = None,
+    raw_response_journal: Any | None = None,
+    request_attempt_offsets: Mapping[str, Mapping[str, int]] | None = None,
+) -> dict[str, Any]:
+    """按显式证券和官方会话读取并配对BaoStock未复权/前复权价格。"""
+    if (
+        not isinstance(symbols, Sequence)
+        or isinstance(symbols, (str, bytes))
+        or not symbols
+    ):
+        raise BaoStockDailyJobError(
+            "SOURCE_SYMBOLS_REQUIRED", "必须显式提供BaoStock证券代码"
+        )
+    normalized_symbols = tuple(normalize_baostock_symbol(value) for value in symbols)
+    if any(value is None for value in normalized_symbols) or len(
+        set(normalized_symbols)
+    ) != len(normalized_symbols):
+        raise BaoStockDailyJobError(
+            "SOURCE_SYMBOLS_INVALID", "BaoStock证券代码须有效且不重复"
+        )
+    if (
+        not isinstance(official_sessions, Sequence)
+        or isinstance(official_sessions, (str, bytes))
+        or not official_sessions
+        or any(type(value) is not date for value in official_sessions)
+        or tuple(sorted(set(official_sessions))) != tuple(official_sessions)
+        or type(max_history_session_count) is not int
+        or not 1 <= max_history_session_count <= 250
+        or len(official_sessions) > max_history_session_count
+        or type(cutoff) is not date
+        or any(value > cutoff for value in official_sessions)
+    ):
+        raise BaoStockDailyJobError(
+            "OFFICIAL_SESSION_REQUIRED",
+            "必须提供唯一、递增且不超过cutoff的1至250个官方会话",
+        )
+    if not isinstance(units, BaoUnitContract):
+        raise BaoStockDailyJobError("UNIT_CONTRACT_REQUIRED", "缺少BaoStock单位合同")
+    if (
+        type(max_api_calls_per_batch) is not int
+        or not 1 <= max_api_calls_per_batch <= 100
+        or type(max_login_batches) is not int
+        or not 1 <= max_login_batches <= _MAX_LOGIN_BATCHES_PER_JOB
+        or type(max_retry_attempts) is not int
+        or not 0 <= max_retry_attempts <= 3
+        or isinstance(query_timeout_seconds, bool)
+        or not isinstance(query_timeout_seconds, (int, float))
+        or not isfinite(float(query_timeout_seconds))
+        or not 0.2 <= float(query_timeout_seconds) <= 30.0
+        or isinstance(retry_backoff_seconds, bool)
+        or not isinstance(retry_backoff_seconds, (int, float))
+        or not isfinite(float(retry_backoff_seconds))
+        or not 0 <= float(retry_backoff_seconds) <= 60.0
+    ):
+        raise BaoStockDailyJobError(
+            "REQUEST_BUDGET_INVALID",
+            "API/登录预算、重试次数、超时或退避时间超出有界合同",
+        )
+
+    target_sessions = tuple(official_sessions)
+    source_symbols = tuple(normalized_symbols)
+    all_coordinate_specs = (
+        ("3", "RAW_UNADJUSTED"),
+        ("2", "FORWARD_ADJUSTED"),
+    )
+    selected_coordinates = (
+        tuple(coordinates)
+        if coordinates is not None
+        else tuple(coordinate for _, coordinate in all_coordinate_specs)
+    )
+    if (
+        not selected_coordinates
+        or len(set(selected_coordinates)) != len(selected_coordinates)
+        or any(
+            coordinate not in {item[1] for item in all_coordinate_specs}
+            for coordinate in selected_coordinates
+        )
+    ):
+        raise BaoStockDailyJobError(
+            "PRICE_COORDINATES_INVALID",
+            "价格坐标请求必须是未重复的RAW/QFQ坐标子集。",
+        )
+    coordinate_specs = tuple(
+        item for item in all_coordinate_specs if item[1] in selected_coordinates
+    )
+    request_attempt_offsets = request_attempt_offsets or {}
+    if not isinstance(request_attempt_offsets, Mapping) or any(
+        not isinstance(attempts, Mapping)
+        or any(
+            symbol not in source_symbols
+            or type(attempt_count) is not int
+            or attempt_count < 0
+            for symbol, attempt_count in attempts.items()
+        )
+        for attempts in request_attempt_offsets.values()
+    ):
+        raise BaoStockDailyJobError(
+            "REQUEST_ATTEMPT_OFFSETS_INVALID",
+            "来源请求台账中的历史尝试次数无效。",
+        )
+    request_attempts: dict[str, dict[str, dict[str, Any]]] = {
+        coordinate: {
+            symbol: {
+                "request_started_at": None,
+                "request_completed_at": None,
+                "status": "NOT_ATTEMPTED",
+                "response_row_count": 0,
+                "attempt_count": int(
+                    request_attempt_offsets.get(coordinate, {}).get(symbol, 0)
+                ),
+                "local_error": None,
+                "returned_fields": None,
+            }
+            for symbol in normalized_symbols
+        }
+        for _, coordinate in coordinate_specs
+    }
+    initial_batches_per_coordinate = (
+        len(source_symbols) + max_api_calls_per_batch - 1
+    ) // max_api_calls_per_batch
+    initial_login_batches = initial_batches_per_coordinate * len(coordinate_specs)
+    total_api_budget = max_login_batches * max_api_calls_per_batch
+    planned_api_calls = len(source_symbols) * len(coordinate_specs)
+    started = perf_counter()
+
+    if (
+        initial_login_batches > max_login_batches
+        or planned_api_calls > total_api_budget
+    ):
+        for by_symbol in request_attempts.values():
+            for attempt in by_symbol.values():
+                attempt["status"] = "NOT_ATTEMPTED_BUDGET"
+                attempt["local_error"] = "REQUEST_BUDGET_EXCEEDED"
+        return {
+            "status": "NOT_ATTEMPTED_BUDGET",
+            "completion_status": "INCOMPLETE",
+            "source": "BAOSTOCK",
+            "time_role": "NON_PIT_RETROSPECTIVE",
+            "capture_clock_role": _CAPTURE_CLOCK_ROLE,
+            "cutoff": cutoff.isoformat(),
+            "target_sessions": [session.isoformat() for session in target_sessions],
+            "requested_symbols": len(source_symbols),
+            "planned_api_calls": planned_api_calls,
+            "total_api_budget": total_api_budget,
+            "max_api_calls_per_batch": max_api_calls_per_batch,
+            "max_login_batches": max_login_batches,
+            "required_initial_login_batches": initial_login_batches,
+            "login_batches": 0,
+            "login_budget_batches": 0,
+            "login_batch_count_unknown": 0,
+            "api_call_count_unknown_batches": 0,
+            "api_calls": 0,
+            "retry_count": 0,
+            "retry_passes_used": 0,
+            "records": (),
+            "record_count": 0,
+            "errors": (),
+            "request_attempts": request_attempts,
+            "unattempted_symbols": {
+                coordinate: list(source_symbols) for _, coordinate in coordinate_specs
+            },
+            "coordinate_stats": {
+                coordinate: {
+                    "adjustflag": flag,
+                    "api_calls": 0,
+                    "login_batches": 0,
+                    "elapsed_seconds": 0.0,
+                    "successful_symbols": [],
+                    "failed_symbols": [],
+                    "unattempted_symbols": list(source_symbols),
+                    "first_captured_at": None,
+                    "last_captured_at": None,
+                }
+                for flag, coordinate in coordinate_specs
+            },
+            "reason": "初始双坐标请求超过显式登录/API预算，未登录、未发送查询",
+            "source_network_called": False,
+            "database_write": False,
+            "database_write_attempted": False,
+            "elapsed_seconds": perf_counter() - started,
+        }
+
+    coordinate_rows: dict[str, dict[str, dict[date, BaoDailyObservation]]] = {
+        coordinate: {} for _, coordinate in coordinate_specs
+    }
+    coordinate_capture_times: dict[str, dict[str, datetime]] = {
+        coordinate: {} for _, coordinate in coordinate_specs
+    }
+    attempted_symbols: dict[str, set[str]] = {
+        coordinate: set() for _, coordinate in coordinate_specs
+    }
+    archived_symbols: dict[str, set[str]] = {
+        coordinate: set() for _, coordinate in coordinate_specs
+    }
+    archive_written_requests = 0
+    archive_reused_requests = 0
+    coordinate_stats: dict[str, dict[str, Any]] = {
+        coordinate: {
+            "adjustflag": flag,
+            "api_calls": 0,
+            "login_batches": 0,
+            "elapsed_seconds": 0.0,
+            "successful_symbols": [],
+            "failed_symbols": [],
+            "unattempted_symbols": [],
+            "first_captured_at": None,
+            "last_captured_at": None,
+        }
+        for flag, coordinate in coordinate_specs
+    }
+    errors: list[dict[str, Any]] = []
+    login_batches = 0
+    login_budget_batches = 0
+    login_batch_count_unknown = 0
+    api_call_count_unknown_batches = 0
+    api_calls = 0
+    retry_api_calls = 0
+    retry_passes_used = 0
+    required_fields = {
+        "date",
+        "code",
+        "open",
+        "high",
+        "low",
+        "close",
+        "preclose",
+        "volume",
+        "amount",
+        "adjustflag",
+        "turn",
+        "tradestatus",
+        "isST",
+    }
+
+    for attempt in range(max_retry_attempts + 1):
+        if attempt > 0:
+            if all(
+                len(coordinate_rows[coordinate]) == len(source_symbols)
+                for _, coordinate in coordinate_specs
+            ):
+                break
+            if login_budget_batches >= max_login_batches:
+                break
+            retry_passes_used = attempt
+            delay = min(float(retry_backoff_seconds) * (2 ** (attempt - 1)), 60.0)
+            if delay > 0:
+                sleep(delay)
+
+        for adjustflag, coordinate in coordinate_specs:
+            pending_symbols = [
+                symbol
+                for symbol in source_symbols
+                if symbol not in coordinate_rows[coordinate]
+            ]
+            coordinate_started = perf_counter()
+            for offset in range(0, len(pending_symbols), max_api_calls_per_batch):
+                batch_symbols = tuple(
+                    pending_symbols[offset : offset + max_api_calls_per_batch]
+                )
+                archived_responses: dict[str, Mapping[str, Any]] = {}
+                symbols_to_query = []
+                for symbol in batch_symbols:
+                    archived = (
+                        raw_response_journal.read_response(
+                            source_symbol=symbol, adjustment_flag=adjustflag
+                        )
+                        if raw_response_journal is not None
+                        else None
+                    )
+                    if archived is None:
+                        symbols_to_query.append(symbol)
+                    else:
+                        if (
+                            not isinstance(archived, Mapping)
+                            or archived.get("journal_reused") is not True
+                            or archived.get("status")
+                            not in {"RESPONSE_RECEIVED", "QUERY_FAILED"}
+                            or type(archived.get("complete")) is not bool
+                            or archived.get("query_error_code") != "0"
+                            or archived.get("adjustflag") != adjustflag
+                            or archived.get("coordinate") != coordinate
+                        ):
+                            raise BaoStockDailyJobError(
+                                "RAW_RESPONSE_JOURNAL_RECORD_INVALID",
+                                "已归档响应与请求坐标不匹配，拒绝重新出网或写PG。",
+                            )
+                        if archived.get("complete") is False:
+                            raw_fields = archived.get("raw_response_fields")
+                            raw_values = archived.get("raw_row_values")
+                            replayed_rows: list[dict[str, str]] = []
+                            replay_valid = (
+                                isinstance(raw_fields, list)
+                                and len(raw_fields) == len(set(raw_fields))
+                                and required_fields.issubset(raw_fields)
+                                and isinstance(raw_values, list)
+                                and len(raw_values) <= len(target_sessions)
+                            )
+                            seen_replayed_sessions: set[str] = set()
+                            if replay_valid:
+                                for values in raw_values:
+                                    if (
+                                        not isinstance(values, list)
+                                        or len(values) != len(raw_fields)
+                                        or any(
+                                            not isinstance(value, str)
+                                            for value in values
+                                        )
+                                    ):
+                                        replay_valid = False
+                                        break
+                                    row = dict(zip(raw_fields, values, strict=True))
+                                    row_session = row.get("date")
+                                    try:
+                                        parsed_session = date.fromisoformat(row_session)
+                                    except (TypeError, ValueError):
+                                        replay_valid = False
+                                        break
+                                    if (
+                                        parsed_session.isoformat() != row_session
+                                        or parsed_session not in target_sessions
+                                        or parsed_session > cutoff
+                                        or normalize_baostock_symbol(row.get("code"))
+                                        != symbol
+                                        or row.get("adjustflag") != adjustflag
+                                        or row_session in seen_replayed_sessions
+                                    ):
+                                        replay_valid = False
+                                        break
+                                    seen_replayed_sessions.add(row_session)
+                                    replayed_rows.append(row)
+                            if replay_valid:
+                                archived = {
+                                    **archived,
+                                    "status": "RESPONSE_RECEIVED",
+                                    "complete": True,
+                                    "response_fields": list(raw_fields),
+                                    "rows": replayed_rows,
+                                    "local_error": None,
+                                    "replayed_after_raw_archive": True,
+                                }
+                        archived_responses[symbol] = archived
+                        archived_symbols[coordinate].add(symbol)
+                        attempted_symbols[coordinate].add(symbol)
+                        archive_reused_requests += 1
+
+                network_response: Mapping[str, Any] = {}
+                network_responses: Mapping[str, Any] = {}
+                remote_attempted: set[str] = set()
+                if symbols_to_query:
+                    if login_budget_batches >= max_login_batches:
+                        break
+                    login_budget_batches += 1
+                    receipts: list[Mapping[str, Any]] = []
+
+                    def archive_raw_response(
+                        symbol: str,
+                        response_adjustflag: str,
+                        raw_response: Mapping[str, Any],
+                    ) -> None:
+                        if raw_response_journal is None:
+                            return
+                        if response_adjustflag != adjustflag:
+                            raise BaoStockDailyJobError(
+                                "RAW_RESPONSE_JOURNAL_COORDINATE_INVALID",
+                                "BaoStock原始响应回调坐标与请求不一致。",
+                            )
+                        attempt_number = (
+                            request_attempts[coordinate][symbol]["attempt_count"] + 1
+                        )
+                        receipts.append(
+                            raw_response_journal.archive_response(
+                                source_symbol=symbol,
+                                adjustment_flag=adjustflag,
+                                response=raw_response,
+                                request_attempt_number=attempt_number,
+                            )
+                        )
+
+                    try:
+                        network_response = query_daily_range_rows(
+                            symbols=tuple(symbols_to_query),
+                            start_date=target_sessions[0].isoformat(),
+                            end_date=target_sessions[-1].isoformat(),
+                            timeout_seconds=float(query_timeout_seconds),
+                            max_rows_per_symbol=_MAX_RAW_SOURCE_ROWS_PER_SYMBOL,
+                            adjustflag=adjustflag,
+                            max_api_calls=max_api_calls_per_batch,
+                            target_session_count=len(target_sessions),
+                            transport=transport,
+                            raw_response_sink=(
+                                archive_raw_response
+                                if raw_response_journal is not None
+                                else None
+                            ),
+                        )
+                    except BaostockRawResponseSinkError:
+                        raise
+                    except Exception as error:
+                        login_batch_count_unknown += 1
+                        api_call_count_unknown_batches += 1
+                        for symbol in symbols_to_query:
+                            request_attempt = request_attempts[coordinate][symbol]
+                            request_attempt["attempt_count"] += 1
+                            request_attempt["status"] = "CLIENT_EXCEPTION"
+                            request_attempt["local_error"] = type(error).__name__
+                        errors.append(
+                            {
+                                "adjustflag": adjustflag,
+                                "coordinate": coordinate,
+                                "attempt": attempt,
+                                "symbols": list(symbols_to_query),
+                                "status": "CLIENT_EXCEPTION",
+                                "error_type": type(error).__name__,
+                            }
+                        )
+                        continue
+                    if not isinstance(network_response, Mapping):
+                        network_response = {}
+                    login_attempted = network_response.get("login_attempted") is True
+                    query_count = network_response.get("query_calls", 0)
+                    if type(query_count) is not int or not 0 <= query_count <= len(
+                        symbols_to_query
+                    ):
+                        errors.append(
+                            {
+                                "adjustflag": adjustflag,
+                                "coordinate": coordinate,
+                                "attempt": attempt,
+                                "symbols": list(symbols_to_query),
+                                "status": "API_CALL_COUNT_INVALID",
+                            }
+                        )
+                        query_count = (
+                            min(len(symbols_to_query), max(0, query_count))
+                            if type(query_count) is int
+                            else 0
+                        )
+                    if query_count > 0 and not login_attempted:
+                        errors.append(
+                            {
+                                "adjustflag": adjustflag,
+                                "coordinate": coordinate,
+                                "attempt": attempt,
+                                "symbols": list(symbols_to_query),
+                                "status": "API_CALLS_WITHOUT_LOGIN",
+                            }
+                        )
+                        query_count = 0
+                    if login_attempted:
+                        login_batches += 1
+                        coordinate_stats[coordinate]["login_batches"] += 1
+                    else:
+                        login_budget_batches -= 1
+                    api_calls += query_count
+                    coordinate_stats[coordinate]["api_calls"] += query_count
+                    if attempt > 0:
+                        retry_api_calls += query_count
+                    remote_attempted = set(symbols_to_query[:query_count])
+                    attempted_symbols[coordinate].update(remote_attempted)
+                    remote_responses = network_response.get("responses")
+                    if isinstance(remote_responses, Mapping):
+                        network_responses = remote_responses
+                    for receipt in receipts:
+                        archive_written_requests += int(
+                            not receipt.get("reused", False)
+                        )
+                        archive_reused_requests += int(bool(receipt.get("reused")))
+                response_map = {**archived_responses, **network_responses}
+                batch_errors: list[dict[str, Any]] = []
+                for symbol in batch_symbols:
+                    is_archived = symbol in archived_responses
+                    if not is_archived and symbol not in remote_attempted:
+                        if symbol in network_responses:
+                            batch_errors.append(
+                                {
+                                    "adjustflag": adjustflag,
+                                    "coordinate": coordinate,
+                                    "attempt": attempt,
+                                    "symbol": symbol,
+                                    "status": "RESPONSE_FOR_UNATTEMPTED_SYMBOL",
+                                }
+                            )
+                        continue
+                    symbol_response = response_map.get(symbol)
+                    request_attempt = request_attempts[coordinate][symbol]
+                    if is_archived:
+                        request_attempt["attempt_count"] = max(
+                            request_attempt["attempt_count"],
+                            int(symbol_response["request_attempt_number"]),
+                        )
+                        request_attempt["request_started_at"] = symbol_response.get(
+                            "request_started_at"
+                        )
+                        request_attempt["request_completed_at"] = symbol_response.get(
+                            "request_completed_at"
+                        )
+                    else:
+                        request_attempt["attempt_count"] += 1
+                        if isinstance(symbol_response, Mapping):
+                            request_started_at = symbol_response.get(
+                                "request_started_at"
+                            )
+                            request_completed_at = symbol_response.get(
+                                "request_completed_at"
+                            )
+                            if request_attempt[
+                                "request_started_at"
+                            ] is None and isinstance(request_started_at, str):
+                                request_attempt["request_started_at"] = (
+                                    request_started_at
+                                )
+                            if isinstance(request_completed_at, str):
+                                request_attempt["request_completed_at"] = (
+                                    request_completed_at
+                                )
+                    if isinstance(symbol_response, Mapping):
+                        response_rows = symbol_response.get("rows")
+                        request_attempt["response_row_count"] = (
+                            len(response_rows) if isinstance(response_rows, list) else 0
+                        )
+                        request_attempt["status"] = symbol_response.get(
+                            "status", "QUERY_FAILED"
+                        )
+                        request_attempt["local_error"] = symbol_response.get(
+                            "local_error"
+                        ) or symbol_response.get("query_error_code")
+                        if isinstance(symbol_response.get("response_fields"), list):
+                            request_attempt["returned_fields"] = tuple(
+                                symbol_response["response_fields"]
+                            )
+                    else:
+                        request_attempt["status"] = "NO_SYMBOL_RESPONSE"
+                        request_attempt["response_row_count"] = 0
+                        request_attempt["local_error"] = network_response.get("status")
+                    if (
+                        not isinstance(symbol_response, Mapping)
+                        or symbol_response.get("status") != "RESPONSE_RECEIVED"
+                        or symbol_response.get("complete") is not True
+                    ):
+                        batch_errors.append(
+                            {
+                                "adjustflag": adjustflag,
+                                "coordinate": coordinate,
+                                "attempt": attempt,
+                                "symbol": symbol,
+                                "status": (
+                                    symbol_response.get("status", "NO_SYMBOL_RESPONSE")
+                                    if isinstance(symbol_response, Mapping)
+                                    else "NO_SYMBOL_RESPONSE"
+                                ),
+                                "error_code": (
+                                    symbol_response.get("local_error")
+                                    if isinstance(symbol_response, Mapping)
+                                    else network_response.get("status")
+                                ),
+                                "query_error_code": (
+                                    symbol_response.get("query_error_code")
+                                    if isinstance(symbol_response, Mapping)
+                                    else None
+                                ),
+                            }
+                        )
+                        continue
+
+                    response_fields = symbol_response.get("response_fields")
+                    rows = symbol_response.get("rows")
+                    if (
+                        not isinstance(response_fields, list)
+                        or len(response_fields) != len(set(response_fields))
+                        or not required_fields.issubset(response_fields)
+                        or not isinstance(rows, list)
+                        or symbol_response.get("adjustflag") != adjustflag
+                        or symbol_response.get("coordinate") != coordinate
+                    ):
+                        request_attempt["status"] = "RESPONSE_REJECTED"
+                        request_attempt["local_error"] = (
+                            "RESPONSE_FIELDS_OR_COORDINATE_INVALID"
+                        )
+                        batch_errors.append(
+                            {
+                                "adjustflag": adjustflag,
+                                "coordinate": coordinate,
+                                "attempt": attempt,
+                                "symbol": symbol,
+                                "status": "RESPONSE_FIELDS_OR_COORDINATE_INVALID",
+                            }
+                        )
+                        continue
+
+                    request_attempt["returned_fields"] = tuple(response_fields)
+
+                    try:
+                        captured_at = _response_time(
+                            symbol_response.get("request_completed_at")
+                        )
+                    except BaoStockDailyJobError as error:
+                        request_attempt["status"] = "RESPONSE_REJECTED"
+                        request_attempt["local_error"] = error.code
+                        batch_errors.append(
+                            {
+                                "adjustflag": adjustflag,
+                                "coordinate": coordinate,
+                                "attempt": attempt,
+                                "symbol": symbol,
+                                "status": error.code,
+                            }
+                        )
+                        continue
+
+                    symbol_rows: dict[date, BaoDailyObservation] = {}
+                    invalid_reason: str | None = None
+                    for row in rows:
+                        if not isinstance(row, Mapping):
+                            invalid_reason = "ROW_NOT_MAPPING"
+                            break
+                        raw_date = row.get("date")
+                        try:
+                            session_date = date.fromisoformat(raw_date)
+                        except (TypeError, ValueError):
+                            invalid_reason = "ROW_DATE_INVALID"
+                            break
+                        if (
+                            session_date.isoformat() != raw_date
+                            or session_date not in target_sessions
+                            or session_date > cutoff
+                            or normalize_baostock_symbol(row.get("code")) != symbol
+                            or row.get("adjustflag") != adjustflag
+                        ):
+                            invalid_reason = "ROW_OUTSIDE_OFFICIAL_WINDOW_OR_COORDINATE"
+                            break
+                        if session_date in symbol_rows:
+                            invalid_reason = "DUPLICATE_SYMBOL_SESSION"
+                            break
+                        try:
+                            observation = normalize_daily_row(
+                                row,
+                                response_fields,
+                                _FIELD_MAP,
+                                units,
+                                adjustflag=adjustflag,
+                            )
+                        except ContractError as error:
+                            invalid_reason = getattr(
+                                error, "code", "ROW_CONTRACT_INVALID"
+                            )
+                            break
+                        if observation.session_date != session_date:
+                            invalid_reason = "NORMALIZED_SESSION_MISMATCH"
+                            break
+                        symbol_rows[session_date] = observation
+
+                    if invalid_reason is not None:
+                        request_attempt["status"] = "RESPONSE_REJECTED"
+                        request_attempt["local_error"] = invalid_reason
+                        batch_errors.append(
+                            {
+                                "adjustflag": adjustflag,
+                                "coordinate": coordinate,
+                                "attempt": attempt,
+                                "symbol": symbol,
+                                "status": invalid_reason,
+                            }
+                        )
+                        continue
+
+                    coordinate_rows[coordinate][symbol] = symbol_rows
+                    coordinate_capture_times[coordinate][symbol] = captured_at
+                    stats = coordinate_stats[coordinate]
+                    first = stats["first_captured_at"]
+                    last = stats["last_captured_at"]
+                    stats["first_captured_at"] = (
+                        captured_at if first is None else min(first, captured_at)
+                    )
+                    stats["last_captured_at"] = (
+                        captured_at if last is None else max(last, captured_at)
+                    )
+                errors.extend(batch_errors)
+
+            coordinate_stats[coordinate]["elapsed_seconds"] += max(
+                0.0, perf_counter() - coordinate_started
+            )
+            if login_budget_batches >= max_login_batches:
+                break
+
+        if login_budget_batches >= max_login_batches:
+            break
+
+    records: list[BaoStockPriceWindowRecord] = []
+    for symbol in source_symbols:
+        raw_rows = coordinate_rows.get("RAW_UNADJUSTED", {}).get(symbol, {})
+        qfq_rows = coordinate_rows.get("FORWARD_ADJUSTED", {}).get(symbol, {})
+        raw_captured_at = coordinate_capture_times.get("RAW_UNADJUSTED", {}).get(symbol)
+        qfq_captured_at = coordinate_capture_times.get("FORWARD_ADJUSTED", {}).get(
+            symbol
+        )
+        for session in target_sessions:
+            raw_observation = raw_rows.get(session)
+            qfq_observation = qfq_rows.get(session)
+            response_fields_by_coordinate = {
+                coordinate: tuple(
+                    request_attempts[coordinate][symbol]["returned_fields"]
+                )
+                for _, coordinate in coordinate_specs
+                if request_attempts[coordinate][symbol].get("returned_fields")
+                is not None
+            }
+            qfq_ohlc = (
+                BaoStockQfqOhlc(
+                    open=qfq_observation.open,
+                    high=qfq_observation.high,
+                    low=qfq_observation.low,
+                    close=qfq_observation.close,
+                    preclose=qfq_observation.preclose,
+                )
+                if qfq_observation is not None
+                else None
+            )
+            if raw_observation is not None and qfq_ohlc is not None:
+                coverage_status = "PAIRED_RAW_AND_QFQ"
+            elif raw_observation is not None:
+                coverage_status = "QFQ_BAR_MISSING_UNKNOWN"
+            elif qfq_ohlc is not None:
+                coverage_status = "RAW_BAR_MISSING_UNKNOWN"
+            else:
+                coverage_status = "NO_BAR_IN_EITHER_COORDINATE_UNKNOWN"
+            records.append(
+                BaoStockPriceWindowRecord(
+                    source_symbol=symbol,
+                    requested_source_code=symbol.lower(),
+                    source_code=(
+                        raw_observation.source_code
+                        if raw_observation is not None
+                        else qfq_observation.source_code
+                        if qfq_observation is not None
+                        else symbol.lower()
+                    ),
+                    session_date=session,
+                    raw_observation=raw_observation,
+                    qfq_ohlc=qfq_ohlc,
+                    qfq_observation=qfq_observation,
+                    response_fields_by_coordinate=response_fields_by_coordinate,
+                    raw_captured_at=raw_captured_at,
+                    qfq_captured_at=qfq_captured_at,
+                    coverage_status=coverage_status,
+                )
+            )
+
+    unattempted_by_coordinate: dict[str, list[str]] = {}
+    failed_by_coordinate: dict[str, list[str]] = {}
+    all_queries_completed = True
+    for _, coordinate in coordinate_specs:
+        successful = set(coordinate_rows[coordinate])
+        attempted = attempted_symbols[coordinate]
+        unattempted = [symbol for symbol in source_symbols if symbol not in attempted]
+        failed = [
+            symbol
+            for symbol in source_symbols
+            if symbol in attempted and symbol not in successful
+        ]
+        unattempted_by_coordinate[coordinate] = unattempted
+        failed_by_coordinate[coordinate] = failed
+        stats = coordinate_stats[coordinate]
+        stats["successful_symbols"] = [
+            symbol for symbol in source_symbols if symbol in successful
+        ]
+        stats["failed_symbols"] = failed
+        stats["unattempted_symbols"] = unattempted
+        if len(successful) != len(source_symbols):
+            all_queries_completed = False
+
+    pair_count = sum(
+        record.coverage_status == "PAIRED_RAW_AND_QFQ" for record in records
+    )
+    missing_bar_count = len(records) - pair_count
+    return {
+        "status": "COMPLETED" if all_queries_completed else "INCOMPLETE",
+        "completion_status": "COMPLETED" if all_queries_completed else "INCOMPLETE",
+        "source": "BAOSTOCK",
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "capture_clock_role": _CAPTURE_CLOCK_ROLE,
+        "cutoff": cutoff.isoformat(),
+        "target_sessions": [session.isoformat() for session in target_sessions],
+        "requested_symbols": len(source_symbols),
+        "planned_api_calls": planned_api_calls,
+        "total_api_budget": total_api_budget,
+        "max_api_calls_per_batch": max_api_calls_per_batch,
+        "max_login_batches": max_login_batches,
+        "required_initial_login_batches": initial_login_batches,
+        "login_batches": login_batches,
+        "login_budget_batches": login_budget_batches,
+        "login_batch_count_unknown": login_batch_count_unknown,
+        "api_call_count_unknown_batches": api_call_count_unknown_batches,
+        "api_calls": api_calls,
+        "retry_count": retry_api_calls,
+        "retry_passes_used": retry_passes_used,
+        "archive_written_requests": archive_written_requests,
+        "archive_reused_requests": archive_reused_requests,
+        "records": tuple(records),
+        "record_count": len(records),
+        "paired_record_count": pair_count,
+        "missing_bar_pair_count": missing_bar_count,
+        "coverage_status": (
+            "COMPLETE_COORDINATE_ROWS"
+            if missing_bar_count == 0
+            else "INCOMPLETE_NO_BAR_UNKNOWN"
+        ),
+        "errors": tuple(errors),
+        "request_attempts": request_attempts,
+        "failed_symbols": failed_by_coordinate,
+        "unattempted_symbols": unattempted_by_coordinate,
+        "coordinate_stats": coordinate_stats,
+        "source_network_called": transport is None
+        and (login_batches > 0 or login_batch_count_unknown > 0),
+        "database_write": False,
+        "database_write_attempted": False,
+        "elapsed_seconds": perf_counter() - started,
+    }
 
 
 def run_manual_baostock_daily_capture(

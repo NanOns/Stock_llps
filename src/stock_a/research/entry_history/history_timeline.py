@@ -14,6 +14,8 @@ from stock_a.research.entry_history.history_preview import (
 )
 from stock_a.research.entry_context.sessions import _load_calendar, _parse_target
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
+from stock_a.research.entry_history.support import _source_price_bar_from_pg_row
+from stock_a.research.entry_history.support import _source_price_bar_from_pg_row
 
 _PRICE_RELATION_FIELDS = (
     "core.ma5",
@@ -100,33 +102,284 @@ def _timeline_raw_ohlc(row: Mapping[str, Any] | None) -> dict[str, Any]:
     } | {"quality": quality, "reason": reason}
 
 
+def _timeline_qfq_ohlc(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """投影BaoStock adjustflag=2的QFQ OHLC，不回退RAW价格。"""
+    if row is None:
+        reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+        return {
+            name: {"value": None, "quality": "UNKNOWN", "reason": reason}
+            for name in ("open", "high", "low", "close")
+        } | {"quality": "UNKNOWN", "reason": reason}
+    selected = _source_price_bar_from_pg_row(row, price_coordinate="FORWARD_ADJUSTED")
+    if selected is None:
+        reason = row.get("bar_reason") or "QFQ_TARGET_BAR_MISSING"
+        return {
+            name: {"value": None, "quality": "UNKNOWN", "reason": reason}
+            for name in ("open", "high", "low", "close")
+        } | {"quality": "UNKNOWN", "reason": reason}
+    result = {
+        name: _render_field(getattr(selected, name))
+        for name in ("open", "high", "low", "close")
+    }
+    quality = (
+        "OBSERVED"
+        if all(item["quality"] == "OBSERVED" for item in result.values())
+        else "UNKNOWN"
+    )
+    reason = None if quality == "OBSERVED" else "QFQ_PRICE_QUALITY_UNKNOWN"
+    return result | {"quality": quality, "reason": reason}
+
+
+def _raw_coordinate_price_timeline(
+    *,
+    symbol: str,
+    target_session: date,
+    sessions: Sequence[date],
+    rows_by_session: Mapping[date, Mapping[str, Any]],
+    source_capture_id: int,
+    calendar_id: str,
+    calendar_revision: str,
+) -> dict[str, Any]:
+    """只投影未复权日线；Core、MA关系和跨会话价格比较明确不计算。"""
+    reason = "CORE_REQUIRES_FORWARD_ADJUSTED_COORDINATE"
+    coordinate_id = (
+        f"RAW_UNADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
+    )
+    core_field_ids = (
+        "core.ma5",
+        "core.ma10",
+        "core.ma20",
+        "core.ma60",
+        "core.atr20",
+        "core.prior_high20",
+        "core.amount_ratio20",
+        "core.volume_ratio20",
+    )
+    core_na = {
+        field_id: {
+            "value": None,
+            "quality": "NOT_APPLICABLE",
+            "reason": reason,
+        }
+        for field_id in core_field_ids
+    }
+    status_counts: dict[str, int] = {}
+    quality_counts: dict[str, int] = {}
+    points: list[dict[str, Any]] = []
+    valid_count = 0
+    for index, session in enumerate(sessions):
+        row = rows_by_session.get(session)
+        status = str(row.get("bar_status")) if row else "HISTORY_ROW_NOT_STORED"
+        status_counts[status] = status_counts.get(status, 0) + 1
+        quality = str(row.get("price_quality") or "UNKNOWN") if row else "UNKNOWN"
+        quality_counts[quality] = quality_counts.get(quality, 0) + 1
+        raw_ohlc = _timeline_raw_ohlc(row)
+        qfq_ohlc = _timeline_qfq_ohlc(row)
+        if raw_ohlc.get("quality") == "OBSERVED":
+            valid_count += 1
+        history_count = min(index + 1, 20)
+        ma_window = {
+            "official_session_count": history_count,
+            "valid_bar_count": 0,
+            "required_valid_bar_count": 20,
+            "status": "NOT_COMPUTED",
+            "reason": reason,
+        }
+        prior_window = {
+            "official_session_count": max(0, history_count - 1),
+            "valid_bar_count": 0,
+            "required_valid_bar_count": 20,
+            "status": "NOT_COMPUTED",
+            "reason": reason,
+        }
+        relation_na = {
+            "relation": None,
+            "quality": "NOT_APPLICABLE",
+            "reason": reason,
+        }
+        points.append(
+            {
+                "session_date": session.isoformat(),
+                "source_symbol": symbol,
+                "source_capture_id": source_capture_id,
+                "price_coordinate": "RAW_UNADJUSTED",
+                "time_role": "NON_PIT_RETROSPECTIVE",
+                "raw_row_present": row is not None,
+                "raw_status": status,
+                "raw_price_quality": quality,
+                "raw_price_reason": (
+                    row.get("price_reason")
+                    if row
+                    else "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+                ),
+                "raw_ohlc": raw_ohlc,
+                "raw_close": raw_ohlc["close"],
+                "qfq_ohlc": qfq_ohlc,
+                "qfq_close": qfq_ohlc["close"],
+                "qfq_price_quality": (
+                    row.get("qfq_price_quality", "UNKNOWN") if row else "UNKNOWN"
+                ),
+                "qfq_price_reason": (
+                    row.get("qfq_price_reason")
+                    if row
+                    else "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+                ),
+                "core_status": "NOT_COMPUTED",
+                "core_reason": reason,
+                "core_price_fields": dict(core_na),
+                "close_vs_ma": {
+                    field_id: dict(relation_na) for field_id in core_field_ids[:4]
+                },
+                "moving_average_order": {
+                    "quality": "NOT_APPLICABLE",
+                    "groups": [],
+                    "unknown_fields": list(core_field_ids[:4]),
+                    "reason": reason,
+                },
+                "core_ma20": dict(core_na["core.ma20"]),
+                "core_prior_high20": dict(core_na["core.prior_high20"]),
+                "core_ma5": dict(core_na["core.ma5"]),
+                "core_ma10": dict(core_na["core.ma10"]),
+                "core_ma60": dict(core_na["core.ma60"]),
+                "core_atr20": dict(core_na["core.atr20"]),
+                "core_amount_ratio20": dict(core_na["core.amount_ratio20"]),
+                "core_volume_ratio20": dict(core_na["core.volume_ratio20"]),
+                "amount_unit_status": row.get("amount_unit_status") if row else None,
+                "volume_unit_status": row.get("volume_unit_status") if row else None,
+                "close_vs_ma20": None,
+                "relation_unknown_reason": reason,
+                "close_vs_prior_high20": None,
+                "prior_high20_relation_unknown_reason": reason,
+                "ma20_window": dict(ma_window),
+                "moving_average_windows": {
+                    field_id: dict(ma_window) for field_id in core_field_ids[:4]
+                },
+                "atr20_window": {
+                    **ma_window,
+                    "required_valid_bar_count": 21,
+                },
+                "prior_high20_window": dict(prior_window),
+                "prior_high20_excludes_target_session": True,
+                "coordinate_id": coordinate_id,
+                "producer": "stock_a.storage.postgres.baostock_price_facts",
+                "semantic_version": "BAOSTOCK_RAW_PRICE_ONLY_R1",
+                "comparison": {
+                    "status": "NOT_COMPUTED",
+                    "event": "NOT_COMPUTED",
+                    "reason": reason,
+                },
+            }
+        )
+
+    not_computed_history = {
+        "status": "NOT_COMPUTED",
+        "reason_code": reason,
+        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": source_capture_id,
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "official_session_count": len(sessions),
+        "official_session_pair_count": max(0, len(sessions) - 1),
+        "event_count": 0,
+        "unknown_count": 0,
+        "field_statistics": {},
+        "observations": [],
+        "events": [],
+    }
+    return {
+        "ok": True,
+        "contract": "STOCK_A_PG_BAOSTOCK_RAW_PRICE_TIMELINE_R1",
+        "status": "PRICE_ONLY_NOT_COMPUTED",
+        "research_mode": "NON_PIT_RAW_PRICE_DIAGNOSTIC",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "core_status": "NOT_COMPUTED",
+        "core_reason": reason,
+        "source_capture_id": source_capture_id,
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "formal_selection_status": "NOT_CONNECTED",
+        "symbol": symbol,
+        "target_session": target_session.isoformat(),
+        "session_start": sessions[0].isoformat(),
+        "session_end": sessions[-1].isoformat(),
+        "calendar_id": calendar_id,
+        "calendar_revision": calendar_revision,
+        "total_session_count": len(sessions),
+        "raw_row_count": sum(
+            row.get("source_capture_id") == source_capture_id
+            for row in rows_by_session.values()
+        ),
+        "valid_price_bar_count": valid_count,
+        "known_count": 0,
+        "unknown_count": 0,
+        "not_computed_count": len(sessions),
+        "not_comparable_count": 0,
+        "first_evaluable_count": 0,
+        "first_evaluable_session": None,
+        "raw_status_counts": dict(sorted(status_counts.items())),
+        "raw_price_quality_counts": dict(sorted(quality_counts.items())),
+        "qfq_price_quality_counts": {},
+        "event_counts": {},
+        "unknown_reason_counts": {},
+        "producer": "stock_a.storage.postgres.baostock_price_facts",
+        "semantic_version": "BAOSTOCK_RAW_PRICE_ONLY_R1",
+        "points": points,
+        "price_relation_history": not_computed_history,
+        "ma20_direction_history": {
+            **not_computed_history,
+            "binding": {
+                "target_session": target_session.isoformat(),
+                "source_symbol": symbol,
+                "source_capture_id": source_capture_id,
+                "calendar_id": calendar_id,
+                "calendar_revision": calendar_revision,
+                "price_coordinate": "RAW_UNADJUSTED",
+                "coordinate_id": coordinate_id,
+            },
+            "windows": {},
+        },
+        "future_session_rows_used": 0,
+        "database_write": False,
+        "ddl_executed": False,
+    }
+
+
 def post_signal_price_facts(
     sessions: Sequence[date], rows: Sequence[Mapping[str, Any]], requested: int
 ) -> dict[str, Any]:
-    """逐官方会话投影原始价格；缺行不借用相邻会话。"""
+    """逐官方会话比较QFQ收盘；RAW成交事实不混入跨日收益。"""
     by_date = {row["session_date"]: row for row in rows}
     if len(by_date) != len(rows) or any(day not in sessions for day in by_date):
         raise ResearchEntryError("POST_SIGNAL_ROWS_INVALID", "后续行情会话重复或越界")
+    capture_ids = {row.get("source_capture_id") for row in rows}
+    capture_id = (
+        next(iter(capture_ids))
+        if len(capture_ids) == 1 and type(next(iter(capture_ids))) is int
+        else None
+    )
     base_row = by_date.get(sessions[0])
-    base = _timeline_raw_ohlc(base_row)
+    base = _timeline_qfq_ohlc(base_row)
+    base_raw = _timeline_raw_ohlc(base_row)
     points = []
     for index, session in enumerate(sessions[1:], 1):
         row = by_date.get(session)
-        ohlc = _timeline_raw_ohlc(row)
+        ohlc = _timeline_qfq_ohlc(row)
+        raw_ohlc = _timeline_raw_ohlc(row)
         comparison = {
             "quality": "UNKNOWN",
-            "reason": "T0_OR_ENDPOINT_BAR_UNKNOWN",
+            "reason": "T0_OR_ENDPOINT_QFQ_BAR_UNKNOWN",
             "value": None,
         }
         if base["quality"] == ohlc["quality"] == "OBSERVED":
             if (
-                base_row.get("price_coordinate") != "RAW_UNADJUSTED"
-                or row.get("price_coordinate") != "RAW_UNADJUSTED"
+                capture_id is None
+                or row is None
+                or row.get("source_capture_id") != capture_id
             ):
-                comparison["reason"] = "PRICE_COORDINATE_MISMATCH"
+                comparison["reason"] = "PAIRED_SOURCE_CAPTURE_MISMATCH"
             else:
                 value = (
-                    exact_number(row["raw_close"]) / exact_number(base_row["raw_close"])
+                    exact_number(row["qfq_close"]) / exact_number(base_row["qfq_close"])
                     - 1
                 )
                 comparison = _render_field(FieldValue(value))
@@ -134,11 +387,22 @@ def post_signal_price_facts(
             {
                 "offset": index,
                 "session": session.isoformat(),
+                "source_capture_id": capture_id,
+                "price_coordinate": "FORWARD_ADJUSTED",
                 "bar_status": row.get("bar_status")
                 if row
                 else "HISTORY_ROW_NOT_STORED",
                 "ohlc": ohlc,
-                "raw_close_relative_change": comparison,
+                "qfq_ohlc": ohlc,
+                "raw_ohlc": raw_ohlc,
+                "qfq_close": ohlc["close"],
+                "selected_qfq_close": ohlc["close"],
+                "qfq_close_relative_change": comparison,
+                "raw_close_relative_change": {
+                    "value": None,
+                    "quality": "NOT_APPLICABLE",
+                    "reason": "CROSS_SESSION_COMPARISON_REQUIRES_QFQ_COORDINATE",
+                },
             }
         )
     available = len(points)
@@ -150,16 +414,38 @@ def post_signal_price_facts(
             {
                 "offset": index,
                 "session": None,
+                "source_capture_id": capture_id,
+                "price_coordinate": "FORWARD_ADJUSTED",
                 "bar_status": "NOT_AVAILABLE",
                 "ohlc": {
                     key: dict(unavailable) for key in ("open", "high", "low", "close")
                 }
                 | {"quality": "NOT_AVAILABLE", "reason": reason},
+                "qfq_ohlc": {
+                    key: dict(unavailable) for key in ("open", "high", "low", "close")
+                }
+                | {"quality": "NOT_AVAILABLE", "reason": reason},
+                "raw_ohlc": {
+                    key: dict(unavailable) for key in ("open", "high", "low", "close")
+                }
+                | {"quality": "NOT_AVAILABLE", "reason": reason},
+                "qfq_close": dict(unavailable),
+                "selected_qfq_close": dict(unavailable),
+                "qfq_close_relative_change": dict(unavailable),
                 "raw_close_relative_change": dict(unavailable),
             }
         )
     return {
-        "t0": {"session": sessions[0].isoformat(), "ohlc": base},
+        "t0": {
+            "session": sessions[0].isoformat(),
+            "source_capture_id": capture_id,
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "ohlc": base,
+            "qfq_ohlc": base,
+            "raw_ohlc": base_raw,
+            "qfq_close": base["close"],
+            "selected_qfq_close": base["close"],
+        },
         "points": points,
         "requested_session_count": requested,
         "available_session_count": available,
@@ -175,8 +461,9 @@ def post_signal_price_facts(
             if valid_bars < available
             else "AVAILABLE"
         ),
-        "price_coordinate": "RAW_UNADJUSTED",
-        "pit_status": "HISTORICAL_NON_PIT_EXPLORATION",
+        "source_capture_id": capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
     }
 
 
@@ -192,7 +479,12 @@ def _timeline_transition(
     previous_relation = previous.get("close_vs_ma20") if previous else None
     if previous is not None and any(
         previous.get(key) != current.get(key)
-        for key in ("coordinate_id", "source_package_id", "semantic_version")
+        for key in (
+            "coordinate_id",
+            "source_capture_id",
+            "price_coordinate",
+            "semantic_version",
+        )
     ):
         return {
             "status": "NOT_COMPARABLE",
@@ -200,7 +492,7 @@ def _timeline_transition(
             "previous_session": previous_session,
             "previous_relation": previous_relation,
             "relation_transition": None,
-            "reason": "PRICE_COORDINATE_PACKAGE_OR_SEMANTIC_VERSION_MISMATCH",
+            "reason": "PRICE_COORDINATE_CAPTURE_OR_SEMANTIC_VERSION_MISMATCH",
         }
     if current_relation is None:
         return {
@@ -278,27 +570,27 @@ def _timeline_relation_evidence(
                 ),
             }
         )
-    if point.get("price_quality") != "OBSERVED":
-        code = str(point.get("price_quality") or "PRICE_QUALITY_UNKNOWN")
+    if point.get("qfq_price_quality") != "OBSERVED":
+        code = str(point.get("qfq_price_quality") or "QFQ_PRICE_QUALITY_UNKNOWN")
         issues.append(
             {
                 "code": code,
                 "message": (
-                    f"该会话价格质量为{code}，未达到OBSERVED"
+                    f"该会话QFQ价格质量为{code}，未达到OBSERVED"
                     + (
-                        f"；来源原因：{point.get('price_reason')}"
-                        if point.get("price_reason")
+                        f"；来源原因：{point.get('qfq_price_reason')}"
+                        if point.get("qfq_price_reason")
                         else ""
                     )
                 ),
             }
         )
-    close_field = point.get("raw_close")
+    close_field = point.get("qfq_close")
     if not isinstance(close_field, Mapping) or close_field.get("quality") != "OBSERVED":
         code = (
-            str(close_field.get("quality") or "RAW_CLOSE_UNKNOWN")
+            str(close_field.get("quality") or "QFQ_CLOSE_UNKNOWN")
             if isinstance(close_field, Mapping)
-            else "RAW_CLOSE_MISSING"
+            else "QFQ_CLOSE_MISSING"
         )
         issues.append(
             {
@@ -314,21 +606,21 @@ def _timeline_relation_evidence(
                 ),
             }
         )
-    raw_ohlc = point.get("raw_ohlc")
-    if not isinstance(raw_ohlc, Mapping) or raw_ohlc.get("quality") != "OBSERVED":
+    qfq_ohlc = point.get("qfq_ohlc")
+    if not isinstance(qfq_ohlc, Mapping) or qfq_ohlc.get("quality") != "OBSERVED":
         code = (
-            str(raw_ohlc.get("quality") or "RAW_OHLC_UNKNOWN")
-            if isinstance(raw_ohlc, Mapping)
-            else "RAW_OHLC_MISSING"
+            str(qfq_ohlc.get("quality") or "QFQ_OHLC_UNKNOWN")
+            if isinstance(qfq_ohlc, Mapping)
+            else "QFQ_OHLC_MISSING"
         )
         issues.append(
             {
                 "code": code,
                 "message": (
-                    f"完整OHLC质量为{code}"
+                    f"完整QFQ OHLC质量为{code}"
                     + (
-                        f"；字段原因：{raw_ohlc.get('reason')}"
-                        if isinstance(raw_ohlc, Mapping) and raw_ohlc.get("reason")
+                        f"；字段原因：{qfq_ohlc.get('reason')}"
+                        if isinstance(qfq_ohlc, Mapping) and qfq_ohlc.get("reason")
                         else ""
                     )
                 ),
@@ -474,7 +766,8 @@ def _timeline_price_relation_history(
     pair_statuses: list[list[str]] = []
     identity_keys = (
         "source_symbol",
-        "source_package_id",
+        "source_capture_id",
+        "price_coordinate",
         "coordinate_id",
         "producer",
         "semantic_version",
@@ -569,11 +862,11 @@ def _timeline_price_relation_history(
                 "event_kind": event_kind,
                 "before_relation": before_relation,
                 "after_relation": after_relation,
-                "before_close": _timeline_value_evidence(previous.get("raw_close")),
+                "before_close": _timeline_value_evidence(previous.get("qfq_close")),
                 "before_threshold": _timeline_value_evidence(
                     core_fields_before.get(field_id)
                 ),
-                "after_close": _timeline_value_evidence(current.get("raw_close")),
+                "after_close": _timeline_value_evidence(current.get("qfq_close")),
                 "after_threshold": _timeline_value_evidence(
                     core_fields_after.get(field_id)
                 ),
@@ -676,7 +969,8 @@ def _timeline_ma20_direction_history(
     *,
     target_session: str,
     source_symbol: str,
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str,
     calendar_id: str,
     calendar_revision: str,
     coordinate_id: str,
@@ -684,7 +978,8 @@ def _timeline_ma20_direction_history(
     """只消费同一轨迹已生成的Core MA20点，不重算Core或跨未知会话比较。"""
     identity_fields = (
         "source_symbol",
-        "source_package_id",
+        "source_capture_id",
+        "price_coordinate",
         "coordinate_id",
         "producer",
         "semantic_version",
@@ -758,10 +1053,10 @@ def _timeline_ma20_direction_history(
         "binding": {
             "target_session": target_session,
             "source_symbol": source_symbol,
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "calendar_id": calendar_id,
             "calendar_revision": calendar_revision,
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": price_coordinate,
             "coordinate_id": coordinate_id,
         },
         "windows": windows,
@@ -775,30 +1070,57 @@ def research_stock_pg_history_timeline(
     *,
     symbol: str,
     target_session: str,
-    source_package_id: int,
     session_dates: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
     missing_history_sessions: Sequence[date],
     profile_contract: dict[str, Any],
+    source_capture_id: int | None = None,
+    price_coordinate: str | None = None,
+    **legacy_source_identity: Any,
 ) -> dict[str, Any]:
-    """按实际官方会话逐日复用PG Core生产路径，形成单股价格轨迹。"""
+    """按paired BaoStock捕获逐日生成QFQ技术轨迹，并单列RAW日线事实。"""
     target = _parse_target(target_session)
     normalized = _normalize_symbol(symbol)[0]
     sessions = tuple(session_dates)
     rows = tuple(history_rows)
+
+    def not_computed(reason_code: str, message: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "contract": "STOCK_A_PG_BAOSTOCK_PRICE_TIMELINE_R2",
+            "status": "NOT_COMPUTED",
+            "reason_code": reason_code,
+            "reason": message,
+            "symbol": normalized,
+            "target_session": target.isoformat(),
+            "source_capture_id": source_capture_id
+            if type(source_capture_id) is int and source_capture_id > 0
+            else None,
+            "price_coordinate": price_coordinate,
+            "time_role": "NON_PIT_RETROSPECTIVE",
+            "database_write": False,
+        }
+
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        return not_computed(
+            "PG_BAOSTOCK_CAPTURE_REQUIRED",
+            "价格轨迹必须绑定paired BaoStock source_capture_id；不回退TDX或来源包。",
+        )
+    if price_coordinate not in {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}:
+        return not_computed(
+            "PRICE_COORDINATE_UNSUPPORTED",
+            "日线轨迹只支持BaoStock RAW_UNADJUSTED或FORWARD_ADJUSTED坐标。",
+        )
     if (
         not sessions
-        or len(sessions) > 75
+        or len(sessions) > 250
         or sessions[-1] != target
         or tuple(sorted(set(sessions))) != sessions
         or any(type(day) is not date for day in sessions)
+        or any(not isinstance(row, Mapping) for row in rows)
     ):
         raise ResearchEntryError(
-            "PG_TIMELINE_WINDOW_INVALID", "价格轨迹须绑定递增官方会话且最多75日"
-        )
-    if type(source_package_id) is not int or source_package_id <= 0:
-        raise ResearchEntryError(
-            "PG_TIMELINE_BINDING_INVALID", "价格轨迹缺少有效数字来源包ID"
+            "PG_TIMELINE_WINDOW_INVALID", "价格轨迹须绑定递增官方会话且不超过250日。"
         )
     calendar_payload, _calendar_metadata, calendar_revision, calendar_sessions = (
         _load_calendar(target)
@@ -809,7 +1131,7 @@ def research_stock_pg_history_timeline(
     if sessions != official_window:
         raise ResearchEntryError(
             "PG_TIMELINE_CALENDAR_INVALID",
-            "价格轨迹会话没有与版本化官方交易日历闭合",
+            "价格轨迹会话没有与版本化官方交易日历闭合。",
         )
     row_dates = tuple(row.get("session_date") for row in rows)
     if (
@@ -817,95 +1139,71 @@ def research_stock_pg_history_timeline(
         or any(day not in sessions for day in row_dates)
         or any(
             row.get("source_symbol") != normalized
-            or row.get("source_package_id") != source_package_id
+            or row.get("source_capture_id") != source_capture_id
             for row in rows
         )
     ):
         raise ResearchEntryError(
             "PG_TIMELINE_HISTORY_INVALID",
-            "轨迹Raw行重复、越界或混入其它代码或来源包",
+            "轨迹价格行重复、越界或未绑定同一代码及paired捕获。",
         )
     rows_by_session = {row["session_date"]: row for row in rows}
     missing = tuple(day for day in sessions if day not in rows_by_session)
     if tuple(missing_history_sessions) != missing:
         raise ResearchEntryError(
-            "PG_TIMELINE_MISSING_BINDING_INVALID", "Raw缺失会话清单与实际行不一致"
+            "PG_TIMELINE_MISSING_BINDING_INVALID", "价格缺失会话清单与实际行不一致。"
+        )
+    if price_coordinate == "RAW_UNADJUSTED":
+        return _raw_coordinate_price_timeline(
+            symbol=normalized,
+            target_session=target,
+            sessions=sessions,
+            rows_by_session=rows_by_session,
+            source_capture_id=source_capture_id,
+            calendar_id=calendar_payload["calendar_id"],
+            calendar_revision=calendar_revision,
         )
 
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
+    )
     points: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {}
-    price_quality_counts: dict[str, int] = {}
+    qfq_quality_counts: dict[str, int] = {}
+    raw_quality_counts: dict[str, int] = {}
     event_counts: dict[str, int] = {}
     unknown_reason_counts: dict[str, int] = {}
     valid_price_bar_count = 0
     first_evaluable_session = None
-    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
-    ma_field_ids = (
-        "core.ma5",
-        "core.ma10",
-        "core.ma20",
-        "core.ma60",
-    )
+    ma_field_ids = ("core.ma5", "core.ma10", "core.ma20", "core.ma60")
     price_field_ids = (*ma_field_ids, "core.atr20", "core.prior_high20")
+
+    def valid_qfq_bar(day: date) -> bool:
+        candidate = rows_by_session.get(day)
+        return bool(
+            candidate is not None
+            and candidate.get("bar_status") == "TARGET_PRESENT"
+            and candidate.get("qfq_price_quality") == "OBSERVED"
+            and all(
+                candidate.get(name) is not None
+                for name in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
+            )
+        )
+
     for index, session in enumerate(sessions):
         row = rows_by_session.get(session)
-        raw_status = row.get("bar_status") if row else "HISTORY_ROW_NOT_STORED"
-        status_counts[raw_status] = status_counts.get(raw_status, 0) + 1
-        price_quality = str(row.get("price_quality") or "UNKNOWN") if row else "UNKNOWN"
-        price_quality_counts[price_quality] = (
-            price_quality_counts.get(price_quality, 0) + 1
+        status = row.get("bar_status") if row else "HISTORY_ROW_NOT_STORED"
+        status_counts[status] = status_counts.get(status, 0) + 1
+        qfq_quality = (
+            str(row.get("qfq_price_quality") or "UNKNOWN") if row else "UNKNOWN"
         )
-        ma20_window = sessions[max(0, index - 19) : index + 1]
-        prior_window = sessions[max(0, index - 20) : index]
-
-        def valid_bar(day: date) -> bool:
-            candidate = rows_by_session.get(day)
-            return bool(
-                candidate is not None
-                and candidate.get("bar_status") == "TARGET_PRESENT"
-                and candidate.get("price_quality") == "OBSERVED"
-                and all(
-                    candidate.get(name) is not None
-                    for name in ("raw_open", "raw_high", "raw_low", "raw_close")
-                )
-            )
-
-        if row is None:
-            raw_close_field = {
-                "value": None,
-                "quality": "UNKNOWN",
-                "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
-            }
-            ma20_field = {
-                "value": None,
-                "quality": "UNKNOWN",
-                "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
-            }
-            prior_high_field = dict(ma20_field)
-            amount_ratio_field = dict(ma20_field)
-            volume_ratio_field = dict(ma20_field)
-            core_price_fields = {
-                field_id: dict(ma20_field) for field_id in price_field_ids
-            }
-            close_vs_ma = {
-                field_id: {
-                    "relation": None,
-                    "quality": "UNKNOWN",
-                    "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
-                }
-                for field_id in ma_field_ids
-            }
-            moving_average_order = {
-                "quality": "UNKNOWN",
-                "groups": [],
-                "unknown_fields": list(ma_field_ids),
-                "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
-            }
-            relation = None
-            relation_reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
-            prior_high_relation = None
-            prior_high_relation_reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
-        else:
+        qfq_quality_counts[qfq_quality] = qfq_quality_counts.get(qfq_quality, 0) + 1
+        raw_quality = str(row.get("price_quality") or "UNKNOWN") if row else "UNKNOWN"
+        raw_quality_counts[raw_quality] = raw_quality_counts.get(raw_quality, 0) + 1
+        qfq_ohlc = _timeline_qfq_ohlc(row)
+        raw_ohlc = _timeline_raw_ohlc(row)
+        preview = None
+        if row is not None:
             prefix_sessions = sessions[: index + 1]
             prefix_rows = tuple(
                 item for item in rows if item["session_date"] <= session
@@ -916,45 +1214,47 @@ def research_stock_pg_history_timeline(
             preview = research_stock_pg_history_preview(
                 symbol=normalized,
                 target_session=session.isoformat(),
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
                 session_dates=prefix_sessions,
                 history_rows=prefix_rows,
                 missing_history_sessions=prefix_missing,
                 profile_contract=profile_contract,
                 include_profile_preview=False,
             )
-            raw_close_field = preview["raw"]["close"]
+            qfq_close_field = preview["qfq"]["close"]
             core_fields = preview["core"]["fields"]
             core_price_fields = {
                 field_id: core_fields[field_id] for field_id in price_field_ids
             }
             close_vs_ma = {}
             for field_id in ma_field_ids:
-                ma_relation, ma_reason = _timeline_relation(
-                    raw_close_field, core_price_fields[field_id]
+                relation, reason = _timeline_relation(
+                    qfq_close_field, core_price_fields[field_id]
                 )
                 close_vs_ma[field_id] = {
-                    "relation": ma_relation,
-                    "quality": "OBSERVED" if ma_relation else "UNKNOWN",
-                    "reason": ma_reason,
+                    "relation": relation,
+                    "quality": "OBSERVED" if relation else "UNKNOWN",
+                    "reason": reason,
                 }
-            unknown_ma_fields = [
+            unknown_ma = [
                 field_id
                 for field_id in ma_field_ids
                 if core_price_fields[field_id].get("quality") != "OBSERVED"
             ]
-            if unknown_ma_fields:
-                reasons = [
-                    core_price_fields[field_id].get("reason")
-                    or core_price_fields[field_id].get("quality")
-                    or "UNKNOWN_REASON_NOT_PROVIDED"
-                    for field_id in unknown_ma_fields
-                ]
+            if unknown_ma:
                 moving_average_order = {
                     "quality": "UNKNOWN",
                     "groups": [],
-                    "unknown_fields": unknown_ma_fields,
-                    "reason": ";".join(dict.fromkeys(reasons)),
+                    "unknown_fields": unknown_ma,
+                    "reason": ";".join(
+                        dict.fromkeys(
+                            core_price_fields[field_id].get("reason")
+                            or core_price_fields[field_id].get("quality")
+                            or "UNKNOWN_REASON_NOT_PROVIDED"
+                            for field_id in unknown_ma
+                        )
+                    ),
                 }
             else:
                 exact_ma_values = []
@@ -980,18 +1280,45 @@ def research_stock_pg_history_timeline(
             prior_high_field = core_fields["core.prior_high20"]
             amount_ratio_field = core_fields["core.amount_ratio20"]
             volume_ratio_field = core_fields["core.volume_ratio20"]
-            relation, relation_reason = _timeline_relation(raw_close_field, ma20_field)
-            prior_high_relation, prior_high_relation_reason = _timeline_relation(
-                raw_close_field, prior_high_field
+            relation, relation_reason = _timeline_relation(qfq_close_field, ma20_field)
+            prior_high_relation, prior_high_reason = _timeline_relation(
+                qfq_close_field, prior_high_field
             )
-            if valid_bar(session):
+            if valid_qfq_bar(session):
                 valid_price_bar_count += 1
+            raw_close_field = preview["raw"]["close"]
+        else:
+            unknown_field = {
+                "value": None,
+                "quality": "UNKNOWN",
+                "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            }
+            qfq_close_field = dict(unknown_field)
+            raw_close_field = dict(unknown_field)
+            core_price_fields = {
+                field_id: dict(unknown_field) for field_id in price_field_ids
+            }
+            close_vs_ma = {
+                field_id: {
+                    "relation": None,
+                    "quality": "UNKNOWN",
+                    "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+                }
+                for field_id in ma_field_ids
+            }
+            moving_average_order = {
+                "quality": "UNKNOWN",
+                "groups": [],
+                "unknown_fields": list(ma_field_ids),
+                "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            }
+            ma20_field = prior_high_field = amount_ratio_field = volume_ratio_field = (
+                dict(unknown_field)
+            )
+            relation = prior_high_relation = None
+            relation_reason = prior_high_reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
         if relation is None:
-            if row is not None and raw_status != "TARGET_PRESENT":
-                relation_reason = row.get("bar_reason") or raw_status
-            elif row is not None and price_quality != "OBSERVED":
-                relation_reason = row.get("price_reason") or price_quality
-            unknown_reason = relation_reason or "PRICE_RELATION_UNKNOWN"
+            unknown_reason = relation_reason or "QFQ_PRICE_RELATION_UNKNOWN"
             unknown_reason_counts[unknown_reason] = (
                 unknown_reason_counts.get(unknown_reason, 0) + 1
             )
@@ -1004,21 +1331,34 @@ def research_stock_pg_history_timeline(
             window_sessions = sessions[max(0, index - required + 1) : index + 1]
             ma_windows[field_id] = {
                 "official_session_count": len(window_sessions),
-                "valid_bar_count": sum(valid_bar(day) for day in window_sessions),
+                "valid_bar_count": sum(valid_qfq_bar(day) for day in window_sessions),
                 "required_valid_bar_count": required,
             }
         atr20_sessions = sessions[max(0, index - 20) : index + 1]
+        prior_window = sessions[max(0, index - 20) : index]
         point = {
             "session_date": session.isoformat(),
             "source_symbol": normalized,
+            "source_capture_id": source_capture_id,
+            "price_coordinate": price_coordinate,
+            "time_role": "NON_PIT_RETROSPECTIVE",
             "raw_row_present": row is not None,
-            "raw_status": raw_status,
-            "price_quality": price_quality,
-            "price_reason": row.get("price_reason")
+            "raw_status": status,
+            "qfq_price_quality": qfq_quality,
+            "qfq_price_reason": row.get("qfq_price_reason")
             if row
             else "UNKNOWN_HISTORY_SESSION_NOT_STORED",
-            "raw_ohlc": _timeline_raw_ohlc(row),
+            "raw_price_quality": row.get("price_quality", "UNKNOWN")
+            if row
+            else "UNKNOWN",
+            "raw_price_reason": row.get("price_reason")
+            if row
+            else "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            "raw_ohlc": raw_ohlc,
+            "qfq_ohlc": qfq_ohlc,
             "raw_close": raw_close_field,
+            "qfq_close": qfq_close_field,
+            "selected_qfq_close": qfq_close_field,
             "core_price_fields": core_price_fields,
             "close_vs_ma": close_vs_ma,
             "moving_average_order": moving_average_order,
@@ -1036,34 +1376,35 @@ def research_stock_pg_history_timeline(
             "raw_volume_quality": row.get("raw_volume_quality", "UNKNOWN")
             if row
             else "UNKNOWN",
-            "amount_unit_status": "UNIT_UNVERIFIED" if row else "UNKNOWN",
-            "volume_unit_status": "UNIT_UNVERIFIED" if row else "UNKNOWN",
+            "amount_unit_status": row.get("amount_unit_status") if row else None,
+            "volume_unit_status": row.get("volume_unit_status") if row else None,
             "close_vs_prior_high20": prior_high_relation,
-            "prior_high20_relation_unknown_reason": prior_high_relation_reason,
+            "prior_high20_relation_unknown_reason": prior_high_reason,
             "close_vs_ma20": relation,
             "relation_unknown_reason": unknown_reason,
             "ma20_window": {
-                "official_session_count": len(ma20_window),
-                "valid_bar_count": sum(valid_bar(day) for day in ma20_window),
+                "official_session_count": len(sessions[max(0, index - 19) : index + 1]),
+                "valid_bar_count": sum(
+                    valid_qfq_bar(day)
+                    for day in sessions[max(0, index - 19) : index + 1]
+                ),
                 "required_valid_bar_count": 20,
             },
             "moving_average_windows": ma_windows,
             "atr20_window": {
                 "official_session_count": len(atr20_sessions),
-                "valid_bar_count": sum(valid_bar(day) for day in atr20_sessions),
+                "valid_bar_count": sum(valid_qfq_bar(day) for day in atr20_sessions),
                 "required_valid_bar_count": 21,
             },
             "prior_high20_window": {
                 "official_session_count": len(prior_window),
-                "valid_bar_count": sum(valid_bar(day) for day in prior_window),
+                "valid_bar_count": sum(valid_qfq_bar(day) for day in prior_window),
                 "required_valid_bar_count": 20,
             },
             "prior_high20_excludes_target_session": True,
             "coordinate_id": coordinate_id,
             "producer": "stock_a.research.core:calculate_core",
             "semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
-            "source_capture_id": row.get("source_capture_id") if row else None,
-            "source_package_id": row.get("source_package_id") if row else None,
         }
         points.append(point)
         transition = _timeline_transition(
@@ -1081,7 +1422,8 @@ def research_stock_pg_history_timeline(
         points,
         target_session=target.isoformat(),
         source_symbol=normalized,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
         calendar_id=calendar_payload["calendar_id"],
         calendar_revision=calendar_revision,
         coordinate_id=coordinate_id,
@@ -1089,16 +1431,16 @@ def research_stock_pg_history_timeline(
     known_count = sum(point["close_vs_ma20"] is not None for point in points)
     return {
         "ok": True,
-        "contract": "STOCK_A_PG_SOURCE_SYMBOL_PRICE_TIMELINE_R1",
+        "contract": "STOCK_A_PG_BAOSTOCK_PRICE_TIMELINE_R2",
         "status": "RESEARCH_PREVIEW_NON_PIT",
-        "research_mode": "NON_PIT_RAW_DIAGNOSTIC",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "research_mode": "NON_PIT_QFQ_DIAGNOSTIC",
+        "price_coordinate": price_coordinate,
+        "source_capture_id": source_capture_id,
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "formal_selection_status": "NOT_CONNECTED",
         "symbol": normalized,
         "target_session": target.isoformat(),
-        "source_package_id": source_package_id,
         "session_start": sessions[0].isoformat(),
         "session_end": sessions[-1].isoformat(),
         "calendar_id": calendar_payload["calendar_id"],
@@ -1119,7 +1461,8 @@ def research_stock_pg_history_timeline(
         ),
         "first_evaluable_session": first_evaluable_session,
         "raw_status_counts": dict(sorted(status_counts.items())),
-        "price_quality_counts": dict(sorted(price_quality_counts.items())),
+        "qfq_price_quality_counts": dict(sorted(qfq_quality_counts.items())),
+        "raw_price_quality_counts": dict(sorted(raw_quality_counts.items())),
         "event_counts": dict(sorted(event_counts.items())),
         "unknown_reason_counts": dict(sorted(unknown_reason_counts.items())),
         "producer": "stock_a.research.core:calculate_core",
@@ -1128,8 +1471,5 @@ def research_stock_pg_history_timeline(
         "price_relation_history": price_relation_history,
         "ma20_direction_history": ma20_direction_history,
         "future_session_rows_used": 0,
-        "database_write": False,
-        "ddl_executed": False,
-        "network_access": False,
-        "event_semantics": "仅紧邻官方会话可比；严格BELOW↔ABOVE为CROSS；等值进入、离开和保持分列",
+        "time_role": "NON_PIT_RETROSPECTIVE",
     }

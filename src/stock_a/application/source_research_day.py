@@ -16,6 +16,7 @@ from stock_a.application.pg_price_profiles import (
 )
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.application.source_d0_raw import (
+    MAX_SOURCE_SYMBOLS,
     _official_calendar,
     query_source_d0_raw_launch,
 )
@@ -50,12 +51,11 @@ from stock_a.storage.postgres.static_research_facts import (
     persist_static_research_day,
     read_source_pool_seed_forward_scope,
 )
-
-from stock_a.storage.postgres.source_raw import (
-    read_raw_daily_forward_pool,
-    read_raw_daily_catalog,
-    read_source_version_context,
+from stock_a.storage.postgres.baostock_price_facts import (
+    read_baostock_price_catalog,
+    read_baostock_price_history_batch,
 )
+from stock_a.application.pg_research import read_source_version_context
 
 D1_DEFAULT_HISTORY_SESSION_COUNT = 40
 
@@ -94,18 +94,18 @@ def persist_source_t1_forward_from_saved(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
 ) -> dict[str, Any]:
     """复用已存Raw、Seed和价格路径算法，生产单一T+1 typed范围。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise SourceResearchDayError(
-            "T1_FORWARD_SCOPE_INVALID", "T+1目标、截止日期或来源包编号无效"
+            "T1_FORWARD_SCOPE_INVALID", "T+1目标、研究截止或paired capture无效"
         )
     target_calendar, _, _, target_calendar_sessions = _load_calendar(target_session)
     _, _, _, cutoff_calendar_sessions = _load_calendar(research_cutoff)
@@ -123,7 +123,7 @@ def persist_source_t1_forward_from_saved(
             "status": "NOT_DUE",
             "target_session": target_session.isoformat(),
             "research_cutoff": research_cutoff.isoformat(),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "database_write": False,
             "ddl_executed": False,
             "source_collection": False,
@@ -137,7 +137,7 @@ def persist_source_t1_forward_from_saved(
             "target_session": target_session.isoformat(),
             "endpoint_session": endpoint_session.isoformat(),
             "research_cutoff": research_cutoff.isoformat(),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "database_write": False,
             "ddl_executed": False,
             "source_collection": False,
@@ -156,40 +156,35 @@ def persist_source_t1_forward_from_saved(
     source = read_source_version_context(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
     )
     endpoint_source = read_source_version_context(
         config,
         target_session=endpoint_session,
-        source_package_id=source_package_id,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
     )
-    expected_clock_role = "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
     for label, item in (("T0", source), ("T+1", endpoint_source)):
         if (
             item.get("status") != "AVAILABLE"
             or item.get("version_status") != "COMPLETE"
-            or item.get("source_package_id") != source_package_id
+            or item.get("source_capture_id") != source_capture_id
             or item.get("source_time_quality") != "NON_PIT_OBSERVED"
-            or item.get("source_clock_role") != expected_clock_role
+            or item.get("time_role") != "NON_PIT_RETROSPECTIVE"
             or item.get("source_available_at") is not None
-            or item.get("parser_contract") != source.get("parser_contract")
-            or item.get("raw_row_count") != item.get("capture_expected_row_count")
+            or item.get("price_coordinate") != "FORWARD_ADJUSTED"
         ):
             raise SourceResearchDayError(
                 "T1_FORWARD_SOURCE_SCOPE_INVALID",
-                f"{label}Raw捕获、来源时钟、解析合同或完整分母不符合后验同源生产范围",
+                f"{label}BaoStock QFQ paired capture或NON_PIT身份不符合后验同源生产范围",
             )
-    if source.get("capture_expected_row_count") != endpoint_source.get(
-        "capture_expected_row_count"
-    ):
-        raise SourceResearchDayError(
-            "T1_FORWARD_SOURCE_POOL_MISMATCH", "T0与T+1官方Raw来源分母不同"
-        )
 
     seed_scope = read_source_pool_seed_forward_scope(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
         source_capture_id=source["source_capture_id"],
         expected_source_count=source["capture_expected_row_count"],
     )
@@ -200,49 +195,109 @@ def persist_source_t1_forward_from_saved(
 
     symbols = seed_scope["source_symbols"]
     sessions = (target_session, endpoint_session)
-    raw = read_raw_daily_forward_pool(
-        config,
-        source_symbols=symbols,
-        sessions=sessions,
-        research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
-        include_parser_contract=True,
-    )
-    for day in sessions:
-        version = raw["session_versions"].get(day.isoformat())
-        if (
-            version is None
-            or version.get("status") != "CLOSED"
-            or version.get("row_count") != len(symbols)
+    rows_by_symbol: dict[str, list[Mapping[str, Any]]] = {
+        symbol: [] for symbol in symbols
+    }
+    session_versions: dict[str, dict[str, Any]] = {
+        day.isoformat(): {
+            "status": "CLOSED",
+            "row_count": 0,
+            "expected_row_count": 0,
+            "completed_request_count": 0,
+        }
+        for day in sessions
+    }
+    for start in range(0, len(symbols), 100):
+        symbol_batch = symbols[start : start + 100]
+        offset = 0
+        total = None
+        batch_row_count = 0
+        batch_coverage = None
+        while True:
+            page = read_baostock_price_history_batch(
+                config,
+                source_symbols=symbol_batch,
+                sessions=sessions,
+                source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
+                cutoff=research_cutoff,
+                offset=offset,
+                limit=1000,
+            )
+            if (
+                page.get("source_capture_id") != source_capture_id
+                or page.get("price_coordinate") != "FORWARD_ADJUSTED"
+            ):
+                raise SourceResearchDayError(
+                    "T1_FORWARD_QFQ_IDENTITY_INVALID",
+                    "T0/T+1 QFQ历史没有绑定同一paired capture。",
+                )
+            page_info = page["page"]
+            if total is None:
+                total = int(page_info["total"])
+                batch_coverage = page.get("coverage", ())
+            elif int(page_info["total"]) != total:
+                raise SourceResearchDayError(
+                    "T1_FORWARD_QFQ_DENOMINATOR_CHANGED",
+                    "T0/T+1 QFQ历史分页期间分母发生变化。",
+                )
+            for row in page.get("rows", ()):
+                rows_by_symbol[row["source_symbol"]].append(row)
+                batch_row_count += 1
+            next_offset = page_info.get("next_offset")
+            if next_offset is None:
+                break
+            offset = int(next_offset)
+        if total is None or batch_row_count != total:
+            raise SourceResearchDayError(
+                "T1_FORWARD_QFQ_HISTORY_INCOMPLETE",
+                "T0/T+1 QFQ历史分页没有闭合到行数分母。",
+            )
+        if any(
+            item.get("coverage_status") != "COMPLETE" for item in batch_coverage or ()
         ):
             raise SourceResearchDayError(
-                "T1_FORWARD_RAW_PARTITION_INCOMPLETE",
-                f"{day.isoformat()}Raw来源池未闭合，拒绝写入任何路径行",
+                "T1_FORWARD_QFQ_HISTORY_INCOMPLETE",
+                "T0/T+1 QFQ历史请求或行覆盖未闭合。",
             )
+        for item in batch_coverage or ():
+            version = session_versions[item["session_date"]]
+            version["row_count"] += int(item["row_count"])
+            version["expected_row_count"] += int(item["expected_symbol_count"])
+            version["completed_request_count"] += int(item["completed_request_count"])
+    if any(
+        version["row_count"] != version["expected_row_count"]
+        or version["completed_request_count"] != version["expected_row_count"]
+        for version in session_versions.values()
+    ):
+        raise SourceResearchDayError(
+            "T1_FORWARD_QFQ_HISTORY_INCOMPLETE",
+            "T0/T+1 QFQ历史会话覆盖未闭合。",
+        )
 
     outcomes = {}
     for symbol in symbols:
         outcomes[symbol] = exploratory_raw_path(
             sessions,
-            raw["rows_by_symbol"][symbol],
+            rows_by_symbol[symbol],
             1,
             target_session=endpoint_session,
-            saved_through=raw["saved_through"],
+            saved_through=min(research_cutoff, endpoint_session),
         )
     paths = prepare_forward_path_rows(
         target=target_session,
         source=source,
         calendar_revision=seed_scope["calendar_revision"],
-        session_versions=raw["session_versions"],
+        session_versions=session_versions,
         outcomes=outcomes,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         horizon=1,
     )
     write_result = write_forward_path_rows(
         config,
         paths=paths,
         source_symbols=symbols,
-        endpoint_source_capture_id=endpoint_source["source_capture_id"],
+        endpoint_source_capture_id=source_capture_id,
         research_cutoff=research_cutoff,
     )
     expected_cohort_rows = write_result.pop("_s2_t1_cohort_expected_rows")
@@ -268,9 +323,8 @@ def persist_source_t1_forward_from_saved(
             target_session=target_session,
             endpoint_session=endpoint_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
-            source_capture_id=source["source_capture_id"],
-            endpoint_source_capture_id=endpoint_source["source_capture_id"],
+            source_capture_id=source_capture_id,
+            endpoint_source_capture_id=source_capture_id,
             expected_rows=expected_cohort_rows,
         )
         if (
@@ -292,8 +346,7 @@ def persist_source_t1_forward_from_saved(
         "target_session": target_session.isoformat(),
         "endpoint_session": endpoint_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
-        "source_capture_id": source["source_capture_id"],
+        "source_capture_id": source_capture_id,
         "endpoint_source_capture_id": endpoint_source["source_capture_id"],
         "profile_revision": seed_scope["profile_revision"],
         "producer_contract": seed_scope["producer_contract"],
@@ -324,7 +377,7 @@ def run_source_d0_launch_reference_day(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     persist: bool,
 ) -> dict[str, Any]:
     """只为相邻会话消费者生产所需的LAUNCH_CONFIRM前日D0事实。"""
@@ -334,11 +387,11 @@ def run_source_d0_launch_reference_day(
         )
     if (
         target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise SourceResearchDayError(
-            "D0_REFERENCE_SCOPE_INVALID", "D0参考事实日期或来源包编号无效"
+            "D0_REFERENCE_SCOPE_INVALID", "D0参考事实日期或source_capture_id无效"
         )
     calendar = _official_calendar(target_session)
     sessions = calendar["sessions"]
@@ -346,52 +399,54 @@ def run_source_d0_launch_reference_day(
         raise SourceResearchDayError(
             "D0_REFERENCE_SESSION_INVALID", "D0参考日必须是有前序官方会话的交易日"
         )
-    versions = []
-    offset = 0
-    while True:
-        catalog = read_raw_daily_catalog(
-            config,
-            max_target_session=research_cutoff,
-            offset=offset,
-            limit=200,
-        )
-        versions.extend(catalog["versions"])
-        if catalog["next_offset"] is None:
-            break
-        offset = catalog["next_offset"]
+    catalog = read_baostock_price_catalog(
+        config, cutoff=research_cutoff, source_capture_id=source_capture_id
+    )
     target_versions = [
-        item for item in versions if item["session_date"] == target_session.isoformat()
+        item
+        for item in catalog.get("price_coordinate_versions", ())
+        if item.get("session_date") == target_session.isoformat()
     ]
+    coordinate_versions = {
+        item.get("price_coordinate"): item for item in target_versions
+    }
     if (
-        len(target_versions) != 1
-        or target_versions[0]["source_package_id"] != source_package_id
-        or target_versions[0]["version_status"] != "CLOSED"
-        or target_versions[0]["row_count"] != target_versions[0]["expected_row_count"]
+        catalog.get("status") != "AVAILABLE"
+        or set(coordinate_versions) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or any(
+            item.get("source_capture_id") != source_capture_id
+            or item.get("coverage_status") != "COMPLETE"
+            or item.get("row_count") != item.get("expected_row_count")
+            for item in coordinate_versions.values()
+        )
     ):
         raise SourceResearchDayError(
             "D0_REFERENCE_RAW_VERSION_UNAVAILABLE",
-            "D0参考日没有唯一、同包且闭合的已存PG Raw来源版本",
+            "D0参考日没有唯一且闭合的paired BaoStock价格来源",
         )
     source = read_source_version_context(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
     )
     page = query_source_d0_raw_launch(
         config,
         scenario="LAUNCH_CONFIRM",
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
         offset=0,
-        limit=5000,
+        limit=MAX_SOURCE_SYMBOLS,
     )
     source_version = page.get("source_version", {})
-    expected_count = target_versions[0]["row_count"]
+    expected_count = int(coordinate_versions["FORWARD_ADJUSTED"]["row_count"])
     if (
         source.get("status") != "AVAILABLE"
         or source_version.get("source_capture_id") != source.get("source_capture_id")
-        or source_version.get("source_package_id") != source_package_id
+        or source_version.get("source_capture_id") != source_capture_id
         or page.get("target_session") != target_session.isoformat()
         or page.get("source_pool", {}).get("source_count") != expected_count
         or page.get("source_pool", {}).get("scenario_state_partition_closed")
@@ -402,7 +457,7 @@ def run_source_d0_launch_reference_day(
     ):
         raise SourceResearchDayError(
             "D0_REFERENCE_PARTITION_OPEN",
-            "D0参考事实未与闭合的同包Raw来源捕获及完整分母一致",
+            "D0参考事实未与闭合的BaoStock paired capture及完整分母一致",
         )
     persistence = persist_static_d0_reference_scenario(
         config, scenario="LAUNCH_CONFIRM", page=page
@@ -412,7 +467,6 @@ def run_source_d0_launch_reference_day(
         "target_session": target_session.isoformat(),
         "previous_session": sessions[sessions.index(target_session) - 1].isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
         "source_capture_id": source.get("source_capture_id"),
         "scenario": "LAUNCH_CONFIRM",
         "rows_expected": persistence["rows_expected"],
@@ -620,7 +674,7 @@ def _persist_static_research_day(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     expected_capture_id: int | None,
     expected_source_count: int,
     history_session_count: int | None = None,
@@ -637,10 +691,10 @@ def _persist_static_research_day(
     for snapshot in catalog["snapshots"]:
         if (
             snapshot["target_session"] != target_session.isoformat()
-            or snapshot["source_package_id"] != source_package_id
+            or snapshot["source_capture_id"] != source_capture_id
             or not snapshot["complete"]
             or snapshot["source_symbol_count"] != expected_source_count
-            or snapshot["price_coordinate"] != "RAW_UNADJUSTED"
+            or snapshot["price_coordinate"] != "FORWARD_ADJUSTED"
             or snapshot["history_calendar_id"] != calendar["calendar_id"]
             or (
                 history_session_count is not None
@@ -675,7 +729,7 @@ def _persist_static_research_day(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         profile_contract=profile_contract,
         history_session_count=history_count,
@@ -686,10 +740,11 @@ def _persist_static_research_day(
         seed.get("profile_revision_matches_runtime") is not True
         or seed.get("stored_profile_status") != "AVAILABLE"
         or seed.get("source_pool_total") != expected_source_count
+        or seed.get("price_coordinate") != "FORWARD_ADJUSTED"
     ):
         raise SourceResearchDayError(
             "STATIC_RESEARCH_PROFILE_OR_DENOMINATOR_MISMATCH",
-            "Seed静态事实必须绑定精确R6画像和完整来源池分母",
+            "Seed静态事实必须绑定精确QFQ画像和完整来源池分母",
         )
     scenarios = {}
     for scenario in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
@@ -701,9 +756,9 @@ def _persist_static_research_day(
             scenario=scenario,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             offset=0,
-            limit=5000,
+            limit=MAX_SOURCE_SYMBOLS,
             **kwargs,
         )
         source = page.get("source_version", {})
@@ -712,8 +767,8 @@ def _persist_static_research_day(
                 expected_capture_id is not None
                 and source.get("source_capture_id") != expected_capture_id
             )
-            or source.get("source_package_id") != source_package_id
-            or seed.get("source_package_id") != source_package_id
+            or source.get("source_capture_id") != source_capture_id
+            or seed.get("source_capture_id") != source_capture_id
         ):
             raise SourceResearchDayError(
                 "STATIC_RESEARCH_SOURCE_IDENTITY_MISMATCH",
@@ -736,7 +791,7 @@ def run_source_static_research_day(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     persist: bool = False,
     history_session_count: int | None = None,
     worker_count: int = 1,
@@ -772,47 +827,45 @@ def run_source_static_research_day(
     _validate_static_history_count(history_session_count)
     if (
         target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise SourceResearchDayError(
             "STATIC_RESEARCH_SCOPE_INVALID", "静态事实初始化范围或数据包编号无效"
         )
-    versions = []
-    offset = 0
-    while True:
-        catalog = read_raw_daily_catalog(
-            config,
-            max_target_session=research_cutoff,
-            offset=offset,
-            limit=200,
-        )
-        versions.extend(catalog["versions"])
-        if catalog["next_offset"] is None:
-            break
-        offset = catalog["next_offset"]
+    catalog = read_baostock_price_catalog(
+        config, cutoff=research_cutoff, source_capture_id=source_capture_id
+    )
     target_versions = [
-        item for item in versions if item["session_date"] == target_session.isoformat()
+        item
+        for item in catalog.get("price_coordinate_versions", ())
+        if item.get("session_date") == target_session.isoformat()
     ]
+    coordinate_versions = {
+        item.get("price_coordinate"): item for item in target_versions
+    }
     if (
-        len(target_versions) != 1
-        or target_versions[0]["source_package_id"] != source_package_id
-        or target_versions[0]["version_status"] != "CLOSED"
-        or target_versions[0]["row_count"] != target_versions[0]["expected_row_count"]
+        catalog.get("status") != "AVAILABLE"
+        or set(coordinate_versions) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or any(
+            item.get("source_capture_id") != source_capture_id
+            or item.get("coverage_status") != "COMPLETE"
+            or item.get("row_count") != item.get("expected_row_count")
+            for item in coordinate_versions.values()
+        )
     ):
         raise SourceResearchDayError(
             "STATIC_RESEARCH_RAW_VERSION_UNAVAILABLE",
-            "目标日没有唯一、同包且闭合的已存PG Raw来源版本",
+            "目标日没有唯一且闭合的paired BaoStock价格来源",
         )
-    version = target_versions[0]
     started = time.perf_counter()
     persistence = _persist_static_research_day(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         expected_capture_id=None,
-        expected_source_count=version["row_count"],
+        expected_source_count=coordinate_versions["FORWARD_ADJUSTED"]["row_count"],
         history_session_count=history_session_count,
         worker_count=worker_count,
     )
@@ -826,7 +879,7 @@ def run_source_static_research_day(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             profile_revision=persistence["profile_revision"],
             industry_snapshot_id=sector_snapshot_ids["INDUSTRY"],
             concept_snapshot_id=sector_snapshot_ids["CONCEPT"],
@@ -836,9 +889,9 @@ def run_source_static_research_day(
         "status": "PERSISTED",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
-        "source_capture_count": version["source_capture_count"],
-        "source_count": version["row_count"],
+        "source_capture_id": source_capture_id,
+        "source_capture_count": 1,
+        "source_count": coordinate_versions["FORWARD_ADJUSTED"]["row_count"],
         "persistence": persistence,
         "sector_pulse": sector_pulse,
         "execution": {
@@ -901,7 +954,7 @@ def _prepare_d1_facts(
             raise SourceResearchDayError(
                 "D1_SOURCE_KEY_INVALID", "D1来源代码与市场不匹配"
             )
-        if board not in {"MAIN_BOARD", "GEM"}:
+        if board not in {"MAIN_BOARD", "GEM", "STAR_BOARD"}:
             raise SourceResearchDayError("D1_BOARD_INVALID", "D1来源板别无效")
         history_rows = structure_row.get("history_row_count")
         if type(history_rows) is not int or history_rows < 1:
@@ -1005,13 +1058,13 @@ def _prepare_d1_facts(
                     generation_reason=reason,
                     history_row_count=history_rows,
                     target_bar_status=_required_text(
-                        source.get("bar_status"), "D1目标Bar状态"
+                        source.get("qfq_bar_status"), "D1目标QFQ Bar状态"
                     ),
-                    target_bar_reason=_optional_text(source.get("bar_reason")),
+                    target_bar_reason=_optional_text(source.get("qfq_bar_reason")),
                     target_price_quality=_required_text(
-                        source.get("price_quality"), "D1目标价格质量"
+                        source.get("qfq_price_quality"), "D1目标QFQ价格质量"
                     ),
-                    target_price_reason=_optional_text(source.get("price_reason")),
+                    target_price_reason=_optional_text(source.get("qfq_price_reason")),
                     historical_anchor_count=historical_count,
                     material_change_anchor_count=counts["MATERIAL_CHANGE"],
                     count_only_anchor_count=counts["COUNT_ONLY"],
@@ -1162,7 +1215,7 @@ def prepare_source_research_day(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     d1_history_session_count: int,
     include_d0: bool = True,
     include_d1: bool = True,
@@ -1173,8 +1226,8 @@ def prepare_source_research_day(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(include_d0) is not bool
         or type(include_d1) is not bool
         or not (include_d0 or include_d1)
@@ -1214,11 +1267,11 @@ def prepare_source_research_day(
             before_session=before_session,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
-            before_source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
+            before_source_capture_id=source_capture_id,
             transition="ALL",
             offset=0,
-            limit=5000,
+            limit=2 * MAX_SOURCE_SYMBOLS,
         )
         d0_wall_seconds = time.perf_counter() - d0_started
         d0_rows = _prepare_d0_facts(d0)
@@ -1236,7 +1289,7 @@ def prepare_source_research_day(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             d1_history_session_count=d1_history_session_count,
             industry_snapshot_id=None,
             concept_snapshot_id=None,
@@ -1255,8 +1308,8 @@ def prepare_source_research_day(
         d0.get("pair_status") != "COMPARABLE"
         or after.get("target_session") != target_session.isoformat()
         or before.get("target_session") != before_session.isoformat()
-        or after_source.get("source_package_id") != source_package_id
-        or before_source.get("source_package_id") != source_package_id
+        or after_source.get("source_capture_id") != source_capture_id
+        or before_source.get("source_capture_id") != source_capture_id
         or d0.get("source_key_set", {}).get("union_partition_closed") is not True
         or len(d0_rows) != d0.get("source_key_set", {}).get("source_union_count")
     ):
@@ -1266,7 +1319,7 @@ def prepare_source_research_day(
         )
     if include_d1 and (
         d1.get("target_session") != target_session.isoformat()
-        or d1_source.get("source_package_id") != source_package_id
+        or d1_source.get("source_capture_id") != source_capture_id
         or d1.get("source_pool_partition_closed") is not True
         or d1.get("source_pool_count")
         != len(d1_rows) // max(1, len(d1.get("structure_type_counts", {})))
@@ -1309,7 +1362,9 @@ def prepare_source_research_day(
         before_version = read_source_version_context(
             config,
             target_session=before_session,
-            source_package_id=source_package_id,
+            research_cutoff=research_cutoff,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
         )
         if before_version.get("status") != "AVAILABLE":
             raise SourceResearchDayError(
@@ -1328,7 +1383,7 @@ def prepare_source_research_day(
     facts = ResearchDayFacts(
         before_session=before_session,
         target_session=target_session,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         before_capture_id=before_capture_id,
         target_capture_id=target_capture_id,
         source_time_quality=_required_text(
@@ -1572,7 +1627,7 @@ def _summarize_day(
         "target_session": facts.target_session.isoformat(),
         "before_session": facts.before_session.isoformat(),
         "research_cutoff": d1.get("research_cutoff"),
-        "source_package_id": facts.source_package_id,
+        "source_capture_id": facts.source_capture_id,
         "before_capture_id": facts.before_capture_id,
         "target_capture_id": facts.target_capture_id,
         "calendar": {
@@ -1583,7 +1638,8 @@ def _summarize_day(
             "source_time_quality": facts.source_time_quality,
             "source_clock_role": facts.source_clock_role,
             "pit_status": "NON_PIT_RETROSPECTIVE",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "time_role": "NON_PIT_RETROSPECTIVE",
         },
         "d0": d0_summary,
         "d1": d1_summary,
@@ -1596,7 +1652,7 @@ def _summarize_day(
             "atomic_scope": {
                 "target_session": facts.target_session.isoformat(),
                 "before_session": facts.before_session.isoformat(),
-                "source_package_id": facts.source_package_id,
+                "source_capture_id": facts.source_capture_id,
                 "before_capture_id": facts.before_capture_id,
                 "target_capture_id": facts.target_capture_id,
                 "d0_algorithm_contract": facts.d0_algorithm_contract,
@@ -1629,7 +1685,7 @@ def run_source_research_day(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     d1_history_session_count: int,
     persist: bool = False,
     history_session_count: int | None = None,
@@ -1658,7 +1714,7 @@ def run_source_research_day(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         d1_history_session_count=d1_history_session_count,
         include_d0=include_d0,
         include_d1=include_d1,
@@ -1676,7 +1732,7 @@ def run_source_research_day(
                 config,
                 target_session=target_session,
                 research_cutoff=research_cutoff,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 expected_capture_id=facts.target_capture_id,
                 expected_source_count=(
                     facts.d1_source_count
@@ -1697,6 +1753,16 @@ def run_source_research_day(
                 "dml_executed": False,
             }
         report["static_persistence"] = static_result
+        report["profile_revision"] = static_result.get("profile_revision")
+        report["producer_versions"] = static_result.get("producer_versions", {})
+        report["rows_expected"] = {
+            **write_result.get("rows_expected", {}),
+            **static_result.get("rows_expected", {}),
+        }
+        report["rows_inserted"] = {
+            **write_result.get("rows_inserted", {}),
+            **static_result.get("rows_inserted", {}),
+        }
         report["status"] = "PERSISTED"
         report["persistence"] = write_result
         report["execution"]["transaction"] = write_result["transaction"]

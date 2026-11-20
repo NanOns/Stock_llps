@@ -22,7 +22,7 @@ from stock_a.storage.postgres.source_raw import _transaction
 
 PRODUCER_CONTRACT = "SOURCE_RESEARCH_OBSERVATION_SEGMENTS_R1"
 PRODUCER_VERSION = "R1"
-PRICE_COORDINATE = "RAW_UNADJUSTED"
+PRICE_COORDINATE = "FORWARD_ADJUSTED"
 IDENTITY_STATUS = "SOURCE_SYMBOL_ONLY"
 RESEARCH_SCOPE = "NON_PIT_EXPLORATORY"
 
@@ -43,7 +43,7 @@ _EVENT_FILTERS = {
 
 _SEGMENT_COLUMNS = (
     "source_enrollment_id",
-    "source_package_id",
+    "source_capture_id",
     "source_symbol",
     "rule_id",
     "rule_version",
@@ -85,12 +85,12 @@ class ObservationSegmentConflict(ValueError):
 
 
 def _validate_producer_arguments(
-    *, research_cutoff: date, source_package_id: int, rule_ids: Sequence[str] | None
+    *, research_cutoff: date, source_capture_id: int, rule_ids: Sequence[str] | None
 ) -> None:
     if (
         type(research_cutoff) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or (
             rule_ids is not None
             and (
@@ -106,14 +106,14 @@ def _validate_producer_arguments(
 
 
 def _anchor_rows(
-    cursor: Any, *, source_package_id: int, cutoff: date, rule_ids: Sequence[str] | None
+    cursor: Any, *, source_capture_id: int, cutoff: date, rule_ids: Sequence[str] | None
 ) -> list[tuple[Any, ...]]:
     rule_filter = "AND r.rule_id = ANY(%s)" if rule_ids else ""
     params: tuple[Any, ...] = (
-        (source_package_id, cutoff, list(rule_ids))
+        (source_capture_id, cutoff, list(rule_ids))
         if rule_ids
         else (
-            source_package_id,
+            source_capture_id,
             cutoff,
         )
     )
@@ -125,7 +125,7 @@ def _anchor_rows(
                   e.parent_enrollment_id
            FROM source_research_enrollments e
            JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
-           WHERE r.source_package_id=%s AND r.target_session<=%s
+           WHERE r.source_capture_id=%s AND r.target_session<=%s
              AND e.enrollment_kind IN
                  ('ENTRY','FIRST_OBSERVED_LEFT_CENSORED','REENTRY')
              {rule_filter}
@@ -138,7 +138,7 @@ def _anchor_rows(
 def _fact_groups(
     cursor: Any,
     *,
-    source_package_id: int,
+    source_capture_id: int,
     sessions: Sequence[date],
     symbols: Sequence[str],
     rule_ids: Sequence[str],
@@ -150,10 +150,10 @@ def _fact_groups(
                   profile_revision,history_session_count,d1_history_session_count,
                   event_window_start,calendar_revision,scope,source_capture_id,reasons
            FROM source_rule_evaluations
-           WHERE source_package_id=%s AND target_session=ANY(%s)
+           WHERE source_capture_id=%s AND target_session=ANY(%s)
              AND source_symbol=ANY(%s) AND rule_id=ANY(%s)
            ORDER BY source_symbol,rule_id,target_session,id""",
-        (source_package_id, list(sessions), list(symbols), list(rule_ids)),
+        (source_capture_id, list(sessions), list(symbols), list(rule_ids)),
     )
     grouped: dict[tuple[str, str], dict[date, list[tuple[Any, ...]]]] = {}
     for row in cursor.fetchall():
@@ -245,7 +245,7 @@ def _compute_segment_rows(
     contexts: Mapping[date, Mapping[str, Any]],
     facts_by_pair: Mapping[tuple[str, str], Mapping[date, Sequence[tuple[Any, ...]]]],
     official_sessions: Sequence[date],
-    source_package_id: int,
+    source_capture_id: int,
     research_cutoff: date,
 ) -> list[tuple[Any, ...]]:
     by_fact_id = {
@@ -327,7 +327,7 @@ def _compute_segment_rows(
         rows.append(
             _rule_observation_row(
                 enrollment_id=enrollment_id,
-                package=source_package_id,
+                package=source_capture_id,
                 symbol=symbol,
                 rule_id=rule_id,
                 rule_version=rule_version,
@@ -474,7 +474,7 @@ def _compute_segment_rows(
             rows.append(
                 _rule_observation_row(
                     enrollment_id=enrollment_id,
-                    package=source_package_id,
+                    package=source_capture_id,
                     symbol=symbol,
                     rule_id=rule_id,
                     rule_version=rule_version,
@@ -509,14 +509,14 @@ def persist_source_observation_segments(
     config: Mapping[str, Any],
     *,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     rule_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """从已存来源规则登记离线生成逐会话观察段；一次事务整体提交。"""
     selected_rules = tuple(rule_ids) if rule_ids is not None else None
     _validate_producer_arguments(
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         rule_ids=selected_rules,
     )
     calendar_sessions = tuple(
@@ -531,14 +531,14 @@ def persist_source_observation_segments(
     ):
         anchors = _anchor_rows(
             cursor,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             cutoff=research_cutoff,
             rule_ids=selected_rules,
         )
         if not anchors:
             return {
                 "status": "NO_OBSERVED_SAMPLE",
-                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
                 "research_cutoff": research_cutoff.isoformat(),
                 "enrollment_count": 0,
                 "observation_count": 0,
@@ -554,11 +554,11 @@ def persist_source_observation_segments(
             if first_session <= session <= research_cutoff
         )
         contexts = _read_rule_day_contexts(
-            cursor, sessions=sessions, package=source_package_id
+            cursor, sessions=sessions, package=source_capture_id
         )
         facts = _fact_groups(
             cursor,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             sessions=sessions,
             symbols=tuple(sorted({row[3] for row in anchors})),
             rule_ids=tuple(sorted({row[4] for row in anchors})),
@@ -568,7 +568,7 @@ def persist_source_observation_segments(
             contexts=contexts,
             facts_by_pair=facts,
             official_sessions=calendar_sessions,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             research_cutoff=research_cutoff,
         )
         expected_by_key = {(row[0], row[10]): row for row in rows}
@@ -610,7 +610,7 @@ def persist_source_observation_segments(
             link_row = existing_by_key.get((parent_id, child_session))
             proved_old_link = bool(
                 link_row
-                and link_row[1] == source_package_id
+                and link_row[1] == source_capture_id
                 and link_row[2] == child[3]
                 and link_row[3] == child[4]
                 and link_row[4] == child[5]
@@ -682,7 +682,7 @@ def persist_source_observation_segments(
         rule_counts = Counter(row[4] for row in anchors)
         return {
             "status": "PERSISTED",
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "research_cutoff": research_cutoff.isoformat(),
             "enrollment_count": len(anchors),
             "source_symbol_count": len({row[3] for row in anchors}),
@@ -705,7 +705,7 @@ def _validate_read_arguments(
     *,
     as_of: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     rule_id: str | None,
     status: str | None,
     event_code: str | None,
@@ -728,8 +728,8 @@ def _validate_read_arguments(
         type(as_of) is not date
         or type(research_cutoff) is not date
         or as_of > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or (rule_id is not None and (not isinstance(rule_id, str) or not rule_id))
         or (status is not None and status not in allowed_statuses)
         or (event_code is not None and event_code not in _EVENT_FILTERS)
@@ -752,7 +752,7 @@ def read_source_observation_segments(
     *,
     as_of: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     rule_id: str | None = None,
     status: str | None = None,
     event_code: str | None = None,
@@ -766,7 +766,7 @@ def read_source_observation_segments(
     _validate_read_arguments(
         as_of=as_of,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         rule_id=rule_id,
         status=status,
         event_code=event_code,
@@ -783,7 +783,7 @@ def read_source_observation_segments(
         (session for session in official_sessions if session > research_cutoff), None
     )
     base = """WITH segments AS (
-        SELECT e.id AS enrollment_id,r.source_package_id,r.source_symbol,r.rule_id,
+        SELECT e.id AS enrollment_id,r.source_capture_id,r.source_symbol,r.rule_id,
                r.rule_version,r.target_session AS t0_session,r.id AS anchor_rule_fact_id,
                r.source_capture_id AS anchor_capture_id,e.enrollment_kind,
                e.reason_code AS enrollment_reason,e.parent_enrollment_id,
@@ -821,11 +821,11 @@ def read_source_observation_segments(
           WHERE o.source_enrollment_id=e.id AND o.observation_session<=%s
           ORDER BY o.observation_session DESC,o.id DESC LIMIT 1
         ) latest ON TRUE
-        WHERE r.source_package_id=%s AND r.target_session<=%s
+        WHERE r.source_capture_id=%s AND r.target_session<=%s
           AND e.enrollment_kind IN
               ('ENTRY','FIRST_OBSERVED_LEFT_CENSORED','REENTRY')
     )"""
-    params = (as_of, as_of, source_package_id, as_of)
+    params = (as_of, as_of, source_capture_id, as_of)
     rule_clause = " AND rule_id=%s" if rule_id else ""
     status_clause = " AND current_status=%s" if status else ""
     selected_params = params + ((rule_id,) if rule_id else ())
@@ -837,7 +837,7 @@ def read_source_observation_segments(
         outcome_summary, outcome_by_enrollment = (
             read_source_observation_outcomes_cursor(
                 cursor,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
                 t0_session=as_of,
                 research_cutoff=research_cutoff,
                 rule_id=rule_id,
@@ -850,11 +850,11 @@ def read_source_observation_segments(
                       count(DISTINCT r.source_symbol) AS source_symbol_count
                FROM source_research_enrollments e
                JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
-               WHERE r.source_package_id=%s AND r.target_session<=%s
+               WHERE r.source_capture_id=%s AND r.target_session<=%s
                  AND e.enrollment_kind IN
                      ('ENTRY','FIRST_OBSERVED_LEFT_CENSORED','REENTRY')
                GROUP BY r.rule_id ORDER BY r.rule_id""",
-            (source_package_id, as_of),
+            (source_capture_id, as_of),
         )
         available_rules = [
             {
@@ -900,7 +900,7 @@ def read_source_observation_segments(
         total_count, source_symbol_count = cursor.fetchone()
         cursor.execute(
             f"""{base}
-                SELECT enrollment_id,source_package_id,source_symbol,rule_id,rule_version,
+                SELECT enrollment_id,source_capture_id,source_symbol,rule_id,rule_version,
                        t0_session,anchor_rule_fact_id,anchor_capture_id,enrollment_kind,
                        enrollment_reason,parent_enrollment_id,anchor_profile_revision,
                        anchor_history_session_count,anchor_d1_history_session_count,
@@ -928,7 +928,7 @@ def read_source_observation_segments(
           FROM segments s
           JOIN source_research_observation_segment_days o
             ON o.source_enrollment_id=s.enrollment_id
-          WHERE o.source_package_id=%s AND o.observation_session=%s
+          WHERE o.source_capture_id=%s AND o.observation_session=%s
             AND NOT (o.event_code='REENTRY' AND o.linked_enrollment_id IS NOT NULL
                      AND s.enrollment_kind<>'REENTRY') {event_rule_clause}
         ), expected AS (
@@ -972,7 +972,7 @@ def read_source_observation_segments(
           UNION ALL
           SELECT * FROM missing
         )"""
-        event_base_params = params + (source_package_id, as_of)
+        event_base_params = params + (source_capture_id, as_of)
         event_base_params += (rule_id,) if rule_id else ()
         event_base_params += (as_of, as_of)
         event_base_params += (rule_id,) if rule_id else ()
@@ -1014,9 +1014,9 @@ def read_source_observation_segments(
         cursor.execute(
             """SELECT count(*),count(DISTINCT source_symbol)
                FROM source_rule_evaluations
-               WHERE source_package_id=%s AND target_session=%s
+               WHERE source_capture_id=%s AND target_session=%s
                  AND (%s::text IS NULL OR rule_id=%s)""",
-            (source_package_id, as_of, rule_id, rule_id),
+            (source_capture_id, as_of, rule_id, rule_id),
         )
         input_rule_fact_count, input_rule_symbol_count = cursor.fetchone()
         cursor.execute(
@@ -1054,7 +1054,7 @@ def read_source_observation_segments(
         total_event_count = cursor.fetchone()[0]
         cursor.execute(
             f"""{event_base}
-                SELECT s.enrollment_id,s.source_package_id,s.source_symbol,s.rule_id,
+                SELECT s.enrollment_id,s.source_capture_id,s.source_symbol,s.rule_id,
                        s.rule_version,s.t0_session,s.anchor_rule_fact_id,
                        s.anchor_capture_id,s.enrollment_kind,s.enrollment_reason,
                        s.parent_enrollment_id,s.anchor_profile_revision,
@@ -1153,7 +1153,7 @@ def read_source_observation_segments(
                 ).event
             return {
                 "enrollment_id": row[0],
-                "source_package_id": row[1],
+                "source_capture_id": row[1],
                 "source_symbol": row[2],
                 "rule_id": row[3],
                 "rule_version": row[4],
@@ -1215,7 +1215,7 @@ def read_source_observation_segments(
         if displayed_items_by_id:
             cursor.execute(
                 """SELECT c.parent_enrollment_id,c.id,cr.target_session,cr.id,
-                          cr.source_capture_id,cr.source_package_id,cr.source_symbol,
+                          cr.source_capture_id,cr.source_symbol,
                           cr.rule_id,cr.rule_version
                    FROM source_research_enrollments c
                    JOIN source_rule_evaluations cr ON cr.id=c.rule_fact_id
@@ -1223,7 +1223,7 @@ def read_source_observation_segments(
                    JOIN source_rule_evaluations pr ON pr.id=p.rule_fact_id
                    WHERE c.parent_enrollment_id=ANY(%s)
                      AND c.enrollment_kind='REENTRY' AND cr.target_session<=%s
-                     AND cr.source_package_id=pr.source_package_id
+                     AND cr.source_capture_id=pr.source_capture_id
                      AND cr.source_symbol=pr.source_symbol
                      AND cr.rule_id=pr.rule_id AND cr.rule_version=pr.rule_version
                    ORDER BY c.parent_enrollment_id,cr.target_session,c.id""",
@@ -1251,8 +1251,8 @@ def read_source_observation_segments(
         if displayed_items_by_id:
             displayed_ids = sorted(displayed_items_by_id)
             cursor.execute(
-                """SELECT e.id,f.target_session,f.source_package_id,
-                          f.source_capture_id,f.source_symbol,f.horizon,
+                """SELECT e.id,f.target_session,f.source_capture_id,
+                          f.source_symbol,f.horizon,
                           f.path_rule_version,f.calendar_revision,f.endpoint_session,
                           f.maturity,f.endpoint_quality,f.endpoint_reason,
                           f.endpoint_numerator,f.endpoint_denominator,f.path_quality,
@@ -1263,7 +1263,6 @@ def read_source_observation_segments(
                    JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
                    JOIN source_forward_path_facts f
                      ON f.target_session=r.target_session
-                    AND f.source_package_id=r.source_package_id
                     AND f.source_capture_id=r.source_capture_id
                     AND f.source_symbol=r.source_symbol
                    WHERE e.id=ANY(%s) AND r.target_session<=%s
@@ -1292,7 +1291,7 @@ def read_source_observation_segments(
                     }
                 item["forward_paths"] = _enrollment_forward_paths(
                     {
-                        "package": item["source_package_id"],
+                        "package": item["source_capture_id"],
                         "capture": item["anchor_capture_id"],
                         "source_symbol": item["source_symbol"],
                         "calendar_revision": item["calendar_revision"],
@@ -1332,7 +1331,7 @@ def read_source_observation_segments(
                 if as_of == research_cutoff and next_official_session is not None
                 else "NOT_COMPUTED"
             ),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "rule_id": rule_id or "ALL_REGISTERED_RULES",
             "available_rules": available_rules,
             "status_counts": status_counts,
@@ -1387,7 +1386,7 @@ def read_source_observation_segments(
                     else None,
                 },
                 "results": event_items,
-                "classification": "SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT_EXPLORATORY",
+                "classification": "SOURCE_SYMBOL_ONLY / FORWARD_ADJUSTED / NON_PIT_EXPLORATORY",
             },
             "scope": RESEARCH_SCOPE,
             "identity_status": IDENTITY_STATUS,
@@ -1424,7 +1423,7 @@ def read_source_observation_segment_followups(
         _,
     ):
         cursor.execute(
-            """SELECT e.id,r.target_session,r.id,r.source_package_id,r.source_capture_id,
+            """SELECT e.id,r.target_session,r.id,r.source_capture_id,
                       r.source_symbol,r.rule_id,r.rule_version,r.profile_revision,
                       r.history_session_count,r.d1_history_session_count,
                       r.event_window_start,r.calendar_revision,r.scope,
@@ -1442,12 +1441,12 @@ def read_source_observation_segment_followups(
         timeline_by_requested = {
             enrollment_id: enrollment_id
             for enrollment_id, anchor in anchors.items()
-            if anchor[15] in {"ENTRY", "FIRST_OBSERVED_LEFT_CENSORED", "REENTRY"}
+            if anchor[14] in {"ENTRY", "FIRST_OBSERVED_LEFT_CENSORED", "REENTRY"}
         }
         daily_ids = [
             enrollment_id
             for enrollment_id, anchor in anchors.items()
-            if anchor[15] == "DAILY_LANDMARK"
+            if anchor[14] == "DAILY_LANDMARK"
         ]
         daily_candidates: dict[int, set[int]] = {
             enrollment_id: set() for enrollment_id in daily_ids
@@ -1460,7 +1459,7 @@ def read_source_observation_segment_followups(
                    JOIN source_research_observation_segment_days o
                      ON o.evidence_rule_fact_id=r.id
                     AND o.observation_session=r.target_session
-                    AND o.source_package_id=r.source_package_id
+                    AND o.source_capture_id=r.source_capture_id
                     AND o.source_symbol=r.source_symbol
                     AND o.rule_id=r.rule_id
                    WHERE e.id=ANY(%s) AND o.quality_status='OBSERVED'
@@ -1517,39 +1516,36 @@ def read_source_observation_segment_followups(
             if endpoint is not None and endpoint <= cutoff
         ]
         forward_rows: dict[tuple[int, str, int], list[tuple[Any, ...]]] = {}
-        packages = {row[3] for row in anchors.values()}
-        for package in packages:
-            package_anchors = [
+        source_capture_ids = {row[3] for row in anchors.values()}
+        for source_capture_id in source_capture_ids:
+            capture_anchors = [
                 (enrollment_id, row)
                 for enrollment_id, row in anchors.items()
-                if row[3] == package
+                if row[3] == source_capture_id
             ]
-            captures = sorted({row[4] for _, row in package_anchors})
-            symbols = sorted({row[5] for _, row in package_anchors})
+            symbols = sorted({row[4] for _, row in capture_anchors})
             if not due_horizons:
                 continue
             cursor.execute(
-                """SELECT target_session,source_package_id,source_capture_id,
-                          source_symbol,horizon,path_rule_version,calendar_revision,
+                """SELECT target_session,source_capture_id,source_symbol,
+                          horizon,path_rule_version,calendar_revision,
                           endpoint_session,maturity,endpoint_quality,endpoint_reason,
                           endpoint_numerator,endpoint_denominator,path_quality,
                           path_reasons,price_coordinate,scope,mfe_numerator,
                           mfe_denominator,mae_numerator,mae_denominator,
                           mdd_numerator,mdd_denominator
                    FROM source_forward_path_facts
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=ANY(%s) AND source_symbol=ANY(%s)
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND source_symbol=ANY(%s)
                      AND horizon=ANY(%s) AND endpoint_session<=%s
                    ORDER BY source_capture_id,source_symbol,horizon,
                             path_rule_version,calendar_revision""",
-                (target, package, captures, symbols, due_horizons, cutoff),
+                (target, source_capture_id, symbols, due_horizons, cutoff),
             )
             stored = cursor.fetchall()
-            for enrollment_id, anchor in package_anchors:
-                forward_rows[(enrollment_id, anchor[5], anchor[4])] = [
-                    row
-                    for row in stored
-                    if row[1] == package and row[2] == anchor[4] and row[3] == anchor[5]
+            for enrollment_id, anchor in capture_anchors:
+                forward_rows[(enrollment_id, anchor[4], anchor[3])] = [
+                    row for row in stored if row[1] == anchor[3] and row[2] == anchor[4]
                 ]
         result: dict[int, dict[str, Any]] = {}
         for enrollment_id, anchor in anchors.items():
@@ -1614,11 +1610,10 @@ def read_source_observation_segment_followups(
                 )
             latest = entries[-1] if entries else None
             forward_anchor = {
-                "package": anchor[3],
-                "capture": anchor[4],
-                "source_symbol": anchor[5],
-                "calendar_revision": anchor[12],
-                "scope": anchor[13],
+                "capture": anchor[3],
+                "source_symbol": anchor[4],
+                "calendar_revision": anchor[11],
+                "scope": anchor[12],
             }
             result[enrollment_id] = {
                 "status": current_status,
@@ -1628,22 +1623,22 @@ def read_source_observation_segment_followups(
                 "segment_enrollment_id": timeline_id,
                 "fact_id": latest[4] if latest else anchor[2],
                 "state": latest[6] if latest else "TRUE",
-                "source_capture_id": latest[3] if latest else anchor[4],
+                "source_capture_id": latest[3] if latest else anchor[3],
                 "base_fact_id": anchor[2],
-                "base_capture_id": anchor[4],
-                "rule_id": anchor[6],
-                "rule_version": anchor[7],
-                "profile_revision": latest[12] if latest else anchor[8],
-                "history_session_count": latest[13] if latest else anchor[9],
-                "d1_history_session_count": latest[14] if latest else anchor[10],
-                "event_window_start": (anchor[11].isoformat() if anchor[11] else None),
-                "calendar_revision": anchor[12],
-                "scope": anchor[13],
-                "parent_enrollment_id": anchor[14],
-                "enrollment_kind": anchor[15],
+                "base_capture_id": anchor[3],
+                "rule_id": anchor[5],
+                "rule_version": anchor[6],
+                "profile_revision": latest[12] if latest else anchor[7],
+                "history_session_count": latest[13] if latest else anchor[8],
+                "d1_history_session_count": latest[14] if latest else anchor[9],
+                "event_window_start": (anchor[10].isoformat() if anchor[10] else None),
+                "calendar_revision": anchor[11],
+                "scope": anchor[12],
+                "parent_enrollment_id": anchor[13],
+                "enrollment_kind": anchor[14],
                 "forward_paths": _enrollment_forward_paths(
                     forward_anchor,
-                    forward_rows.get((enrollment_id, anchor[5], anchor[4]), []),
+                    forward_rows.get((enrollment_id, anchor[4], anchor[3]), []),
                     due_by_horizon,
                     cutoff=cutoff,
                 ),

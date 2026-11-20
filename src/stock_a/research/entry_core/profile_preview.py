@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 from stock_a.research.core import (
     CORE_MAX_ACTUAL_LOOKBACK,
@@ -20,8 +19,6 @@ from stock_a.research.profile import (
     evaluate_closed_period_trend,
     evaluate_profile_kernel,
 )
-from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
-
 from stock_a.research.entry_core.fields import _RAW_FIELDS, _render_field
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
@@ -54,13 +51,13 @@ _PROFILE_PERIOD_INPUTS = {
     "profile.closed_week_trend": {
         "status": "UNKNOWN",
         "quality": "UNKNOWN_DATA",
-        "reason": "CLOSED_PERIOD_INPUT_UNAVAILABLE：缺少官方周历覆盖证明、目标坐标规范ACTUAL日线、逐会话状态及公司行为选集闭包；保持UNKNOWN。",
+        "reason": "CLOSED_PERIOD_INPUT_UNAVAILABLE：缺少官方周历覆盖证明、BaoStock QFQ ACTUAL日线或逐会话状态；保持UNKNOWN。",
         "missing_inputs": ("period.closed_week",),
     },
     "profile.closed_month_trend": {
         "status": "UNKNOWN",
         "quality": "UNKNOWN_DATA",
-        "reason": "CLOSED_PERIOD_INPUT_UNAVAILABLE：缺少官方月历覆盖证明、目标坐标规范ACTUAL日线、逐会话状态及公司行为选集闭包；保持UNKNOWN。",
+        "reason": "CLOSED_PERIOD_INPUT_UNAVAILABLE：缺少官方月历覆盖证明、BaoStock QFQ ACTUAL日线或逐会话状态；保持UNKNOWN。",
         "missing_inputs": ("period.closed_month",),
     },
     "profile.relative": {
@@ -88,93 +85,6 @@ _COMPARE_FIELDS = (
     "core.volume_ratio5",
     "core.volume_ratio20",
 )
-
-
-def _source_path(roots: Iterable[str], directory: str, code: str) -> tuple[Path, Path]:
-    resolved_roots: list[Path] = []
-    candidates: list[tuple[Path, Path]] = []
-    for value in roots:
-        try:
-            root = Path(value).resolve(strict=True)
-        except FileNotFoundError as error:
-            raise ResearchEntryError(
-                "SOURCE_ROOT_INVALID", "配置的TDX来源根不存在"
-            ) from error
-        except PermissionError as error:
-            raise ResearchEntryError(
-                "SOURCE_ACCESS_DENIED", "操作系统拒绝访问配置的TDX来源根"
-            ) from error
-        except OSError as error:
-            raise ResearchEntryError(
-                "SOURCE_ROOT_INVALID", "配置的TDX来源根无法核验"
-            ) from error
-        if not root.is_dir():
-            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根不是目录")
-        resolved_roots.append(root)
-        candidate = root / "vipdoc" / directory / "lday" / f"{directory}{code}.day"
-        try:
-            source = candidate.resolve(strict=True)
-        except FileNotFoundError:
-            continue
-        except PermissionError as error:
-            raise ResearchEntryError(
-                "SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX日线最终路径"
-            ) from error
-        except OSError as error:
-            raise ResearchEntryError(
-                "SOURCE_IO_ERROR", "TDX日线最终路径核验发生I/O错误"
-            ) from error
-        try:
-            source.relative_to(root)
-        except ValueError as error:
-            raise ResearchEntryError(
-                "SOURCE_PATH_OUTSIDE_ROOT", "TDX日线最终路径离开配置保护根"
-            ) from error
-        candidates.append((root, source))
-    if not resolved_roots:
-        raise ResearchEntryError("SOURCE_NOT_CONFIGURED", "没有配置只读TDX保护根")
-    if not candidates:
-        raise ResearchEntryError(
-            "SOURCE_NOT_FOUND", "配置保护根中没有该代码的TDX日线文件"
-        )
-    if len(candidates) != 1:
-        raise ResearchEntryError(
-            "SOURCE_ROOT_AMBIGUOUS", "多个配置来源根均含同一代码文件，拒绝自行选择"
-        )
-    return candidates[0]
-
-
-def _unknown_observation(session: date, reason: str) -> CoreObservation:
-    values = {name: unknown(reason) for name in _RAW_FIELDS}
-    return CoreObservation(
-        session=session,
-        state="UNKNOWN",
-        coordinate_id=None,
-        open=values["open"],
-        high=values["high"],
-        low=values["low"],
-        close=values["close"],
-        amount=values["amount"],
-        volume=values["volume"],
-    )
-
-
-def _observation(
-    session: date, symbol: str, decoded: DecodedDay | None
-) -> CoreObservation:
-    if decoded is None:
-        return _unknown_observation(session, "NO_TDX_BAR_FOR_OFFICIAL_SESSION")
-    return CoreObservation(
-        session=session,
-        state="ACTUAL",
-        coordinate_id=f"RAW:TDX_SOURCE_SYMBOL:{symbol}",
-        open=decoded.raw_open,
-        high=decoded.raw_high,
-        low=decoded.raw_low,
-        close=decoded.raw_close,
-        amount=decoded.amount,
-        volume=decoded.volume,
-    )
 
 
 def _profile_row_payload(row: CoreObservation) -> dict[str, Any]:
@@ -215,7 +125,7 @@ def _profile_window(
         last_endpoint=last_endpoint,
         selected_sessions=tuple(row.session for row in selected),
         calendar_revision=calendar_revision,
-        status_revision="TDX_NO_BAR_UNKNOWN_STATUS_R1",
+        status_revision="BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
     )
     return identity, {
         "contract": window_contract,
@@ -230,7 +140,7 @@ def _profile_window(
         ],
         "selected_sessions": [row.session.isoformat() for row in selected],
         "calendar_revision": calendar_revision,
-        "status_revision": "TDX_NO_BAR_UNKNOWN_STATUS_R1",
+        "status_revision": "BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
         "input_quality": quality,
     }
 
@@ -241,16 +151,18 @@ def _build_profile_preview(
     target_session: date,
     source_last_session: date,
     source_cutoff: str,
-    target_bar: DecodedDay | None,
+    target_bar: Mapping[str, Any] | None,
     history: tuple[CoreObservation, ...],
     core: dict[str, FieldValue],
     calendar_revision: str,
     contract: dict[str, Any],
+    source_capture_id: int,
+    price_coordinate: str,
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
-    source_snapshot_role: str = "LOCAL_FILE_SNAPSHOT_ID_NOT_CAPTURED_AVAILABLE_AT",
+    source_snapshot_role: str = "BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
     selected_fields: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """把本次真实Raw/Core读取接到既有规则；显式限于未复权NON_PIT预览。"""
+    """把指定paired capture和价格坐标的Core结果接入Profile11预览。"""
     if not isinstance(contract, dict):
         raise ResearchEntryError(
             "PROFILE_PREVIEW_CONTRACT_REQUIRED",
@@ -292,13 +204,30 @@ def _build_profile_preview(
             "PROFILE_PREVIEW_CONTRACT_INVALID", "Profile字段登记存在重复或非法field_id"
         )
 
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CAPTURE_REQUIRED",
+            "Profile预览必须绑定paired BaoStock捕获ID",
+        )
+    if price_coordinate != "FORWARD_ADJUSTED":
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_COORDINATE_INVALID",
+            "Profile技术预览必须使用BaoStock QFQ坐标",
+        )
     normalized = _normalize_symbol(symbol)[0]
-    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
+    )
     snapshot_id = source_cutoff
+    qfq_close = (
+        target_bar.get("qfq_close")
+        if isinstance(target_bar, Mapping)
+        else getattr(target_bar, "qfq_close", None)
+    )
     target_close = (
-        target_bar.raw_close
-        if target_bar is not None
-        else unknown("TARGET_BAR_MISSING")
+        qfq_close
+        if isinstance(qfq_close, FieldValue)
+        else unknown("QFQ_TARGET_BAR_MISSING")
     )
 
     components: list[dict[str, Any]] = []
@@ -325,7 +254,7 @@ def _build_profile_preview(
                         supplied_period_bars,
                         target_session=target_session,
                         coordinate_id=coordinate_id,
-                        coordinate_contract_version="RAW_UNADJUSTED",
+                        coordinate_contract_version="FORWARD_ADJUSTED",
                         rules=rules,
                         field_registry=canonical_registry,
                     )
@@ -345,7 +274,7 @@ def _build_profile_preview(
                         "quality": period_result.quality,
                         "value": _render_field(period_result)["value"],
                         "reason": period_result.reason,
-                        "production_eligibility": "PREVIEW_ONLY_RAW_NON_PIT",
+                        "production_eligibility": "PREVIEW_ONLY_QFQ_NON_PIT",
                         "input_fields": [period_field_id],
                     }
                 )
@@ -397,38 +326,25 @@ def _build_profile_preview(
                 )
             field_registry = dict(registered)
             if input_id == "adjusted.close":
-                # 仅本预览局部把同目标、同Raw坐标的source close映射到规则输入名。
-                # 不改正式合同，也不宣称执行了P06复权生产者。
-                field_registry.update(
-                    {
-                        "unit": "CNY",
-                        "producer_symbol": "stock_a.research.entry:_build_profile_preview",
-                        "expression_ref": "TDX_RAW_CLOSE_PREVIEW_ALIAS_R1",
-                        "algorithm_version": "TDX_RAW_UNADJUSTED_PREVIEW_R1",
-                        "parameter_version": "TDX_RAW_UNADJUSTED_PREVIEW_R1",
-                        "context_dependencies": [
-                            "context.target_session",
-                            "context.source_cutoff",
-                        ],
-                        "window_contract": "NONE",
-                        "input_fields": ["raw.close"],
-                    }
-                )
-                source_field_id = "raw.close"
-                source_producer = "stock_a.sources.tdx.day:decode_day_record"
+                source_field_id = "adjusted.close"
+                source_producer = "stock_a.sources.baostock.daily:normalize_daily_row"
                 input_value = target_close
                 input_window = {
                     "contract": "TARGET_SESSION_R1",
                     "first_endpoint": target_session.isoformat()
-                    if target_bar is not None
+                    if target_close.quality == "OBSERVED"
                     else None,
                     "last_endpoint": target_session.isoformat()
-                    if target_bar is not None
+                    if target_close.quality == "OBSERVED"
                     else None,
                     "requested_sessions": 1,
-                    "selected_session_count": 1 if target_bar is not None else 0,
+                    "selected_session_count": 1
+                    if target_close.quality == "OBSERVED"
+                    else 0,
                     "selected_sessions": (
-                        [target_session.isoformat()] if target_bar is not None else []
+                        [target_session.isoformat()]
+                        if target_close.quality == "OBSERVED"
+                        else []
                     ),
                 }
             else:
@@ -483,6 +399,14 @@ def _build_profile_preview(
                     contexts[dependency] = snapshot_id
                 elif dependency == "context.calendar_ref":
                     contexts[dependency] = calendar_revision
+                elif dependency == "context.source_capture_id":
+                    contexts[dependency] = source_capture_id
+                elif dependency == "context.price_coordinate":
+                    contexts[dependency] = price_coordinate
+                elif dependency == "context.price_coordinate_contract":
+                    contexts[dependency] = (
+                        f"BAOSTOCK_ADJUSTFLAG_2_{price_coordinate}_NON_PIT_R2"
+                    )
                 else:
                     raise ResearchEntryError(
                         "PROFILE_PREVIEW_CONTEXT_UNBOUND",
@@ -550,7 +474,7 @@ def _build_profile_preview(
                 "quality": result.quality,
                 "value": _render_field(result)["value"],
                 "reason": result.reason,
-                "production_eligibility": "PREVIEW_ONLY_RAW_UNADJUSTED_NON_PIT",
+                "production_eligibility": "PREVIEW_ONLY_QFQ_NON_PIT",
                 "calculation_basis": {
                     "input_fields": list(rule["input_fields"]),
                     "operands": rule.get("operands", {}),
@@ -562,8 +486,8 @@ def _build_profile_preview(
         )
 
     return {
-        "contract": "STOCK-A-PROFILE-COMPONENT-PREVIEW/R1",
-        "scope": "REAL_TDX_RAW_CORE_READONLY_COMPONENT_PREVIEW",
+        "contract": "STOCK-A-PROFILE-COMPONENT-PREVIEW/R2",
+        "scope": "REAL_BAOSTOCK_QFQ_CORE_READONLY_COMPONENT_PREVIEW",
         "target_session": target_session.isoformat(),
         "source_last_session": source_last_session.isoformat(),
         "identity": {
@@ -572,8 +496,12 @@ def _build_profile_preview(
             "security_id": None,
         },
         "research_mode": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "source": {
+            "provider": "BAOSTOCK",
+            "source_capture_id": source_capture_id,
             "source_cutoff": snapshot_id,
             "source_cutoff_role": source_snapshot_role,
             "local_read_clock_is_historical_availability": False,

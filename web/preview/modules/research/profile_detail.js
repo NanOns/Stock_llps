@@ -20,11 +20,11 @@ function showProfileDetail(item) {
     ["研究资格", `${item.identity_status} · ${item.pit_status}`],
     [
       "来源版本定位键",
-      `${item.target_session} · ${item.source_package_id} · ${item.profile_revision}`,
+      `${item.target_session} · ${item.source_capture_id} · ${item.profile_revision}`,
     ],
     [
-      "来源包ID / 画像修订",
-      `${item.source_package_id} · ${item.profile_revision}`,
+      "来源捕获ID / 画像修订",
+      `${item.source_capture_id} · ${item.profile_revision}`,
     ],
     [
       "窗口与日历",
@@ -77,7 +77,7 @@ function showProfileDetail(item) {
   }
   root.append(rawGrid);
   renderPricePositionDetail(root, item);
-  appendText(root, "h3", "Core价格字段 / 质量 / 原因");
+  appendText(root, "h3", "Core前复权价格字段 / 质量 / 原因");
   const coreTable = document.createElement("table");
   coreTable.innerHTML =
     "<thead><tr><th>字段</th><th>NUMERIC值</th><th>精确分数</th><th>质量</th><th>原因</th></tr></thead>";
@@ -131,7 +131,7 @@ function showProfileDetail(item) {
   actions.className = "profile-detail-actions";
   const timelineButton = document.createElement("button");
   timelineButton.type = "button";
-  timelineButton.textContent = "查看75会话 RAW K / Core";
+  timelineButton.textContent = "查看75会话BaoStock价格 / Core";
   timelineButton.addEventListener("click", () => {
     void openProfileTimeline(item);
   });
@@ -146,11 +146,11 @@ function showProfileDetail(item) {
 }
 async function openProfileTimeline(item) {
   const root = $("profileDetail");
-  const value = `${item.target_session}|${item.source_package_id}`;
+  const value = `${item.target_session}|${item.source_capture_id}`;
   const version = state.versions.find(
     (candidate) =>
       candidate.session_date === item.target_session &&
-      candidate.source_package_id === item.source_package_id,
+      candidate.source_capture_id === item.source_capture_id,
   );
   const option = Array.from($("versionSelect").options).find(
     (candidate) => candidate.value === value,
@@ -179,8 +179,9 @@ async function openProfileTimeline(item) {
   }
   const persistedProfileSnapshot = {
     target_session: item.target_session,
-    source_package_id: item.source_package_id,
+    source_capture_id: item.source_capture_id,
     profile_revision: item.profile_revision,
+    price_coordinate: item.price_coordinate || "FORWARD_ADJUSTED",
   };
   await queryTimeline({
     origin: "profile",

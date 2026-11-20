@@ -33,21 +33,21 @@ async function queryStock(event) {
     state.timelineRequest++;
     renderTimeline(null);
   }
-  clearRawPeriodState("正在读取所选日期、来源代码和PG捕获版本的自然周/月…");
+  clearRawPeriodState("正在读取所选日期、BaoStock捕获和价格坐标的自然周/月…");
   const v = selectedVersion();
   if (!v) {
-    setMessage("请先从真实PG目录选择目标日期和来源包版本。");
+    setMessage("请先从真实PG目录选择目标日期和BaoStock价格捕获。");
     return false;
   }
   const symbol = $("symbolInput").value.trim();
   const count = Number($("windowInput").value);
-  const key = `${v.target_session}|${v.source_package_id}|${symbol}|${count}`;
+  const key = `${v.target_session}|${v.source_capture_id}|${symbol}|${count}`;
   const requestIsCurrent = () => {
     const selected = selectedVersion();
     return (
       requestId === state.stockRequest &&
       key ===
-        `${selected?.target_session}|${selected?.source_package_id}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
+        `${selected?.target_session}|${selected?.source_capture_id}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
     );
   };
   if (!symbol || !Number.isInteger(count) || count < 1 || count > 75) {
@@ -57,7 +57,7 @@ async function queryStock(event) {
   }
   clearResult();
   $("queryStock").disabled = true;
-  setMessage("正在按显式日期、来源包ID和窗口只读读取PG并计算现役Core/Profile…");
+  setMessage("正在读取BaoStock未复权现价，并按前复权坐标计算现役Core/Profile…");
   try {
     const raw = await api(
       `/api/preview/raw?${new URLSearchParams({ ...v, symbol })}`,
@@ -69,7 +69,7 @@ async function queryStock(event) {
       body: JSON.stringify({
         symbol,
         target_session: v.target_session,
-        source_package_id: v.source_package_id,
+        source_capture_id: v.source_capture_id,
         session_count: count,
       }),
     });
@@ -78,23 +78,29 @@ async function queryStock(event) {
       b = result.snapshot_identity;
     if (
       a.target_session !== b.target_session ||
-      a.source_package_id !== b.source_package_id ||
+      a.source_capture_id !== b.source_capture_id ||
       b.target_session !== v.target_session ||
-      b.source_package_id !== v.source_package_id ||
+      b.source_capture_id !== v.source_capture_id ||
+      raw.price_coordinate !== "RAW_UNADJUSTED" ||
+      result.price_coordinates?.absolute_spot !== "RAW_UNADJUSTED" ||
+      result.price_coordinates?.cross_session_research !== "FORWARD_ADJUSTED" ||
       raw.symbol !== result.symbol
     )
-      throw new Error("RAW与Core/Profile预览身份不一致，已拒绝合并展示。");
+      throw new Error("BaoStock捕获或RAW/QFQ坐标不一致，已拒绝合并展示。");
     $("stockResult").hidden = false;
-    setMessage("研究预览已返回；数值为RAW_UNADJUSTED / NON_PIT。", true);
+    setMessage(
+      "研究预览已返回；现价为RAW，跨会话Core/Profile为QFQ，均为NON_PIT。",
+      true,
+    );
     $("resultTitle").textContent = `${symbol} · ${v.target_session}`;
     $("resultMode").textContent =
-      `${result.status} · ${result.source_object_status} · ${result.target_bar_status} · ${result.price_coordinate} · ${result.identity_status}`;
+      `${result.status} · ${result.source_object_status} · ${result.target_bar_status} · RAW_UNADJUSTED / FORWARD_ADJUSTED · ${result.identity_status}`;
     $("snapshotId").textContent =
-      `TDX来源包ID ${v.source_package_id} · 目标会话 ${v.target_session} · RAW_UNADJUSTED`;
+      `BaoStock捕获ID ${v.source_capture_id} · 目标会话 ${v.target_session} · 现价RAW_UNADJUSTED / Core QFQ`;
     $("windowText").textContent =
       `窗口 ${result.window.start_session} 至 ${result.window.end_session}：` +
       `实际Bar ${result.window.real_bar_count}/${result.window.requested_sessions}，` +
-      `TDX缺Bar/读取失败 ${result.window.source_bar_gap_count}，` +
+      `BaoStock缺Bar/读取失败 ${result.window.source_bar_gap_count}，` +
       `PG未保存历史会话 ${result.window.unavailable_history_row_count}；` +
       `Raw行覆盖 ${result.window.history_records_status}；` +
       `MA20/ATR20价格窗口 ${result.window.price_window_status} ` +
@@ -128,7 +134,7 @@ async function queryStock(event) {
     if (
       keepTimeline &&
       state.chartPeriodContext?.target_session === v.target_session &&
-      state.chartPeriodContext?.source_package_id === v.source_package_id &&
+      state.chartPeriodContext?.source_capture_id === v.source_capture_id &&
       state.chartPeriodContext?.symbol === symbol
     ) {
       await queryTimeline({

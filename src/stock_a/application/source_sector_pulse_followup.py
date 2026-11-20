@@ -77,10 +77,7 @@ def _readback_pulse_day(context: Mapping[str, Any]) -> dict[str, Any]:
         "status": "AVAILABLE",
         "target_session": identity["target_session"].isoformat(),
         "profile_revision": identity["profile_revision"],
-        "source_version": {
-            "source_package_id": identity["source_package_id"],
-            "source_capture_id": identity["source_capture_id"],
-        },
+        "source_version": context["t0_source_version"],
         "by_kind": by_kind,
     }
 
@@ -114,19 +111,19 @@ def run_source_sector_pulse_followup_day(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
-    target_package_ids: Mapping[int, int] | None = None,
+    source_capture_id: int,
+    target_capture_ids: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
-    """只消费PG已存PULSE，批量读取固定篮子必要Raw并原子保存后继结果。"""
+    """只消费PG已存PULSE，批量读取固定篮子QFQ并原子保存后继结果。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
     ):
         raise SourceSectorPulseFollowupError(
-            "PULSE_FOLLOWUP_REQUEST_INVALID", "T0、研究截止或来源包数字ID无效"
+            "PULSE_FOLLOWUP_REQUEST_INVALID", "T0、研究截止或paired capture无效"
         )
     calendar = _official_calendar(research_cutoff)
     calendar_identity = {
@@ -136,14 +133,53 @@ def run_source_sector_pulse_followup_day(
     all_targets, due_targets = _horizon_targets(
         target_session, research_cutoff, tuple(calendar["sessions"])
     )
+    resolved_target_capture_ids = {
+        horizon: source_capture_id for horizon in due_targets
+    }
+    if target_capture_ids is not None and any(
+        target_capture_ids.get(horizon) != source_capture_id
+        for horizon in due_targets
+        if horizon in target_capture_ids
+    ):
+        raise SourceSectorPulseFollowupError(
+            "PULSE_FOLLOWUP_CAPTURE_MISMATCH",
+            "本批后继会话必须复用覆盖完整窗口的paired capture",
+        )
     context = read_source_sector_pulse_followup_inputs(
         config,
         t0_session=target_session,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         due_targets=due_targets,
-        target_package_ids=target_package_ids,
+        target_capture_ids=resolved_target_capture_ids,
     )
+    t0_source = context.get("t0_source_version")
+    if (
+        not isinstance(t0_source, Mapping)
+        or t0_source.get("source_capture_id") != source_capture_id
+        or set(t0_source.get("price_coordinates", ()))
+        != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or t0_source.get("source_time_quality") != "NON_PIT_OBSERVED"
+        or t0_source.get("source_clock_role") != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+        or t0_source.get("source_available_at") is not None
+    ):
+        raise SourceSectorPulseFollowupError(
+            "PULSE_FOLLOWUP_T0_CAPTURE_INVALID",
+            "T0 PULSE来源不是完整、成对且NON_PIT的BaoStock捕获",
+        )
+    for horizon, version in context.get("target_source_versions", {}).items():
+        if (
+            version.get("source_capture_id") != source_capture_id
+            or set(version.get("price_coordinates", ()))
+            != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+            or version.get("source_time_quality") != "NON_PIT_OBSERVED"
+            or version.get("source_clock_role") != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+            or version.get("source_available_at") is not None
+        ):
+            raise SourceSectorPulseFollowupError(
+                "PULSE_FOLLOWUP_TARGET_CAPTURE_INVALID",
+                f"{horizon}会话未绑定本批成对NON_PIT BaoStock捕获",
+            )
     pulse_states = Counter(row["pulse_state"] for row in context["pulse_rows"])
     outcomes: list[dict[str, Any]] = []
     incomplete_horizons = []
@@ -155,7 +191,7 @@ def run_source_sector_pulse_followup_day(
                     "horizon_sessions": horizon,
                     "target_session": target.isoformat(),
                     "status": "INCOMPLETE",
-                    "reason_codes": ["FOLLOWUP_RAW_SESSION_PARTITION_NOT_CLOSED"],
+                    "reason_codes": ["FOLLOWUP_QFQ_SESSION_PARTITION_NOT_CLOSED"],
                 }
             )
             continue
@@ -166,11 +202,7 @@ def run_source_sector_pulse_followup_day(
                 rows_by_symbol=context["rows_by_symbol"],
                 t0_session=target_session,
                 target_session=target,
-                source_package_id=source_package_id,
                 t0_source_capture_id=context["t0_source_version"]["source_capture_id"],
-                target_source_package_id=context["target_source_versions"][horizon][
-                    "source_package_id"
-                ],
                 target_source_capture_id=context["target_source_versions"][horizon][
                     "source_capture_id"
                 ],
@@ -198,8 +230,8 @@ def run_source_sector_pulse_followup_day(
         research_cutoff=research_cutoff,
         horizon_targets=all_targets,
         calendar_identity=calendar_identity,
-        target_package_ids={
-            h: v["source_package_id"]
+        target_capture_ids={
+            h: v["source_capture_id"]
             for h, v in context["target_source_versions"].items()
         },
     )
@@ -265,7 +297,7 @@ def run_source_sector_pulse_followup_day(
         "status": "PERSISTED",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "pulse_state_counts": dict(sorted(pulse_states.items())),
         "pulse_board_count": len(context["pulse_rows"]),
         "followup_summaries": summary,
@@ -276,7 +308,6 @@ def run_source_sector_pulse_followup_day(
         "readback_saved_through": readback.get("saved_through"),
         "input": {
             "t0_source_capture_id": context["t0_source_version"]["source_capture_id"],
-            "t0_source_package_id": context["t0_source_version"]["source_package_id"],
             "profile_revision": context["pulse_rows"][0]["profile_revision"],
             "snapshot_ids": {
                 kind: next(
@@ -316,7 +347,8 @@ def run_source_sector_pulse_followup_day(
         "dml_executed": persistence.get("dml_executed", False),
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "formal_rotation_state": "NOT_EVALUATED",
     }
 

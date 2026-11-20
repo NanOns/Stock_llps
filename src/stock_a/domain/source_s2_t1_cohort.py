@@ -16,7 +16,6 @@ COHORT_COLUMNS = (
     "target_session",
     "endpoint_session",
     "research_cutoff",
-    "source_package_id",
     "source_capture_id",
     "endpoint_source_capture_id",
     "t0_profile_revision",
@@ -59,7 +58,6 @@ COHORT_KEY = (
     "target_session",
     "endpoint_session",
     "research_cutoff",
-    "source_package_id",
     "source_capture_id",
     "endpoint_source_capture_id",
     "t0_profile_revision",
@@ -102,7 +100,6 @@ def prepare_source_s2_t1_cohort_rows(
     target_session: date,
     endpoint_session: date,
     research_cutoff: date,
-    source_package_id: int,
     source_capture_id: int,
     endpoint_source_capture_id: int,
     t0_scope: Mapping[str, Any],
@@ -118,8 +115,6 @@ def prepare_source_s2_t1_cohort_rows(
         or type(endpoint_session) is not date
         or type(research_cutoff) is not date
         or not target_session < endpoint_session <= research_cutoff
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(endpoint_source_capture_id) is not int
@@ -133,6 +128,7 @@ def prepare_source_s2_t1_cohort_rows(
         raise SourceS2T1CohortError("S2/T+1范围或完整来源池分母无效")
 
     required_scope_keys = (
+        "source_capture_id",
         "profile_revision",
         "producer_contract",
         "producer_version",
@@ -166,10 +162,12 @@ def prepare_source_s2_t1_cohort_rows(
     )
     if (
         any(t0_scope[key] != endpoint_scope[key] for key in shared_keys)
+        or t0_scope["source_capture_id"] != source_capture_id
+        or endpoint_scope["source_capture_id"] != endpoint_source_capture_id
         or t0_scope["research_mode"] != "NON_PIT_RETROSPECTIVE"
-        or t0_scope["price_coordinate"] != "RAW_UNADJUSTED"
+        or t0_scope["price_coordinate"] != "FORWARD_ADJUSTED"
         or t0_scope["source_time_quality"] != "NON_PIT_OBSERVED"
-        or t0_scope["source_clock_role"] != "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
+        or t0_scope["source_clock_role"] != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
         or t0_scope["source_available_at"] is not None
         or t0_scope["calendar_revision"] != calendar_revision
         or t0_scope["source_count"] != expected_source_count
@@ -212,8 +210,8 @@ def prepare_source_s2_t1_cohort_rows(
             raise SourceS2T1CohortError("不可评价T+1端点不能携带数值收益")
         if not isinstance(quality, str) or not quality:
             raise SourceS2T1CohortError("T+1端点质量码无效")
-        if item.get("price_coordinate") != "RAW_UNADJUSTED":
-            raise SourceS2T1CohortError("T+1端点价格坐标不是RAW_UNADJUSTED")
+        if item.get("price_coordinate") != "FORWARD_ADJUSTED":
+            raise SourceS2T1CohortError("T+1端点价格坐标不是FORWARD_ADJUSTED")
         by_symbol[symbol] = item
     if len(by_symbol) != expected_source_count:
         raise SourceS2T1CohortError("T0与T+1输入代码集合未闭合")
@@ -222,7 +220,6 @@ def prepare_source_s2_t1_cohort_rows(
         target_session,
         endpoint_session,
         research_cutoff,
-        source_package_id,
         source_capture_id,
         endpoint_source_capture_id,
         t0_scope["profile_revision"],
@@ -236,7 +233,7 @@ def prepare_source_s2_t1_cohort_rows(
         path_rule_version,
         COHORT_VERSION,
         "NON_PIT_EXPLORATORY",
-        "RAW_UNADJUSTED",
+        "FORWARD_ADJUSTED",
     )
 
     output: list[tuple[Any, ...]] = []

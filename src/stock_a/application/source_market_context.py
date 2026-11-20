@@ -16,7 +16,7 @@ from stock_a.domain.market_presentation import (
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.source_market_breadth import (
-    RawPriceObservation,
+    QfqPriceObservation,
     SourceCohortIdentity,
     SourceMarketBreadthInput,
     SourceMarketBreadthResult,
@@ -24,9 +24,10 @@ from stock_a.research.source_market_breadth import (
     SOURCE_MARKET_BREADTH_CONTRACT,
     calculate_source_market_breadth,
 )
-from stock_a.storage.postgres.source_raw import (
-    RawSourcePgError,
-    read_source_market_breadth_history,
+from stock_a.storage.postgres.baostock_price_facts import (
+    BaoStockPriceFactsError,
+    read_baostock_capture_roster,
+    read_baostock_price_history_batch,
 )
 
 _ELIGIBLE_CLASSES = (
@@ -48,7 +49,7 @@ class SourceMarketContextError(Exception):
 
 @dataclass(frozen=True)
 class SourceMarketContextRead:
-    """一个精确Raw来源版本的市场宽度读取与内核结果。"""
+    """一个精确BaoStock QFQ捕获的市场宽度读取与内核结果。"""
 
     target_session: date
     research_cutoff: date
@@ -81,9 +82,9 @@ def compute_source_market_context(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
 ) -> SourceMarketContextRead:
-    """按固定官方日历和精确Raw来源包读取并计算一次来源宽度。"""
+    """按固定官方日历和paired BaoStock捕获读取QFQ市场宽度。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
@@ -94,10 +95,10 @@ def compute_source_market_context(
             "目标交易会话不得晚于显式研究截止日",
             category="ARGUMENT",
         )
-    if type(source_package_id) is not int or source_package_id <= 0:
+    if type(source_capture_id) is not int or source_capture_id <= 0:
         raise SourceMarketContextError(
-            "MARKET_BREADTH_PACKAGE_ID_INVALID",
-            "来源包ID必须是正数BIGINT",
+            "MARKET_BREADTH_CAPTURE_ID_INVALID",
+            "source_capture_id必须是正数BIGINT",
             category="ARGUMENT",
         )
 
@@ -128,46 +129,178 @@ def compute_source_market_context(
 
     session_window = calendar["sessions"][target_index - 4 : target_index + 1]
     try:
-        pg_result = read_source_market_breadth_history(
+        roster = read_baostock_capture_roster(
             config,
-            target_session=target_session,
-            research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
-            session_window=session_window,
+            source_capture_id=source_capture_id,
+            cutoff=research_cutoff,
         )
-    except RawSourcePgError:
-        raise
+    except BaoStockPriceFactsError as error:
+        raise SourceMarketContextError(
+            error.code, str(error), category="UNAVAILABLE"
+        ) from error
+    if roster.get("status") != "AVAILABLE":
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_CAPTURE_UNAVAILABLE",
+            "目标BaoStock paired捕获目录不可用或为空",
+            category="NOT_EVALUABLE",
+        )
+    roster_by_symbol = {
+        item["source_symbol"]: item for item in roster.get("symbols", [])
+    }
+    source_symbols = tuple(
+        sorted(
+            symbol
+            for symbol, item in roster_by_symbol.items()
+            if item.get("eligible_start_session")
+            and item.get("eligible_end_session")
+            and item["eligible_start_session"]
+            <= target_session.isoformat()
+            <= item["eligible_end_session"]
+        )
+    )
+    if not source_symbols:
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_CAPTURE_EMPTY_AT_TARGET",
+            "paired捕获在目标会话没有符合有效窗口的来源代码",
+            category="NOT_EVALUABLE",
+        )
+    needed_sessions = (
+        session_window[0],
+        session_window[1],
+        session_window[3],
+        session_window[4],
+    )
+    rows_by_key = {}
+    offset = 0
+    page_size = 5000
+    try:
+        while True:
+            batch = read_baostock_price_history_batch(
+                config,
+                source_symbols=source_symbols,
+                sessions=needed_sessions,
+                source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
+                cutoff=research_cutoff,
+                offset=offset,
+                limit=page_size,
+            )
+            for row in batch.get("rows", []):
+                key = (row["source_symbol"], row["session_date"])
+                if key in rows_by_key:
+                    raise SourceMarketContextError(
+                        "MARKET_BREADTH_PRICE_DUPLICATE",
+                        "QFQ历史批量Reader返回重复来源代码和会话",
+                        category="UNAVAILABLE",
+                    )
+                rows_by_key[key] = row
+            page = batch.get("page", {})
+            next_offset = page.get("next_offset")
+            if next_offset is None:
+                break
+            if type(next_offset) is not int or next_offset <= offset:
+                raise SourceMarketContextError(
+                    "MARKET_BREADTH_PRICE_PAGE_INVALID",
+                    "QFQ历史批量Reader分页游标无效",
+                    category="UNAVAILABLE",
+                )
+            offset = next_offset
+    except BaoStockPriceFactsError as error:
+        raise SourceMarketContextError(
+            error.code, str(error), category="UNAVAILABLE"
+        ) from error
 
-    source_version = pg_result["source_version"]
-    status_counts = source_version["target_status_counts"]
+    def missing_status(symbol: str, session: date) -> tuple[str, str]:
+        if not (
+            roster_by_symbol[symbol]["eligible_start_session"]
+            <= session.isoformat()
+            <= roster_by_symbol[symbol]["eligible_end_session"]
+        ):
+            return "TARGET_MISSING", "SOURCE_SYMBOL_OUTSIDE_ELIGIBLE_SESSION_WINDOW"
+        request = (
+            roster_by_symbol[symbol].get("coordinates", {}).get("FORWARD_ADJUSTED", {})
+        )
+        completed_through = request.get("completed_through_session")
+        if request.get("request_status") in {"COMPLETED", "NO_DATA"} and (
+            request.get("request_status") == "NO_DATA"
+            or completed_through is not None
+            and completed_through >= session.isoformat()
+        ):
+            return "TARGET_MISSING", "QFQ_TARGET_BAR_NOT_RETURNED"
+        return "READ_FAILED", request.get(
+            "last_error_code"
+        ) or "QFQ_REQUEST_NOT_COMPLETE"
+
+    observations = []
+    status_counts = {"TARGET_PRESENT": 0, "TARGET_MISSING": 0, "READ_FAILED": 0}
+    for symbol in source_symbols:
+        for session in needed_sessions:
+            row = rows_by_key.get((symbol, session))
+            if row is None:
+                bar_status, bar_reason = missing_status(symbol, session)
+                quality = "UNKNOWN"
+                price_reason = bar_reason
+                close = None
+            else:
+                bar_status = row.get("bar_status") or "READ_FAILED"
+                bar_reason = row.get("bar_reason")
+                quality = row.get("selected_price_quality") or "UNKNOWN"
+                price_reason = row.get("selected_price_reason")
+                close = row.get("selected_close")
+                if bar_status not in status_counts:
+                    bar_status = "READ_FAILED"
+                    bar_reason = bar_reason or "PRICE_BAR_STATUS_INVALID"
+            if session == target_session:
+                status_counts[bar_status] += 1
+            observations.append(
+                QfqPriceObservation(
+                    source_symbol=symbol,
+                    session_date=session,
+                    source_capture_id=source_capture_id,
+                    selected_close=close,
+                    price_quality=quality,
+                    price_reason=price_reason or bar_reason,
+                    bar_status=bar_status,
+                    price_coordinate="FORWARD_ADJUSTED",
+                )
+            )
+    source_version = {
+        "source_capture_id": source_capture_id,
+        "provider": "BAOSTOCK",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+        "source_time_quality": roster["source_time_quality"],
+        "source_clock_role": roster["source_clock_role"],
+        "capture_read_started_at": roster["captured_at_start"],
+        "capture_validated_at": roster["captured_at_validated"],
+        "source_available_at": None,
+        "price_row_count": len(source_symbols),
+        "capture_expected_price_row_count": len(source_symbols),
+        "target_status_counts": status_counts,
+    }
     cohort = SourceCohortIdentity(
         target_session=target_session,
-        source_package_id=source_package_id,
-        source_capture_id=source_version["source_capture_id"],
-        source_dataset_id=source_version["source_dataset_id"],
-        source_byte_count=source_version["source_byte_count"],
-        parser_contract=source_version["parser_contract"],
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
         source_time_quality=source_version["source_time_quality"],
-        source_available_at=source_version["source_available_at"],
+        source_available_at=None,
         capture_read_started_at=source_version["capture_read_started_at"],
         capture_validated_at=source_version["capture_validated_at"],
         source_clock_role=source_version["source_clock_role"],
-        raw_row_count=source_version["raw_row_count"],
-        capture_expected_row_count=source_version["capture_expected_row_count"],
+        price_row_count=len(source_symbols),
+        capture_expected_price_row_count=len(source_symbols),
         target_present_count=status_counts["TARGET_PRESENT"],
         target_missing_count=status_counts["TARGET_MISSING"],
         read_failed_count=status_counts["READ_FAILED"],
         calendar_id=calendar["calendar_id"],
         calendar_revision=calendar["calendar_revision"],
     )
-    observations = tuple(
-        RawPriceObservation(**row) for row in pg_result["history_rows"]
-    )
+    observations = tuple(observations)
     try:
         calculation = calculate_source_market_breadth(
             SourceMarketBreadthInput(
                 cohort=cohort,
-                source_symbols=pg_result["source_symbols"],
+                source_symbols=source_symbols,
                 research_cutoff=research_cutoff,
                 calendar_id=calendar["calendar_id"],
                 calendar_revision=calendar["calendar_revision"],
@@ -186,7 +319,34 @@ def compute_source_market_context(
         target_session=target_session,
         research_cutoff=research_cutoff,
         calendar=calendar,
-        pg_result=pg_result,
+        pg_result={
+            "status": "AVAILABLE",
+            "transaction": "REPEATABLE READ READ ONLY",
+            "source_capture_id": source_capture_id,
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "source_symbols": source_symbols,
+            "history_rows": [
+                {
+                    "source_symbol": item.source_symbol,
+                    "session_date": item.session_date,
+                    "source_capture_id": item.source_capture_id,
+                    "selected_close": item.selected_close,
+                    "price_quality": item.price_quality,
+                    "price_reason": item.price_reason,
+                    "bar_status": item.bar_status,
+                    "price_coordinate": item.price_coordinate,
+                }
+                for item in observations
+            ],
+            "target_status_counts": status_counts,
+            "history_row_count": len(rows_by_key),
+            "calculation_history_row_count": len(observations),
+            "storage_status": "COMPUTED_READ_ONLY",
+            "source_io_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "database_write_attempted": False,
+        },
         source_version=source_version,
         cohort=cohort,
         calculation=calculation,
@@ -198,7 +358,7 @@ def read_source_market_context(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     include_symbols: bool = False,
 ) -> SourceMarketContextRead:
     """直接读取已保存的精确市场宽度，不在读取时重算来源池。"""
@@ -214,9 +374,11 @@ def read_source_market_context(
             "目标会话超过研究截止",
             category="ARGUMENT",
         )
-    if type(source_package_id) is not int or source_package_id <= 0:
+    if type(source_capture_id) is not int or source_capture_id <= 0:
         raise SourceMarketContextError(
-            "MARKET_BREADTH_PACKAGE_ID_INVALID", "来源包ID无效", category="ARGUMENT"
+            "MARKET_BREADTH_CAPTURE_ID_INVALID",
+            "source_capture_id无效",
+            category="ARGUMENT",
         )
     try:
         payload, metadata, revisions, sessions = _load_calendar(target_session)
@@ -231,7 +393,7 @@ def read_source_market_context(
     saved = read_market_breadth(
         config,
         target_session=target_session,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         calendar_revision=payload["revision"],
         contract_version=SOURCE_MARKET_BREADTH_CONTRACT,
         include_symbols=include_symbols,
@@ -271,18 +433,15 @@ def read_source_market_context(
 
     cohort = SourceCohortIdentity(
         target_session=target_session,
-        source_package_id=source_package_id,
         source_capture_id=int(day["source_capture_id"]),
-        source_dataset_id=day["source_dataset_id"],
-        source_byte_count=day["source_byte_count"],
-        parser_contract=day["parser_contract"],
+        price_coordinate="FORWARD_ADJUSTED",
         source_time_quality=day["source_time_quality"],
         source_available_at=clock("source_available_at"),
         capture_read_started_at=clock("capture_read_started_at"),
         capture_validated_at=clock("capture_validated_at"),
         source_clock_role=day["source_clock_role"],
-        raw_row_count=day["source_count"],
-        capture_expected_row_count=day["source_count"],
+        price_row_count=day["source_count"],
+        capture_expected_price_row_count=day["source_count"],
         target_present_count=day["target_present_count"],
         target_missing_count=day["target_missing_count"],
         read_failed_count=day["read_failed_count"],
@@ -331,19 +490,23 @@ def read_source_market_context(
         symbols=symbols,
     )
     source_version = {
-        "source_package_id": cohort.source_package_id,
         "source_capture_id": cohort.source_capture_id,
-        "raw_row_count": cohort.raw_row_count,
-        "capture_expected_row_count": cohort.capture_expected_row_count,
+        "price_coordinate": cohort.price_coordinate,
+        "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+        "price_row_count": cohort.price_row_count,
+        "capture_expected_price_row_count": cohort.capture_expected_price_row_count,
         "source_time_quality": cohort.source_time_quality,
         "source_available_at": cohort.source_available_at,
+        "capture_read_started_at": cohort.capture_read_started_at,
+        "capture_validated_at": cohort.capture_validated_at,
+        "source_clock_role": cohort.source_clock_role,
     }
     pg_result = {
         "history_row_count": 0,
         "calculation_history_row_count": day["history_row_count"],
         "storage_status": "SAVED",
         "transaction": "REPEATABLE READ READ ONLY",
-        "source_zip_opened": False,
+        "source_io_attempted": False,
         "database_write_attempted": False,
         "ddl_executed": False,
         "dml_executed": False,
@@ -426,7 +589,7 @@ def source_market_context_payload(
         "analysis_scope": "SOURCE_SYMBOL_COHORT_FIXED_AT_T",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "pit_status": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "target_session": market.target_session.isoformat(),
         "research_cutoff": market.research_cutoff.isoformat(),
         "official_calendar": {
@@ -439,7 +602,7 @@ def source_market_context_payload(
                 "t_minus_1": window[3].isoformat(),
                 "t": window[4].isoformat(),
             },
-            "raw_price_sessions": [
+            "qfq_price_sessions": [
                 {"role": "t", "session_date": window[4].isoformat()},
                 {"role": "t_minus_1", "session_date": window[3].isoformat()},
                 {"role": "t_minus_3", "session_date": window[1].isoformat()},
@@ -448,12 +611,10 @@ def source_market_context_payload(
         },
         "source_cohort": {
             "target_session": market.target_session.isoformat(),
-            "source_package_id": cohort.source_package_id,
             "source_capture_id": cohort.source_capture_id,
-            "source_dataset_id": cohort.source_dataset_id,
-            "source_byte_count": cohort.source_byte_count,
-            "parser_contract": cohort.parser_contract,
-            "raw_row_count": cohort.raw_row_count,
+            "price_coordinate": cohort.price_coordinate,
+            "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+            "price_row_count": cohort.price_row_count,
             "target_present_count": cohort.target_present_count,
             "target_missing_count": cohort.target_missing_count,
             "read_failed_count": cohort.read_failed_count,
@@ -502,7 +663,7 @@ def source_market_context_payload(
         },
         "formal_market_breadth": {
             "status": "NOT_READY_HISTORICAL_UNIVERSE",
-            "reason": "本值只描述t日Raw来源代码集合，不代表t与t-3各自正式上市总体。",
+            "reason": "本值只描述t日BaoStock来源代码集合，不代表t与t-3各自正式上市总体。",
             "missing_dependencies": [
                 "t与t-3官方有效上市身份总体及其精确比较集合",
                 "稳定security_id和日期有效身份映射",
@@ -515,12 +676,12 @@ def source_market_context_payload(
             "account": "stock_a",
             "server": "127.0.0.1:5432",
             "transaction": pg_result["transaction"],
-            "history_raw_row_count": pg_result["history_row_count"],
+            "history_price_row_count": pg_result["history_row_count"],
             "source_history_rows_at_calculation": pg_result.get(
                 "calculation_history_row_count", pg_result["history_row_count"]
             ),
             "storage_status": pg_result.get("storage_status", "COMPUTED_READ_ONLY"),
-            "source_zip_opened": pg_result["source_zip_opened"],
+            "source_io_attempted": pg_result["source_io_attempted"],
             "database_write_attempted": pg_result["database_write_attempted"],
             "ddl_executed": pg_result["ddl_executed"],
             "dml_executed": pg_result["dml_executed"],
@@ -582,10 +743,10 @@ def validate_source_market_context_binding(
     market_identity = {
         "source_capture_id": market.source_version["source_capture_id"],
         "target_session": market.target_session.isoformat(),
-        "source_package_id": market.source_version["source_package_id"],
-        "raw_row_count": int(market.source_version["raw_row_count"]),
-        "capture_expected_row_count": int(
-            market.source_version["capture_expected_row_count"]
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "price_row_count": int(market.source_version["price_row_count"]),
+        "capture_expected_price_row_count": int(
+            market.source_version["capture_expected_price_row_count"]
         ),
     }
     d1_identity = {key: d1_source.get(key) for key in market_identity}
@@ -608,7 +769,7 @@ def validate_source_market_context_binding(
     ):
         raise SourceMarketContextError(
             "SOURCE_MARKET_CONTEXT_IDENTITY_MISMATCH",
-            "市场宽度与D1来源包、捕获、时钟或官方日历修订不一致",
+            "市场宽度与D1捕获、价格坐标、时钟或官方日历修订不一致",
             category="IDENTITY_MISMATCH",
         )
 
@@ -626,7 +787,7 @@ def validate_source_market_context_binding(
         strength_identity = {
             "source_capture_id": strength_source.get("source_capture_id"),
             "target_session": strength.get("target_session"),
-            "source_package_id": strength_source.get("source_package_id"),
+            "price_coordinate": strength_source.get("price_coordinate"),
         }
         expected_strength_identity = {
             key: market_identity[key] for key in strength_identity
@@ -646,7 +807,7 @@ def validate_source_market_context_binding(
         ):
             raise SourceMarketContextError(
                 "SOURCE_MARKET_CONTEXT_IDENTITY_MISMATCH",
-                "市场宽度与行业/GN强弱使用的来源包、捕获或官方日历不一致",
+                "市场宽度与行业/GN强弱使用的捕获、坐标或官方日历不一致",
                 category="IDENTITY_MISMATCH",
             )
 
@@ -661,17 +822,17 @@ def source_market_not_evaluable_payload(
     reason: str,
 ) -> dict[str, Any]:
     """在官方市场窗口不足时保留组合结果并将市场组件标为UNKNOWN。"""
-    n_source = int(source_identity["raw_row_count"])
+    n_source = int(source_identity["price_row_count"])
     counts = {name: 0 for name in (*_ELIGIBLE_CLASSES, "UNKNOWN")}
     counts["UNKNOWN"] = n_source
     unknown_reasons = {reason_code: n_source} if n_source else {}
     return {
         "status": "NOT_EVALUABLE",
-        "contract_version": "MKT-02_RAW_POSITIVE_RETURN_STATE_DELTA_R1",
+        "contract_version": SOURCE_MARKET_BREADTH_CONTRACT,
         "analysis_scope": "SOURCE_SYMBOL_COHORT_FIXED_AT_T",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "pit_status": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
         "official_calendar": {
@@ -682,9 +843,9 @@ def source_market_not_evaluable_payload(
         },
         "source_cohort": {
             "target_session": target_session.isoformat(),
-            "source_package_id": source_identity.get("source_package_id"),
             "source_capture_id": source_identity.get("source_capture_id"),
-            "raw_row_count": n_source,
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "price_row_count": n_source,
             "source_time_quality": source_identity.get("source_time_quality"),
             "source_available_at": source_identity.get("source_available_at"),
         },

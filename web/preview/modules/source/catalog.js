@@ -14,17 +14,16 @@ async function loadCatalog() {
     if (catalogRequest !== state.catalogRequest) return;
     state.versions = data.versions;
     $("versionSelect").replaceChildren(
-      new Option("— 请选择目标日期与来源包版本 —", ""),
+      new Option("— 请选择目标日期与价格捕获 —", ""),
     );
     for (const v of data.versions) {
       const title = [
-        `${v.session_date} · 包ID ${v.source_package_id} · ${v.version_status} · `,
-        `Raw ${v.row_count}/${v.expected_row_count}（有Bar `,
-        `${v.bar_status_counts.TARGET_PRESENT || 0} / 缺Bar ${v.bar_status_counts.TARGET_MISSING || 0}）`,
+        `${v.session_date} · 捕获ID ${v.source_capture_id} · ${v.version_status} · `,
+        `配对价格行 ${v.row_count}/${v.expected_row_count} · RAW OBSERVED ${v.raw_observed_value_row_count ?? 0} · QFQ OBSERVED ${v.qfq_observed_value_row_count ?? 0}`,
       ].join("");
       const option = new Option(
         title,
-        `${v.session_date}|${v.source_package_id}`,
+        `${v.session_date}|${v.source_capture_id}`,
       );
       $("versionSelect").append(option);
     }
@@ -34,14 +33,14 @@ async function loadCatalog() {
     $("candidateRows").replaceChildren();
     $("pageCount").textContent = "—";
     $("pageStatus").textContent = state.versions.length
-      ? "请选择PG日期和版本"
-      : "PG目录为空";
+      ? "请选择PG日期与BaoStock双坐标捕获"
+      : "PG中没有可选的BaoStock价格捕获";
     $("prevPage").disabled = true;
     $("nextPage").disabled = true;
     $("lastPage").disabled = true;
     $("population").textContent = state.versions.length
-      ? `已读取${data.total_version_count}个真实PG日期/版本。请选择明确版本；Raw来源候选不代表官方上市总体。`
-      : "PG中没有可选的Raw来源版本。";
+      ? `已读取${data.total_version_count}个真实PG日期/捕获。请选择明确捕获；价格来源候选不代表官方上市总体。`
+      : "PG中没有可选的BaoStock价格捕获。";
   } catch (error) {
     if (catalogRequest !== state.catalogRequest) return;
     $("population").textContent = `目录读取失败：${error.message}`;
@@ -54,9 +53,9 @@ function describePopulation(page) {
   const version = page.source_version;
   const versionText =
     version.status === "CLOSED"
-      ? `来源包Raw记录闭合：${version.stored_raw_rows}/${version.capture_expected_rows}`
-      : `来源包Raw部分入库：${version.stored_raw_rows}/${version.capture_expected_rows}；不得按全市场完成解释`;
-  return `${page.target_session} · 来源包ID ${page.source_package_id} · ${versionText}。当前筛选来源候选=${page.filtered_total}；有效上市总体=UNKNOWN（NOT_CONNECTED）。这只是该来源包的候选分母。`;
+      ? `来源捕获Raw记录闭合：${version.stored_raw_rows}/${version.capture_expected_rows}`
+      : `来源捕获Raw部分入库：${version.stored_raw_rows}/${version.capture_expected_rows}；不得按全市场完成解释`;
+  return `${page.target_session} · 来源捕获ID ${page.source_capture_id} · ${versionText}。当前筛选来源候选=${page.filtered_total}；有效上市总体=UNKNOWN（NOT_CONNECTED）。这只是该来源捕获的候选分母。`;
 }
 async function loadPage() {
   const v = selectedVersion();
@@ -77,14 +76,14 @@ async function loadPage() {
   }
   const requestId = ++state.pageRequest;
   state.stockRequest++;
-  const key = `${v.target_session}|${v.source_package_id}`;
+  const key = `${v.target_session}|${v.source_capture_id}`;
   state.version = v;
   clearResult();
   $("candidateRows").replaceChildren();
   $("pageStatus").textContent = "正在读取PG分页…";
   const query = new URLSearchParams({
     target_session: v.target_session,
-    source_package_id: v.source_package_id,
+    source_capture_id: v.source_capture_id,
     offset: String(state.offset),
     limit: String(state.limit),
     market: $("marketSelect").value,
@@ -95,7 +94,7 @@ async function loadPage() {
     if (
       requestId !== state.pageRequest ||
       key !==
-        `${selectedVersion()?.target_session}|${selectedVersion()?.source_package_id}`
+        `${selectedVersion()?.target_session}|${selectedVersion()?.source_capture_id}`
     )
       return;
     const p = data.page;
@@ -119,7 +118,7 @@ async function loadPage() {
       cell(tr, text(item.bar_status));
       cell(
         tr,
-        `${item.source_object_status || "TDX_SOURCE_SYMBOL_OBSERVED"} · ${item.stable_security_id_status || "STABLE_SECURITY_ID_UNVERIFIED"}`,
+        `${item.source_object_status || "BAOSTOCK_SOURCE_SYMBOL_OBSERVED"} · ${item.stable_security_id_status || "STABLE_SECURITY_ID_UNVERIFIED"}`,
       );
       const td = document.createElement("td");
       const button = document.createElement("button");

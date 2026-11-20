@@ -18,7 +18,7 @@ PROFILE_SEMANTIC_MODULES = (
     ("fields-profile", "price-profile/fields-profile.json"),
 )
 _MANIFEST_NAME = "price-profile.contract.json"
-_FORMAT_ID = "STOCK-A-PRICE-PROFILE-SEMANTICS/R1"
+_FORMAT_ID = "STOCK-A-PRICE-PROFILE-SEMANTICS/R2"
 _MAX_JSON_BYTES = 1_500_000
 
 
@@ -227,7 +227,7 @@ def load_price_profile_contract(
     if (
         manifest.get("format") != _FORMAT_ID
         or manifest.get("contract_id") != "STOCK-A-PRICE-PROFILE-SEMANTICS"
-        or manifest.get("version") != "R1"
+        or manifest.get("version") != "R2"
     ):
         raise PriceProfileContractError(
             "PROFILE_CONTRACT_IDENTITY_MISMATCH", "画像合同身份或版本不匹配"
@@ -296,7 +296,7 @@ def load_price_profile_contract(
         )
     document = {
         "contract_id": "STOCK-A-PRICE-PROFILE-SEMANTICS",
-        "version": "R1",
+        "version": "R2",
         "field_registry": [
             field for _order, field in sorted(assembled_fields, key=lambda row: row[0])
         ],

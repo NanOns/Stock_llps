@@ -21,7 +21,6 @@ def read_source_board_relative_history_inputs(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_package_id: int,
     source_capture_id: int,
     source_symbol: str,
     board_kind: str,
@@ -32,8 +31,6 @@ def read_source_board_relative_history_inputs(
     session_days = tuple(sessions)
     if (
         type(target_session) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or not isinstance(source_symbol, str)
@@ -63,7 +60,7 @@ def read_source_board_relative_history_inputs(
         source = source_raw.read_source_version_context(
             config,
             target_session=session,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
         )
         source_versions[session] = source
     first_version = source_versions[target_session]
@@ -85,13 +82,12 @@ def read_source_board_relative_history_inputs(
                       membership_mode,research_mode,price_coordinate,
                       hypothesis_version
                FROM source_t0_early_observation_facts
-               WHERE target_session=%s AND source_package_id=%s
-                 AND source_capture_id=%s AND source_symbol=%s
+               WHERE target_session=%s AND source_capture_id=%s
+                 AND source_symbol=%s
                  AND board_kind=%s AND board_native_id=%s
                ORDER BY membership_snapshot_id,catalog_id""",
             (
                 target_session,
-                source_package_id,
                 source_capture_id,
                 source_symbol,
                 board_kind,
@@ -189,12 +185,16 @@ def read_source_board_relative_history_inputs(
                     "participation_status": "NOT_COMPUTED",
                 },
             }
-            if source.get("status") != "AVAILABLE" or type(source_capture) is not int:
+            if (
+                source.get("status") != "AVAILABLE"
+                or type(source_capture) is not int
+                or source_capture != source_capture_id
+            ):
                 day["reason"] = "该会话没有唯一且闭合的已存Raw捕获"
                 days.append(day)
                 continue
 
-            package_id = source_package_id
+            capture_id = source_capture_id
             cursor.execute(
                 """SELECT DISTINCT profile_revision,producer_contract,
                           producer_version,history_session_count,calendar_id,
@@ -202,10 +202,10 @@ def read_source_board_relative_history_inputs(
                           history_window_start,history_window_end,
                           source_time_quality,source_clock_role
                    FROM source_pool_seed_day_facts
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s AND source_symbol=%s
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND source_symbol=%s
                    ORDER BY profile_revision,producer_contract,producer_version""",
-                (session, package_id, source_capture, source_symbol),
+                (session, capture_id, source_symbol),
             )
             scope_rows = cursor.fetchall()
             if len(scope_rows) == 1:
@@ -218,10 +218,9 @@ def read_source_board_relative_history_inputs(
             day["source_pool_symbols"] = _symbols(
                 cursor,
                 """SELECT source_symbol FROM source_raw_daily
-                   WHERE session_date=%s AND source_package_id=%s
-                     AND source_capture_id=%s
+                   WHERE session_date=%s AND source_capture_id=%s
                    ORDER BY source_symbol """,
-                (session, package_id, source_capture),
+                (session, capture_id),
             )
 
             scope = day["seed_scope"]
@@ -232,12 +231,10 @@ def read_source_board_relative_history_inputs(
                               s.rps20_numerator,s.rps20_denominator,s.rps20_quality
                        FROM tdx_sector_members m
                        JOIN source_raw_daily r ON r.source_symbol=m.source_symbol
-                         AND r.session_date=%s AND r.source_package_id=%s
-                         AND r.source_capture_id=%s
+                         AND r.session_date=%s AND r.source_capture_id=%s
                        LEFT JOIN source_pool_seed_day_facts s
                          ON s.source_symbol=m.source_symbol
                         AND s.target_session=%s
-                        AND s.source_package_id=%s
                         AND s.source_capture_id=%s
                         AND s.profile_revision=%s
                         AND s.producer_contract=%s
@@ -252,11 +249,9 @@ def read_source_board_relative_history_inputs(
                        ORDER BY m.source_symbol """,
                     (
                         session,
-                        package_id,
-                        source_capture,
+                        capture_id,
                         session,
-                        package_id,
-                        source_capture,
+                        capture_id,
                         scope["profile_revision"],
                         scope["producer_contract"],
                         scope["producer_version"],
@@ -297,13 +292,12 @@ def read_source_board_relative_history_inputs(
                               ORDER BY alignment_state)
                               FILTER (WHERE alignment_state IS NOT NULL), ARRAY[]::text[])
                    FROM source_t0_early_observation_facts
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s AND source_symbol=%s
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND source_symbol=%s
                      AND board_kind=%s AND board_native_id=%s""",
                 (
                     session,
-                    package_id,
-                    source_capture,
+                    capture_id,
                     source_symbol,
                     board_kind,
                     board_native_id,
@@ -327,15 +321,14 @@ def read_source_board_relative_history_inputs(
                      ON t.target_pulse_id=p.id
                    WHERE p.target_session=%s AND p.board_kind=%s
                      AND p.board_native_id=%s AND p.catalog_id=%s
-                     AND p.source_package_id=%s AND p.source_capture_id=%s
+                     AND p.source_capture_id=%s
                    ORDER BY p.id""",
                 (
                     session,
                     board_kind,
                     board_native_id,
                     catalog_id,
-                    package_id,
-                    source_capture,
+                    capture_id,
                 ),
             )
             pulse_rows = cursor.fetchall()
@@ -364,11 +357,11 @@ def read_source_board_relative_history_inputs(
                           frozen_line_numerator::text,
                           frozen_line_denominator::text,frozen_line_source
                    FROM source_rule_evaluations
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s AND source_symbol=%s
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND source_symbol=%s
                      AND rule_id IN ('LAUNCH_CONFIRM','RECOVERY_TURN')
                    ORDER BY rule_id,rule_version,scope""",
-                (session, package_id, source_capture, source_symbol),
+                (session, capture_id, source_symbol),
             )
             rule_rows = cursor.fetchall()
             rule_details: dict[str, dict[str, Any]] = {}
@@ -406,10 +399,9 @@ def read_source_board_relative_history_inputs(
                           eligible_count,target_present_count,target_missing_count,
                           read_failed_count,history_row_count,session_t1,session_t3
                    FROM source_market_breadth_days
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s
+                   WHERE target_session=%s AND source_capture_id=%s
                    ORDER BY id""",
-                (session, package_id, source_capture),
+                (session, capture_id),
             )
             breadth_rows = cursor.fetchall()
             if len(breadth_rows) == 1:
@@ -464,7 +456,7 @@ def read_source_board_relative_history_inputs(
                     else None,
                     "membership_mode": membership_mode,
                     "research_mode": "NON_PIT_EXPLORATORY",
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "price_coordinate": "FORWARD_ADJUSTED",
                 }
             elif len(breadth_rows) > 1:
                 day["market_context"] = {
@@ -478,10 +470,9 @@ def read_source_board_relative_history_inputs(
                           median_numerator::text,median_denominator::text,
                           median_value::text,calendar_revision,price_coordinate,pit_status
                    FROM source_market_participation_days
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s
+                   WHERE target_session=%s AND source_capture_id=%s
                    ORDER BY id""",
-                (session, package_id, source_capture),
+                (session, capture_id),
             )
             participation_rows = cursor.fetchall()
             if len(participation_rows) == 1:

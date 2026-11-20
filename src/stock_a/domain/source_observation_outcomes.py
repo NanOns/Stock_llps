@@ -16,7 +16,7 @@ OUTCOME_STATUSES = (
 )
 
 _ANCHOR_FIELDS = (
-    ("source_package_id", "source_package_id"),
+    ("source_capture_id", "source_capture_id"),
     ("source_symbol", "source_symbol"),
     ("rule_id", "rule_id"),
     ("rule_version", "rule_version"),
@@ -134,7 +134,10 @@ def classify_observation_horizon(
         if row.get("evidence_rule_fact_id") is not None:
             evidence_fields = (
                 ("evidence_target_session", session),
-                ("evidence_source_package_id", anchor.get("source_package_id")),
+                (
+                    "evidence_source_capture_id",
+                    anchor.get("source_capture_id"),
+                ),
                 ("evidence_source_symbol", anchor.get("source_symbol")),
                 ("evidence_rule_id", anchor.get("rule_id")),
                 ("evidence_rule_version", anchor.get("rule_version")),

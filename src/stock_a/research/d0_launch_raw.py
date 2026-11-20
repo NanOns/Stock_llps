@@ -11,19 +11,19 @@ from stock_a.research.d0_price_facts import calculate_d0_first_day_damage
 
 
 _SCENARIO = "LAUNCH_CONFIRM"
-_SESSION_CONTRACT = "D0_SESSION_R2"
+_SESSION_CONTRACT = "D0_SESSION_BAOSTOCK_QFQ_R3"
 _REASON_TEXT = {
     "OFFICIAL_WINDOW_INVALID": "官方会话必须是有序、唯一且以目标日结束的窗口。",
     "OFFICIAL_WINDOW_LEFT_TRUNCATED": "目标日前不足20个连续官方会话。",
-    "OFFICIAL_SESSION_ROW_MISSING": "严格官方会话窗口没有该来源代码的RAW行。",
+    "OFFICIAL_SESSION_ROW_MISSING": "严格官方会话窗口没有该来源代码的PG价格行。",
     "OFFICIAL_SESSION_BAR_MISSING": "官方会话未取得有效实际Bar；停复牌状态未知，不能补零或跳日。",
-    "RAW_SOURCE_IDENTITY_MISMATCH": "RAW行与命名空间、来源代码、日期、来源包或来源内容不一致。",
-    "RAW_TARGET_CAPTURE_MISMATCH": "目标日RAW行与来源捕获身份不一致。",
-    "RAW_COORDINATE_MISMATCH": "价格坐标不是同一RAW_UNADJUSTED坐标。",
-    "RAW_PARSER_CONTRACT_MISMATCH": "窗口RAW历史使用了不同的来源解析合同。",
-    "RAW_PRICE_QUALITY_UNKNOWN": "严格会话价格质量未知。",
-    "RAW_PRICE_QUALITY_BAD": "严格会话价格值不合法。",
-    "INVALID_PRICE_OHLC": "原始OHLC缺失、非有限、非正数或内部关系非法。",
+    "RAW_SOURCE_IDENTITY_MISMATCH": "价格行与来源代码、日期或paired捕获身份不一致。",
+    "RAW_TARGET_CAPTURE_MISMATCH": "历史行与paired BaoStock捕获身份不一致。",
+    "RAW_COORDINATE_MISMATCH": "价格坐标不是同一BaoStock QFQ坐标。",
+    "RAW_PARSER_CONTRACT_MISMATCH": "历史行缺少QFQ价格质量或字段。",
+    "RAW_PRICE_QUALITY_UNKNOWN": "严格会话QFQ价格质量未知。",
+    "RAW_PRICE_QUALITY_BAD": "严格会话QFQ价格值不合法。",
+    "INVALID_PRICE_OHLC": "QFQ OHLC缺失、非有限、非正数或内部关系非法。",
     "CLV_RANGE_ZERO": "目标日最高价等于最低价，CLV分母为零。",
     "RAW_AMOUNT_QUALITY_UNKNOWN": "原生金额值质量未知或不适用。",
     "RAW_AMOUNT_QUALITY_BAD": "原生金额值非法。",
@@ -136,9 +136,8 @@ def _window_row(
     rows: Mapping[date, Mapping[str, Any] | None],
     *,
     source_symbol: str,
-    source_package_id: int,
-    target_capture_id: int,
-    parser_contract: str,
+    source_capture_id: int,
+    price_coordinate: str,
 ) -> tuple[Mapping[str, Any] | None, dict[str, Fraction] | None, str | None]:
     row = rows.get(session)
     if row is None:
@@ -146,34 +145,32 @@ def _window_row(
     if (
         row.get("session_date") != session
         or row.get("source_symbol") != source_symbol
-        or type(row.get("source_package_id")) is not int
-        or row.get("source_package_id") != source_package_id
+        or row.get("source_capture_id") != source_capture_id
     ):
         return row, None, "RAW_SOURCE_IDENTITY_MISMATCH"
-    if (
-        session == rows.get("_target_session")
-        and row.get("source_capture_id") != target_capture_id
-    ):
+    row_coordinate = row.get(
+        "qfq_price_coordinate"
+        if price_coordinate == "FORWARD_ADJUSTED"
+        else "raw_price_coordinate",
+        row.get("price_coordinate"),
+    )
+    if row_coordinate not in (None, price_coordinate):
         return row, None, "RAW_TARGET_CAPTURE_MISMATCH"
-    if row.get("price_coordinate") != "RAW_UNADJUSTED":
+    if price_coordinate != "FORWARD_ADJUSTED":
         return row, None, "RAW_COORDINATE_MISMATCH"
-    if row.get("reference_quality") is False:
-        return row, None, "RAW_REFERENCE_QUALITY_UNKNOWN"
-    if row.get("parser_contract") != parser_contract:
-        return row, None, "RAW_PARSER_CONTRACT_MISMATCH"
     if row.get("bar_status") != "TARGET_PRESENT":
         return row, None, "OFFICIAL_SESSION_BAR_MISSING"
-    if row.get("price_quality") == "BAD_VALUE":
+    if row.get("qfq_price_quality") == "BAD_VALUE":
         return row, None, "RAW_PRICE_QUALITY_BAD"
-    if row.get("price_quality") != "OBSERVED":
+    if row.get("qfq_price_quality") != "OBSERVED":
         return row, None, "RAW_PRICE_QUALITY_UNKNOWN"
     values = {
         name: _fraction(row.get(column))
         for name, column in (
-            ("open", "raw_open"),
-            ("high", "raw_high"),
-            ("low", "raw_low"),
-            ("close", "raw_close"),
+            ("open", "qfq_open"),
+            ("high", "qfq_high"),
+            ("low", "qfq_low"),
+            ("close", "qfq_close"),
         )
     }
     if any(value is None for value in values.values()):
@@ -215,14 +212,12 @@ def _raw_amount(
     session: date,
     row: Mapping[str, Any] | None,
     *,
-    parser_contract: str,
+    source_capture_id: int,
 ) -> tuple[Fraction | None, str | None]:
     if row is None or row.get("bar_status") != "TARGET_PRESENT":
         return None, "OFFICIAL_SESSION_BAR_MISSING"
-    if row.get("reference_quality") is False:
-        return None, "RAW_REFERENCE_QUALITY_UNKNOWN"
-    if row.get("parser_contract") != parser_contract:
-        return None, "RAW_PARSER_CONTRACT_MISMATCH"
+    if row.get("source_capture_id") != source_capture_id:
+        return None, "RAW_SOURCE_IDENTITY_MISMATCH"
     if row.get("raw_amount_quality") != "RAW_SOURCE_VALUE_OBSERVED":
         if row.get("raw_amount_quality") == "BAD_VALUE":
             return None, "RAW_AMOUNT_QUALITY_BAD"
@@ -240,13 +235,12 @@ def _window_payload(
     fields = (
         "bar_status",
         "bar_reason",
-        "price_quality",
-        "price_reason",
+        "qfq_price_quality",
+        "qfq_price_reason",
         "raw_amount_quality",
         "raw_amount_reason",
         "amount_unit_status",
         "source_capture_id",
-        "source_package_id",
     )
     result = []
     for session in official_sessions:
@@ -257,13 +251,13 @@ def _window_payload(
         }
         if row is not None:
             payload.update({key: row.get(key) for key in fields})
-            payload["raw_ohlc"] = {
+            payload["qfq_ohlc"] = {
                 key: fraction_payload(_fraction(row.get(column)))
                 for key, column in (
-                    ("open", "raw_open"),
-                    ("high", "raw_high"),
-                    ("low", "raw_low"),
-                    ("close", "raw_close"),
+                    ("open", "qfq_open"),
+                    ("high", "qfq_high"),
+                    ("low", "qfq_low"),
+                    ("close", "qfq_close"),
                 )
             }
             payload["raw_amount"] = fraction_payload(_fraction(row.get("raw_amount")))
@@ -277,12 +271,15 @@ def calculate_d0_launch_confirm_raw(
     official_sessions: Sequence[date],
     history_rows_by_session: Mapping[date, Mapping[str, Any] | None],
     source_symbol: str,
-    source_package_id: int,
-    target_capture_id: int,
-    parser_contract: str,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     include_history_window: bool = False,
 ) -> dict[str, Any]:
     """独立按D0_SESSION_R2严格20个前态会话和目标日计算LAUNCH_CONFIRM raw。"""
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        raise ValueError("D0启动诊断必须绑定paired source_capture_id")
+    if price_coordinate != "FORWARD_ADJUSTED":
+        raise ValueError("D0跨日启动结构必须使用QFQ坐标")
     sessions = tuple(official_sessions)
     valid_window = (
         type(target_session) is date
@@ -315,9 +312,8 @@ def calculate_d0_launch_confirm_raw(
                 session,
                 rows,
                 source_symbol=source_symbol,
-                source_package_id=source_package_id,
-                target_capture_id=target_capture_id,
-                parser_contract=parser_contract,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
             )
             for session in sessions
         }
@@ -407,14 +403,12 @@ def calculate_d0_launch_confirm_raw(
             elif row is not None and (
                 row.get("source_symbol") != source_symbol
                 or row.get("session_date") != session
-                or row.get("source_package_id") != source_package_id
-                or session == current_session
-                and row.get("source_capture_id") != target_capture_id
+                or row.get("source_capture_id") != source_capture_id
             ):
                 value, error = None, "RAW_SOURCE_IDENTITY_MISMATCH"
             else:
                 value, error = _raw_amount(
-                    session, row, parser_contract=parser_contract
+                    session, row, source_capture_id=source_capture_id
                 )
             amount_values[session] = value
             amount_errors[session] = error
@@ -430,7 +424,7 @@ def calculate_d0_launch_confirm_raw(
                 first_error or "RAW_AMOUNT_QUALITY_UNKNOWN",
                 formulas["amr20_mean_prior_at_least_120"],
             )
-        elif len(unit_statuses) != 1 or unit_statuses != {"UNIT_UNVERIFIED"}:
+        elif len(unit_statuses) != 1 or unit_statuses != {"CNY_VERIFIED"}:
             predicates["amr20_mean_prior_at_least_120"] = _unknown_predicate(
                 "RAW_AMOUNT_NATIVE_UNIT_MISMATCH",
                 formulas["amr20_mean_prior_at_least_120"],
@@ -510,6 +504,9 @@ def calculate_d0_launch_confirm_raw(
     return {
         "source_symbol": source_symbol,
         "target_session": target_session.isoformat(),
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "scenario": _SCENARIO,
         "scenario_raw": state,
         "quality": "OBSERVED" if state != "UNKNOWN" else "UNKNOWN",
@@ -551,9 +548,8 @@ def calculate_d0_recovery_turn_raw(
     official_sessions,
     history_rows_by_session,
     source_symbol,
-    source_package_id,
-    target_capture_id,
-    parser_contract,
+    source_capture_id,
+    price_coordinate="FORWARD_ADJUSTED",
     rps5_delta3,
     rps20=None,
     include_prior_ols=False,
@@ -561,7 +557,10 @@ def calculate_d0_recovery_turn_raw(
     """按严格市场会话计算恢复结构；各子条件独立保留未知。"""
     sessions = tuple(official_sessions)
     if (
-        not sessions
+        type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or price_coordinate != "FORWARD_ADJUSTED"
+        or not sessions
         or sessions[-1] != target_session
         or tuple(sorted(set(sessions))) != sessions
         or len(sessions) > 25
@@ -574,9 +573,8 @@ def calculate_d0_recovery_turn_raw(
             day,
             rows,
             source_symbol=source_symbol,
-            source_package_id=source_package_id,
-            target_capture_id=target_capture_id,
-            parser_contract=parser_contract,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
         )
         for day in sessions
     ]
@@ -663,9 +661,6 @@ def calculate_d0_recovery_turn_raw(
     amount_rows = checked[-21:]
     amount_identity_errors = {
         "RAW_SOURCE_IDENTITY_MISMATCH",
-        "RAW_TARGET_CAPTURE_MISMATCH",
-        "RAW_REFERENCE_QUALITY_UNKNOWN",
-        "RAW_PARSER_CONTRACT_MISMATCH",
         "OFFICIAL_SESSION_ROW_MISSING",
         "OFFICIAL_SESSION_BAR_MISSING",
     }
@@ -673,7 +668,7 @@ def calculate_d0_recovery_turn_raw(
         _raw_amount(
             sessions[len(sessions) - len(amount_rows) + i],
             row,
-            parser_contract=parser_contract,
+            source_capture_id=source_capture_id,
         )[0]
         if error not in amount_identity_errors
         else None
@@ -686,7 +681,7 @@ def calculate_d0_recovery_turn_raw(
     if (
         len(amounts) == 21
         and all(v is not None for v in amounts)
-        and units == {"UNIT_UNVERIFIED"}
+        and units == {"CNY_VERIFIED"}
     ):
         mean = sum(amounts[:-1], Fraction()) / 20
         if mean > 0:
@@ -749,8 +744,8 @@ def calculate_d0_recovery_turn_raw(
         official_sessions=sessions,
         history_rows_by_session=history_rows_by_session,
         source_symbol=source_symbol,
-        source_package_id=source_package_id,
-        target_capture_id=target_capture_id,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
     )
     damage_input_error = next((error for _, _, error in checked[-20:] if error), None)
     damage_state = damage.state if damage_input_error is None else "UNKNOWN"
@@ -955,6 +950,9 @@ def calculate_d0_recovery_turn_raw(
             "role": "DIAGNOSTIC_ONLY_NOT_D2",
         },
         "session_contract": _SESSION_CONTRACT,
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
         "absolute_liquidity_cny_status": "UNKNOWN_UNIT_UNVERIFIED",
         "pit_status": "NON_PIT_RETROSPECTIVE",

@@ -6,7 +6,6 @@ from datetime import date
 from typing import Any, Mapping
 
 from stock_a.application.research_window import resolve_pg_history_window
-from stock_a.application.tdx_sector_members import _raw_window_observation
 from stock_a.domain import FieldValue, unknown
 from stock_a.research.core import (
     CoreObservation,
@@ -19,7 +18,10 @@ from stock_a.research.cross_section import (
     rank_return_endpoint,
 )
 from stock_a.research.entry import _load_calendar
-from stock_a.storage.postgres.source_raw import read_raw_daily_history_page
+from stock_a.storage.postgres.baostock_price_facts import (
+    read_baostock_price_history_batch,
+    read_baostock_price_page,
+)
 
 
 def read_source_pool_rps(
@@ -27,184 +29,194 @@ def read_source_pool_rps(
     *,
     target_session: date,
     research_cutoff: date,
-    source_package_id: int,
-    page_size: int = 100,
+    source_capture_id: int,
+    page_size: int = 1000,
 ) -> dict[str, Any]:
-    """各精确端点分别读取完整来源池；RAW结果仅作后验描述。"""
+    """按paired BaoStock capture读取两个完整QFQ横截面端点。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(page_size) is not int
-        or not 1 <= page_size <= 5000
+        or not 1 <= page_size <= 1000
     ):
-        raise ValueError("目标会话、截止日或完整池读取页大小无效")
+        raise ValueError("RPS目标、截止、paired capture或分页上限无效")
+    from stock_a.research.entry_history.support import (
+        _core_observation_from_pg_price_row,
+    )
+
     _, sessions, revision = resolve_pg_history_window(target_session.isoformat(), 24)
     calendar_data, _, _, _ = _load_calendar(target_session)
     calendar = MarketSessionCalendar(calendar_data["calendar_id"], revision, sessions)
-    all_coordinates: dict[str, PriceCoordinate] = {}
-    endpoint_data = {}
-    target_histories: dict[str, list[dict[str, Any]]] = {}
+    coordinate_id = f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}"
+    endpoint_members: dict[int, tuple[str, ...]] = {}
     for offset in (0, 3):
-        end = sessions[-1 - offset]
-        window = sessions[: len(sessions) - offset][-21:]
+        endpoint = sessions[-1 - offset]
+        symbols: list[str] = []
         page_offset = 0
-        members = []
-        histories = {}
         total = None
         while True:
-            page = read_raw_daily_history_page(
+            page = read_baostock_price_page(
                 config,
-                target_session=end,
-                source_package_id=source_package_id,
-                sessions=sessions if offset == 0 else (end,),
+                target_session=endpoint,
+                cutoff=research_cutoff,
+                source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
                 offset=page_offset,
-                limit=page_size,
+                limit=min(page_size, 100),
                 market="ALL",
                 board="ALL",
-                allow_full_pool_page=page_size > 100,
             )
+            if page.get("source_capture_id") != source_capture_id:
+                raise ValueError("RPS端点没有绑定请求的paired capture")
+            if (
+                page.get("version_status") != "CLOSED"
+                or page.get("partition_closed") is not True
+            ):
+                raise ValueError("RPS端点QFQ分区或证券总体未闭合")
             if total is None:
-                total = page["total_count"]
-                if total and (
-                    page["version_status"] != "CLOSED"
-                    or total != page["version_expected_row_count"]
-                ):
-                    raise ValueError("来源池分母不完整")
-            elif total != page["total_count"] or page["version_status"] != "CLOSED":
-                raise ValueError("来源池分页分母发生变化")
-            for candidate in page["candidates"]:
-                symbol = candidate["source_symbol"]
-                if symbol in histories:
-                    raise ValueError("来源池证券重复")
-                if offset == 0:
-                    target_histories[symbol] = candidate["history_rows"]
-                    rows = [
-                        row
-                        for row in candidate["history_rows"]
-                        if row["session_date"] in window
-                    ]
-                elif symbol in target_histories:
-                    rows = [
-                        row
-                        for row in target_histories[symbol]
-                        if row["session_date"] in window
-                    ]
-                    endpoint_rows = [row for row in rows if row["session_date"] == end]
-                    if (
-                        len(endpoint_rows) != 1
-                        or endpoint_rows[0] != candidate["history_rows"][0]
-                    ):
-                        raise ValueError("来源池前一端点历史与成员不一致")
-                else:
-                    history_page = read_raw_daily_history_page(
-                        config,
-                        target_session=end,
-                        source_package_id=source_package_id,
-                        sessions=window,
-                        offset=0,
-                        limit=1,
-                        market="ALL",
-                        board="ALL",
-                        source_symbol=symbol,
-                    )
-                    if (
-                        history_page["version_status"] != "CLOSED"
-                        or history_page["total_count"] != 1
-                    ):
-                        raise ValueError("前一端点独有证券的来源历史不完整")
-                    rows = history_page["candidates"][0]["history_rows"]
-                by_key = {(symbol, row["session_date"]): row for row in rows}
-                if len(by_key) != len(rows):
-                    raise ValueError("来源历史会话重复")
-                counts = {
-                    key: {"row_count": 1, "package_count": 1, "capture_count": 1}
-                    for key in by_key
-                }
-                target_rows = [row for row in rows if row["session_date"] == end]
-                if len(target_rows) != 1:
-                    raise ValueError("来源池目标日缺少唯一Raw行")
-                capture = target_rows[0]["source_capture_id"]
-                observations = tuple(
-                    _raw_window_observation(
-                        source_symbol=symbol,
-                        session=day,
-                        raw_by_key=by_key,
-                        revision_counts=counts,
-                        target_session=end,
-                        target_capture_id=capture,
-                    )[0]
-                    for day in window
-                )
-                histories[symbol] = observations
-                members.append(symbol)
-                all_coordinates[symbol] = PriceCoordinate(
-                    symbol, target_session, "RAW_UNADJUSTED", str(source_package_id)
-                )
-            if page["next_offset"] is None:
-                break
-            page_offset = page["next_offset"]
-        if len(members) != total or members != sorted(set(members)):
-            raise ValueError("来源池分页未闭合")
-        endpoint_data[offset] = (end, window, tuple(members), histories)
-    target_members = endpoint_data[0][2]
-    if not target_members:
-        raise ValueError("目标日没有精确来源池")
-    ranked = {}
-    counts = {}
-    for offset, (end, window, members, histories) in endpoint_data.items():
-        for period in (5, 20):
-            key = f"rps{period}_{offset}"
-            if not members:
-                ranked[key] = {}
-                counts[key] = {
-                    "total": 0,
-                    "known": 0,
-                    "unknown": 0,
-                    "session": end.isoformat(),
-                }
-                continue
-            endpoint_calendar = MarketSessionCalendar(
-                calendar.calendar_id, calendar.revision, window
+                total = int(page["total_count"])
+            elif int(page["total_count"]) != total:
+                raise ValueError("RPS端点分页期间分母发生变化")
+            symbols.extend(
+                str(row["source_symbol"])
+                for row in page.get("rows", ())
+                if isinstance(row, Mapping)
             )
-            returns = {
-                symbol: calculate_core_return(
-                    rows, periods=period, official_calendar=endpoint_calendar
+            next_offset = page.get("next_offset")
+            if next_offset is None:
+                break
+            page_offset = int(next_offset)
+        if total is None or len(symbols) != total or len(set(symbols)) != total:
+            raise ValueError("RPS端点代码总体与分页分母不闭合")
+        endpoint_members[offset] = tuple(sorted(symbols))
+
+    all_symbols = tuple(sorted(set(endpoint_members[0]) | set(endpoint_members[3])))
+    history_rows: dict[tuple[str, date], Mapping[str, Any]] = {}
+    page_offset = 0
+    total_rows = None
+    while True:
+        batch = read_baostock_price_history_batch(
+            config,
+            source_symbols=all_symbols,
+            sessions=sessions,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            cutoff=research_cutoff,
+            offset=page_offset,
+            limit=page_size,
+        )
+        page = batch.get("page", {})
+        if (
+            batch.get("source_capture_id") != source_capture_id
+            or batch.get("price_coordinate") != "FORWARD_ADJUSTED"
+            or batch.get("target_sessions") != [item.isoformat() for item in sessions]
+        ):
+            raise ValueError("RPS历史批次响应与QFQ capture窗口不一致")
+        if total_rows is None:
+            total_rows = int(page.get("total", -1))
+        elif int(page.get("total", -1)) != total_rows:
+            raise ValueError("RPS历史分页期间行数分母发生变化")
+        for item in batch.get("coverage", ()):
+            if (
+                not isinstance(item, Mapping)
+                or item.get("coverage_status") != "COMPLETE"
+            ):
+                raise ValueError("RPS QFQ历史会话覆盖未完整闭合")
+        for row in batch.get("rows", ()):
+            if not isinstance(row, Mapping):
+                raise ValueError("RPS历史行不是字段映射")
+            key = (str(row["source_symbol"]), row["session_date"])
+            if key in history_rows or row.get("source_capture_id") != source_capture_id:
+                raise ValueError("RPS历史行重复或source_capture_id不匹配")
+            history_rows[key] = row
+        next_offset = page.get("next_offset")
+        if next_offset is None:
+            break
+        page_offset = int(next_offset)
+    if total_rows is None or len(history_rows) != total_rows:
+        raise ValueError("RPS历史行数与PG分页分母不一致")
+
+    target_coordinates = {
+        symbol: PriceCoordinate(
+            symbol, target_session, coordinate_id, str(source_capture_id)
+        )
+        for symbol in all_symbols
+    }
+    ranked: dict[str, dict[str, FieldValue]] = {}
+    counts: dict[str, dict[str, Any]] = {}
+    for offset in (0, 3):
+        end = sessions[-1 - offset]
+        endpoint_window = sessions[: len(sessions) - offset][-21:]
+        members = endpoint_members[offset]
+        endpoint_calendar = MarketSessionCalendar(
+            calendar.calendar_id, calendar.revision, endpoint_window
+        )
+        histories: dict[str, tuple[CoreObservation, ...]] = {}
+        window_statuses: dict[str, tuple[str, ...]] = {}
+        for symbol in members:
+            observations = tuple(
+                _core_observation_from_pg_price_row(
+                    history_rows.get((symbol, day)),
+                    session=day,
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
+                    coordinate_id=coordinate_id,
                 )
-                for symbol, rows in histories.items()
+                for day in endpoint_window
+            )
+            histories[symbol] = observations
+            window_statuses[symbol] = tuple(
+                observation.state for observation in observations
+            )
+
+        for period in (5, 20):
+            period_returns = {
+                symbol: calculate_core_return(
+                    histories[symbol],
+                    periods=period,
+                    official_calendar=endpoint_calendar,
+                )
+                for symbol in members
+            }
+            key = f"rps{period}_{offset}"
+            period_statuses = {
+                symbol: window_statuses[symbol][-(period + 1) :] for symbol in members
             }
             endpoint = ReturnEndpoint(
                 endpoint_date=end,
                 return_period=period,
-                return_start_date=window[-1 - period],
+                return_start_date=endpoint_window[-1 - period],
                 universe_date=end,
-                universe_id="SOURCE_POOL_NON_PIT_EXPLORATORY",
-                universe_revision=str(source_package_id),
-                producer_version="CORE_RAW_SOURCE_RPS_R1",
+                universe_id="BAOSTOCK_SOURCE_POOL_NON_PIT",
+                universe_revision=str(source_capture_id),
+                producer_version="CORE_QFQ_SOURCE_RPS_R2",
                 universe_members=members,
-                returns=returns,
-                coordinates={symbol: all_coordinates[symbol] for symbol in members},
-                window_statuses={
-                    symbol: tuple(row.state for row in histories[symbol][-period - 1 :])
-                    for symbol in members
-                },
+                returns=period_returns,
+                coordinates={symbol: target_coordinates[symbol] for symbol in members},
+                window_statuses=period_statuses,
             )
             ranked[key] = rank_return_endpoint(
                 endpoint,
                 target_date=target_session,
                 calendar=calendar,
-                target_coordinates=all_coordinates,
+                target_coordinates=target_coordinates,
             )
-            known = sum(item.quality == "OBSERVED" for item in returns.values())
+            known = sum(
+                value.quality == "OBSERVED" for value in period_returns.values()
+            )
             counts[key] = {
                 "total": len(members),
                 "known": known,
                 "unknown": len(members) - known,
                 "session": end.isoformat(),
             }
-    facts = {}
-    for symbol in target_members:
-        fact = {}
+
+    facts: dict[str, dict[str, FieldValue]] = {}
+    for symbol in endpoint_members[0]:
+        fact: dict[str, FieldValue] = {}
         for period in (5, 20):
             current = ranked[f"rps{period}_0"][symbol]
             previous = ranked[f"rps{period}_3"].get(
@@ -221,10 +233,12 @@ def read_source_pool_rps(
     return {
         "target_session": target_session,
         "research_cutoff": research_cutoff,
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
-        "coordinate": "RAW_UNADJUSTED",
-        "corporate_action_continuity": "UNKNOWN",
+        "coordinate": "FORWARD_ADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
+        "corporate_action_continuity": "NON_PIT_RETROSPECTIVE",
         "formal_research_universe": "UNKNOWN",
         "calendar_revision": revision,
         "endpoint_counts": counts,

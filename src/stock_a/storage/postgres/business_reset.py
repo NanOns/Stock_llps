@@ -25,16 +25,19 @@ class BusinessFactsResetError(Exception):
         super().__init__(message)
 
 
-_PRESERVED_SYSTEM_TABLES = frozenset({"installation_identity", "migration_ledger"})
-_BUSINESS_FACT_TABLES = frozenset(
+_PRESERVED_SYSTEM_TABLES = frozenset(
+    {
+        "installation_identity",
+        "migration_ledger",
+        "source_baostock_unit_contracts",
+    }
+)
+_BASE_BUSINESS_FACT_TABLES = frozenset(
     {
         "data_job_progress",
         "data_jobs",
-        "source_baostock_daily",
-        "source_baostock_unit_contracts",
         "source_captures",
-        "source_adjusted_daily_prices",
-        "source_corporate_action_events",
+        "source_capture_requests",
         "source_cohort_group_stats",
         "source_d0_formal_admission_day_facts",
         "source_d0_launch_day_facts",
@@ -47,7 +50,6 @@ _BUSINESS_FACT_TABLES = frozenset(
         "source_market_breadth_symbols",
         "source_market_participation_days",
         "source_market_participation_unknown_reasons",
-        "source_packages",
         "source_pool_seed_day_facts",
         "source_raw_daily",
         "source_research_enrollments",
@@ -69,10 +71,42 @@ _BUSINESS_FACT_TABLES = frozenset(
         "tdx_sector_source_snapshots",
     }
 )
+_SOURCE_SWITCH_RETIRED_TABLES = frozenset(
+    {
+        "source_packages",
+        "source_baostock_daily",
+        "source_adjusted_daily_prices",
+        "source_corporate_action_events",
+    }
+)
+
+
+def _business_fact_tables(config: Mapping[str, Any]) -> frozenset[str]:
+    """返回适用于runtime迁移版本的准确事实表清理集合。"""
+    identity_config = config.get("application_identity")
+    migration_version = (
+        identity_config.get("migration_version")
+        if isinstance(identity_config, Mapping)
+        else None
+    )
+    if type(migration_version) is not int or migration_version < 1:
+        raise BusinessFactsResetError(
+            "RESET_MIGRATION_VERSION_UNAVAILABLE",
+            "重置前必须绑定有效的PG迁移版本；不能猜测旧或新表清单。",
+        )
+    return (
+        _BASE_BUSINESS_FACT_TABLES | _SOURCE_SWITCH_RETIRED_TABLES
+        if migration_version < 55
+        else _BASE_BUSINESS_FACT_TABLES
+    )
+
+
 _RESET_CONTRACT = "STOCK_A_BIZ10_BUSINESS_FACT_RESET_R1"
 
 
-def _table_inventory(cursor: Any) -> tuple[set[str], dict[str, int]]:
+def _table_inventory(
+    cursor: Any, business_tables: frozenset[str]
+) -> tuple[set[str], dict[str, int]]:
     cursor.execute(
         """SELECT c.relname
            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -80,8 +114,8 @@ def _table_inventory(cursor: Any) -> tuple[set[str], dict[str, int]]:
            ORDER BY c.relname"""
     )
     actual = {str(row[0]) for row in cursor.fetchall()}
-    unknown = actual - _PRESERVED_SYSTEM_TABLES - _BUSINESS_FACT_TABLES
-    missing = _BUSINESS_FACT_TABLES - actual
+    unknown = actual - _PRESERVED_SYSTEM_TABLES - business_tables
+    missing = business_tables - actual
     missing_system = _PRESERVED_SYSTEM_TABLES - actual
     if unknown:
         raise BusinessFactsResetError(
@@ -102,7 +136,7 @@ def _table_inventory(cursor: Any) -> tuple[set[str], dict[str, int]]:
             + ", ".join(sorted(missing_system)),
         )
     counts: dict[str, int] = {}
-    for table in sorted(_BUSINESS_FACT_TABLES):
+    for table in sorted(business_tables):
         cursor.execute(
             sql.SQL("SELECT count(*) FROM stock.{}").format(sql.Identifier(table))
         )
@@ -110,7 +144,9 @@ def _table_inventory(cursor: Any) -> tuple[set[str], dict[str, int]]:
     return actual, counts
 
 
-def _delete_order(cursor: Any) -> tuple[list[str], list[dict[str, str]]]:
+def _delete_order(
+    cursor: Any, business_tables: frozenset[str]
+) -> tuple[list[str], list[dict[str, str]]]:
     cursor.execute(
         """SELECT child_ns.nspname,child.relname,parent.relname,con.conname
            FROM pg_constraint con
@@ -122,17 +158,17 @@ def _delete_order(cursor: Any) -> tuple[list[str], list[dict[str, str]]]:
            ORDER BY child.relname,con.conname"""
     )
     rows = cursor.fetchall()
-    edges: dict[str, set[str]] = {table: set() for table in _BUSINESS_FACT_TABLES}
-    indegree = {table: 0 for table in _BUSINESS_FACT_TABLES}
+    edges: dict[str, set[str]] = {table: set() for table in business_tables}
+    indegree = {table: 0 for table in business_tables}
     constraints: list[dict[str, str]] = []
     for child_schema_value, child_value, parent_value, constraint_value in rows:
         child_schema = str(child_schema_value)
         child = str(child_value)
         parent = str(parent_value)
         constraint = str(constraint_value)
-        if parent not in _BUSINESS_FACT_TABLES:
+        if parent not in business_tables:
             continue
-        if child_schema != "stock" or child not in _BUSINESS_FACT_TABLES:
+        if child_schema != "stock" or child not in business_tables:
             raise BusinessFactsResetError(
                 "RESET_PRESERVED_TABLE_DEPENDENCY",
                 f"保留对象{child_schema}.{child}通过{constraint}引用业务事实stock.{parent}；拒绝删除。",
@@ -154,7 +190,7 @@ def _delete_order(cursor: Any) -> tuple[list[str], list[dict[str, str]]]:
             if indegree[parent] == 0:
                 ready.append(parent)
                 ready.sort()
-    if len(ordered) != len(_BUSINESS_FACT_TABLES):
+    if len(ordered) != len(business_tables):
         raise BusinessFactsResetError(
             "RESET_FOREIGN_KEY_CYCLE",
             "业务表外键图不能形成显式子表优先的清理顺序。",
@@ -215,13 +251,14 @@ def preview_business_fact_reset(
         raise BusinessFactsResetError(
             "RESET_PREVIEW_INPUT_INVALID", "重置预览缺少动态目标会话或来源窗口。"
         )
+    business_tables = _business_fact_tables(config)
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _connection,
         cursor,
         _scope,
     ):
-        _actual, counts = _table_inventory(cursor)
-        order, constraints = _delete_order(cursor)
+        _actual, counts = _table_inventory(cursor, business_tables)
+        order, constraints = _delete_order(cursor, business_tables)
         cursor.execute(
             "SELECT current_database(),current_schema(),session_user,current_user"
         )
@@ -278,9 +315,10 @@ def _delete_business_facts_in_cursor(
     *,
     preserve_job_id: UUID,
     expected_counts: Mapping[str, int],
+    business_tables: frozenset[str],
 ) -> dict[str, int]:
-    _actual, counts = _table_inventory(cursor)
-    _order, _constraints = _delete_order(cursor)
+    _actual, counts = _table_inventory(cursor, business_tables)
+    _order, _constraints = _delete_order(cursor, business_tables)
     cursor.execute(
         "SELECT count(*) FROM stock.data_jobs WHERE status='RUNNING' AND job_id<>%s",
         (preserve_job_id,),
@@ -314,12 +352,12 @@ def _delete_business_facts_in_cursor(
         )
 
     cursor.execute(
-        "UPDATE stock.data_jobs SET source_package_id=NULL WHERE job_id=%s",
+        "UPDATE stock.data_jobs SET source_capture_id=NULL WHERE job_id=%s",
         (preserve_job_id,),
     )
     cursor.execute(
-        """UPDATE stock.data_job_progress SET source_package_id=NULL,source_capture_id=NULL,
-                   baostock_capture_id=NULL,profile_revision=NULL,producer_version=NULL,
+        """UPDATE stock.data_job_progress SET source_capture_id=NULL,
+                   profile_revision=NULL,producer_version=NULL,
                    profile_history_session_count=NULL,d1_history_session_count=NULL,
                    calendar_revision=NULL,industry_snapshot_id=NULL,concept_snapshot_id=NULL
            WHERE job_id=%s""",
@@ -338,7 +376,7 @@ def _delete_business_facts_in_cursor(
 
     # 显式列出本项目全部业务表而不使用CASCADE；所有Stock外键相关表都在同一语句中。
     truncate_tables = sql.SQL(",").join(
-        sql.Identifier("stock", table) for table in sorted(_BUSINESS_FACT_TABLES)
+        sql.Identifier("stock", table) for table in sorted(business_tables)
     )
     cursor.execute(sql.SQL("TRUNCATE TABLE {}").format(truncate_tables))
     cursor.execute(
@@ -358,7 +396,7 @@ def _delete_business_facts_in_cursor(
         raise BusinessFactsResetError(
             "RESET_DELETE_COUNT_MISMATCH", "重置事务删除行数与预览不一致；事务回滚。"
         )
-    for table in sorted(_BUSINESS_FACT_TABLES):
+    for table in sorted(business_tables):
         cursor.execute(
             sql.SQL("SELECT count(*) FROM stock.{}").format(sql.Identifier(table))
         )
@@ -420,8 +458,9 @@ def clear_business_facts(
         raise BusinessFactsResetError(
             "RESET_CONFIRMATION_INVALID", "重置任务身份或预览确认指纹无效。"
         )
+    business_tables = _business_fact_tables(config)
     if not isinstance(expected_table_counts, Mapping) or set(expected_table_counts) != {
-        f"stock.{table}" for table in _BUSINESS_FACT_TABLES
+        f"stock.{table}" for table in business_tables
     }:
         raise BusinessFactsResetError(
             "RESET_PREVIEW_TABLES_INVALID", "重置预览没有完整登记所有业务事实表。"
@@ -470,7 +509,7 @@ def clear_business_facts(
             )
         lock_tables = sql.SQL(",").join(
             sql.Identifier("stock", table)
-            for table in sorted(_BUSINESS_FACT_TABLES - {"data_jobs"})
+            for table in sorted(business_tables - {"data_jobs"})
         )
         cursor.execute(
             sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(lock_tables)
@@ -486,10 +525,27 @@ def clear_business_facts(
                 "RESET_PREVIEW_JOB_BINDING_CHANGED",
                 "重置任务中保存的确认指纹与本次预览不一致。",
             )
-        _actual, current_counts = _table_inventory(cursor)
-        order, constraints = _delete_order(cursor)
+        _actual, current_counts = _table_inventory(cursor, business_tables)
+        order, constraints = _delete_order(cursor, business_tables)
+        cursor.execute(
+            "SELECT count(*) FROM stock.data_jobs WHERE job_id=%s AND status='RUNNING'",
+            (job_id,),
+        )
+        if int(cursor.fetchone()[0]) != 1:
+            raise BusinessFactsResetError(
+                "RESET_JOB_IDENTITY_MISSING",
+                "当前重初始化任务不在PG中或已不处于运行态；未清理任何事实。",
+            )
+        cursor.execute(
+            "SELECT count(*) FROM stock.data_job_progress WHERE job_id=%s",
+            (job_id,),
+        )
+        current_progress_rows = int(cursor.fetchone()[0])
+        normalized_counts = dict(current_counts)
+        normalized_counts["data_jobs"] -= 1
+        normalized_counts["data_job_progress"] -= current_progress_rows
         current_fingerprint = _fingerprint(
-            counts=current_counts,
+            counts=normalized_counts,
             order=order,
             constraints=constraints,
             target_sessions=target_sessions,
@@ -498,7 +554,7 @@ def clear_business_facts(
             module_output_session_counts=module_output_session_counts,
         )
         if (
-            current_counts != counts
+            normalized_counts != counts
             or current_fingerprint != expected_preview_fingerprint
         ):
             raise BusinessFactsResetError(
@@ -506,7 +562,10 @@ def clear_business_facts(
                 "PG当前业务表行数或外键已不同于双重确认时的预览；未删除事实。",
             )
         deleted = _delete_business_facts_in_cursor(
-            cursor, preserve_job_id=job_id, expected_counts=counts
+            cursor,
+            preserve_job_id=job_id,
+            expected_counts=counts,
+            business_tables=business_tables,
         )
         cursor.execute(
             "SELECT count(*) FROM stock.data_jobs WHERE job_id=%s", (job_id,)
@@ -523,7 +582,7 @@ def clear_business_facts(
             (job_id,),
         )
         cleared_units, reset_units = (int(value) for value in cursor.fetchone())
-        if reset_units != len(_BUSINESS_FACT_TABLES) or cleared_units != reset_units:
+        if reset_units != len(business_tables) or cleared_units != reset_units:
             raise BusinessFactsResetError(
                 "RESET_CURRENT_PROGRESS_NOT_CLEARED",
                 "当前重初始化事务没有原子读回全部逐表清理进度。",

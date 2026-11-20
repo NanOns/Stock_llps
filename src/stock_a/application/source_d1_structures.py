@@ -21,7 +21,7 @@ from stock_a.research.core import (
 )
 from stock_a.research.entry import _load_calendar
 from stock_a.research.entry_core.fields import _render_field, _render_value
-from stock_a.research.entry_history.support import _decoded_day_from_pg_raw
+from stock_a.research.entry_history.support import _core_observation_from_pg_price_row
 from stock_a.research.entry_history.history_preview import (
     prepare_source_d1_preview_context,
     research_stock_pg_d1_history_previews,
@@ -35,7 +35,10 @@ from stock_a.research.structure import (
     generate,
     observe_support,
 )
-from stock_a.storage.postgres.source_raw import read_raw_daily_history_page
+from stock_a.storage.postgres.baostock_price_facts import (
+    read_baostock_price_history_batch,
+    read_baostock_price_page,
+)
 
 STRUCTURE_TYPES = (
     "PIVOT_LOW",
@@ -97,7 +100,7 @@ def _history_observations(
     symbol: str,
     sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
-    source_package_id: int,
+    source_capture_id: int,
 ) -> tuple[
     tuple[CoreObservation, ...],
     tuple[Bar, ...],
@@ -126,7 +129,7 @@ def _history_observations(
             or day not in days
             or day in row_map
             or row.get("source_symbol") != normalized
-            or row.get("source_package_id") != source_package_id
+            or row.get("source_capture_id") != source_capture_id
         ):
             raise PgResearchBindingError(
                 "D1_STRUCTURE_RAW_BINDING_INVALID",
@@ -134,62 +137,47 @@ def _history_observations(
             )
         row_map[day] = row
 
-    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
+    )
     observations: list[CoreObservation] = []
     bars: list[Bar] = []
     decoded_by_session = {}
     for ordinal, day in enumerate(days):
         row = row_map.get(day)
-        decoded = _decoded_day_from_pg_raw(row) if row is not None else None
-        if decoded is not None:
-            decoded_by_session[day] = decoded
+        observation = _core_observation_from_pg_price_row(
+            row,
+            session=day,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            coordinate_id=coordinate_id,
+        )
+        if row is not None:
+            decoded_by_session[day] = row
         values = (
-            _valid_ohlc(decoded.prices.value)
-            if decoded is not None and decoded.prices.quality == "OBSERVED"
+            _valid_ohlc(
+                tuple(
+                    field.value
+                    for field in (
+                        observation.open,
+                        observation.high,
+                        observation.low,
+                        observation.close,
+                    )
+                )
+            )
+            if observation.state == "ACTUAL"
             else None
         )
         if values is not None:
-            o, high, low, close = values
-            observations.append(
-                CoreObservation(
-                    session=day,
-                    state="ACTUAL",
-                    coordinate_id=coordinate_id,
-                    open=FieldValue(o),
-                    high=FieldValue(high),
-                    low=FieldValue(low),
-                    close=FieldValue(close),
-                    amount=decoded.amount,
-                    volume=decoded.volume,
-                    native_amount=decoded.raw_amount,
-                    native_volume=decoded.raw_volume,
-                )
-            )
+            observations.append(observation)
             bars.append(Bar(ordinal, FieldValue(values)))
             continue
 
         reason = (
-            "DATA_INVALID_OHLC"
-            if decoded is not None and decoded.prices.quality == "OBSERVED"
-            else decoded.prices.reason
-            if decoded is not None
-            else row.get("bar_reason") or row.get("bar_status")
-            if row is not None
-            else "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+            observation.close.reason or observation.close.quality or "QFQ_PRICE_UNKNOWN"
         )
-        observations.append(
-            CoreObservation(
-                session=day,
-                state="UNKNOWN",
-                coordinate_id=coordinate_id,
-                open=unknown(reason),
-                high=unknown(reason),
-                low=unknown(reason),
-                close=unknown(reason),
-                amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-                volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-            )
-        )
+        observations.append(observation)
         bars.append(Bar(ordinal, unknown(reason)))
     return tuple(observations), tuple(bars), row_map, decoded_by_session
 
@@ -228,16 +216,18 @@ def _source_row_identity(row: Mapping[str, Any] | None) -> dict[str, Any]:
         "session": row["session_date"].isoformat(),
         "bar_status": row.get("bar_status"),
         "bar_reason": row.get("bar_reason"),
-        "price_quality": row.get("price_quality"),
-        "price_reason": row.get("price_reason"),
-        "source_capture_id": int(row["source_capture_id"])
-        if row.get("source_capture_id") is not None
-        else None,
-        "source_package_id": row.get("source_package_id"),
-        "parser_contract": row.get("parser_contract"),
+        "qfq_bar_status": row.get("qfq_bar_status"),
+        "qfq_bar_reason": row.get("qfq_bar_reason"),
+        "source_capture_id": row.get("source_capture_id"),
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "qfq_price_quality": row.get("qfq_price_quality"),
+        "qfq_price_reason": row.get("qfq_price_reason"),
+        "raw_price_quality": row.get("price_quality"),
+        "raw_price_reason": row.get("price_reason"),
         "source_clock_role": row.get("source_clock_role"),
         "source_time_quality": row.get("source_time_quality"),
         "source_available_at": row.get("source_available_at"),
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "observed_started_at": row.get("observed_started_at"),
         "observed_completed_at": row.get("observed_completed_at"),
     }
@@ -273,7 +263,7 @@ def _generation_evidence(
 
     result: dict[str, Any] = {
         "target": bar_ref(index),
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "identity_status": "SOURCE_SYMBOL_ONLY",
     }
     if kind.startswith("PIVOT_"):
@@ -323,7 +313,7 @@ def _anchor_payload(anchor: Anchor, sessions: Sequence[date]) -> dict[str, Any]:
         ),
         "test_from_in_request_window": anchor.test_from < len(sessions),
         "coordinate_id": anchor.coordinate_id,
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "lower": _render_value(anchor.lower),
         "upper": _render_value(anchor.upper),
@@ -436,7 +426,7 @@ def _generate_day(
     observations: Sequence[CoreObservation],
     bars: Sequence[Bar],
     row_map: Mapping[date, Mapping[str, Any]],
-    source_package_id: int,
+    source_capture_id: int,
     calendar_id: str,
     calendar_revision: str,
     core_previous: Mapping[str, FieldValue] | None,
@@ -445,11 +435,13 @@ def _generate_day(
     prior_range_anchors: Mapping[str, Anchor | None] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Anchor]]:
     day = sessions[target_index]
-    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
-    window_ref = (
-        f"{source_package_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
     )
-    source_ref = f"source_raw_daily:{source_package_id}:{symbol}"
+    window_ref = (
+        f"{source_capture_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
+    )
+    source_ref = f"source_raw_daily:{source_capture_id}:{symbol}"
     statuses = tuple(
         (position, "ACTUAL" if item.state == "ACTUAL" else "UNKNOWN")
         for position, item in enumerate(observations[: target_index + 1])
@@ -566,7 +558,7 @@ def _range_candidates_for_previous_session(
     sessions: Sequence[date],
     observations: Sequence[CoreObservation],
     bars: Sequence[Bar],
-    source_package_id: int,
+    source_capture_id: int,
     calendar_id: str,
     calendar_revision: str,
     core_previous: Mapping[str, FieldValue] | None,
@@ -585,10 +577,12 @@ def _range_candidates_for_previous_session(
         )
     previous_index = target_index - 1
     day = sessions[previous_index]
-    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
-    source_ref = f"source_raw_daily:{source_package_id}:{symbol}"
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
+    )
+    source_ref = f"source_raw_daily:{source_capture_id}:{symbol}"
     window_ref = (
-        f"{source_package_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
+        f"{source_capture_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
     )
     statuses = tuple(
         (position, "ACTUAL" if item.state == "ACTUAL" else "UNKNOWN")
@@ -671,7 +665,7 @@ def _pool_candidate_result(
     candidate: Mapping[str, Any],
     sessions: Sequence[date],
     target_index: int,
-    source_package_id: int,
+    source_capture_id: int,
     calendar_id: str,
     calendar_revision: str,
     history_inputs=None,
@@ -684,7 +678,7 @@ def _pool_candidate_result(
             symbol=symbol,
             sessions=sessions,
             history_rows=candidate["history_rows"],
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
         )
     observations, bars, row_map, _decoded_by_session = history_inputs
     core_cache: dict[int, dict[str, FieldValue]] = {}
@@ -722,7 +716,7 @@ def _pool_candidate_result(
             sessions=sessions,
             observations=observations,
             bars=bars,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             calendar_id=calendar_id,
             calendar_revision=calendar_revision,
             core_previous=core_at(target_index - 2),
@@ -794,7 +788,7 @@ def _pool_candidate_result(
                     sessions=sessions,
                     observations=observations,
                     bars=bars,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     calendar_id=calendar_id,
                     calendar_revision=calendar_revision,
                     core_previous=older_core,
@@ -876,7 +870,7 @@ def _pool_candidate_result(
         observations=observations,
         bars=bars,
         row_map=row_map,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
         core_previous=previous_core,
@@ -915,7 +909,7 @@ def _structure_history_core_previews(
     symbol: str,
     sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
-    source_package_id: int,
+    source_capture_id: int,
     preview_context,
     decoded_by_session: Mapping[date, Any] | None = None,
 ) -> dict[date, dict[str, Any]]:
@@ -924,7 +918,8 @@ def _structure_history_core_previews(
         event_sessions=sessions,
         followup_session=sessions[-1],
         session_dates=sessions,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
         history_rows=history_rows,
         context=preview_context,
         _decoded_by_session=decoded_by_session,
@@ -1169,12 +1164,189 @@ def _structure_timeline_changes(
                     "birth": anchor_event.get("source_row"),
                     "previous": before.get("source") if before else None,
                     "target": after.get("source") if after else None,
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "price_coordinate": "FORWARD_ADJUSTED",
                     "identity_status": "SOURCE_SYMBOL_ONLY",
                 },
             }
         )
     return changes
+
+
+def _read_baostock_d1_candidate_page(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    sessions: Sequence[date],
+    source_capture_id: int,
+    source_symbol: str | None = None,
+    offset: int,
+    limit: int = 100,
+) -> dict[str, Any]:
+    if source_symbol is not None:
+        symbol = source_symbol.strip().upper()
+        history = read_baostock_price_history_batch(
+            config,
+            source_symbols=(symbol,),
+            sessions=sessions,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            cutoff=research_cutoff,
+            limit=1000,
+        )
+        rows = tuple(history.get("rows", ()))
+        target_row = next(
+            (row for row in rows if row.get("session_date") == target_session),
+            None,
+        )
+        if target_row is None:
+            raise PgResearchBindingError(
+                "D1_STRUCTURE_SYMBOL_TARGET_ROW_MISSING",
+                "指定来源代码没有本次paired capture目标日价格行。",
+            )
+        context = read_source_version_context(
+            config,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            target_raw_rows=(target_row,),
+        )
+        return {
+            "status": "AVAILABLE",
+            "target_session": target_session.isoformat(),
+            "source_capture_id": source_capture_id,
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "version_status": "CLOSED"
+            if context["version_status"] == "COMPLETE"
+            else "INCOMPLETE",
+            "partition_closed": context["version_status"] == "COMPLETE",
+            "total_count": 1,
+            "version_row_count": context["raw_row_count"],
+            "version_expected_row_count": context["capture_expected_row_count"],
+            "offset": offset,
+            "page_count": 1,
+            "next_offset": None,
+            "candidates": [
+                {
+                    "source_symbol": symbol,
+                    "market": target_row.get("market"),
+                    "board": target_row.get("board"),
+                    "history_rows": [
+                        row for row in rows if row.get("source_symbol") == symbol
+                    ],
+                }
+            ],
+            "rows": [target_row],
+        }
+    target_page = read_baostock_price_page(
+        config,
+        target_session=target_session,
+        cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
+        offset=offset,
+        limit=limit,
+        market="ALL",
+        board="ALL",
+    )
+    if (
+        target_page.get("source_capture_id") != source_capture_id
+        or target_page.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or target_page.get("version_status") != "CLOSED"
+        or target_page.get("partition_closed") is not True
+    ):
+        raise PgResearchBindingError(
+            "D1_STRUCTURE_SOURCE_POOL_NOT_CLOSED",
+            "目标日BaoStock QFQ总体未闭合。",
+        )
+    target_rows = target_page.get("rows", ())
+    symbols = tuple(row["source_symbol"] for row in target_rows)
+    if not symbols or len(set(symbols)) != len(symbols):
+        raise PgResearchBindingError(
+            "D1_STRUCTURE_TARGET_PAGE_INVALID", "目标日BaoStock证券页为空或重复。"
+        )
+    rows_by_symbol: dict[str, list[Mapping[str, Any]]] = {
+        symbol: [] for symbol in symbols
+    }
+    offset_history = 0
+    history_total: int | None = None
+    while True:
+        history_page = read_baostock_price_history_batch(
+            config,
+            source_symbols=symbols,
+            sessions=sessions,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            cutoff=research_cutoff,
+            offset=offset_history,
+            limit=1000,
+        )
+        page_info = history_page.get("page", {})
+        if (
+            history_page.get("source_capture_id") != source_capture_id
+            or history_page.get("price_coordinate") != "FORWARD_ADJUSTED"
+            or history_page.get("target_sessions")
+            != [session.isoformat() for session in sessions]
+        ):
+            raise PgResearchBindingError(
+                "D1_STRUCTURE_HISTORY_IDENTITY_MISMATCH",
+                "批量历史响应与QFQ capture窗口不一致。",
+            )
+        if history_total is None:
+            history_total = int(page_info.get("total", -1))
+        elif int(page_info.get("total", -1)) != history_total:
+            raise PgResearchBindingError(
+                "D1_STRUCTURE_HISTORY_DENOMINATOR_CHANGED",
+                "D1 QFQ历史分页分母发生变化。",
+            )
+        if any(
+            not isinstance(item, Mapping) or item.get("coverage_status") != "COMPLETE"
+            for item in history_page.get("coverage", ())
+        ):
+            raise PgResearchBindingError(
+                "D1_STRUCTURE_HISTORY_COVERAGE_INCOMPLETE",
+                "D1 QFQ历史会话行或来源请求未完整闭合。",
+            )
+        for row in history_page.get("rows", ()):
+            rows_by_symbol[row["source_symbol"]].append(row)
+        next_offset = page_info.get("next_offset")
+        if next_offset is None:
+            break
+        offset_history = int(next_offset)
+    if (
+        history_total is None
+        or sum(len(rows) for rows in rows_by_symbol.values()) != history_total
+    ):
+        raise PgResearchBindingError(
+            "D1_STRUCTURE_HISTORY_PAGE_INCOMPLETE",
+            "D1 QFQ历史行没有闭合到分页总分母。",
+        )
+    candidates = [
+        {
+            "source_symbol": row["source_symbol"],
+            "market": row.get("market"),
+            "board": row.get("board"),
+            "history_rows": rows_by_symbol[row["source_symbol"]],
+        }
+        for row in target_rows
+    ]
+    return {
+        "status": "AVAILABLE",
+        "target_session": target_session.isoformat(),
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "version_status": target_page["version_status"],
+        "partition_closed": target_page["partition_closed"],
+        "total_count": target_page["total_count"],
+        "version_row_count": target_page["version_row_count"],
+        "version_expected_row_count": target_page["version_expected_row_count"],
+        "offset": target_page["offset"],
+        "page_count": target_page["page_count"],
+        "next_offset": target_page["next_offset"],
+        "candidates": candidates,
+        "rows": target_rows,
+    }
 
 
 def discover_source_d1_structures(
@@ -1183,7 +1355,8 @@ def discover_source_d1_structures(
     target_session: date,
     research_cutoff: date,
     sessions: Sequence[date],
-    source_package_id: int,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
     offset: int,
     limit: int,
     structure_symbol: str | None = None,
@@ -1205,13 +1378,14 @@ def discover_source_d1_structures(
         or days[-1] != target_session
         or target_session > research_cutoff
         or tuple(sorted(set(days))) != days
-        or len(days) > 75
+        or len(days) > 60
         or type(offset) is not int
         or offset < 0
         or type(limit) is not int
         or not 1 <= limit <= 100
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or price_coordinate != "FORWARD_ADJUSTED"
         or type(structure_changes) is not bool
         or type(material_changes_only) is not bool
         or type(include_source_symbol_change_summary) is not bool
@@ -1326,18 +1500,17 @@ def discover_source_d1_structures(
     structure_timeline_candidate_count = 0
 
     while True:
-        page = read_raw_daily_history_page(
+        page = _read_baostock_d1_candidate_page(
             config,
             target_session=target_session,
-            source_package_id=source_package_id,
+            research_cutoff=research_cutoff,
             sessions=days,
+            source_capture_id=source_capture_id,
             offset=source_offset,
             limit=100,
-            market="ALL",
-            board="ALL",
         )
         candidates = page["candidates"]
-        target_rows = []
+        target_rows = page["rows"]
         for candidate in candidates:
             symbol = candidate["source_symbol"]
             rows = candidate["history_rows"]
@@ -1353,7 +1526,8 @@ def discover_source_d1_structures(
                 or len(target_matches) != 1
                 or any(
                     row.get("source_symbol") != symbol
-                    or row.get("source_package_id") != source_package_id
+                    or row.get("source_capture_id") != source_capture_id
+                    or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
                     for row in rows
                 )
             ):
@@ -1369,7 +1543,9 @@ def discover_source_d1_structures(
             source_context = read_source_version_context(
                 config,
                 target_session=target_session,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                research_cutoff=research_cutoff,
+                price_coordinate=price_coordinate,
                 target_raw_rows=target_rows,
                 expected_raw_row_count=page["version_row_count"],
             )
@@ -1381,15 +1557,17 @@ def discover_source_d1_structures(
             or not page["partition_closed"]
             or page["total_count"] != page["version_row_count"]
             or page["target_session"] != target_session.isoformat()
-            or page["source_package_id"] != source_package_id
+            or page["source_capture_id"] != source_capture_id
+            or page["price_coordinate"] != price_coordinate
             or source_context.get("status") != "AVAILABLE"
             or context.get("raw_row_count") != page["version_row_count"]
             or page["version_expected_row_count"]
             != context.get("capture_expected_row_count")
             or any(
-                row.get("source_package_id") != source_context.get("source_package_id")
+                row.get("source_capture_id") != source_context.get("source_capture_id")
                 or str(row.get("source_capture_id"))
                 != str(source_context.get("source_capture_id"))
+                or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
                 for row in target_rows
             )
         ):
@@ -1406,14 +1584,14 @@ def discover_source_d1_structures(
                     symbol=candidate["source_symbol"],
                     sessions=days,
                     history_rows=candidate["history_rows"],
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                 )
                 history_rows_decoded += len(history_inputs[2])
                 core_previews = _structure_history_core_previews(
                     symbol=candidate["source_symbol"],
                     sessions=days,
                     history_rows=candidate["history_rows"],
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     preview_context=structure_preview_context,
                     decoded_by_session=history_inputs[3],
                 )
@@ -1423,7 +1601,7 @@ def discover_source_d1_structures(
                     candidate=candidate,
                     sessions=days,
                     target_index=target_index,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     calendar_id=calendar_id,
                     calendar_revision=target_calendar_revision,
                     history_inputs=history_inputs,
@@ -1476,7 +1654,7 @@ def discover_source_d1_structures(
                     symbol=candidate["source_symbol"],
                     sessions=days,
                     history_rows=candidate["history_rows"],
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     core_previews_by_session=core_previews,
                     history_inputs=history_inputs,
                 )
@@ -1768,10 +1946,13 @@ def discover_source_d1_structures(
         if structure_changes
         else "SOURCE_LEVEL_D1_MULTI_STRUCTURE_DISCOVERY",
         "contract": STRUCTURE_CONTRACT,
+        "producer_version": "STOCK_A_D1_BAOSTOCK_QFQ_R2",
         "scope": "FIVE_SOURCE_LEVEL_RESEARCH_TYPES_NOT_FORMAL_D1_TEN_TYPE_CLOSURE",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
         "calendar": {
@@ -1803,7 +1984,7 @@ def discover_source_d1_structures(
             "status": "COMPLETE_FULL_POOL_ADJACENT_SESSION_SCAN"
             if structure_changes
             else "NOT_REQUESTED",
-            "material_change_contract": "SOURCE_D1_STRUCTURE_MATERIAL_CHANGE_R1",
+            "material_change_contract": "SOURCE_D1_STRUCTURE_MATERIAL_CHANGE_QFQ_R2",
             "previous_official_session": previous_session.isoformat()
             if previous_session
             else None,
@@ -1968,7 +2149,7 @@ def evaluate_source_d1_structure_timeline(
     symbol: str,
     sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
-    source_package_id: int,
+    source_capture_id: int,
     core_previews_by_session: Mapping[date, Mapping[str, Any]],
     history_inputs=None,
 ) -> dict[str, Any]:
@@ -1979,7 +2160,7 @@ def evaluate_source_d1_structure_timeline(
             symbol=normalized,
             sessions=sessions,
             history_rows=history_rows,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
         )
     observations, bars, row_map, _decoded_by_session = history_inputs
     if set(core_previews_by_session) != set(sessions):
@@ -2029,7 +2210,7 @@ def evaluate_source_d1_structure_timeline(
             observations=observations,
             bars=bars,
             row_map=row_map,
-            source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             calendar_id="OFFICIAL_SESSION_CALENDAR",
             calendar_revision="SOURCE_WINDOW_BOUND",
             core_previous=previous_fields,
@@ -2095,6 +2276,7 @@ def evaluate_source_d1_structure_timeline(
                 "state": observation.state,
                 "acceptance": observation.acceptance,
                 "freshness": observation.freshness,
+                "reason": observation.reason,
                 "breach_streak": observation.breach_streak,
                 "acceptance_streak": observation.acceptance_streak,
                 "test_count": observation.test_count,
@@ -2108,7 +2290,7 @@ def evaluate_source_d1_structure_timeline(
                     "high": _render_field(observations[index].high),
                     "low": _render_field(observations[index].low),
                     "close": _render_field(observations[index].close),
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "price_coordinate": "FORWARD_ADJUSTED",
                 },
                 "source": _source_row_identity(row_map.get(day)),
             }
@@ -2141,7 +2323,7 @@ def evaluate_source_d1_structure_timeline(
                     "quality": next_fill.quality,
                     "reason": next_fill.reason,
                     "low": _render_field(observations[index].low),
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "price_coordinate": "FORWARD_ADJUSTED",
                     "source": _source_row_identity(row_map.get(day)),
                 }
                 item["gap_fill_observations"].append(fill_payload)
@@ -2209,10 +2391,13 @@ def evaluate_source_d1_structure_timeline(
     )
     return {
         "contract": STRUCTURE_CONTRACT,
+        "producer_version": "STOCK_A_D1_BAOSTOCK_QFQ_R2",
         "status": "SOURCE_SYMBOL_D1_STRUCTURE_HISTORY",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "source_symbol": normalized,
         "window": {
             "start_session": sessions[0].isoformat(),
@@ -2249,34 +2434,35 @@ def discover_source_d1_prior_support_reference(
     symbol: str,
     sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
-    source_package_id: int,
-    parser_contract: str | None = None,
+    source_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
     """按单股历史生成截至窗口末会话已可见的来源支撑参考。"""
     days = tuple(sessions)
     if (
         not days
         or tuple(sorted(set(days))) != days
-        or len(days) > 75
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or len(days) > 60
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise PgResearchBindingError(
             "D1_SOURCE_PRIOR_REFERENCE_REQUEST_INVALID",
-            "单股D1前态需要正数来源包ID及最多75个递增官方会话",
+            "单股D1前态需要正数paired capture及最多75个递增官方会话",
         )
     normalized = symbol.strip().upper()
     history_inputs = _history_observations(
         symbol=normalized,
         sessions=days,
         history_rows=history_rows,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
     )
     core_previews = _structure_history_core_previews(
         symbol=normalized,
         sessions=days,
         history_rows=history_rows,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         preview_context=prepare_source_d1_preview_context(days),
         decoded_by_session=history_inputs[3],
     )
@@ -2284,7 +2470,7 @@ def discover_source_d1_prior_support_reference(
         symbol=normalized,
         sessions=days,
         history_rows=history_rows,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         core_previews_by_session=core_previews,
         history_inputs=history_inputs,
     )
@@ -2296,7 +2482,8 @@ def discover_source_d1_prior_support_reference(
             event.get("relation") != "SUPPORT"
             or event.get("type") not in supported_types
             or date.fromisoformat(event["created_session"]) >= prior_session
-            or event.get("coordinate_id") != f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+            or event.get("coordinate_id")
+            != f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
         ):
             continue
         observation = next(
@@ -2335,13 +2522,8 @@ def discover_source_d1_prior_support_reference(
             if not isinstance(row, Mapping):
                 quality_reasons.append(f"{label}_SOURCE_IDENTITY_MISSING")
                 continue
-            if row.get("source_package_id") != source_package_id:
+            if row.get("source_capture_id") != source_capture_id:
                 quality_reasons.append(f"{label}_SOURCE_PACKAGE_ID_MISMATCH")
-            if (
-                parser_contract is not None
-                and row.get("parser_contract") != parser_contract
-            ):
-                quality_reasons.append(f"{label}_PARSER_CONTRACT_MISMATCH")
         if source is None or source.get("session") != prior_session.isoformat():
             quality_reasons.append("OBSERVATION_SOURCE_SESSION_MISMATCH")
         quality_reasons = sorted(set(quality_reasons))
@@ -2387,7 +2569,7 @@ def discover_source_d1_prior_support_reference(
                 "source": source,
                 "birth_source": birth_source,
                 "research_mode": "NON_PIT_RETROSPECTIVE",
-                "price_coordinate_status": "RAW_UNADJUSTED",
+                "price_coordinate_status": "FORWARD_ADJUSTED",
                 "formal_parent": "NOT_FORMAL_PARENT",
             }
         )
@@ -2409,8 +2591,9 @@ def discover_source_d1_prior_support_reference(
     ]
     return {
         "source_symbol": normalized,
-        "source_package_id": source_package_id,
-        "parser_contract": parser_contract,
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "state": "TRUE" if usable else "UNKNOWN",
         "reason": "SOURCE_SUPPORT_OBSERVED"
         if usable
@@ -2434,7 +2617,6 @@ def discover_source_d1_prior_support_reference(
         },
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "research_mode": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
         "raw_history_rows_decoded": len(history_inputs[2]),
         "database_write_attempted": False,
         "ddl_executed": False,

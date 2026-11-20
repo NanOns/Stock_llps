@@ -19,7 +19,7 @@ from stock_a.research.entry_history.history_preview import (
     research_stock_pg_d1_history_previews,
 )
 from stock_a.research.entry_context.sessions import _load_calendar
-from stock_a.storage.postgres.source_raw import read_raw_daily_history_page
+from stock_a.application.source_d1_structures import _read_baostock_d1_candidate_page
 
 
 def discover_source_d1_support_changes(
@@ -29,7 +29,8 @@ def discover_source_d1_support_changes(
     cutoff,
     sessions,
     calendar_revision,
-    source_package_id,
+    source_capture_id,
+    price_coordinate,
     event_window_start,
     offset,
     limit,
@@ -43,7 +44,8 @@ def discover_source_d1_support_changes(
         or event_window_start not in sessions
         or event_window_start >= target
         or target > cutoff
-        or len(sessions) > 75
+        or len(sessions) > 60
+        or price_coordinate != "FORWARD_ADJUSTED"
         or tuple(sorted(set(sessions))) != tuple(sessions)
         or sessions[-1] != target
     ):
@@ -120,15 +122,14 @@ def discover_source_d1_support_changes(
         not isinstance(source_version_context, Mapping)
         or source_version_context.get("status") != "AVAILABLE"
         or source_version_context.get("target_session") != target.isoformat()
-        or source_version_context.get("source_package_id") != source_package_id
+        or source_version_context.get("source_capture_id") != source_capture_id
         or source_version_context.get("version_status") != "COMPLETE"
         or source_version_context.get("identity_status") != "SOURCE_SYMBOL_ONLY"
-        or source_version_context.get("price_coordinate") != "RAW_UNADJUSTED"
+        or source_version_context.get("price_coordinate") != "FORWARD_ADJUSTED"
         or type(source_version_context.get("raw_row_count")) is not int
         or source_version_context.get("raw_row_count") <= 0
         or source_version_context.get("capture_expected_row_count")
         != source_version_context.get("raw_row_count")
-        or not source_version_context.get("source_package_id")
         or not source_version_context.get("source_capture_id")
     ):
         raise PgResearchBindingError(
@@ -137,24 +138,27 @@ def discover_source_d1_support_changes(
         )
 
     while True:
-        page = read_raw_daily_history_page(
+        page = _read_baostock_d1_candidate_page(
             config,
             target_session=target,
-            source_package_id=source_package_id,
+            research_cutoff=cutoff,
             sessions=sessions,
+            source_capture_id=source_capture_id,
+            source_symbol=source_symbol,
             offset=source_offset,
             limit=100,
-            market="ALL",
-            board="ALL",
-            source_symbol=source_symbol,
-            include_parser_contract=True,
         )
-        candidates = page["candidates"]
+        page_candidates = page["candidates"]
+        candidates = [
+            candidate
+            for candidate in page_candidates
+            if source_symbol is None or candidate["source_symbol"] == source_symbol
+        ]
         if source_query_total is None:
-            source_query_total = page["total_count"]
+            source_query_total = 1 if source_symbol is not None else page["total_count"]
         if source_pool_total is None:
             source_pool_total = page["version_row_count"]
-        target_rows = []
+        target_rows = page["rows"]
         for candidate in candidates:
             symbol = candidate["source_symbol"]
             rows = candidate["history_rows"]
@@ -172,7 +176,7 @@ def discover_source_d1_support_changes(
                 or any(day not in sessions or day > target for day in dates)
                 or any(
                     row.get("source_symbol") != symbol
-                    or row.get("source_package_id") != source_package_id
+                    or row.get("source_capture_id") != source_capture_id
                     for row in rows
                 )
             ):
@@ -194,7 +198,9 @@ def discover_source_d1_support_changes(
             read_source_version_context(
                 config,
                 target_session=target,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                research_cutoff=cutoff,
+                price_coordinate=price_coordinate,
                 target_raw_rows=target_rows,
                 expected_raw_row_count=page["version_row_count"],
             )
@@ -209,41 +215,34 @@ def discover_source_d1_support_changes(
 
         context_keys = (
             "target_session",
-            "source_package_id",
             "source_capture_id",
             "raw_row_count",
             "capture_expected_row_count",
         )
+        expected_page_total = (
+            1 if source_symbol is not None else context["raw_row_count"]
+        )
         if (
             context.get("status") != "AVAILABLE"
+            or context.get("price_coordinate") != price_coordinate
             or any(context.get(key) != source_context.get(key) for key in context_keys)
             or page["version_status"] != "CLOSED"
             or not page["partition_closed"]
-            or (
-                page["total_count"] != context["raw_row_count"]
-                if source_symbol is None
-                else page["total_count"] not in {0, 1}
-                or page["total_count"] == 1
-                and (
-                    len(candidates) != 1
-                    or candidates[0]["source_symbol"] != source_symbol
-                )
-            )
+            or page["total_count"] != expected_page_total
             or page["version_row_count"] != context["raw_row_count"]
             or page["version_expected_row_count"]
             != context["capture_expected_row_count"]
             or page["offset"] != source_offset
-            or page["page_count"] != len(candidates)
-            or len(target_rows) != len(candidates)
-            or page["total_count"] != source_query_total
+            or page["page_count"] != len(page_candidates)
+            or len(target_rows) != len(page_candidates)
+            or (source_symbol is None and page["total_count"] != source_query_total)
             or source_version_context is not None
             and (
                 context.get("raw_row_count") != page["version_row_count"]
                 or context.get("capture_expected_row_count")
                 != page["version_expected_row_count"]
                 or any(
-                    row.get("source_package_id") != source_package_id
-                    or row.get("source_package_id") != context.get("source_package_id")
+                    row.get("source_capture_id") != source_capture_id
                     or row.get("source_capture_id") != context.get("source_capture_id")
                     for row in target_rows
                 )
@@ -263,7 +262,8 @@ def discover_source_d1_support_changes(
                 event_sessions=event_sessions,
                 followup_session=target,
                 session_dates=sessions,
-                source_package_id=source_package_id,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
                 history_rows=rows,
                 context=preview_context,
             )
@@ -279,11 +279,11 @@ def discover_source_d1_support_changes(
                     preview.get("symbol") != symbol
                     or preview.get("target_session") != day.isoformat()
                     or preview.get("identity_status") != "SOURCE_SYMBOL_ONLY"
-                    or preview.get("price_coordinate") != "RAW_UNADJUSTED"
+                    or preview.get("price_coordinate") != "FORWARD_ADJUSTED"
                     or not isinstance(predicate, dict)
                     or predicate.get("target_session") != day.isoformat()
                     or predicate.get("coordinate_id")
-                    != f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
+                    != f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
                     or predicate.get("official_dependency_window", {}).get(
                         "end_session"
                     )
@@ -337,7 +337,6 @@ def discover_source_d1_support_changes(
                         )
                     event_key = (
                         source_context["source_capture_id"],
-                        source_package_id,
                         symbol,
                         day.isoformat(),
                         predicate["coordinate_id"],
@@ -388,7 +387,7 @@ def discover_source_d1_support_changes(
                     official_sessions=sessions,
                     requested_sessions=requested_sessions,
                     history_points=support_points,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     source_context=source_context,
                     official_calendar=official_calendar,
                 )
@@ -421,7 +420,7 @@ def discover_source_d1_support_changes(
                         "target_source_capture_id": source_context["source_capture_id"],
                         "source_symbol": symbol,
                         "event_session": anchor_session.isoformat(),
-                        "price_coordinate": "RAW_UNADJUSTED",
+                        "price_coordinate": "FORWARD_ADJUSTED",
                         "coordinate_id": predicate["coordinate_id"],
                         "algorithm_contract_identity": {
                             "algorithm_family": "ALG-29",
@@ -440,11 +439,11 @@ def discover_source_d1_support_changes(
                     "support_observation_after": comparison.get("current_observation"),
                     "support_followup_status": support_followup.get("status"),
                     "source": {
-                        "price_coordinate": "RAW_UNADJUSTED",
+                        "price_coordinate": "FORWARD_ADJUSTED",
                         "anchor_capture_id": int(anchor_row["source_capture_id"]),
                         "target_capture_id": int(target_row["source_capture_id"]),
-                        "source_package_id": source_context.get("source_package_id"),
                         "source_capture_id": source_context.get("source_capture_id"),
+                        "time_role": "NON_PIT_RETROSPECTIVE",
                     },
                 }
                 symbol_details[symbol]["anchor_events"].append(detail_event)
@@ -452,17 +451,17 @@ def discover_source_d1_support_changes(
                     changed_events.append(detail_event)
 
         source_page_count += 1
-        expected_next = source_offset + len(candidates)
+        expected_next = source_offset + len(page_candidates)
         if page["next_offset"] is None:
-            if expected_next != page["total_count"]:
+            if expected_next != expected_page_total:
                 raise PgResearchBindingError(
                     "D1_SUPPORT_DISCOVERY_PAGE_INCOMPLETE", "来源分页提前结束"
                 )
             break
         if (
-            not candidates
+            not page_candidates
             or page["next_offset"] != expected_next
-            or page["next_offset"] >= page["total_count"]
+            or page["next_offset"] >= expected_page_total
         ):
             raise PgResearchBindingError(
                 "D1_SUPPORT_DISCOVERY_PAGE_INVALID", "来源分页游标不连续"
@@ -558,7 +557,9 @@ def discover_source_d1_support_changes(
         "contract": "ALG-29_RAW_BREAKOUT_PREDICATE_WITH_STRUCTURE_SUPPORT_FOLLOWUP",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "source_capture_id": source_capture_id,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "time_role": "NON_PIT_RETROSPECTIVE",
         "scope": (
             "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY"
             if source_symbol is None

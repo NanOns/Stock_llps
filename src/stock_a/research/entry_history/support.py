@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 from fractions import Fraction
 from typing import Any, Iterable, Mapping, Sequence
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
-from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
+from stock_a.research.core import CoreObservation
 
 from stock_a.research.entry_core.fields import _render_field, _render_value
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
 from stock_a.research.structure import Bar
+
+
+@dataclass(frozen=True)
+class SourcePriceBar:
+    """一个paired BaoStock捕获中指定坐标的OHLC视图。"""
+
+    session_date: date
+    source_capture_id: int
+    price_coordinate: str
+    prices: FieldValue
+    open: FieldValue
+    high: FieldValue
+    low: FieldValue
+    close: FieldValue
 
 
 def _field_from_pg_raw(
@@ -36,18 +51,53 @@ def _field_from_pg_raw(
     return unknown(reason)
 
 
-def _decoded_day_from_pg_raw(row: Mapping[str, Any]) -> DecodedDay | None:
-    if row.get("bar_status") != "TARGET_PRESENT":
-        return None
+def _source_price_bar_from_pg_row(
+    row: Mapping[str, Any], *, price_coordinate: str
+) -> SourcePriceBar | None:
     session = row.get("session_date")
     if type(session) is not date:
-        raise ResearchEntryError("PG_RAW_SESSION_INVALID", "PG来源Raw行缺少date会话")
+        raise ResearchEntryError("PG_PRICE_SESSION_INVALID", "PG来源价格行缺少date会话")
+    if price_coordinate == "RAW_UNADJUSTED":
+        names = ("raw_open", "raw_high", "raw_low", "raw_close")
+        quality_column, reason_column = "price_quality", "price_reason"
+        status = row.get("bar_status")
+    elif price_coordinate == "FORWARD_ADJUSTED":
+        names = ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
+        quality_column, reason_column = "qfq_price_quality", "qfq_price_reason"
+        status = row.get("qfq_bar_status")
+    else:
+        raise ResearchEntryError(
+            "PRICE_COORDINATE_INVALID", "价格坐标只支持RAW_UNADJUSTED或FORWARD_ADJUSTED"
+        )
+    if status != "TARGET_PRESENT":
+        if status not in {"TARGET_MISSING", "READ_FAILED"}:
+            raise ResearchEntryError("PG_PRICE_STATUS_INVALID", "PG价格状态未登记")
+        return None
+    capture_id = row.get("source_capture_id")
+    if type(capture_id) is not int or capture_id <= 0:
+        raise ResearchEntryError(
+            "PG_PRICE_CAPTURE_ID_INVALID", "PG来源价格行缺少paired source_capture_id"
+        )
     fields = tuple(
-        _field_from_pg_raw(row, column, "price_quality", "price_reason")
-        for column in ("raw_open", "raw_high", "raw_low", "raw_close")
+        _field_from_pg_raw(row, column, quality_column, reason_column)
+        for column in names
     )
     if all(item.quality == "OBSERVED" for item in fields):
-        prices = FieldValue(tuple(item.value for item in fields))
+        try:
+            values = tuple(exact_number(item.value) for item in fields)
+        except (TypeError, ValueError, ZeroDivisionError):
+            values = ()
+        valid = (
+            len(values) == 4
+            and all(value > 0 for value in values)
+            and values[2] <= min(values[0], values[3])
+            and max(values[0], values[3]) <= values[1]
+        )
+        if valid:
+            prices = FieldValue(values)
+        else:
+            prices = unknown("PRICE_BAR_INVALID")
+            fields = tuple(unknown("PRICE_BAR_INVALID") for _ in names)
     else:
         prices = unknown(
             next(
@@ -55,43 +105,151 @@ def _decoded_day_from_pg_raw(row: Mapping[str, Any]) -> DecodedDay | None:
                 "PRICE_QUALITY_UNKNOWN",
             )
         )
-    raw_amount = _field_from_pg_raw(
+    return SourcePriceBar(
+        session_date=session,
+        source_capture_id=capture_id,
+        price_coordinate=price_coordinate,
+        prices=prices,
+        open=fields[0],
+        high=fields[1],
+        low=fields[2],
+        close=fields[3],
+    )
+
+
+def _core_observation_from_pg_price_row(
+    row: Mapping[str, Any] | None,
+    *,
+    session: date,
+    source_capture_id: int | None = None,
+    price_coordinate: str,
+    coordinate_id: str,
+) -> CoreObservation:
+    """用指定RAW/QFQ OHLC构造Core输入，量额和状态始终保持RAW。"""
+    if row is None:
+        reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+        return CoreObservation(
+            session=session,
+            state="UNKNOWN",
+            coordinate_id=coordinate_id,
+            open=unknown(reason),
+            high=unknown(reason),
+            low=unknown(reason),
+            close=unknown(reason),
+            amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+            volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+        )
+    if row.get("session_date") != session or (
+        source_capture_id is not None
+        and row.get("source_capture_id") != source_capture_id
+    ):
+        raise ResearchEntryError(
+            "PG_PRICE_IDENTITY_MISMATCH", "PG来源价格行会话或paired capture错配"
+        )
+    if price_coordinate == "RAW_UNADJUSTED":
+        status_column, reason_column = "bar_status", "bar_reason"
+        trade_status_value = row.get("raw_tradestatus_value")
+        trade_status_quality = row.get("raw_tradestatus_quality")
+    elif price_coordinate == "FORWARD_ADJUSTED":
+        status_column, reason_column = "qfq_bar_status", "qfq_bar_reason"
+        trade_status_value = row.get("qfq_tradestatus_value")
+        trade_status_quality = row.get("qfq_tradestatus_quality")
+    else:
+        raise ResearchEntryError(
+            "PRICE_COORDINATE_INVALID", "价格坐标只支持RAW_UNADJUSTED或FORWARD_ADJUSTED"
+        )
+    status = row.get(status_column)
+    if status not in {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}:
+        raise ResearchEntryError("PG_PRICE_STATUS_INVALID", "PG来源价格状态未登记")
+    amount = _field_from_pg_raw(row, "raw_amount", "amount_quality", "amount_reason")
+    volume = _field_from_pg_raw(row, "raw_volume", "volume_quality", "volume_reason")
+    native_amount = _field_from_pg_raw(
         row,
         "raw_amount",
         "raw_amount_quality",
         "raw_amount_reason",
         raw_quality=True,
     )
-    raw_volume = _field_from_pg_raw(
+    native_volume = _field_from_pg_raw(
         row,
         "raw_volume",
         "raw_volume_quality",
         "raw_volume_reason",
         raw_quality=True,
     )
-    amount = (
-        unknown("UNIT_AUTHORITY_NOT_VERIFIED")
-        if raw_amount.quality == "OBSERVED"
-        else unknown(raw_amount.reason or "DATA_INVALID_AMOUNT")
+    if status != "TARGET_PRESENT":
+        reason = row.get(reason_column) or (
+            "TARGET_SESSION_BAR_MISSING"
+            if status == "TARGET_MISSING"
+            else "SOURCE_READ_FAILED"
+        )
+        return CoreObservation(
+            session=session,
+            state="UNKNOWN",
+            coordinate_id=coordinate_id,
+            open=unknown(reason),
+            high=unknown(reason),
+            low=unknown(reason),
+            close=unknown(reason),
+            amount=amount,
+            volume=volume,
+            native_amount=native_amount,
+            native_volume=native_volume,
+        )
+    selected = _source_price_bar_from_pg_row(row, price_coordinate=price_coordinate)
+    if selected is None or selected.prices.quality != "OBSERVED":
+        reason = (
+            selected.prices.reason
+            if selected is not None and selected.prices.reason
+            else "PRICE_COORDINATE_VALUE_UNKNOWN"
+        )
+        return CoreObservation(
+            session=session,
+            state="UNKNOWN",
+            coordinate_id=coordinate_id,
+            open=unknown(reason),
+            high=unknown(reason),
+            low=unknown(reason),
+            close=unknown(reason),
+            amount=amount,
+            volume=volume,
+            native_amount=native_amount,
+            native_volume=native_volume,
+        )
+    state = (
+        "CONFIRMED_SUSPENSION"
+        if trade_status_quality == "OBSERVED" and trade_status_value == "0"
+        else "ACTUAL"
+        if trade_status_quality == "OBSERVED" and trade_status_value == "1"
+        else "UNKNOWN"
     )
-    volume = (
-        unknown("UNIT_AUTHORITY_NOT_VERIFIED")
-        if raw_volume.quality == "OBSERVED"
-        else unknown(raw_volume.reason or "DATA_INVALID_VOLUME")
-    )
-    return DecodedDay(
-        session_date=session,
-        prices=prices,
-        raw_open=fields[0],
-        raw_high=fields[1],
-        raw_low=fields[2],
-        raw_close=fields[3],
+    if state == "UNKNOWN":
+        reason = "TRADE_STATUS_UNKNOWN"
+        return CoreObservation(
+            session=session,
+            state=state,
+            coordinate_id=coordinate_id,
+            open=unknown(reason),
+            high=unknown(reason),
+            low=unknown(reason),
+            close=unknown(reason),
+            amount=amount,
+            volume=volume,
+            native_amount=native_amount,
+            native_volume=native_volume,
+        )
+    return CoreObservation(
+        session=session,
+        state=state,
+        coordinate_id=coordinate_id,
+        open=selected.open,
+        high=selected.high,
+        low=selected.low,
+        close=selected.close,
         amount=amount,
         volume=volume,
-        reserved=0,
-        unit_version="TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1",
-        raw_amount=raw_amount,
-        raw_volume=raw_volume,
+        native_amount=native_amount,
+        native_volume=native_volume,
     )
 
 
@@ -232,25 +390,45 @@ def research_stock_pg_support_followup_preview(
     official_sessions: Sequence[date],
     requested_sessions: Sequence[date],
     history_points: Sequence[Mapping[str, Any]],
-    source_package_id: int,
+    source_capture_id: int | None = None,
+    price_coordinate: str | None = None,
     source_context: Mapping[str, Any],
     official_calendar: Mapping[str, Any],
+    **legacy_source_identity: Any,
 ) -> dict[str, Any]:
-    """把单股精确PG历史D1证据接到冻结BREAKOUT_PLATFORM与支撑观察核。"""
+    """把paired BaoStock QFQ历史D1证据接到冻结BREAKOUT_PLATFORM与支撑观察核。"""
     from stock_a.research.structure import generate, observe_support
 
     normalized = _normalize_symbol(symbol)[0]
     sessions = tuple(official_sessions)
     requested = tuple(requested_sessions)
     points = tuple(history_points)
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        return {
+            "status": "NOT_COMPUTED",
+            "reason_code": "PG_BAOSTOCK_CAPTURE_REQUIRED",
+            "source_symbol": normalized,
+            "target_session": target_session.isoformat(),
+            "price_coordinate": price_coordinate,
+            "time_role": "NON_PIT_RETROSPECTIVE",
+            "database_write": False,
+        }
+    if price_coordinate != "FORWARD_ADJUSTED":
+        return {
+            "status": "NOT_COMPUTED",
+            "reason_code": "SUPPORT_REQUIRES_QFQ_PRICE_COORDINATE",
+            "source_symbol": normalized,
+            "target_session": target_session.isoformat(),
+            "source_capture_id": source_capture_id,
+            "price_coordinate": price_coordinate,
+            "time_role": "NON_PIT_RETROSPECTIVE",
+            "database_write": False,
+        }
     if (
         source_context.get("status") != "AVAILABLE"
         or source_context.get("target_session") != target_session.isoformat()
-        or type(source_package_id) is not int
-        or source_package_id <= 0
-        or source_context.get("source_package_id") != source_package_id
-        or type(source_context.get("source_capture_id")) is not int
-        or source_context.get("source_capture_id") <= 0
+        or source_context.get("source_capture_id") != source_capture_id
+        or source_context.get("price_coordinate") != price_coordinate
         or source_context.get("raw_row_count")
         != source_context.get("capture_expected_row_count")
         or not isinstance(official_calendar, Mapping)
@@ -258,7 +436,8 @@ def research_stock_pg_support_followup_preview(
         or not official_calendar.get("calendar_revision")
     ):
         raise ResearchEntryError(
-            "SUPPORT_SOURCE_BINDING_INVALID", "支撑研究没有绑定同一Raw捕获与包版本"
+            "SUPPORT_SOURCE_BINDING_INVALID",
+            "支撑研究没有绑定同一BaoStock paired捕获与QFQ坐标",
         )
     if (
         not sessions
@@ -289,7 +468,9 @@ def research_stock_pg_support_followup_preview(
             "SUPPORT_HISTORY_POINTS_INVALID", "支撑D1证据没有覆盖请求的连续会话"
         )
 
-    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
+    )
     point_by_session: dict[date, Mapping[str, Any]] = {}
     row_by_session: dict[date, Mapping[str, Any] | None] = {}
     for point in points:
@@ -303,7 +484,7 @@ def research_stock_pg_support_followup_preview(
             or preview.get("symbol") != normalized
             or preview.get("target_session") != day.isoformat()
             or preview.get("identity_status") != "SOURCE_SYMBOL_ONLY"
-            or preview.get("price_coordinate") != "RAW_UNADJUSTED"
+            or preview.get("price_coordinate") != price_coordinate
             or (
                 point.get("history_max_session") is not None
                 and point.get("history_max_session") > day
@@ -313,7 +494,7 @@ def research_stock_pg_support_followup_preview(
                 and (
                     row.get("session_date") != day
                     or row.get("source_symbol") != normalized
-                    or row.get("source_package_id") != source_package_id
+                    or row.get("source_capture_id") != source_capture_id
                 )
             )
         ):
@@ -325,7 +506,7 @@ def research_stock_pg_support_followup_preview(
             not isinstance(predicate, Mapping)
             or predicate.get("target_session") != day.isoformat()
             or predicate.get("coordinate_id") != coordinate_id
-            or predicate.get("price_coordinate") != "RAW_UNADJUSTED"
+            or predicate.get("price_coordinate") != price_coordinate
             or predicate.get("official_dependency_window", {}).get("end_session")
             != day.isoformat()
         ):
@@ -342,13 +523,13 @@ def research_stock_pg_support_followup_preview(
     d1 = anchor_predicate["predicates"]
     d1_state = d1["result"].get("state")
     source_identity = {
-        "source_package_id": source_package_id,
-        "source_capture_id": source_context.get("source_capture_id"),
+        "source_capture_id": source_capture_id,
+        "price_coordinate": price_coordinate,
         "source_symbol": normalized,
         "anchor_session": support_anchor_session.isoformat(),
     }
     base = {
-        "contract": "SOURCE_SYMBOL_BREAKOUT_PLATFORM_SUPPORT_FOLLOWUP_R1",
+        "contract": "SOURCE_SYMBOL_BREAKOUT_PLATFORM_SUPPORT_FOLLOWUP_R2",
         "status": "NOT_GENERATED",
         "scope": "SOURCE_SYMBOL_SCOPED_NONFORMAL",
         "identity_status": "SOURCE_SYMBOL_ONLY",
@@ -357,14 +538,14 @@ def research_stock_pg_support_followup_preview(
         "support_anchor_session": support_anchor_session.isoformat(),
         "target_session": target_session.isoformat(),
         "research_mode": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": price_coordinate,
         "coordinate_id": coordinate_id,
         "future_session_rows_used": 0,
         "formal_anchor_created": False,
         "formal_p15_admission": "NOT_EVALUATED",
         "source": {
-            "source_package_id": source_context.get("source_package_id"),
-            "source_capture_id": source_context.get("source_capture_id"),
+            "source_capture_id": source_capture_id,
+            "price_coordinate": price_coordinate,
             "source_clock_role": source_context.get("source_clock_role"),
             "source_time_quality": source_context.get("source_time_quality"),
             "source_available_at": source_context.get("source_available_at"),
@@ -439,22 +620,26 @@ def research_stock_pg_support_followup_preview(
         return base
 
     anchor_row = row_by_session[support_anchor_session]
-    decoded_anchor = _decoded_day_from_pg_raw(anchor_row) if anchor_row else None
-    if decoded_anchor is None or decoded_anchor.prices.quality != "OBSERVED":
+    anchor_bar = (
+        _source_price_bar_from_pg_row(anchor_row, price_coordinate=price_coordinate)
+        if anchor_row
+        else None
+    )
+    if anchor_bar is None or anchor_bar.prices.quality != "OBSERVED":
         base["status"] = "NOT_EVALUABLE"
         base["reason_code"] = "BREAKOUT_PLATFORM_ACTUAL_BAR_REQUIRED"
-        base["reason"] = "D1 TRUE出生会话缺少可验证Raw OHLC actual Bar。"
+        base["reason"] = "D1 TRUE出生会话缺少可验证QFQ OHLC actual Bar。"
         return base
     shadow_entity_id = "SOURCE_SYMBOL_SCOPED_NONFORMAL:" + ":".join(
         str(source_identity[key]) for key in source_identity
     )
-    source_ref = "PG_SOURCE_RAW:" + ":".join(
+    source_ref = "PG_BAOSTOCK_PAIRED_CAPTURE:" + ":".join(
         (
-            str(source_package_id),
-            str(source_context.get("source_capture_id")),
+            str(source_capture_id),
+            price_coordinate,
             normalized,
             support_anchor_session.isoformat(),
-            str(anchor_row.get("source_capture_id")),
+            str(anchor_bar.source_capture_id),
         )
     )
     dependency = anchor_predicate["official_dependency_window"]
@@ -470,10 +655,12 @@ def research_stock_pg_support_followup_preview(
             + ":"
             + str(dependency.get("end_session"))
             + ":"
-            + str(source_package_id)
+            + str(source_capture_id)
+            + ":"
+            + price_coordinate
         ),
         actual=FieldValue(True),
-        today=Bar(anchor_index, decoded_anchor.prices),
+        today=Bar(anchor_index, anchor_bar.prices),
         inputs={
             "prior_high20": prior_high,
             "atr_today": atr_today,
@@ -517,11 +704,15 @@ def research_stock_pg_support_followup_preview(
             atr_previous = _support_field_from_rendered(
                 previous_inputs.get("core.atr20", {}), "core.atr20"
             )
-        decoded = _decoded_day_from_pg_raw(row) if row else None
-        if decoded is None:
+        selected_bar = (
+            _source_price_bar_from_pg_row(row, price_coordinate=price_coordinate)
+            if row
+            else None
+        )
+        if selected_bar is None:
             reason = (
                 (row or {}).get("bar_reason")
-                or (row or {}).get("price_reason")
+                or (row or {}).get("qfq_price_reason")
                 or (
                     "UNKNOWN_HISTORY_SESSION_NOT_STORED"
                     if row is None
@@ -531,15 +722,15 @@ def research_stock_pg_support_followup_preview(
             ohlc = unknown(reason)
             actual = unknown(reason)
         else:
-            ohlc = decoded.prices
+            ohlc = selected_bar.prices
             actual = (
                 FieldValue(True)
-                if decoded.prices.quality == "OBSERVED"
-                else unknown(decoded.prices.reason or "PRICE_QUALITY_UNKNOWN")
+                if selected_bar.prices.quality == "OBSERVED"
+                else unknown(selected_bar.prices.reason or "PRICE_QUALITY_UNKNOWN")
             )
             if actual.value is True:
                 price_values = tuple(
-                    exact_number(value) for value in decoded.prices.value
+                    exact_number(value) for value in selected_bar.prices.value
                 )
                 if min(price_values) <= 0 or not (
                     price_values[2]
@@ -548,7 +739,7 @@ def research_stock_pg_support_followup_preview(
                     <= price_values[1]
                 ):
                     raise ResearchEntryError(
-                        "SUPPORT_RAW_OHLC_INVALID", "支撑观察Raw OHLC不满足价格合同"
+                        "SUPPORT_QFQ_OHLC_INVALID", "支撑观察QFQ OHLC不满足价格合同"
                     )
         bar = Bar(sessions.index(day), ohlc)
         evidence = (
@@ -610,13 +801,16 @@ def research_stock_pg_support_followup_preview(
                 if row
                 else None,
                 "target_bar_status": preview.get("target_bar_status"),
-                "price_quality": (row or {}).get("price_quality", "UNKNOWN"),
+                "price_quality": (row or {}).get("qfq_price_quality", "UNKNOWN"),
+                "raw_price_quality": (row or {}).get("price_quality", "UNKNOWN"),
                 "bar_reason": (row or {}).get("bar_reason")
-                or (row or {}).get("price_reason"),
-                "raw_ohlc": {
-                    name: _render_field(getattr(decoded, f"raw_{name}"))
-                    if decoded is not None
-                    else _render_field(unknown(ohlc.reason or "RAW_BAR_UNAVAILABLE"))
+                or (row or {}).get("qfq_price_reason"),
+                "coordinate_ohlc": {
+                    name: _render_field(getattr(selected_bar, name))
+                    if selected_bar is not None
+                    else _render_field(
+                        unknown(ohlc.reason or "PRICE_COORDINATE_BAR_UNAVAILABLE")
+                    )
                     for name in ("open", "high", "low", "close")
                 },
                 "prior_dependencies": {
@@ -660,7 +854,7 @@ def research_stock_pg_support_followup_preview(
                 "upper": _render_value(exact_number(anchor.upper)),
                 "created_session": support_anchor_session.isoformat(),
                 "earliest_test_session": first_test.isoformat(),
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": price_coordinate,
                 "shadow_structure": "SOURCE_SYMBOL_SCOPED_NONFORMAL",
                 "formal_entity_id_emitted": False,
                 "formal_anchor_id_emitted": False,

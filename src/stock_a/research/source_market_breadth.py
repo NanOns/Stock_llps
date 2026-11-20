@@ -1,4 +1,4 @@
-"""固定来源代码集合的RAW价格市场宽度纯计算内核。"""
+"""固定来源代码集合的BaoStock QFQ价格市场宽度纯计算内核。"""
 
 from __future__ import annotations
 
@@ -10,28 +10,25 @@ from fractions import Fraction
 import re
 from typing import Any
 
-_SOURCE_SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
-_PRICE_COORDINATE = "RAW_UNADJUSTED"
-SOURCE_MARKET_BREADTH_CONTRACT = "MKT-02_RAW_POSITIVE_RETURN_STATE_DELTA_R1"
+_SOURCE_SYMBOL = re.compile(r"^(SH|SZ|BJ)\.[0-9]{6}$")
+_PRICE_COORDINATE = "FORWARD_ADJUSTED"
+SOURCE_MARKET_BREADTH_CONTRACT = "MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R2"
 
 
 @dataclass(frozen=True)
 class SourceCohortIdentity:
-    """目标日Raw来源版本和实际捕获信息。"""
+    """目标日paired BaoStock捕获和实际时钟身份。"""
 
     target_session: date
-    source_package_id: int
     source_capture_id: int
-    source_dataset_id: str
-    source_byte_count: int
-    parser_contract: str
+    price_coordinate: str
     source_time_quality: str
     source_available_at: str | None
     capture_read_started_at: str
     capture_validated_at: str
     source_clock_role: str
-    raw_row_count: int
-    capture_expected_row_count: int
+    price_row_count: int
+    capture_expected_price_row_count: int
     target_present_count: int
     target_missing_count: int
     read_failed_count: int
@@ -40,13 +37,13 @@ class SourceCohortIdentity:
 
 
 @dataclass(frozen=True)
-class RawPriceObservation:
-    """一个精确来源包、官方会话和来源代码的RAW收盘观察。"""
+class QfqPriceObservation:
+    """一个paired捕获、官方会话和来源代码的QFQ收盘观察。"""
 
     source_symbol: str
     session_date: date
-    source_package_id: int
-    raw_close: Decimal | Fraction | int | None
+    source_capture_id: int
+    selected_close: Decimal | Fraction | int | None
     price_quality: str
     price_reason: str | None
     bar_status: str
@@ -63,7 +60,7 @@ class SourceMarketBreadthInput:
     calendar_id: str
     calendar_revision: str
     official_sessions: tuple[date, ...]
-    observations: tuple[RawPriceObservation, ...]
+    observations: tuple[QfqPriceObservation, ...]
 
 
 @dataclass(frozen=True)
@@ -101,16 +98,16 @@ class SourceMarketBreadthResult:
 
 def _fraction(value: Any) -> Fraction:
     if isinstance(value, bool):
-        raise ValueError("布尔值不能作为RAW价格")
+        raise ValueError("布尔值不能作为QFQ价格")
     if isinstance(value, Fraction):
         return value
     if isinstance(value, Decimal):
         if not value.is_finite():
-            raise ValueError("RAW价格必须为有限值")
+            raise ValueError("QFQ价格必须为有限值")
         return Fraction(value)
     if isinstance(value, int):
         return Fraction(value)
-    raise ValueError("RAW价格必须是精确Decimal、Fraction或整数")
+    raise ValueError("QFQ价格必须是精确Decimal、Fraction或整数")
 
 
 def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
@@ -123,24 +120,21 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
     ):
         raise ValueError("来源目标日必须是截止日前的明确会话")
     if (
-        type(cohort.source_package_id) is not int
-        or cohort.source_package_id <= 0
-        or type(cohort.source_capture_id) is not int
+        type(cohort.source_capture_id) is not int
         or cohort.source_capture_id <= 0
+        or cohort.price_coordinate != _PRICE_COORDINATE
     ):
-        raise ValueError("来源版本必须绑定正数TDX包ID和捕获ID")
-    if cohort.source_dataset_id != "TDX_VIPDATA_PACKAGE":
-        raise ValueError("市场宽度来源必须是已登记的TDX VIPDATA包")
+        raise ValueError("市场宽度来源必须绑定BaoStock捕获和QFQ坐标")
     if (
         inputs.calendar_id != cohort.calendar_id
         or inputs.calendar_revision != cohort.calendar_revision
     ):
         raise ValueError("官方日历身份与输入会话不一致")
     if (
-        type(cohort.raw_row_count) is not int
-        or cohort.raw_row_count < 0
-        or type(cohort.capture_expected_row_count) is not int
-        or cohort.capture_expected_row_count < 0
+        type(cohort.price_row_count) is not int
+        or cohort.price_row_count < 0
+        or type(cohort.capture_expected_price_row_count) is not int
+        or cohort.capture_expected_price_row_count < 0
         or any(
             type(value) is not int or value < 0
             for value in (
@@ -149,23 +143,20 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
                 cohort.read_failed_count,
             )
         )
-        or cohort.raw_row_count != cohort.capture_expected_row_count
-        or cohort.raw_row_count != len(inputs.source_symbols)
+        or cohort.price_row_count != cohort.capture_expected_price_row_count
+        or cohort.price_row_count != len(inputs.source_symbols)
         or cohort.target_present_count
         + cohort.target_missing_count
         + cohort.read_failed_count
-        != cohort.raw_row_count
+        != cohort.price_row_count
     ):
         raise ValueError("Raw行数或来源状态分母不闭合")
     if (
-        type(cohort.source_byte_count) is not int
-        or cohort.source_byte_count <= 0
-        or not cohort.parser_contract
-        or not cohort.source_clock_role
+        not cohort.source_clock_role
         or not cohort.capture_read_started_at
         or not cohort.capture_validated_at
     ):
-        raise ValueError("来源捕获时钟或来源包身份不完整")
+        raise ValueError("paired BaoStock捕获时钟身份不完整")
     if (
         cohort.source_available_at is not None
         and cohort.source_time_quality != "VERIFIED_SOURCE_TIME"
@@ -199,43 +190,43 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
         not isinstance(symbol, str) or _SOURCE_SYMBOL.fullmatch(symbol) is None
         for symbol in inputs.source_symbols
     ) or len(source_symbols) != len(inputs.source_symbols):
-        raise ValueError("来源代码集合必须为唯一的SH./SZ.来源代码")
+        raise ValueError("来源代码集合必须唯一并使用SH./SZ./BJ.来源代码")
     needed_sessions = {window[0], window[1], window[3], window[4]}
     seen: set[tuple[str, date]] = set()
     for observation in inputs.observations:
-        if not isinstance(observation, RawPriceObservation):
-            raise ValueError("价格观察必须使用RawPriceObservation")
+        if not isinstance(observation, QfqPriceObservation):
+            raise ValueError("价格观察必须使用QfqPriceObservation")
         key = (observation.source_symbol, observation.session_date)
         if observation.source_symbol not in source_symbols:
             raise ValueError("价格观察包含固定来源集合以外的代码")
         if observation.session_date not in needed_sessions:
             raise ValueError("价格观察不属于t、t-1、t-3、t-4官方会话")
         if key in seen:
-            raise ValueError("相同来源代码和官方会话存在重复RAW价格")
+            raise ValueError("相同来源代码和官方会话存在重复QFQ价格")
         seen.add(key)
     return window
 
 
 def _observed_close(
-    observation: RawPriceObservation | None,
+    observation: QfqPriceObservation | None,
     *,
     cohort: SourceCohortIdentity,
     expected_session: date,
 ) -> tuple[Fraction | None, str | None, str | None]:
     if observation is None:
-        return None, "RAW_SESSION_ROW_MISSING", None
+        return None, "QFQ_SESSION_ROW_MISSING", None
     if observation.session_date != expected_session:
         return None, "OFFICIAL_SESSION_MISMATCH", None
-    if observation.source_package_id != cohort.source_package_id:
-        return None, "SOURCE_PACKAGE_MISMATCH", None
+    if observation.source_capture_id != cohort.source_capture_id:
+        return None, "SOURCE_CAPTURE_MISMATCH", None
     if observation.price_coordinate != _PRICE_COORDINATE:
-        return None, "PRICE_COORDINATE_NOT_RAW_UNADJUSTED", None
+        return None, "PRICE_COORDINATE_NOT_FORWARD_ADJUSTED", None
     if observation.bar_status == "CONFIRMED_SUSPENSION":
-        return None, "CONFIRMED_SUSPENSION_NO_LEGAL_RAW_PRICE", observation.price_reason
+        return None, "CONFIRMED_SUSPENSION_NO_LEGAL_QFQ_PRICE", observation.price_reason
     if observation.bar_status == "TARGET_MISSING":
         return None, "TARGET_BAR_MISSING", observation.price_reason
     if observation.bar_status == "READ_FAILED":
-        return None, "RAW_READ_FAILED", observation.price_reason
+        return None, "QFQ_READ_FAILED", observation.price_reason
     if observation.bar_status != "TARGET_PRESENT":
         return None, "BAR_STATUS_NOT_OBSERVED", observation.price_reason
     if observation.price_quality != "OBSERVED":
@@ -244,11 +235,11 @@ def _observed_close(
         )
         return None, reason, observation.price_reason
     try:
-        close = _fraction(observation.raw_close)
+        close = _fraction(observation.selected_close)
     except (ValueError, TypeError, ZeroDivisionError):
-        return None, "RAW_CLOSE_INVALID", observation.price_reason
+        return None, "QFQ_CLOSE_INVALID", observation.price_reason
     if close <= 0:
-        return None, "RAW_CLOSE_NOT_POSITIVE", observation.price_reason
+        return None, "QFQ_CLOSE_NOT_POSITIVE", observation.price_reason
     return close, None, None
 
 

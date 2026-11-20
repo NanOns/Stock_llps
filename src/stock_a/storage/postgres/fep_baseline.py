@@ -14,7 +14,6 @@ from stock_a.storage.postgres.source_raw import _transaction
 _TABLE = "source_fep_baseline_facts"
 _COLUMNS = (
     "research_cutoff",
-    "source_package_id",
     "source_capture_id",
     "target_session",
     "period_start_session",
@@ -131,15 +130,15 @@ def read_fep_source_contexts(
     config: Mapping[str, Any],
     *,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     rule_ids: tuple[str, ...],
     horizons: tuple[int, ...],
 ) -> list[dict[str, Any]]:
     """从截止内Raw、三态、登记、Forward及市场宽度事实读取完整输入。"""
     if (
         type(research_cutoff) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or not rule_ids
         or len(set(rule_ids)) != len(rule_ids)
         or any(not isinstance(rule, str) or not rule.strip() for rule in rule_ids)
@@ -147,7 +146,7 @@ def read_fep_source_contexts(
         or tuple(sorted(set(horizons))) != horizons
         or any(horizon not in {1, 3, 5} for horizon in horizons)
     ):
-        raise ValueError("FEP来源读取的截止、来源包、规则或期限无效")
+        raise ValueError("FEP来源读取的截止、来源捕获、规则或期限无效")
 
     with _transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
@@ -155,22 +154,23 @@ def read_fep_source_contexts(
         _,
     ):
         cursor.execute(
-            """SELECT r.id,r.target_session,r.source_symbol,r.source_package_id,
-                      r.source_capture_id,r.rule_id,r.rule_version,r.profile_revision,
+            """SELECT r.id,r.target_session,r.source_symbol,r.source_capture_id,
+                      r.rule_id,r.rule_version,r.profile_revision,
                       r.history_session_count,r.d1_history_session_count,
                       r.event_window_start,r.calendar_revision,r.state,r.reasons,r.scope,
                       c.source_time_quality,c.parser_contract,c.source_clock_role,
-                      c.source_available_at,c.target_session
+                      c.source_available_at
                FROM source_rule_evaluations r
                JOIN source_captures c ON c.capture_id=r.source_capture_id
-                                      AND c.source_package_id=r.source_package_id
-                                      AND c.target_session=r.target_session
-               WHERE r.target_session<=%s AND r.source_package_id=%s
+                                      AND c.provider='BAOSTOCK'
+                                      AND c.range_start_session<=r.target_session
+                                      AND c.range_end_session>=r.target_session
+               WHERE r.target_session<=%s AND r.source_capture_id=%s
                  AND r.rule_id=ANY(%s) AND r.scope='NON_PIT_EXPLORATORY'
-                 AND c.target_session<=%s
+                 AND c.range_end_session<=%s
                ORDER BY r.target_session,r.rule_id,r.source_capture_id,
                         r.profile_revision,r.source_symbol""",
-            (research_cutoff, source_package_id, list(rule_ids), research_cutoff),
+            (research_cutoff, source_capture_id, list(rule_ids), research_cutoff),
         )
         rows = cursor.fetchall()
 
@@ -186,10 +186,9 @@ def read_fep_source_contexts(
                 row[8],
                 row[9],
                 row[10],
-                row[11],
+                row[14],
                 row[15],
                 row[16],
-                row[17],
             )
             grouped.setdefault(key, []).append(row)
 
@@ -197,7 +196,6 @@ def read_fep_source_contexts(
         for key, scope_rows in sorted(grouped.items(), key=lambda item: item[0]):
             (
                 target,
-                package,
                 capture,
                 rule,
                 rule_version,
@@ -216,9 +214,9 @@ def read_fep_source_contexts(
                 fact_id, symbol, state, reasons, scope = (
                     row[0],
                     row[2],
+                    row[11],
                     row[12],
                     row[13],
-                    row[14],
                 )
                 if scope != "NON_PIT_EXPLORATORY" or symbol in rule_facts:
                     raise ResearchFactConflict("FEP T0规则事实有重复代码或范围错误")
@@ -233,9 +231,9 @@ def read_fep_source_contexts(
 
             cursor.execute(
                 """SELECT source_symbol FROM source_raw_daily
-                   WHERE session_date=%s AND source_package_id=%s
-                     AND source_capture_id=%s ORDER BY source_symbol""",
-                (target, package, capture),
+                   WHERE session_date=%s AND source_capture_id=%s
+                   ORDER BY source_symbol""",
+                (target, capture),
             )
             raw_symbols = [row[0] for row in cursor.fetchall()]
             raw_symbol_set = set(raw_symbols)
@@ -276,16 +274,15 @@ def read_fep_source_contexts(
                           mdd_numerator,mdd_denominator,price_coordinate,scope,
                           path_rule_version,calendar_revision
                    FROM source_forward_path_facts
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s AND horizon=ANY(%s)
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND horizon=ANY(%s)
                      AND path_rule_version=%s
-                     AND price_coordinate='RAW_UNADJUSTED'
+                     AND price_coordinate='FORWARD_ADJUSTED'
                      AND scope='NON_PIT_EXPLORATORY'
                      AND target_session<=%s AND endpoint_session<=%s
                    ORDER BY horizon,calendar_revision,source_symbol""",
                 (
                     target,
-                    package,
                     capture,
                     list(horizons),
                     PATH_VERSION,
@@ -342,7 +339,7 @@ def read_fep_source_contexts(
                     "mdd_numerator": mdd_numerator,
                     "mdd_denominator": mdd_denominator,
                     "valid_forward_identity": (
-                        coordinate == "RAW_UNADJUSTED"
+                        coordinate == "FORWARD_ADJUSTED"
                         and scope == "NON_PIT_EXPLORATORY"
                         and path_version == PATH_VERSION
                         and forward_calendar_revision == calendar_revision
@@ -357,10 +354,11 @@ def read_fep_source_contexts(
                 """SELECT id,contract_version,calendar_revision,source_count,
                           eligible_count,source_time_quality,source_clock_role
                    FROM source_market_breadth_days
-                   WHERE target_session=%s AND source_package_id=%s
-                     AND source_capture_id=%s AND target_session<=%s
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND target_session<=%s
+                     AND price_coordinate='FORWARD_ADJUSTED'
                    ORDER BY contract_version,calendar_revision""",
-                (target, package, capture, research_cutoff),
+                (target, capture, research_cutoff),
             )
             market_days = cursor.fetchall()
             market = None
@@ -379,12 +377,13 @@ def read_fep_source_contexts(
                               primary_unknown_reason
                        FROM source_market_breadth_symbols
                        WHERE breadth_day_id=%s AND target_session=%s
-                         AND source_package_id=%s AND source_capture_id=%s
-                         AND target_session<=%s ORDER BY source_symbol""",
+                         AND source_capture_id=%s
+                         AND target_session<=%s
+                         AND price_coordinate='FORWARD_ADJUSTED'
+                       ORDER BY source_symbol""",
                     (
                         breadth_day_id,
                         target,
-                        package,
                         capture,
                         research_cutoff,
                     ),
@@ -421,7 +420,6 @@ def read_fep_source_contexts(
             contexts.append(
                 {
                     "target_session": target,
-                    "source_package_id": package,
                     "source_capture_id": capture,
                     "rule_id": rule,
                     "rule_version": rule_version,
@@ -434,7 +432,7 @@ def read_fep_source_contexts(
                     "source_time_quality": source_time_quality,
                     "parser_contract": parser_contract,
                     "source_clock_role": source_clock_role,
-                    "source_available_at": scope_rows[0][18],
+                    "source_available_at": scope_rows[0][17],
                     "rule_facts": rule_facts,
                     "raw_symbols": raw_symbol_set,
                     "raw_count": len(raw_symbols),
@@ -476,16 +474,16 @@ def persist_fep_baseline_rows(
         f"INSERT INTO {_TABLE} ({','.join(_COLUMNS)}) "
         f"VALUES ({','.join(['%s'] * len(_COLUMNS))}) ON CONFLICT DO NOTHING"
     )
-    rules = sorted({row[6] for row in values})
-    packages = sorted({row[1] for row in values})
+    rules = sorted({row[5] for row in values})
+    capture_ids = sorted({row[1] for row in values})
     cutoffs = sorted({row[0] for row in values})
-    horizons = sorted({row[18] for row in values})
-    lanes = sorted({row[17] for row in values})
-    if len(packages) != 1 or len(cutoffs) != 1:
-        raise ValueError("单次FEP写入必须绑定唯一截止与来源包")
+    horizons = sorted({row[17] for row in values})
+    lanes = sorted({row[16] for row in values})
+    if len(capture_ids) != 1 or len(cutoffs) != 1:
+        raise ValueError("单次FEP写入必须绑定唯一截止与BaoStock来源捕获")
 
     def business_key(row: tuple[Any, ...]) -> tuple[Any, ...]:
-        return row[:23]
+        return tuple(row[_COLUMNS.index(name)] for name in _COLUMNS[:23])
 
     expected_by_key = {}
     for value in values:
@@ -513,11 +511,11 @@ def persist_fep_baseline_rows(
         inserted = cursor.rowcount
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
-                WHERE research_cutoff=%s AND source_package_id=%s
+                WHERE research_cutoff=%s AND source_capture_id=%s
                   AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
                 ORDER BY summary_scope,target_session,period_start_session,
                          rule_id,lane,horizon,condition_code,group_code,metric_code""",
-            (cutoffs[0], packages[0], rules, horizons, lanes),
+            (cutoffs[0], capture_ids[0], rules, horizons, lanes),
         )
         stored = cursor.fetchall()
         stored_by_key = {business_key(tuple(row)): tuple(row) for row in stored}
@@ -541,7 +539,7 @@ def persist_fep_baseline_rows(
                     tuple(
                         expected[_COLUMNS.index(name)] for name in _RESTATABLE_COLUMNS
                     )
-                    + tuple(expected[:23]),
+                    + tuple(expected[_COLUMNS.index(name)] for name in _COLUMNS[:23]),
                 )
                 if cursor.rowcount != 1:
                     raise ResearchFactConflict("FEP同键定点修订未更新唯一业务行")
@@ -553,11 +551,11 @@ def persist_fep_baseline_rows(
         if restated:
             cursor.execute(
                 f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
-                    WHERE research_cutoff=%s AND source_package_id=%s
+                    WHERE research_cutoff=%s AND source_capture_id=%s
                       AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
                     ORDER BY summary_scope,target_session,period_start_session,
                              rule_id,lane,horizon,condition_code,group_code,metric_code""",
-                (cutoffs[0], packages[0], rules, horizons, lanes),
+                (cutoffs[0], capture_ids[0], rules, horizons, lanes),
             )
             stored_after = {
                 business_key(tuple(row)): tuple(row) for row in cursor.fetchall()
@@ -582,8 +580,9 @@ def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
     keys = [tuple(row[:23]) for row in rows]
     if len(keys) != len(set(keys)):
         reasons.append("FEP_READER_DUPLICATE_BUSINESS_SCOPE")
-    t0_rows = [row for row in rows if row[19] == "T0"]
-    equal_rows = [row for row in rows if row[19] == "EQUAL_DATE"]
+    index = {name: _COLUMNS.index(name) for name in _COLUMNS}
+    t0_rows = [row for row in rows if row[index["summary_scope"]] == "T0"]
+    equal_rows = [row for row in rows if row[index["summary_scope"]] == "EQUAL_DATE"]
     if len(t0_rows) + len(equal_rows) != len(rows):
         reasons.append("FEP_READER_UNKNOWN_SUMMARY_SCOPE")
     expected_t0 = {
@@ -591,13 +590,19 @@ def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
         for group in ("MATCH", "NO_MATCH", "UNKNOWN")
         for metric in ("RAW_CLOSE_RETURN", "RAW_MFE", "RAW_MAE", "RAW_MDD_CLOSE")
     } | {("MATCH_VS_NO_MATCH", "RAW_CLOSE_RETURN", "ALL")}
-    targets = sorted({row[3] for row in t0_rows})
+    targets = sorted({row[index["target_session"]] for row in t0_rows})
     if not targets:
         reasons.append("FEP_READER_T0_ROWS_MISSING")
-    index = {name: _COLUMNS.index(name) for name in _COLUMNS}
     for target in targets:
-        day_rows = [row for row in t0_rows if row[3] == target]
-        by_scope = {(row[20], row[21], row[22]): row for row in day_rows}
+        day_rows = [row for row in t0_rows if row[index["target_session"]] == target]
+        by_scope = {
+            (
+                row[index["group_code"]],
+                row[index["metric_code"]],
+                row[index["condition_code"]],
+            ): row
+            for row in day_rows
+        }
         if len(by_scope) != len(day_rows) or set(by_scope) != expected_t0:
             reasons.append("FEP_READER_T0_GROUP_METRIC_INCOMPLETE")
             continue
@@ -629,7 +634,7 @@ def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
             "ENTRY": "entry_count",
             "DAILY_LANDMARK": "daily_landmark_count",
             "REENTRY": "reentry_count",
-        }.get(rows[0][17])
+        }.get(rows[0][index["lane"]])
         if lane_member_column is None:
             reasons.append("FEP_READER_LANE_INVALID")
             continue
@@ -682,7 +687,14 @@ def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
             "B_FIXED_UNKNOWN",
         )
     }
-    equal_scopes = [(row[20], row[21], row[22]) for row in equal_rows]
+    equal_scopes = [
+        (
+            row[index["group_code"]],
+            row[index["metric_code"]],
+            row[index["condition_code"]],
+        )
+        for row in equal_rows
+    ]
     if (
         len(equal_scopes) != len(set(equal_scopes))
         or set(equal_scopes) != expected_conditions
@@ -694,8 +706,8 @@ def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
         requested = len(targets)
         for row in equal_rows:
             if (
-                row[4] != expected_start
-                or row[5] != expected_end
+                row[index["period_start_session"]] != expected_start
+                or row[index["period_end_session"]] != expected_end
                 or row[index["requested_date_count"]] != requested
             ):
                 reasons.append("FEP_READER_EQUAL_DATE_RANGE_MISMATCH")
@@ -727,7 +739,7 @@ def _same_t0_lane_comparison(
     """从同一typed表的T0 MATCH行生成只读、日期等权lane对照。"""
     index = {name: _COLUMNS.index(name) for name in _COLUMNS}
     identity_fields = (
-        "source_package_id",
+        "source_capture_id",
         "source_capture_id",
         "target_session",
         "rule_id",
@@ -901,7 +913,7 @@ def _same_t0_lane_comparison(
         "direction": "REENTRY_MINUS_ENTRY",
         "comparison_source": "PERSISTED_TYPED_T0_MATCH_ROWS",
         "scope": "NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "capability": "DESCRIPTIVE_ONLY",
         "causal_or_strategy_claim": False,
         "reason_codes": counterpart_closure_reasons,
@@ -914,7 +926,7 @@ def read_fep_baseline(
     config: Mapping[str, Any],
     *,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     rule_id: str,
     horizon: int,
     lane: str,
@@ -922,8 +934,8 @@ def read_fep_baseline(
     """只读读取已经完成的T0组统计及等权日期汇总，不触碰来源表。"""
     if (
         type(research_cutoff) is not date
-        or type(source_package_id) is not int
-        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or not isinstance(rule_id, str)
         or not rule_id.strip()
         or horizon not in {1, 3, 5}
@@ -938,19 +950,19 @@ def read_fep_baseline(
     ):
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
-                WHERE research_cutoff=%s AND source_package_id=%s
+                WHERE research_cutoff=%s AND source_capture_id=%s
                   AND rule_id=%s AND horizon=%s AND lane=ANY(%s)
                 ORDER BY lane,summary_scope,target_session,condition_code,group_code,metric_code""",
-            (research_cutoff, source_package_id, rule_id, horizon, list(query_lanes)),
+            (research_cutoff, source_capture_id, rule_id, horizon, list(query_lanes)),
         )
         comparison_rows = cursor.fetchall()
-    rows = [row for row in comparison_rows if row[17] == lane]
+    rows = [row for row in comparison_rows if row[_COLUMNS.index("lane")] == lane]
     if not rows:
         return {
             "status": "NOT_COMPUTED",
             "reason_codes": ["NO_PERSISTED_FEP_BASELINE"],
             "research_cutoff": research_cutoff.isoformat(),
-            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
             "rule_id": rule_id,
             "horizon": horizon,
             "lane": lane,
@@ -993,8 +1005,17 @@ def read_fep_baseline(
         )
         record["research_cutoff"] = record["research_cutoff"].isoformat()
         records.append(record)
+    partition_columns = (
+        "rule_id",
+        "rule_version",
+        "profile_family",
+        "calendar_revision",
+        "path_rule_version",
+        "source_time_quality",
+        "parser_contract",
+    )
     partitions = {
-        (row[6], row[7], row[8], row[13], row[14], row[15], row[16]) for row in rows
+        tuple(row[_COLUMNS.index(name)] for name in partition_columns) for row in rows
     }
     closure_reasons = _validate_fep_baseline_closure(rows)
     if len(partitions) != 1:
@@ -1003,25 +1024,27 @@ def read_fep_baseline(
         "status": "AVAILABLE" if not closure_reasons else "INCOMPLETE",
         "reason_codes": sorted(set(closure_reasons)),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": source_package_id,
+        "source_capture_id": source_capture_id,
         "rule_id": rule_id,
-        "rule_version": rows[0][7],
+        "rule_version": rows[0][_COLUMNS.index("rule_version")],
         "horizon": horizon,
         "lane": lane,
-        "profile_family": rows[0][8],
-        "calendar_revision": rows[0][13],
-        "path_rule_version": rows[0][14],
+        "profile_family": rows[0][_COLUMNS.index("profile_family")],
+        "calendar_revision": rows[0][_COLUMNS.index("calendar_revision")],
+        "path_rule_version": rows[0][_COLUMNS.index("path_rule_version")],
         "entity": "SOURCE_STOCK",
         "target": "RAW_CLOSE_RETURN",
         "scope": "NON_PIT_EXPLORATORY",
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "capability": "DESCRIPTIVE_ONLY",
         "model_capability": "NOT_ENABLED",
         "rows": records,
     }
     if lane in {"ENTRY", "REENTRY"}:
         counterpart = "REENTRY" if lane == "ENTRY" else "ENTRY"
-        counterpart_rows = [row for row in comparison_rows if row[17] == counterpart]
+        counterpart_rows = [
+            row for row in comparison_rows if row[_COLUMNS.index("lane")] == counterpart
+        ]
         counterpart_reasons = (
             _validate_fep_baseline_closure(counterpart_rows) if counterpart_rows else []
         )
@@ -1030,13 +1053,13 @@ def read_fep_baseline(
             and len(
                 {
                     (
-                        row[6],
-                        row[7],
-                        row[8],
-                        row[13],
-                        row[14],
-                        row[15],
-                        row[16],
+                        row[_COLUMNS.index("rule_id")],
+                        row[_COLUMNS.index("rule_version")],
+                        row[_COLUMNS.index("profile_family")],
+                        row[_COLUMNS.index("calendar_revision")],
+                        row[_COLUMNS.index("path_rule_version")],
+                        row[_COLUMNS.index("source_time_quality")],
+                        row[_COLUMNS.index("parser_contract")],
                     )
                     for row in counterpart_rows
                 }

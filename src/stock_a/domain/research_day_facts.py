@@ -128,7 +128,7 @@ class ResearchDayFacts:
 
     before_session: date
     target_session: date
-    source_package_id: int
+    source_capture_id: int
     before_capture_id: int
     target_capture_id: int
     source_time_quality: str

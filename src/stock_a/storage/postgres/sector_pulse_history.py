@@ -36,15 +36,9 @@ def _read_market_context(
             "breadth": {"status": "NOT_COMPUTED", "reason_codes": reason},
             "participation": {"status": "NOT_COMPUTED", "reason_codes": reason},
         }
-    package_id = source_identity.get("source_package_id")
     capture_id = source_identity.get("source_capture_id")
     profile_revision = source_identity.get("profile_revision")
-    if (
-        type(package_id) is not int
-        or package_id <= 0
-        or type(capture_id) is not int
-        or capture_id <= 0
-    ):
+    if type(capture_id) is not int or capture_id <= 0:
         reason = ["MARKET_FACT_SOURCE_IDENTITY_INVALID"]
         return {
             "breadth": {"status": "INCOMPLETE", "reason_codes": reason},
@@ -56,13 +50,13 @@ def _read_market_context(
        source_count,eligible_count,target_present_count,target_missing_count,
        read_failed_count
 FROM source_market_breadth_days
-WHERE target_session=%s AND target_session<=%s AND source_package_id=%s
-  AND source_capture_id=%s AND calendar_id=%s AND calendar_revision=%s
+WHERE target_session=%s AND target_session<=%s AND source_capture_id=%s
+  AND price_coordinate='FORWARD_ADJUSTED'
+  AND calendar_id=%s AND calendar_revision=%s
 ORDER BY id LIMIT 2""",
         (
             target_session,
             research_cutoff,
-            package_id,
             capture_id,
             calendar_id,
             calendar_revision,
@@ -140,13 +134,13 @@ GROUP BY primary_unknown_reason ORDER BY primary_unknown_reason""",
        profile_unknown_count,profile_missing_count,median_numerator,
        median_denominator,classification,status
 FROM source_market_participation_days
-WHERE target_session=%s AND target_session<=%s AND source_package_id=%s
-  AND source_capture_id=%s AND contract_version='MARKET_PARTICIPATION_R1'
+WHERE target_session=%s AND target_session<=%s AND source_capture_id=%s
+  AND contract_version='MARKET_PARTICIPATION_R1'
+  AND price_coordinate='FORWARD_ADJUSTED'
   AND calendar_id=%s AND calendar_revision=%s"""
     participation_params: tuple[Any, ...] = (
         target_session,
         research_cutoff,
-        package_id,
         capture_id,
         calendar_id,
         calendar_revision,
@@ -184,7 +178,7 @@ WHERE target_session=%s AND target_session<=%s AND source_package_id=%s
             participation_status,
         ) = participation_rows[0]
         valid_participation = (
-            price_coordinate == "RAW_UNADJUSTED"
+            price_coordinate == "FORWARD_ADJUSTED"
             and pit_status == "NON_PIT_RETROSPECTIVE"
             and int(stored_source_count)
             == int(profile_count) + int(profile_missing_count)
@@ -231,7 +225,7 @@ def read_source_sector_pulse_history(
     *,
     target_session: date,
     research_cutoff: date,
-    target_source_package_id: int,
+    target_source_capture_id: int,
     profile_revision: str,
     snapshot_id: int,
     board_kind: str,
@@ -246,8 +240,8 @@ def read_source_sector_pulse_history(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(target_source_package_id) is not int
-        or target_source_package_id <= 0
+        or type(target_source_capture_id) is not int
+        or target_source_capture_id <= 0
         or not isinstance(profile_revision, str)
         or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         or type(snapshot_id) is not int
@@ -302,11 +296,12 @@ def read_source_sector_pulse_history(
         _,
     ):
         cursor.execute(
-            f"""SELECT p.id,p.target_session,p.source_package_id,p.source_capture_id,
+            f"""SELECT p.id,p.target_session,p.source_capture_id,
        p.profile_revision,p.catalog_id,c.snapshot_id,p.board_kind,p.board_native_id,
        p.board_name,p.algorithm_contract,p.pulse_state,p.pulse_reason_codes,
        p.calculation_status,p.formal_rotation_state,p.research_mode,p.membership_mode,
        p.price_coordinate,p.snapshot_source_quality,p.source_pool_count,
+       p.source_time_quality,p.source_clock_role,p.source_available_at,
        p.snapshot_board_count,p.member_count,p.mapped_count,p.unmapped_count,
        p.dq5_pp_numerator,p.dq5_pp_denominator,p.ret5_target_numerator,
        p.ret5_target_denominator,p.ret5_prior_numerator,p.ret5_prior_denominator,
@@ -319,15 +314,14 @@ def read_source_sector_pulse_history(
 FROM {_TABLE} p
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
 WHERE p.target_session=ANY(%s) AND p.target_session<=%s
-  AND (p.target_session<>%s OR p.source_package_id=%s)
+  AND p.source_capture_id=%s
   AND p.board_kind=%s AND p.board_native_id=%s
   AND c.snapshot_id=%s AND p.algorithm_contract=%s
 ORDER BY p.target_session,p.id""",
             (
                 list(history_sessions),
                 research_cutoff,
-                target_session,
-                target_source_package_id,
+                target_source_capture_id,
                 board_kind,
                 board_native_id,
                 snapshot_id,
@@ -341,33 +335,107 @@ ORDER BY p.target_session,p.id""",
             pulse_by_session.setdefault(row["target_session"], []).append(row)
 
         cursor.execute(
-            """SELECT c.target_session,c.source_package_id,c.capture_id,
-       c.normalized_count,c.source_time_quality,c.source_clock_role,
-       c.source_available_at
-FROM source_captures c JOIN source_packages p
-  ON p.source_package_id=c.source_package_id
-WHERE c.target_session=ANY(%s) AND c.target_session<=%s
-  AND p.dataset_id=%s
-  AND (c.target_session<>%s OR c.source_package_id=%s)
-ORDER BY c.target_session,c.capture_id""",
+            """WITH capture AS (
+    SELECT capture_id,provider,range_start_session,range_end_session,
+           price_coordinates,source_time_quality,source_clock_role,source_available_at
+    FROM source_captures WHERE capture_id=%s
+), request_codes AS (
+    SELECT source_code,
+           count(*)=2 AND count(DISTINCT adjustment_flag)=2
+             AND count(DISTINCT eligible_start_session)=1
+             AND count(DISTINCT eligible_end_session)=1
+             AND bool_and(request_status IN ('COMPLETED','NO_DATA')
+               AND (request_status='NO_DATA' OR completed_through_session>=range_end_session))
+               AS complete,
+           min(eligible_start_session) AS eligible_start_session,
+           max(eligible_end_session) AS eligible_end_session
+    FROM source_capture_requests WHERE capture_id=%s GROUP BY source_code
+), requested(session_date) AS (
+    SELECT unnest(%s::date[])
+), expected AS (
+    SELECT requested.session_date,
+           count(*) FILTER (WHERE requested.session_date BETWEEN eligible_start_session
+                                              AND eligible_end_session)::bigint AS expected_count,
+           count(*) FILTER (WHERE requested.session_date BETWEEN eligible_start_session
+                                              AND eligible_end_session AND complete)::bigint AS complete_count
+    FROM requested CROSS JOIN request_codes
+    GROUP BY requested.session_date
+), raw AS (
+    SELECT session_date,count(*)::bigint AS row_count,
+           count(DISTINCT source_symbol)::bigint AS symbol_count,
+           count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint AS raw_quality_count,
+           count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint AS qfq_quality_count
+    FROM source_raw_daily
+    WHERE source_capture_id=%s AND session_date=ANY(%s::date[])
+    GROUP BY session_date
+)
+SELECT requested.session_date,capture.capture_id,capture.provider,
+       capture.range_start_session,capture.range_end_session,capture.price_coordinates,
+       capture.source_time_quality,capture.source_clock_role,capture.source_available_at,
+       expected.expected_count,expected.complete_count,raw.row_count,raw.symbol_count,
+       raw.raw_quality_count,raw.qfq_quality_count
+FROM requested CROSS JOIN capture
+JOIN expected USING (session_date)
+LEFT JOIN raw USING (session_date)
+WHERE capture.provider='BAOSTOCK'
+  AND capture.range_start_session<=%s AND capture.range_end_session>=%s
+  AND capture.range_end_session<=%s
+  AND capture.price_coordinates @> ARRAY['RAW_UNADJUSTED','FORWARD_ADJUSTED']::text[]
+ORDER BY requested.session_date""",
             (
+                target_source_capture_id,
+                target_source_capture_id,
                 list(history_sessions),
+                target_source_capture_id,
+                list(history_sessions),
+                history_sessions[0],
+                history_sessions[-1],
                 research_cutoff,
-                source_raw._DATASET_ID,
-                target_session,
-                target_source_package_id,
             ),
         )
         capture_contexts: dict[date, list[dict[str, Any]]] = {}
         for values in cursor.fetchall():
-            capture_contexts.setdefault(values[0], []).append(
+            (
+                session,
+                capture_id,
+                provider,
+                range_start,
+                range_end,
+                coordinates,
+                time_quality,
+                clock_role,
+                available_at,
+                expected_count,
+                complete_count,
+                row_count,
+                symbol_count,
+                raw_quality_count,
+                qfq_quality_count,
+            ) = values
+            if (
+                provider != "BAOSTOCK"
+                or time_quality != "NON_PIT_OBSERVED"
+                or clock_role != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
+                or available_at is not None
+                or set(coordinates or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+                or expected_count is None
+                or int(expected_count) <= 0
+                or int(expected_count) != int(complete_count or 0)
+                or int(expected_count) != int(row_count or 0)
+                or int(expected_count) != int(symbol_count or 0)
+                or int(expected_count) != int(raw_quality_count or 0)
+                or int(expected_count) != int(qfq_quality_count or 0)
+            ):
+                continue
+            capture_contexts.setdefault(session, []).append(
                 {
-                    "source_package_id": int(values[1]),
-                    "source_capture_id": int(values[2]),
-                    "source_pool_count": int(values[3]),
-                    "source_time_quality": values[4],
-                    "source_clock_role": values[5],
-                    "source_available_at": values[6],
+                    "source_capture_id": int(capture_id),
+                    "source_pool_count": int(expected_count),
+                    "source_time_quality": time_quality,
+                    "source_clock_role": clock_role,
+                    "source_available_at": available_at,
+                    "range_start_session": range_start,
+                    "range_end_session": range_end,
                 }
             )
 
@@ -390,7 +458,6 @@ ORDER BY c.target_session,c.capture_id""",
                         ],
                         "identity": (
                             {
-                                "source_package_id": capture["source_package_id"],
                                 "source_capture_id": capture["source_capture_id"],
                                 "profile_revision": None,
                             }
@@ -413,7 +480,6 @@ ORDER BY c.target_session,c.capture_id""",
                         "reason_codes": ["PULSE_FACT_SCOPE_AMBIGUOUS"],
                         "identity": (
                             {
-                                "source_package_id": capture["source_package_id"],
                                 "source_capture_id": capture["source_capture_id"],
                                 "profile_revision": None,
                             }
@@ -447,7 +513,7 @@ ORDER BY c.target_session,c.capture_id""",
                 or row["formal_rotation_state"] != "NOT_EVALUATED"
                 or row["research_mode"] != "NON_PIT_RETROSPECTIVE"
                 or row["membership_mode"] != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-                or row["price_coordinate"] != "RAW_UNADJUSTED"
+                or row["price_coordinate"] != "FORWARD_ADJUSTED"
                 or int(row["source_pool_count"]) <= 0
                 or int(row["snapshot_board_count"]) <= 0
                 or int(row["member_count"])
@@ -456,9 +522,9 @@ ORDER BY c.target_session,c.capture_id""",
                 reasons.append("PULSE_TYPED_FACT_CONTRACT_MISMATCH")
             if (
                 session == target_session
-                and int(row["source_package_id"]) != target_source_package_id
+                and int(row["source_capture_id"]) != target_source_capture_id
             ):
-                reasons.append("PULSE_TARGET_SOURCE_PACKAGE_MISMATCH")
+                reasons.append("PULSE_TARGET_SOURCE_CAPTURE_MISMATCH")
             if (
                 session == target_session
                 and row["profile_revision"].strip() != profile_revision
@@ -466,9 +532,11 @@ ORDER BY c.target_session,c.capture_id""",
                 reasons.append("PULSE_TARGET_PROFILE_REVISION_MISMATCH")
             if (
                 capture is None
-                or capture["source_package_id"] != int(row["source_package_id"])
                 or capture["source_capture_id"] != int(row["source_capture_id"])
                 or capture["source_pool_count"] != int(row["source_pool_count"])
+                or row["source_time_quality"] != capture["source_time_quality"]
+                or row["source_clock_role"] != capture["source_clock_role"]
+                or row["source_available_at"] != capture["source_available_at"]
                 or len(capture_candidates) != 1
             ):
                 reasons.append("PULSE_SOURCE_CAPTURE_CONTEXT_NOT_CLOSED")
@@ -481,7 +549,6 @@ ORDER BY c.target_session,c.capture_id""",
                         "pulse_fact_id": int(row["id"]),
                         "catalog_id": int(row["catalog_id"]),
                         "snapshot_id": int(row["snapshot_id"]),
-                        "source_package_id": int(row["source_package_id"]),
                         "source_capture_id": int(row["source_capture_id"]),
                         "profile_revision": row["profile_revision"].strip(),
                     },
@@ -580,7 +647,7 @@ ORDER BY previous_pulse_id,target_pulse_id,id""",
                 and transition["target_pulse_state"] == current_row["pulse"]["state"]
                 and transition["calculation_status"] == "COMPLETE"
                 and transition["research_mode"] == "NON_PIT_RETROSPECTIVE"
-                and transition["price_coordinate"] == "RAW_UNADJUSTED"
+                and transition["price_coordinate"] == "FORWARD_ADJUSTED"
                 and transition["formal_rotation_state"] == "NOT_EVALUATED"
             )
             target_row["transition"] = {
@@ -608,7 +675,7 @@ ORDER BY previous_pulse_id,target_pulse_id,id""",
         if available_ids:
             cursor.execute(
                 """SELECT pulse_fact_id,horizon_sessions,target_session,
-       target_source_package_id,target_source_capture_id,fixed_member_denominator,
+       target_source_capture_id,fixed_member_denominator,
        observed_member_count,unknown_member_count,equal_weight_return_numerator,
        equal_weight_return_denominator,outcome_status,reason_codes,research_mode,
        membership_mode,price_coordinate,calendar_id,calendar_revision
@@ -716,7 +783,7 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
                     and fact["research_mode"] == "NON_PIT_RETROSPECTIVE"
                     and fact["membership_mode"]
                     == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-                    and fact["price_coordinate"] == "RAW_UNADJUSTED"
+                    and fact["price_coordinate"] == "FORWARD_ADJUSTED"
                     and int(fact["fixed_member_denominator"]) == expected_member_count
                     and int(fact["observed_member_count"])
                     + int(fact["unknown_member_count"])
@@ -758,9 +825,6 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
                         if return_fraction is not None
                         else None,
                         "return_percent_4dp": return_percent,
-                        "target_source_package_id": int(
-                            fact["target_source_package_id"]
-                        ),
                         "target_source_capture_id": int(
                             fact["target_source_capture_id"]
                         ),
@@ -802,7 +866,7 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
             "profile_revision": profile_revision,
             "algorithm_contract": _ALGORITHM,
             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "formal_rotation_state": "NOT_EVALUATED",
         },
         "sessions": output_rows,

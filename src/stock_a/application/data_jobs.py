@@ -8,8 +8,9 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
-from uuid import UUID, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from stock_a.domain import FieldValue
 from stock_a.research.entry import _load_calendar
 from stock_a.research.entry_context.sessions import CORE_MAX_ACTUAL_LOOKBACK
 from stock_a.storage.postgres import data_jobs as data_job_pg
@@ -26,13 +27,9 @@ class DataJobError(Exception):
 
 
 _MAX_SESSION_COUNT = 32767
+_MAX_PRICE_HISTORY_SESSIONS = 250
 _STAGE_TABLES = {
-    "SOURCE_RAW": (
-        "stock.source_packages",
-        "stock.source_captures",
-        "stock.source_raw_daily",
-    ),
-    "SOURCE_BAOSTOCK": ("stock.source_baostock_daily",),
+    "SOURCE_BAOSTOCK_PRICES": ("stock.source_raw_daily",),
     "SOURCE_SECTOR_MEMBERS": (
         "stock.tdx_sector_source_snapshots",
         "stock.tdx_sector_catalog",
@@ -65,13 +62,11 @@ _STAGE_TABLES = {
         "stock.source_sector_pulse_cohort_group_facts",
         "stock.source_sector_pulse_cohort_reason_facts",
     ),
-    "ADJUSTED_PRICE": ("stock.source_adjusted_daily_prices",),
 }
 _STAGE_ORDER = {
     "BUSINESS_RESET": 1,
-    "SOURCE_RAW": 1,
+    "SOURCE_BAOSTOCK_PRICES": 1,
     "SOURCE_SECTOR_MEMBERS": 2,
-    "SOURCE_BAOSTOCK": 3,
     "MARKET_BREADTH": 3,
     "CORE_PROFILE": 4,
     "MARKET_PARTICIPATION": 5,
@@ -81,14 +76,12 @@ _STAGE_ORDER = {
     "SECTOR_PULSE": 9,
     "SECTOR_TRANSITION": 10,
     "SECTOR_FOLLOWUP": 11,
-    "ADJUSTED_PRICE": 12,
 }
 _RAW_JOB_SCOPE = "STOCK_A_R08_BIZ08_DATA_JOB_RAW_IMPORT_R1"
 
 _MODULES = {
-    "TDX_RAW": ("SOURCE", "TDX官方Raw来源", True, True),
+    "BAOSTOCK_PRICES": ("SOURCE", "BaoStock股票日线价格", True, True),
     "TDX_SECTOR_MEMBERS": ("SOURCE", "行业与GN概念成员来源", True, True),
-    "BAOSTOCK": ("SOURCE", "BaoStock补充来源", True, True),
     "CORE_PROFILE": ("BASE", "Core / Profile", True, True),
     "MARKET_BREADTH": ("BASE", "市场宽度", True, True),
     "MARKET_PARTICIPATION": ("BASE", "成交参与", True, True),
@@ -98,7 +91,6 @@ _MODULES = {
     "SECTOR_PULSE": ("RESEARCH", "行业 / GN概念PULSE", True, True),
     "SECTOR_TRANSITION": ("RESEARCH", "行业 / GN概念相邻变化", True, True),
     "SECTOR_FOLLOWUP": ("RESEARCH", "板块跨日跟踪", True, True),
-    "ADJUSTED_PRICE": ("RESEARCH", "仿射复权价格", True, True),
 }
 _UNCOORDINATED_RESEARCH_CONSUMERS = (
     (
@@ -172,6 +164,7 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "daily_mode",
         "reset_confirmed",
         "reset_preview_fingerprint",
+        "raw_response_journal_enabled",
     }
     if set(body) - allowed:
         raise DataJobError("DATA_JOB_INPUT_INVALID", "任务参数包含未登记字段。")
@@ -182,6 +175,17 @@ def _request_fields(body: Any) -> dict[str, Any]:
         )
     initialization_mode = body.get("initialization_mode", "REUSE_RAW")
     daily_mode = body.get("daily_mode", "CUSTOM")
+    raw_response_journal_enabled = body.get("raw_response_journal_enabled", False)
+    if type(raw_response_journal_enabled) is not bool or (
+        raw_response_journal_enabled
+        and not (
+            mode == "INITIALIZE" and initialization_mode == "RESET_ALL_BUSINESS_FACTS"
+        )
+    ):
+        raise DataJobError(
+            "RAW_RESPONSE_JOURNAL_SCOPE_INVALID",
+            "原始行情响应档案仅能由明确启用的RESET_ALL初始化任务使用。",
+        )
     if mode == "INITIALIZE":
         if initialization_mode not in {"REUSE_RAW", "RESET_ALL_BUSINESS_FACTS"}:
             raise DataJobError(
@@ -248,7 +252,7 @@ def _request_fields(body: Any) -> dict[str, Any]:
     if legacy:
         # BIZ08请求保持兼容；新界面始终显式发送模块列表。
         selections = {
-            "source": ["TDX_RAW"],
+            "source": ["BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"],
             "base": ["CORE_PROFILE", "MARKET_BREADTH", "MARKET_PARTICIPATION"],
             "research": [],
         }
@@ -278,19 +282,28 @@ def _request_fields(body: Any) -> dict[str, Any]:
                 "DATA_JOB_D1_WINDOW_INVALID", "D1历史窗口至少需要两个官方会话。"
             )
     if mode == "INITIALIZE" and initialization_mode == "RESET_ALL_BUSINESS_FACTS":
-        if not {"TDX_RAW", "TDX_SECTOR_MEMBERS"}.issubset(set(selections["source"])):
+        if not {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}.issubset(
+            set(selections["source"])
+        ):
             raise DataJobError(
                 "DATA_JOB_RESET_SOURCE_SELECTION_INVALID",
-                "清空全部业务事实后重建必须包含TDX Raw与行业/GN成员来源。",
+                "清空全部业务事实后重建必须包含BaoStock价格与行业/GN成员来源。",
             )
     if mode == "MANUAL_DAILY" and daily_mode == "SOURCE_ONLY":
-        if selections["base"] or selections["research"] or not selections["source"]:
+        if (
+            selections["base"]
+            or selections["research"]
+            or not selections["source"]
+            or not set(selections["source"]).issubset(
+                {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}
+            )
+        ):
             raise DataJobError(
                 "DATA_JOB_SOURCE_ONLY_SCOPE_INVALID",
-                "仅第一层日更必须选择来源模块，且不得选择任何基础画像或研究模块。",
+                "SOURCE_ONLY只允许BaoStock价格和/或TDX行业成员来源，不得选择基础画像或研究模块。",
             )
     if mode == "MANUAL_DAILY" and daily_mode == "FULL_THREE_LAYERS":
-        required_sources = {"TDX_RAW", "TDX_SECTOR_MEMBERS"}
+        required_sources = {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}
         required_base = {
             code
             for code, (layer, _label, implemented, available) in _MODULES.items()
@@ -308,7 +321,16 @@ def _request_fields(body: Any) -> dict[str, Any]:
         ):
             raise DataJobError(
                 "DATA_JOB_FULL_THREE_LAYERS_SCOPE_INVALID",
-                "完整三层日更必须选择全部现役基础画像与研究模块，以及TDX Raw和行业/GN来源。",
+                "完整三层日更必须选择全部现役基础画像与研究模块，以及BaoStock价格和TDX行业/GN成员来源。",
+            )
+    if mode == "INITIALIZE":
+        history_count = _positive_integer(
+            body.get("history_session_count"), "history_session_count"
+        )
+        if history_count > _MAX_PRICE_HISTORY_SESSIONS:
+            raise DataJobError(
+                "DATA_JOB_HISTORY_WINDOW_INVALID",
+                f"初始化历史会话数必须不超过{_MAX_PRICE_HISTORY_SESSIONS}。",
             )
     return {
         "mode": mode,
@@ -329,6 +351,7 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "daily_mode": daily_mode,
         "reset_confirmed": body.get("reset_confirmed") is True,
         "reset_preview_fingerprint": body.get("reset_preview_fingerprint"),
+        "raw_response_journal_enabled": raw_response_journal_enabled,
         "has_module_selection": has_module_selection,
         "legacy_request": legacy,
     }
@@ -439,6 +462,8 @@ def _unit(
     status: str = "NOT_STARTED",
     error_code: str | None = None,
     error_message: str | None = None,
+    source_capture_id: int | None = None,
+    price_coordinates: Sequence[str] | None = None,
 ) -> None:
     units.append(
         {
@@ -450,7 +475,58 @@ def _unit(
             "status": status,
             "error_code": error_code,
             "error_message": error_message,
+            "source_capture_id": source_capture_id,
+            "price_coordinates": list(price_coordinates or ()),
         }
+    )
+
+
+def _price_coordinate_versions(
+    raw_coverage: Mapping[str, Any], *, cutoff: date
+) -> tuple[dict[str, dict[str, Mapping[str, Any]]], str]:
+    """按session×坐标读取PG paired capture；TDX package和进程内票据不能回退充数。"""
+    if "price_coordinate_versions" not in raw_coverage:
+        return {}, "WAITING_FOR_SOURCE_CAPTURE_READER"
+    rows = raw_coverage.get("price_coordinate_versions")
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return {}, "PRICE_COORDINATE_COVERAGE_INVALID"
+    versions: dict[str, dict[str, Mapping[str, Any]]] = {}
+    seen_coordinates: set[tuple[str, str]] = set()
+    for item in rows:
+        if not isinstance(item, Mapping):
+            return {}, "PRICE_COORDINATE_COVERAGE_INVALID"
+        session_text = item.get("session_date")
+        capture_id = item.get("source_capture_id")
+        coordinate = item.get("price_coordinate")
+        if (
+            not isinstance(session_text, str)
+            or type(capture_id) is not int
+            or capture_id <= 0
+            or coordinate not in {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        ):
+            return {}, "PRICE_COORDINATE_COVERAGE_INVALID"
+        try:
+            session = date.fromisoformat(session_text)
+        except ValueError:
+            return {}, "PRICE_COORDINATE_COVERAGE_INVALID"
+        if session.isoformat() != session_text or session > cutoff:
+            return {}, "PRICE_COORDINATE_COVERAGE_INVALID"
+        key = (session_text, coordinate)
+        if key in seen_coordinates:
+            return {}, "PRICE_COORDINATE_COVERAGE_DUPLICATE"
+        seen_coordinates.add(key)
+        by_coordinate = versions.setdefault(session_text, {})
+        if (
+            item.get("coverage_status") == "COMPLETE"
+            and type(item.get("row_count")) is int
+            and item.get("row_count", -1) >= 0
+            and type(item.get("expected_row_count")) is int
+            and item.get("expected_row_count", -1) >= 0
+            and item.get("row_count") == item.get("expected_row_count")
+        ):
+            by_coordinate[coordinate] = item
+    return versions, str(
+        raw_coverage.get("price_coordinate_reader_status", "AVAILABLE")
     )
 
 
@@ -460,10 +536,10 @@ def build_data_job_plan(
     cutoff: date,
     raw_coverage: Mapping[str, Any],
     execution_authorized: bool,
-    adjusted_action_sessions: Sequence[date] = (),
-    adjusted_action_symbols_by_session: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
-    """按官方日历与截止日内闭合PG Raw目录生成不写数据的任务计划。"""
+    from datetime import datetime
+
+    """按官方日历、BaoStock坐标捕获和截止日生成不写数据的任务计划。"""
     request = _request_fields(body)
     if type(cutoff) is not date:
         raise DataJobError("DATA_JOB_CUTOFF_REQUIRED", "服务必须绑定明确研究截止日。")
@@ -477,12 +553,15 @@ def build_data_job_plan(
             raw_history_count, "history_session_count"
         )
         if profile_history is None:
-            profile_history = raw_coverage.get("current_profile_history_session_count")
-        if profile_history is None:
-            profile_history = CORE_MAX_ACTUAL_LOOKBACK
+            profile_history = min(CORE_MAX_ACTUAL_LOOKBACK, raw_history_count)
         profile_history = _positive_integer(
             profile_history, "profile_history_session_count"
         )
+        if profile_history > raw_history_count:
+            raise DataJobError(
+                "DATA_JOB_HISTORY_WINDOW_INVALID",
+                "Profile历史窗口不能超过用户显式选择的价格来源会话数。",
+            )
     else:
         needs_profile_window = bool(
             {"CORE_PROFILE", "MARKET_PARTICIPATION", "D0", "FOCUS_FORMAL"}
@@ -530,23 +609,34 @@ def build_data_job_plan(
     selected_base_modules = set(request["base_modules"])
     selected_research_modules = set(request["research_modules"])
     operation = request["operation"]
-    active_package_id = raw_coverage.get("latest_profile_source_package_id")
-    if active_package_id is None:
-        raw_sessions_in_pg = set(raw_coverage.get("closed_sessions", ()))
-    else:
-        raw_sessions_in_pg = {
-            item["session_date"]
-            for item in raw_coverage.get("closed_versions", ())
-            if item["source_package_id"] == active_package_id
-        }
+    reset_preflight_required = (
+        mode == "INITIALIZE"
+        and request["initialization_mode"] == "RESET_ALL_BUSINESS_FACTS"
+    )
+    capture_versions, price_reader_status = _price_coordinate_versions(
+        raw_coverage, cutoff=cutoff
+    )
+    if (
+        mode == "INITIALIZE"
+        and request["initialization_mode"] == "RESET_ALL_BUSINESS_FACTS"
+    ):
+        # 重置预览不能把随后会删除的PG捕获事实当成可复用版本。
+        capture_versions = {}
     if mode == "INITIALIZE":
+        calendar_id, calendar_revision, all_sessions = _load_official_sessions(cutoff)
         target = (
             _parse_session(request["target_session"])
             if request["target_session"] is not None
-            else _parse_session(latest_raw)
-            if latest_raw
-            else cutoff
+            else max((day for day in all_sessions if day <= cutoff), default=None)
         )
+        if target is None:
+            return _blocked_plan(
+                mode,
+                cutoff,
+                raw_coverage,
+                "OFFICIAL_CALENDAR_UNAVAILABLE",
+                ["NO_OFFICIAL_SESSION_THROUGH_CUTOFF"],
+            )
         if target > cutoff:
             return _blocked_plan(
                 mode,
@@ -556,7 +646,6 @@ def build_data_job_plan(
                 ["TARGET_AFTER_RESEARCH_CUTOFF"],
                 target_session=target.isoformat(),
             )
-        calendar_id, calendar_revision, all_sessions = _load_official_sessions(cutoff)
         if target not in all_sessions:
             raise DataJobError(
                 "DATA_JOB_TARGET_NOT_TRADING_SESSION",
@@ -634,32 +723,20 @@ def build_data_job_plan(
                 daily_sessions = (target,)
 
     raw_request_count = (
-        output_counts.get("TDX_RAW", raw_history_count)
+        raw_history_count
         if mode == "INITIALIZE"
-        else output_counts.get("TDX_RAW", 1)
+        else _positive_integer(
+            output_counts.get("BAOSTOCK_PRICES", 1),
+            "BaoStock价格输出会话数",
+        )
     )
-    if "TDX_RAW" not in selected_source_modules:
-        raw_request_count = 1
-    raw_request_count = _positive_integer(raw_request_count, "TDX Raw输出会话数")
     if mode == "MANUAL_DAILY":
         raw_history_count = raw_request_count
-    tdx_raw_output_sessions = (
+    baostock_output_sessions = (
         recent_official_sessions(eligible, through=target, count=raw_request_count)
-        if "TDX_RAW" in selected_source_modules
+        if "BAOSTOCK_PRICES" in selected_source_modules
         else ()
     )
-    if "BAOSTOCK" in selected_source_modules:
-        if "TDX_RAW" in selected_source_modules:
-            baostock_output_sessions = tdx_raw_output_sessions
-        else:
-            baostock_count = _positive_integer(
-                output_counts.get("BAOSTOCK", 1), "BAOSTOCK输出会话数"
-            )
-            baostock_output_sessions = recent_official_sessions(
-                eligible, through=target, count=baostock_count
-            )
-    else:
-        baostock_output_sessions = ()
     if mode == "INITIALIZE":
         requested_target_count = raw_request_count
         if len(eligible) < requested_target_count:
@@ -682,7 +759,9 @@ def build_data_job_plan(
             d0_output_count=d0_requested,
             d1_output_count=d1_requested,
         )
-        raw_window = windows["raw"] if "TDX_RAW" in selected_source_modules else ()
+        raw_window = (
+            windows["raw"] if "BAOSTOCK_PRICES" in selected_source_modules else ()
+        )
         d0_count = d0_requested
         d1_count = d1_requested
     else:
@@ -701,7 +780,7 @@ def build_data_job_plan(
             )
         raw_window = (
             recent_official_sessions(eligible, through=target, count=raw_request_count)
-            if "TDX_RAW" in selected_source_modules
+            if "BAOSTOCK_PRICES" in selected_source_modules
             else ()
         )
         d0_count = (
@@ -749,7 +828,6 @@ def build_data_job_plan(
                     "SECTOR_PULSE",
                     "SECTOR_TRANSITION",
                     "SECTOR_FOLLOWUP",
-                    "ADJUSTED_PRICE",
                     "FOCUS_FORMAL",
                     "D0",
                     "D1",
@@ -768,41 +846,6 @@ def build_data_job_plan(
             operation=operation,
             raw_coverage=raw_coverage,
         )
-
-    adjusted_action_session_set = {
-        session
-        for session in adjusted_action_sessions
-        if type(session) is date and session <= target
-    }
-    adjusted_symbols = adjusted_action_symbols_by_session or {}
-    adjusted_source_windows: dict[str, tuple[date, ...]] = {}
-    if "ADJUSTED_PRICE" in selected_research_modules:
-        for day in module_output_sessions.get("ADJUSTED_PRICE", ()):
-            day_text = day.isoformat()
-            symbols = tuple(
-                sorted(
-                    {
-                        symbol
-                        for symbol in adjusted_symbols.get(day_text, ())
-                        if isinstance(symbol, str) and symbol
-                    }
-                )
-            )
-            if day not in adjusted_action_session_set or not symbols:
-                continue
-            source_window = recent_official_sessions(eligible, through=day, count=2)
-            if len(source_window) == 2 and source_window[-1] == day:
-                adjusted_source_windows[day_text] = source_window
-        if "TDX_RAW" in selected_source_modules and adjusted_source_windows:
-            raw_window = tuple(
-                sorted(
-                    set(raw_window).union(
-                        session
-                        for window in adjusted_source_windows.values()
-                        for session in window
-                    )
-                )
-            )
 
     sector_followup_due: dict[str, dict[int, date]] = {}
     if "SECTOR_FOLLOWUP" in selected_research_modules:
@@ -865,6 +908,38 @@ def build_data_job_plan(
         else profile_dates
     )
 
+    if (
+        mode == "MANUAL_DAILY"
+        and request["profile_history_session_count"] is None
+        and selected_modules
+        & {"CORE_PROFILE", "MARKET_PARTICIPATION", "D0", "FOCUS_FORMAL"}
+    ):
+        # 手动历史模拟按最早实际画像输出日，从PG真实paired capture和本次待采日
+        # 推导可用窗口；不强行要求开发阶段尚未取得的70日输入。
+        profile_target_days = tuple(
+            sorted(
+                set(profile_dates)
+                | set(d0_sessions)
+                | set(focus_sessions)
+                | set(participation_sessions)
+            )
+        )
+        paired_capture_sessions = {
+            date.fromisoformat(session_text)
+            for session_text, versions in capture_versions.items()
+            if {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}.issubset(versions)
+        }
+        if "BAOSTOCK_PRICES" in selected_source_modules:
+            paired_capture_sessions.update(baostock_output_sessions)
+        if profile_target_days:
+            available_windows = [
+                sum(session <= day for session in paired_capture_sessions)
+                for day in profile_target_days
+            ]
+            minimum_available_window = min(available_windows)
+            if minimum_available_window > 0:
+                profile_history = min(profile_history, minimum_available_window)
+
     stored_d1_window = raw_coverage.get("current_d1_history_session_count")
     d1_window_ambiguous = raw_coverage.get("d1_history_window_ambiguous") is True
     current_d1_window = request["d1_history_session_count"]
@@ -877,7 +952,6 @@ def build_data_job_plan(
 
         current_d1_window = D1_DEFAULT_HISTORY_SESSION_COUNT
     required_raw_sessions: set[date] = set(raw_window)
-    required_raw_sessions.update(tdx_raw_output_sessions)
     profile_inputs: dict[date, tuple[date, ...]] = {}
     d0_inputs: dict[date, tuple[date, ...]] = {}
     d0_profile_inputs: dict[date, tuple[date, ...]] = {}
@@ -941,90 +1015,99 @@ def build_data_job_plan(
     if operation == "CLEAR_DERIVED":
         raw_window = ()
 
-    closed_versions = tuple(raw_coverage.get("closed_versions", ()))
-    package_sessions: dict[int, dict[str, Mapping[str, Any]]] = {}
-    for item in closed_versions:
-        package_sessions.setdefault(int(item["source_package_id"]), {})[
-            str(item["session_date"])
-        ] = item
-    baostock_raw_session_inputs: list[Mapping[str, Any]] = []
-    baostock_source_package_id = None
-    if baostock_output_sessions and "TDX_RAW" not in selected_source_modules:
-        resolved_versions = []
-        for session in baostock_output_sessions:
-            matches = [
-                item
-                for item in closed_versions
-                if item.get("session_date") == session.isoformat()
-            ]
-            preferred = [
-                item
-                for item in matches
-                if item.get("source_package_id") == active_package_id
-            ]
-            candidates = preferred or matches
-            if len(candidates) != 1:
-                resolved_versions = []
-                break
-            resolved_versions.append(candidates[0])
-        package_ids = {int(item["source_package_id"]) for item in resolved_versions}
-        if (
-            len(resolved_versions) == len(baostock_output_sessions)
-            and len(package_ids) == 1
-            and all(
-                int(item["row_count"]) == int(item["expected_row_count"])
-                for item in resolved_versions
-            )
-        ):
-            baostock_source_package_id = next(iter(package_ids))
-            baostock_raw_session_inputs = sorted(
-                resolved_versions, key=lambda item: item["session_date"]
-            )
-    package_order = sorted(
-        package_sessions,
-        key=lambda package_id: (
-            package_id == active_package_id,
-            len(package_sessions[package_id]),
-            package_id,
-        ),
-        reverse=True,
-    )
-    required_iso = {day.isoformat() for day in raw_window}
-    if "ADJUSTED_PRICE" in selected_research_modules:
-        required_iso.update(
-            session.isoformat()
-            for window in adjusted_source_windows.values()
-            for session in window
+    price_coordinates = ("RAW_UNADJUSTED", "FORWARD_ADJUSTED")
+    price_capture_inputs: list[dict[str, Any]] = []
+    raw_window_sessions = {session.isoformat() for session in raw_window}
+    for session_text, by_coordinate in sorted(capture_versions.items()):
+        if session_text not in raw_window_sessions:
+            continue
+        for coordinate in price_coordinates:
+            version = by_coordinate.get(coordinate)
+            if version is not None:
+                price_capture_inputs.append(
+                    {
+                        "session_date": session_text,
+                        "source_capture_id": version["source_capture_id"],
+                        "price_coordinate": coordinate,
+                    }
+                )
+    stored_price_sessions = {
+        session_text
+        for session_text, versions in capture_versions.items()
+        if all(coordinate in versions for coordinate in price_coordinates)
+        and len(
+            {
+                int(versions[coordinate]["source_capture_id"])
+                for coordinate in price_coordinates
+            }
         )
-    reusable_packages = [
-        package_id
-        for package_id in package_order
-        if required_iso.issubset(package_sessions[package_id])
-    ]
-    reuse_raw_package_id = reusable_packages[0] if reusable_packages else None
-    if request["initialization_mode"] == "RESET_ALL_BUSINESS_FACTS":
-        # 清库重建不能把将被删除的PG Raw包误当作可复用输入。
-        reuse_raw_package_id = None
-    raw_version_by_date = (
-        package_sessions.get(reuse_raw_package_id, {})
-        if reuse_raw_package_id is not None
-        else {}
+        == 1
+    }
+    missing_price_inputs: list[dict[str, str]] = []
+    for day in raw_window:
+        session_text = day.isoformat()
+        by_coordinate = capture_versions.get(session_text, {})
+        missing_coordinates = [
+            coordinate
+            for coordinate in price_coordinates
+            if coordinate not in by_coordinate
+        ]
+        if missing_coordinates:
+            missing_price_inputs.extend(
+                {
+                    "session_date": session_text,
+                    "price_coordinate": coordinate,
+                }
+                for coordinate in missing_coordinates
+            )
+        elif (
+            len(
+                {
+                    int(by_coordinate[coordinate]["source_capture_id"])
+                    for coordinate in price_coordinates
+                }
+            )
+            != 1
+        ):
+            missing_price_inputs.extend(
+                {"session_date": session_text, "price_coordinate": coordinate}
+                for coordinate in price_coordinates
+            )
+    selected_window_capture_ids = {
+        int(item["source_capture_id"])
+        for item in price_capture_inputs
+        if item["session_date"] in raw_window_sessions
+    }
+    price_capture_window_status = (
+        "NO_CAPTURE_YET"
+        if not selected_window_capture_ids
+        else "MIXED_SOURCE_CAPTURE_IDS"
+        if len(selected_window_capture_ids) > 1
+        else "PAIRED_CAPTURE_ID_AVAILABLE"
+        if not missing_price_inputs
+        else "PAIRED_CAPTURE_INCOMPLETE"
     )
-    raw_sessions_in_pg = set(raw_version_by_date)
-    missing_raw = [
-        day.isoformat()
-        for day in raw_window
-        if day.isoformat() not in raw_sessions_in_pg
-    ]
-    source_will_fill_raw = "TDX_RAW" in selected_source_modules
-    raw_window_set = set(raw_window)
-    raw_input_unavailable = set(missing_raw) if not source_will_fill_raw else set()
+    if price_capture_window_status == "MIXED_SOURCE_CAPTURE_IDS":
+        stored_price_sessions = set()
+        missing_price_inputs = [
+            {"session_date": day.isoformat(), "price_coordinate": coordinate}
+            for day in raw_window
+            for coordinate in price_coordinates
+        ]
+    missing_raw = sorted({item["session_date"] for item in missing_price_inputs})
+    source_will_fill_prices = "BAOSTOCK_PRICES" in selected_source_modules
+    fillable_price_sessions = {day.isoformat() for day in baostock_output_sessions}
+    raw_input_unavailable = {
+        session
+        for session in missing_raw
+        if not source_will_fill_prices or session not in fillable_price_sessions
+    }
     d0_insufficient = [
         day.isoformat()
         for day in d0_sessions
         if not d0_inputs.get(day)
         or (
-            not source_will_fill_raw
+            not source_will_fill_prices
             and any(
                 session.isoformat() in raw_input_unavailable
                 for session in (
@@ -1040,7 +1123,7 @@ def build_data_job_plan(
         if current_d1_window is None
         or len(d1_inputs.get(day, ())) < max(2, current_d1_window)
         or (
-            not source_will_fill_raw
+            not source_will_fill_prices
             and any(
                 item.isoformat() in raw_input_unavailable
                 for item in d1_inputs.get(day, ())
@@ -1056,7 +1139,7 @@ def build_data_job_plan(
         if profile_window_by_date.get(day, 0)
         < min(CORE_MAX_ACTUAL_LOOKBACK, profile_history)
         or (
-            not source_will_fill_raw
+            not source_will_fill_prices
             and any(
                 item.isoformat() in raw_input_unavailable
                 for item in profile_inputs.get(day, ())
@@ -1075,13 +1158,26 @@ def build_data_job_plan(
         d1_window: int | None = None,
         expected_calendar_revision: str | None = None,
     ) -> bool:
-        version = raw_version_by_date.get(session.isoformat())
-        if not isinstance(version, Mapping):
+        versions = capture_versions.get(session.isoformat())
+        if not isinstance(versions, Mapping) or any(
+            coordinate not in versions for coordinate in price_coordinates
+        ):
             return False
-        package_id = version.get("source_package_id")
-        capture_id = version.get("source_capture_id")
-        if type(package_id) is not int or type(capture_id) is not int:
+        expected_capture_ids = {
+            coordinate: int(versions[coordinate]["source_capture_id"])
+            for coordinate in price_coordinates
+        }
+        if len(set(expected_capture_ids.values())) != 1:
             return False
+
+        def matches_price_key(item: Mapping[str, Any]) -> bool:
+            actual = item.get("source_capture_ids_by_coordinate")
+            return (
+                item.get("target_session") == session.isoformat()
+                and isinstance(actual, Mapping)
+                and dict(actual) == expected_capture_ids
+            )
+
         if profile_window is not None and profile_window < 1:
             return False
         candidates = completion_units.get(module, ())
@@ -1108,9 +1204,7 @@ def build_data_job_plan(
         if module == "CORE_PROFILE":
             for profile in raw_coverage.get("profile_completed_versions", ()):
                 if (
-                    profile.get("target_session") == session.isoformat()
-                    and profile.get("source_package_id") == package_id
-                    and profile.get("source_capture_id") == capture_id
+                    matches_price_key(profile)
                     and profile.get("history_session_count") == profile_window
                     and profile.get("profile_revision") == expected_profile_revision
                 ):
@@ -1118,20 +1212,14 @@ def build_data_job_plan(
         if module == "MARKET_BREADTH":
             for breadth in raw_coverage.get("market_breadth_completed_versions", ()):
                 if (
-                    breadth.get("target_session") == session.isoformat()
-                    and breadth.get("source_package_id") == package_id
-                    and breadth.get("source_capture_id") == capture_id
+                    matches_price_key(breadth)
                     and breadth.get("contract_version")
-                    == "MKT-02_RAW_POSITIVE_RETURN_STATE_DELTA_R1"
+                    == "MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R2"
                     and breadth.get("calendar_revision") == expected_calendar_revision
                 ):
                     return True
         for candidate in candidates:
-            if (
-                candidate.get("target_session") != session.isoformat()
-                or candidate.get("source_package_id") != package_id
-                or candidate.get("source_capture_id") != capture_id
-            ):
+            if not matches_price_key(candidate):
                 continue
             tables = candidate.get("business_tables", ())
             if not isinstance(tables, Sequence):
@@ -1174,7 +1262,7 @@ def build_data_job_plan(
     sector_pulse_insufficient = {
         day.isoformat()
         for day in module_output_sessions.get("SECTOR_PULSE", ())
-        if not source_will_fill_raw and day.isoformat() in raw_input_unavailable
+        if not source_will_fill_prices and day.isoformat() in raw_input_unavailable
     }
     d0_ready_sessions = {
         day.isoformat() for day in d0_sessions if day.isoformat() not in d0_insufficient
@@ -1190,7 +1278,7 @@ def build_data_job_plan(
         for day in market_sessions
         if len(market_inputs.get(day, ())) == 5
         and (
-            source_will_fill_raw
+            source_will_fill_prices
             or not any(
                 item.isoformat() in raw_input_unavailable
                 for item in market_inputs.get(day, ())
@@ -1212,10 +1300,24 @@ def build_data_job_plan(
         for breadth in raw_coverage.get("market_breadth_completed_versions", ())
         if isinstance(breadth, Mapping)
         and breadth.get("calendar_revision") == calendar_revision
-        and (version := raw_version_by_date.get(str(breadth.get("target_session"))))
-        is not None
-        and breadth.get("source_package_id") == version.get("source_package_id")
-        and breadth.get("source_capture_id") == version.get("source_capture_id")
+        and isinstance(
+            capture_versions.get(str(breadth.get("target_session"))), Mapping
+        )
+        and all(
+            coordinate in capture_versions[str(breadth.get("target_session"))]
+            for coordinate in price_coordinates
+        )
+        and isinstance(breadth.get("source_capture_ids_by_coordinate"), Mapping)
+        and dict(breadth.get("source_capture_ids_by_coordinate", {}))
+        == {
+            coordinate: int(
+                capture_versions[str(breadth.get("target_session"))][coordinate][
+                    "source_capture_id"
+                ]
+            )
+            for coordinate in price_coordinates
+            if coordinate in capture_versions[str(breadth.get("target_session"))]
+        }
     )
     breadth_ready_sessions = planned_breadth_ready | stored_breadth_ready
     if "D0" in selected_research_modules:
@@ -1236,7 +1338,7 @@ def build_data_job_plan(
         for target_text, previous_text in sector_transition_pairs.items()
         if previous_text is None
         or (
-            not source_will_fill_raw
+            not source_will_fill_prices
             and any(
                 session.isoformat() in raw_input_unavailable
                 for session in (
@@ -1259,7 +1361,7 @@ def build_data_job_plan(
         profile_window = (
             len(d0_profile_inputs.get(session, ()))
             or len(profile_inputs.get(session, ()))
-            or profile_history
+            or None
         )
         return completed_for_selected_raw(
             "SEED",
@@ -1297,7 +1399,7 @@ def build_data_job_plan(
         for day in market_sessions
         if len(market_inputs.get(day, ())) < 5
         or (
-            not source_will_fill_raw
+            not source_will_fill_prices
             and any(
                 item.isoformat() in raw_input_unavailable
                 for item in market_inputs.get(day, ())
@@ -1311,63 +1413,56 @@ def build_data_job_plan(
         or day.isoformat() in market_insufficient
         or day.isoformat() not in profile_ready_sessions
         or day.isoformat() not in breadth_ready_sessions
-        or (not source_will_fill_raw and day.isoformat() in raw_input_unavailable)
+        or (not source_will_fill_prices and day.isoformat() in raw_input_unavailable)
     }
     sector_followup_insufficient = {
         t0
         for t0, due in sector_followup_due.items()
-        if not source_will_fill_raw
+        if not source_will_fill_prices
         and any(
             session.isoformat() in raw_input_unavailable
             for session in (date.fromisoformat(t0), *due.values())
         )
     }
     units: list[dict[str, Any]] = []
-    if "TDX_RAW" in selected_source_modules:
-        _unit(
-            units,
-            stage="SOURCE_RAW",
-            target_session=target,
-            business_table="stock.source_packages",
-        )
-        for day in raw_window:
+    if "BAOSTOCK_PRICES" in selected_source_modules:
+        for day in baostock_output_sessions:
+            versions = capture_versions.get(day.isoformat(), {})
+            paired_capture_id = None
+            if all(coordinate in versions for coordinate in price_coordinates):
+                capture_ids = {
+                    int(versions[coordinate]["source_capture_id"])
+                    for coordinate in price_coordinates
+                }
+                if len(capture_ids) == 1:
+                    paired_capture_id = next(iter(capture_ids))
+            waiting_for_reader = price_reader_status != "AVAILABLE"
             _unit(
                 units,
-                stage="SOURCE_RAW",
-                target_session=day,
-                business_table="stock.source_captures",
-            )
-            _unit(
-                units,
-                stage="SOURCE_RAW",
+                stage="SOURCE_BAOSTOCK_PRICES",
                 target_session=day,
                 business_table="stock.source_raw_daily",
-            )
-    if "BAOSTOCK" in selected_source_modules:
-        for day in baostock_output_sessions:
-            _unit(
-                units,
-                stage="SOURCE_BAOSTOCK",
-                target_session=day,
-                business_table="stock.source_baostock_daily",
-                status=(
-                    "NOT_COMPUTED"
-                    if "TDX_RAW" not in selected_source_modules
-                    and baostock_source_package_id is None
-                    else "NOT_STARTED"
-                ),
+                status="NOT_COMPUTED" if waiting_for_reader else "NOT_STARTED",
                 error_code=(
-                    "BAOSTOCK_RAW_INPUT_UNAVAILABLE"
-                    if "TDX_RAW" not in selected_source_modules
-                    and baostock_source_package_id is None
+                    (
+                        "SOURCE_CAPTURE_READER_NOT_CONNECTED"
+                        if price_reader_status.startswith("WAITING")
+                        else "PRICE_COORDINATE_COVERAGE_UNAVAILABLE"
+                    )
+                    if waiting_for_reader
                     else None
                 ),
                 error_message=(
-                    "目标会话没有唯一、完整且同包绑定的PG TDX Raw输入；不启动TDX采集。"
-                    if "TDX_RAW" not in selected_source_modules
-                    and baostock_source_package_id is None
+                    (
+                        "尚无BaoStock价格capture只读覆盖读取器；等待接通后再确认可复用输入。"
+                        if price_reader_status.startswith("WAITING")
+                        else "BaoStock价格capture只读覆盖读取无效或未通过；保留未计算状态。"
+                    )
+                    if waiting_for_reader
                     else None
                 ),
+                source_capture_id=paired_capture_id,
+                price_coordinates=price_coordinates,
             )
     if "TDX_SECTOR_MEMBERS" in selected_source_modules:
         for table in _STAGE_TABLES["SOURCE_SECTOR_MEMBERS"]:
@@ -1567,10 +1662,12 @@ def build_data_job_plan(
 
     blockers: list[str] = []
     source_io_required = (
-        bool(missing_raw and "TDX_RAW" in selected_source_modules)
+        "BAOSTOCK_PRICES" in selected_source_modules
         or "TDX_SECTOR_MEMBERS" in selected_source_modules
-        or "BAOSTOCK" in selected_source_modules
     )
+    price_reader_required = (
+        bool(raw_window) or "BAOSTOCK_PRICES" in selected_source_modules
+    ) and not reset_preflight_required
     if not execution_authorized and source_io_required:
         blockers.append("DATA_EXECUTION_NOT_AUTHORIZED")
     if d1_sessions and current_d1_window is None:
@@ -1581,10 +1678,18 @@ def build_data_job_plan(
         )
     if any(item["status"] == "NOT_COMPUTED" for item in units):
         blockers.append("HISTORY_INSUFFICIENT_FOR_SOME_OUTPUT_DATES")
+    if price_reader_required and price_reader_status != "AVAILABLE":
+        blockers.append("SOURCE_CAPTURE_READER_NOT_CONNECTED")
 
-    executable = execution_authorized or not source_io_required
+    executable = (execution_authorized or not source_io_required) and (
+        not price_reader_required or price_reader_status == "AVAILABLE"
+    )
     if not executable:
-        status = "BLOCKED_NOT_AUTHORIZED"
+        status = (
+            "WAITING_FOR_SOURCE_READER"
+            if price_reader_required and price_reader_status != "AVAILABLE"
+            else "BLOCKED_NOT_AUTHORIZED"
+        )
     elif any(item["status"] == "NOT_COMPUTED" for item in units):
         status = "READY_WITH_INCOMPLETE_UNITS"
     elif missing_raw:
@@ -1599,7 +1704,7 @@ def build_data_job_plan(
         "blocked_reasons": blockers,
         "target_session": target.isoformat(),
         "research_cutoff": cutoff.isoformat(),
-        "history_session_count": max(raw_request_count, len(raw_window)),
+        "history_session_count": raw_request_count,
         "profile_history_session_count": profile_history,
         "d0_output_session_count": d0_count,
         "d1_output_session_count": d1_count,
@@ -1607,25 +1712,35 @@ def build_data_job_plan(
         "calendar_id": calendar_id,
         "calendar_revision": calendar_revision,
         "raw_history_sessions": [day.isoformat() for day in raw_window],
-        "tdx_raw_output_sessions": [day.isoformat() for day in tdx_raw_output_sessions],
-        "baostock_output_sessions": [
+        "baostock_price_output_sessions": [
             day.isoformat() for day in baostock_output_sessions
         ],
-        "baostock_source_package_id": baostock_source_package_id,
-        "baostock_raw_session_inputs": [
-            dict(item) for item in baostock_raw_session_inputs
-        ],
+        "price_coordinates": list(price_coordinates),
+        "price_capture_inputs": price_capture_inputs,
+        "price_capture_reader_status": (
+            "RESET_PREFLIGHT_REQUIRED"
+            if reset_preflight_required
+            else price_reader_status
+        ),
+        "missing_price_inputs": missing_price_inputs,
         "raw_history_session_count_available": len(raw_window),
         "raw_history_sessions_in_pg": len(raw_window) - len(missing_raw),
         "missing_raw_sessions": missing_raw,
-        "reuse_raw_package_id": reuse_raw_package_id,
-        "raw_session_inputs": [
-            raw_version_by_date[day.isoformat()]
-            for day in raw_window
-            if day.isoformat() in raw_version_by_date
-        ]
-        if reuse_raw_package_id is not None
-        else [],
+        "source_capture_preview": {
+            "status": (
+                "RESET_PREFLIGHT_REQUIRED"
+                if reset_preflight_required
+                else price_reader_status
+            ),
+            "versions": price_capture_inputs,
+            "window_status": price_capture_window_status,
+            "source_capture_id": (
+                next(iter(selected_window_capture_ids))
+                if len(selected_window_capture_ids) == 1
+                else None
+            ),
+            "identity_fields": ["source_capture_id", "price_coordinate"],
+        },
         "d0_output_sessions": [day.isoformat() for day in d0_sessions],
         "d1_output_sessions": [day.isoformat() for day in d1_sessions],
         "profile_output_sessions": [day.isoformat() for day in profile_dates],
@@ -1670,8 +1785,12 @@ def build_data_job_plan(
                 for module, sessions in module_output_sessions.items()
             },
             **(
-                {"BAOSTOCK": [day.isoformat() for day in baostock_output_sessions]}
-                if "BAOSTOCK" in selected_source_modules
+                {
+                    "BAOSTOCK_PRICES": [
+                        day.isoformat() for day in baostock_output_sessions
+                    ]
+                }
+                if "BAOSTOCK_PRICES" in selected_source_modules
                 else {}
             ),
             **(
@@ -1679,19 +1798,6 @@ def build_data_job_plan(
                 if "TDX_SECTOR_MEMBERS" in selected_source_modules
                 else {}
             ),
-            **(
-                {"TDX_RAW": [day.isoformat() for day in tdx_raw_output_sessions]}
-                if "TDX_RAW" in selected_source_modules
-                else {}
-            ),
-        },
-        "adjusted_price_source_windows": {
-            target_session: [session.isoformat() for session in window]
-            for target_session, window in adjusted_source_windows.items()
-        },
-        "adjusted_price_symbols_by_session": {
-            target_session: list(adjusted_symbols.get(target_session, ()))
-            for target_session in adjusted_source_windows
         },
         "market_breadth_insufficient_history_sessions": sorted(market_insufficient),
         "market_participation_insufficient_sessions": sorted(
@@ -1702,21 +1808,30 @@ def build_data_job_plan(
         "d1_insufficient_history_sessions": d1_insufficient,
         "profile_insufficient_history_sessions": profile_insufficient,
         "source_coverage": {
-            "status": "PG_SOURCE_REUSE_AVAILABLE"
-            if reuse_raw_package_id is not None and not missing_raw
+            "status": "RESET_SOURCE_PREFLIGHT_REQUIRED"
+            if reset_preflight_required
+            else "PG_PRICE_CAPTURE_REUSE_AVAILABLE"
+            if price_capture_inputs and not missing_price_inputs
+            else "WAITING_FOR_SOURCE_CAPTURE_READER"
+            if price_reader_required and price_reader_status != "AVAILABLE"
             else "NOT_EXECUTED_DATA_FREEZE"
             if source_io_required and not execution_authorized
-            else "CHECKED_AFTER_EXPLICIT_START"
+            else "NOT_CHECKED_NO_NETWORK"
             if source_io_required
-            else "PG_SOURCE_INPUT_UNAVAILABLE"
-            if missing_raw
+            else "PG_PRICE_INPUT_UNAVAILABLE"
+            if missing_price_inputs
             else "NO_SOURCE_IO_REQUIRED",
             "verified_external_sessions": None,
             "source_request_performed": False,
             "pg_closed_raw_session_count": raw_coverage.get("stored_session_count", 0),
             "pg_first_session": raw_coverage.get("first_stored_session"),
             "pg_last_session": raw_coverage.get("last_stored_session"),
-            "active_pg_source_package_id": active_package_id,
+            "price_coordinate_reader_status": (
+                "RESET_PREFLIGHT_REQUIRED"
+                if reset_preflight_required
+                else price_reader_status
+            ),
+            "price_capture_version_count": len(price_capture_inputs),
         },
         "stage_units": units,
         "planned_unit_count": len(units),
@@ -1733,6 +1848,18 @@ def _blocked_plan(
     reasons: list[str],
     **extra: Any,
 ) -> dict[str, Any]:
+    price_versions, price_reader_status = _price_coordinate_versions(
+        raw_coverage, cutoff=cutoff
+    )
+    price_capture_inputs = [
+        {
+            "session_date": session_text,
+            "source_capture_id": version["source_capture_id"],
+            "price_coordinate": coordinate,
+        }
+        for session_text, versions in sorted(price_versions.items())
+        for coordinate, version in sorted(versions.items())
+    ]
     return {
         "mode": mode,
         "status": status,
@@ -1740,15 +1867,23 @@ def _blocked_plan(
         "blocked_reasons": reasons,
         "research_cutoff": cutoff.isoformat(),
         "source_coverage": {
-            "status": "NOT_CHECKED_DATA_FREEZE",
+            "status": "WAITING_FOR_SOURCE_CAPTURE_READER"
+            if price_reader_status != "AVAILABLE"
+            else "NOT_CHECKED_NO_NETWORK",
             "verified_external_sessions": None,
             "source_request_performed": False,
             "pg_closed_raw_session_count": raw_coverage.get("stored_session_count", 0),
             "pg_first_session": raw_coverage.get("first_stored_session"),
             "pg_last_session": raw_coverage.get("last_stored_session"),
-            "active_pg_source_package_id": raw_coverage.get(
-                "latest_profile_source_package_id"
-            ),
+            "price_coordinate_reader_status": price_reader_status,
+            "price_capture_version_count": len(price_capture_inputs),
+        },
+        "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+        "price_capture_inputs": price_capture_inputs,
+        "source_capture_preview": {
+            "status": price_reader_status,
+            "versions": price_capture_inputs,
+            "identity_fields": ["source_capture_id", "price_coordinate"],
         },
         "stage_units": [],
         "planned_unit_count": 0,
@@ -1775,6 +1910,7 @@ def _job_request_key(plan: Mapping[str, Any]) -> str:
         "initialization_mode": plan.get("initialization_mode", "REUSE_RAW"),
         "daily_mode": plan.get("daily_mode", "CUSTOM"),
         "reset_preview_fingerprint": plan.get("reset_preview_fingerprint"),
+        "raw_response_journal_enabled": plan.get("raw_response_journal_enabled", False),
         "source_version_fingerprint": plan.get("source_version_fingerprint"),
         "sector_snapshot_ids": plan.get("sector_snapshot_ids"),
         "cleanup_preview_key": plan.get("cleanup_preview", {}).get("preview_key"),
@@ -1807,6 +1943,28 @@ class DataJobCoordinator:
 
     def capabilities(self) -> dict[str, Any]:
         coverage = self._coverage()
+        source_policy = self.config.get("source_policy", {})
+        primary_policy = (
+            source_policy.get("baostock_primary", {})
+            if isinstance(source_policy, Mapping)
+            else {}
+        )
+        primary_budget = (
+            primary_policy.get("request_budget", {})
+            if isinstance(primary_policy, Mapping)
+            else {}
+        )
+        configured_history_limit = (
+            primary_budget.get("max_history_session_count")
+            if isinstance(primary_budget, Mapping)
+            else None
+        )
+        history_session_limit = (
+            configured_history_limit
+            if type(configured_history_limit) is int
+            and 1 <= configured_history_limit <= _MAX_PRICE_HISTORY_SESSIONS
+            else None
+        )
         latest = data_job_pg.read_recent_jobs(self.config, limit=1)
         from stock_a.application.source_sector_pulse import (
             resolve_source_sector_snapshot_pair,
@@ -1849,7 +2007,7 @@ class DataJobCoordinator:
                     "reason": reason,
                     "cleanup_allowed": cleanup_allowed,
                     "default_selected": (
-                        code in {"TDX_RAW", "TDX_SECTOR_MEMBERS"}
+                        code in {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}
                         if layer == "SOURCE"
                         else True
                     ),
@@ -1864,7 +2022,25 @@ class DataJobCoordinator:
             else "BLOCKED_NOT_AUTHORIZED",
             "research_cutoff": self.research_cutoff.isoformat(),
             "raw_coverage": coverage,
-            "default_history_session_count": 200,
+            "history_session_count_required_for_initialize": True,
+            "history_session_count_limits": {
+                "minimum": 1,
+                "maximum": history_session_limit,
+            },
+            "baostock_primary_policy": {
+                key: primary_budget.get(key)
+                for key in (
+                    "max_login_batches",
+                    "max_api_calls_per_batch",
+                    "query_timeout_seconds",
+                    "max_history_session_count",
+                    "max_identity_total_seconds",
+                    "max_retry_attempts",
+                    "retry_backoff_seconds",
+                )
+            }
+            if isinstance(primary_budget, Mapping)
+            else {},
             "current_profile_history_session_count": coverage.get(
                 "current_profile_history_session_count"
             ),
@@ -1881,113 +2057,10 @@ class DataJobCoordinator:
     def plan(self, body: Any) -> dict[str, Any]:
         coverage = self._coverage()
         request = _request_fields(body)
-        adjusted_action_sessions: tuple[date, ...] = ()
-        adjusted_symbols_by_session: dict[str, tuple[str, ...]] = {}
-        adjusted_input_status_by_session: dict[str, dict[str, str]] = {}
-        adjusted_event_revisions_by_session: dict[str, list[dict[str, str]]] = {}
-        adjusted_capture_by_session: dict[str, int] = {}
-        adjusted_raw_identities_by_session: dict[str, dict[str, Any]] = {}
-        if "ADJUSTED_PRICE" in request["selected_modules"]:
-            latest_raw = coverage.get("last_stored_session")
-            if request.get("target_session") is not None:
-                adjusted_target = _parse_session(request["target_session"])
-            elif request["mode"] == "INITIALIZE" and latest_raw:
-                adjusted_target = _parse_session(latest_raw)
-            else:
-                _calendar_id, _calendar_revision, sessions = _load_official_sessions(
-                    self.research_cutoff
-                )
-                valid_sessions = tuple(
-                    session for session in sessions if session <= self.research_cutoff
-                )
-                adjusted_target = valid_sessions[-1] if valid_sessions else None
-
-            if adjusted_target is not None and adjusted_target <= self.research_cutoff:
-                _calendar_id, _calendar_revision, sessions = _load_official_sessions(
-                    self.research_cutoff
-                )
-                if adjusted_target in sessions:
-                    output_count = request["module_output_session_counts"].get(
-                        "ADJUSTED_PRICE",
-                        request["output_session_count"] or 5,
-                    )
-                    output_count = _positive_integer(
-                        output_count, "ADJUSTED_PRICE输出会话数"
-                    )
-                    adjusted_output_sessions = recent_official_sessions(
-                        sessions,
-                        through=adjusted_target,
-                        count=output_count,
-                    )
-                    from stock_a.storage.postgres.adjusted_prices import (
-                        read_corporate_action_events,
-                        read_verified_action_sessions,
-                        read_verified_action_symbols_for_session,
-                    )
-
-                    adjusted_action_sessions = read_verified_action_sessions(
-                        self.config, through_session=adjusted_target
-                    )
-                    action_session_set = set(adjusted_action_sessions)
-                    for action_session in adjusted_output_sessions:
-                        day_text = action_session.isoformat()
-                        if action_session not in action_session_set:
-                            adjusted_input_status_by_session[day_text] = {
-                                "status": "NOT_COMPUTED",
-                                "code": "ADJUSTMENT_ACTION_NOT_PROVEN",
-                                "message": "该目标会话没有已验证的公司行为公告范围；不推断零调整。",
-                            }
-                            continue
-                        symbols = read_verified_action_symbols_for_session(
-                            self.config, target_session=action_session
-                        )
-                        if not symbols:
-                            adjusted_input_status_by_session[day_text] = {
-                                "status": "NOT_COMPUTED",
-                                "code": "ADJUSTMENT_ACTION_SYMBOL_NOT_PROVEN",
-                                "message": "目标公告没有可唯一绑定的已验证来源代码。",
-                            }
-                            continue
-                        revisions: list[dict[str, str]] = []
-                        invalid_reason = None
-                        for symbol in symbols:
-                            events = read_corporate_action_events(
-                                self.config,
-                                source_symbol=symbol,
-                                through_session=action_session,
-                            )
-                            if (
-                                len(events) != 1
-                                or events[0].get("effective_session") != action_session
-                                or events[0].get("source_quality")
-                                != "VERIFIED_OFFICIAL_NOTICE"
-                                or events[0].get("action_kind")
-                                != "CAPITAL_RESERVE_TO_STOCK"
-                            ):
-                                invalid_reason = (
-                                    "该来源代码存在多事件、非目标生效日或未验证事件；"
-                                    "本公告能力不能闭合此目标窗口。"
-                                )
-                                break
-                            revisions.append(
-                                {
-                                    "source_symbol": symbol,
-                                    "event_ref": str(events[0]["event_ref"]),
-                                    "semantic_revision": str(
-                                        events[0]["semantic_revision"]
-                                    ).strip(),
-                                }
-                            )
-                        if invalid_reason:
-                            adjusted_input_status_by_session[day_text] = {
-                                "status": "INCOMPLETE",
-                                "code": "ADJUSTMENT_EVENT_COVERAGE_INCOMPLETE",
-                                "message": invalid_reason,
-                            }
-                            continue
-                        adjusted_symbols_by_session[day_text] = tuple(symbols)
-                        adjusted_event_revisions_by_session[day_text] = revisions
-
+        reset_preflight_required = (
+            request["mode"] == "INITIALIZE"
+            and request["initialization_mode"] == "RESET_ALL_BUSINESS_FACTS"
+        )
         sector_pair = {"status": "NOT_REQUESTED", "snapshot_ids": None}
         if {
             "SECTOR_PULSE",
@@ -2004,217 +2077,235 @@ class DataJobCoordinator:
             cutoff=self.research_cutoff,
             raw_coverage=coverage,
             execution_authorized=self.execution_authorized,
-            adjusted_action_sessions=adjusted_action_sessions,
-            adjusted_action_symbols_by_session=adjusted_symbols_by_session,
         )
-        if "ADJUSTED_PRICE" in request["selected_modules"]:
-            plan["adjusted_price_input_status_by_session"] = (
-                adjusted_input_status_by_session
+        plan["raw_response_journal_enabled"] = request["raw_response_journal_enabled"]
+        source_policy = self.config.get("source_policy", {})
+        primary_policy = (
+            source_policy.get("baostock_primary", {})
+            if isinstance(source_policy, Mapping)
+            else {}
+        )
+        primary_budget = (
+            primary_policy.get("request_budget", {})
+            if isinstance(primary_policy, Mapping)
+            else {}
+        )
+        if "BAOSTOCK_PRICES" in request["source_modules"]:
+            required_policy_keys = (
+                "max_login_batches",
+                "max_api_calls_per_batch",
+                "query_timeout_seconds",
+                "max_history_session_count",
+                "max_identity_total_seconds",
+                "max_retry_attempts",
+                "retry_backoff_seconds",
             )
-            plan["adjusted_price_event_revisions"] = adjusted_event_revisions_by_session
-            plan["adjusted_price_capture_by_session"] = adjusted_capture_by_session
-            plan["adjusted_price_raw_identities_by_session"] = (
-                adjusted_raw_identities_by_session
+            policy_valid = (
+                isinstance(primary_budget, Mapping)
+                and all(key in primary_budget for key in required_policy_keys)
+                and type(primary_budget.get("max_login_batches")) is int
+                and 1 <= primary_budget["max_login_batches"] <= 10000
+                and type(primary_budget.get("max_api_calls_per_batch")) is int
+                and 1 <= primary_budget["max_api_calls_per_batch"] <= 100
+                and type(primary_budget.get("max_history_session_count")) is int
+                and 1 <= primary_budget["max_history_session_count"] <= 250
+                and type(primary_budget.get("max_retry_attempts")) is int
+                and 0 <= primary_budget["max_retry_attempts"] <= 3
+                and isinstance(
+                    primary_budget.get("query_timeout_seconds"), (int, float)
+                )
+                and not isinstance(primary_budget.get("query_timeout_seconds"), bool)
+                and 0.2 <= primary_budget["query_timeout_seconds"] <= 30
+                and isinstance(
+                    primary_budget.get("max_identity_total_seconds"), (int, float)
+                )
+                and not isinstance(
+                    primary_budget.get("max_identity_total_seconds"), bool
+                )
+                and 0.5 <= primary_budget["max_identity_total_seconds"] <= 120
+                and isinstance(
+                    primary_budget.get("retry_backoff_seconds"), (int, float)
+                )
+                and not isinstance(primary_budget.get("retry_backoff_seconds"), bool)
+                and 0 <= primary_budget["retry_backoff_seconds"] <= 60
             )
-            if "TDX_RAW" not in request["source_modules"]:
-                package_id = plan.get("reuse_raw_package_id")
-                windows = plan.get("adjusted_price_source_windows", {})
-                symbols_by_session = plan.get("adjusted_price_symbols_by_session", {})
-                if type(package_id) is int:
-                    from stock_a.storage.postgres.adjusted_prices import (
-                        read_adjustment_raw_window,
+            policy_values = (
+                {key: primary_budget.get(key) for key in required_policy_keys}
+                if policy_valid
+                else {}
+            )
+            universe_preview = coverage.get("baostock_universe_preview")
+            symbol_count = (
+                universe_preview.get("symbol_count")
+                if isinstance(universe_preview, Mapping)
+                else None
+            )
+            required_capture_pairs = {
+                (session, coordinate)
+                for session in plan.get("raw_history_sessions", ())
+                for coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED")
+            }
+            capture_inputs = [
+                item
+                for item in plan.get("price_capture_inputs", ())
+                if isinstance(item, Mapping)
+            ]
+            existing_capture_pairs = {
+                (item.get("session_date"), item.get("price_coordinate"))
+                for item in capture_inputs
+            }
+            existing_capture_ids = {
+                item.get("source_capture_id")
+                for item in capture_inputs
+                if type(item.get("source_capture_id")) is int
+                and item.get("source_capture_id") > 0
+            }
+            capture_reuse_ready = (
+                not reset_preflight_required
+                and plan.get("price_capture_reader_status") == "AVAILABLE"
+                and bool(required_capture_pairs)
+                and required_capture_pairs.issubset(existing_capture_pairs)
+                and len(existing_capture_ids) == 1
+            )
+            budget_plan: dict[str, Any] = {
+                "status": (
+                    "PREFLIGHT_AT_EXECUTION"
+                    if reset_preflight_required
+                    else "READY_CAPTURE_REUSE"
+                    if capture_reuse_ready
+                    else "WAITING_FOR_SOURCE_UNIVERSE_READER"
+                ),
+                "api_calls_per_symbol_coordinate": 1,
+                "coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
+                "target_sessions": plan.get("baostock_price_output_sessions", []),
+                "source_capture_inputs": plan.get("price_capture_inputs", []),
+                "symbol_count": None,
+                "identity_login_batches": 1,
+                "identity_api_calls": 2,
+                "planned_api_calls_total": None,
+                "required_initial_login_batches": None,
+                "configured": policy_values,
+                "source_reader_status": coverage.get(
+                    "baostock_universe_reader_status", "WAITING_FOR_SOURCE_READER"
+                ),
+                "network_requests_performed": False,
+                "dynamic_universe_resolved_during": (
+                    "RESET_SOURCE_PREFLIGHT_BEFORE_CLEAR"
+                    if reset_preflight_required
+                    else None
+                ),
+                "source_preflight_required_before_clear": reset_preflight_required,
+            }
+            if reset_preflight_required and policy_valid:
+                budget_plan["status"] = "PREFLIGHT_AT_EXECUTION"
+                if type(symbol_count) is int and symbol_count > 0:
+                    max_api = int(primary_budget["max_api_calls_per_batch"])
+                    budget_plan["estimated_symbol_count"] = symbol_count
+                    budget_plan["estimated_price_api_calls"] = 2 * symbol_count
+                    budget_plan["estimated_initial_login_batches"] = 1 + 2 * (
+                        (symbol_count + max_api - 1) // max_api
                     )
-
-                    for day_text, window_text in windows.items():
-                        symbols = symbols_by_session.get(day_text, ())
-                        expected_window = tuple(
-                            date.fromisoformat(value) for value in window_text
+            elif policy_valid and capture_reuse_ready:
+                budget_plan.update(
+                    {
+                        "status": "READY_CAPTURE_REUSE",
+                        "symbol_count": len(
+                            {
+                                str(item.get("source_symbol"))
+                                for item in capture_inputs
+                                if isinstance(item.get("source_symbol"), str)
+                            }
                         )
-                        capture_ids: set[int] = set()
-                        capture_ids_by_source_session: dict[str, int] = {}
-                        window_complete = len(expected_window) == 2
-                        for symbol in symbols:
-                            rows = read_adjustment_raw_window(
-                                self.config,
-                                source_symbol=symbol,
-                                source_package_id=package_id,
-                                target_session=expected_window[-1],
-                                session_count=2,
-                            )
-                            if tuple(
-                                row["session_date"] for row in rows
-                            ) != expected_window or any(
-                                row.get("source_package_id") != package_id
-                                or row.get("price_quality") != "OBSERVED"
-                                or row.get("bar_status") != "TARGET_PRESENT"
-                                for row in rows
-                            ):
-                                window_complete = False
-                                break
-                            symbol_capture_ids = {
-                                row["session_date"].isoformat(): int(
-                                    row["source_capture_id"]
-                                )
-                                for row in rows
-                            }
-                            if len(symbol_capture_ids) != 2 or (
-                                capture_ids_by_source_session
-                                and symbol_capture_ids != capture_ids_by_source_session
-                            ):
-                                window_complete = False
-                                break
-                            capture_ids_by_source_session = symbol_capture_ids
-                            target_rows = [
-                                row
-                                for row in rows
-                                if row["session_date"] == expected_window[-1]
-                            ]
-                            capture_ids.update(
-                                int(row["source_capture_id"]) for row in target_rows
-                            )
-                        if window_complete and len(capture_ids) == 1:
-                            adjusted_capture_by_session[day_text] = next(
-                                iter(capture_ids)
-                            )
-                            adjusted_raw_identities_by_session[day_text] = {
-                                "source_package_id": package_id,
-                                "source_capture_ids_by_session": (
-                                    capture_ids_by_source_session
-                                ),
-                                "source_symbols": list(symbols),
-                            }
-                        else:
-                            plan["adjusted_price_input_status_by_session"][day_text] = {
-                                "status": "NOT_COMPUTED",
-                                "code": "ADJUSTMENT_RAW_WINDOW_UNAVAILABLE",
-                                "message": "同一来源包没有完整的前一官方会话与公告生效会话Raw窗口。",
-                            }
-                else:
-                    for day_text in plan.get("adjusted_price_source_windows", {}):
-                        plan["adjusted_price_input_status_by_session"][day_text] = {
-                            "status": "NOT_COMPUTED",
-                            "code": "ADJUSTMENT_RAW_PACKAGE_UNAVAILABLE",
-                            "message": "没有绑定包含两会话输入窗口的已存Raw来源包；未启动来源采集。",
-                        }
-            for day_text in plan.get("module_output_sessions", {}).get(
-                "ADJUSTED_PRICE", ()
-            ):
-                if (
-                    day_text not in plan.get("adjusted_price_source_windows", {})
-                    and day_text not in plan["adjusted_price_input_status_by_session"]
-                ):
-                    plan["adjusted_price_input_status_by_session"][day_text] = {
-                        "status": "NOT_COMPUTED",
-                        "code": "ADJUSTMENT_TWO_SESSION_WINDOW_UNAVAILABLE",
-                        "message": "没有完整的两个截止内官方输入会话；不触发调整生产。",
+                        or None,
+                        "identity_login_batches": 0,
+                        "identity_api_calls": 0,
+                        "price_login_batches": 0,
+                        "price_api_calls": 0,
+                        "planned_api_calls_total": 0,
+                        "required_initial_login_batches": 0,
+                        "capture_reused": True,
+                        "network_requests_performed": False,
                     }
-        if "BAOSTOCK" in request["source_modules"]:
-            bao_policy = self.config.get("source_policy", {}).get(
-                "baostock_supplement", {}
-            )
-            plan["baostock_request_status"] = {
+                )
+            elif policy_valid and type(symbol_count) is int and symbol_count > 0:
+                max_api = int(primary_budget["max_api_calls_per_batch"])
+                max_logins = int(primary_budget["max_login_batches"])
+                identity_login_batches = 1
+                identity_api_calls = 2
+                price_login_batches = 2 * ((symbol_count + max_api - 1) // max_api)
+                required_batches = identity_login_batches + price_login_batches
+                price_api_calls = 2 * symbol_count
+                planned_calls = identity_api_calls + price_api_calls
+                budget_plan.update(
+                    {
+                        "status": (
+                            "READY"
+                            if required_batches <= max_logins
+                            and planned_calls <= max_logins * max_api
+                            else "BLOCKED_BUDGET"
+                        ),
+                        "symbol_count": symbol_count,
+                        "identity_login_batches": identity_login_batches,
+                        "identity_api_calls": identity_api_calls,
+                        "price_login_batches": price_login_batches,
+                        "price_api_calls": price_api_calls,
+                        "planned_api_calls_total": planned_calls,
+                        "required_initial_login_batches": required_batches,
+                        "max_api_calls_per_batch": max_api,
+                        "max_login_batches": max_logins,
+                        "max_identity_total_seconds": primary_budget[
+                            "max_identity_total_seconds"
+                        ],
+                        "max_retry_attempts": primary_budget["max_retry_attempts"],
+                        "retry_backoff_seconds": primary_budget[
+                            "retry_backoff_seconds"
+                        ],
+                    }
+                )
+            elif policy_valid and symbol_count == 0:
+                budget_plan["status"] = "BLOCKED_EMPTY_SOURCE_UNIVERSE"
+            plan["baostock_price_budget_plan"] = budget_plan
+            plan["baostock_price_request_status"] = {
                 "source_availability": "NOT_CHECKED_NO_NETWORK",
-                "request_policy": bao_policy.get("request_policy", "UNKNOWN"),
                 "execution_authorized": self.execution_authorized,
                 "network_requests_performed": False,
+                "price_capture_reader_status": plan.get("price_capture_reader_status"),
             }
-            if "TDX_RAW" not in request["source_modules"]:
-                from stock_a.application.baostock_daily_jobs import (
-                    _request_budget,
-                    plan_baostock_capture_batches,
+            if not policy_valid:
+                plan.setdefault("blocked_reasons", []).append(
+                    "BAOSTOCK_PRIMARY_POLICY_INVALID"
                 )
-                from stock_a.storage.postgres.data_jobs import (
-                    read_raw_symbols_by_session,
+                plan["executable"] = False
+                plan["status"] = "BLOCKED_INPUT_UNAVAILABLE"
+            elif budget_plan["status"] == "BLOCKED_BUDGET":
+                plan.setdefault("blocked_reasons", []).append(
+                    "BAOSTOCK_REQUEST_BUDGET_EXCEEDED"
                 )
-
-                package_id = plan.get("baostock_source_package_id")
-                sessions = tuple(
-                    date.fromisoformat(item)
-                    for item in plan.get("baostock_output_sessions", ())
+                plan["executable"] = False
+                plan["status"] = "BLOCKED_REQUEST_BUDGET"
+            elif budget_plan["status"] in {
+                "WAITING_FOR_SOURCE_UNIVERSE_READER",
+                "BLOCKED_EMPTY_SOURCE_UNIVERSE",
+            }:
+                wait_code = (
+                    "BAOSTOCK_UNIVERSE_EMPTY"
+                    if budget_plan["status"] == "BLOCKED_EMPTY_SOURCE_UNIVERSE"
+                    else "BAOSTOCK_UNIVERSE_READER_NOT_CONNECTED"
                 )
-                units = [
-                    item
-                    for item in plan.get("stage_units", ())
-                    if item.get("stage_code") == "SOURCE_BAOSTOCK"
-                ]
-                blockers = plan.setdefault("blocked_reasons", [])
-
-                def block_baostock(code: str, message: str) -> None:
-                    blockers.append(code)
-                    plan["executable"] = False
-                    plan["status"] = "BLOCKED_INPUT_UNAVAILABLE"
-                    for unit in units:
-                        unit.update(
-                            {
-                                "status": "BLOCKED",
-                                "error_code": code,
-                                "error_message": message,
-                            }
-                        )
-                    plan.setdefault("unplanned_producers", []).append(
-                        {
-                            "stage_code": "BAOSTOCK",
-                            "status": "BLOCKED",
-                            "reason_code": code,
-                            "message": message,
-                        }
-                    )
-
-                if type(package_id) is not int or not sessions:
-                    block_baostock(
-                        "BAOSTOCK_RAW_INPUT_UNAVAILABLE",
-                        "目标日期没有唯一完整的PG TDX Raw来源包；未启动TDX重新采集。",
-                    )
-                else:
-                    raw_readback = read_raw_symbols_by_session(
-                        self.config,
-                        target_sessions=sessions,
-                        source_package_id=package_id,
-                        cutoff=self.research_cutoff,
-                    )
-                    expected_counts = {
-                        item["session_date"]: int(item["expected_row_count"])
-                        for item in plan.get("baostock_raw_session_inputs", ())
-                    }
-                    actual_counts = raw_readback["symbol_counts_by_session"]
-                    if raw_readback["missing_sessions"] or any(
-                        actual_counts.get(day.isoformat())
-                        != expected_counts.get(day.isoformat())
-                        for day in sessions
-                    ):
-                        block_baostock(
-                            "BAOSTOCK_RAW_READBACK_INCOMPLETE",
-                            "独立PG读回的TDX代码分母与闭合Raw目录不一致；未发起来源请求。",
-                        )
-                    else:
-                        max_logins, max_queries, _timeout = _request_budget(self.config)
-                        budget_plan = plan_baostock_capture_batches(
-                            sessions,
-                            raw_readback["symbols_by_session"],
-                            max_login_batches=max_logins,
-                            max_queries_per_target_session=max_queries,
-                        )
-                        plan["baostock_request_budget"] = {
-                            key: budget_plan[key]
-                            for key in (
-                                "status",
-                                "target_session_count",
-                                "symbol_session_units",
-                                "required_login_batches",
-                                "allowed_login_batches",
-                                "max_queries_per_target_session",
-                            )
-                        }
-                        if budget_plan["status"] != "READY":
-                            block_baostock(
-                                "BAOSTOCK_REQUEST_BUDGET_EXCEEDED",
-                                "所需BaoStock登录批次超过本机预算；未抽样、未登录且未发送请求。",
-                            )
-                if bao_policy.get("request_policy") != "REQUESTED":
-                    block_baostock(
-                        "BAOSTOCK_REQUEST_NOT_AUTHORIZED",
-                        "BaoStock来源策略为未请求；仅核对PG代码池和预算，不发送网络请求。",
-                    )
+                plan.setdefault("blocked_reasons", []).append(wait_code)
+                plan["executable"] = False
+                plan["status"] = "WAITING_FOR_SOURCE_READER"
+            if (
+                policy_valid
+                and request["mode"] == "INITIALIZE"
+                and request["history_session_count"]
+                > primary_budget.get("max_history_session_count", 0)
+            ):
+                plan.setdefault("blocked_reasons", []).append(
+                    "HISTORY_SESSION_COUNT_EXCEEDS_BAOSTOCK_POLICY"
+                )
+                plan["executable"] = False
+                plan["status"] = "BLOCKED_HISTORY_WINDOW"
         plan["sector_snapshot_pair"] = sector_pair
         plan["sector_snapshot_ids"] = sector_pair.get("snapshot_ids")
         completed = self._complete_plan(plan, request, coverage, sector_pair)
@@ -2294,13 +2385,28 @@ class DataJobCoordinator:
                     preview["irreversible_warning"] = (
                         "当前为既有任务恢复；不会再次执行全库清理。"
                     )
-                completed["executable"] = self.execution_authorized
+                source_reader_ready = (
+                    completed.get("price_capture_reader_status")
+                    == "RESET_PREFLIGHT_REQUIRED"
+                    and completed.get("baostock_price_budget_plan", {}).get("status")
+                    == "PREFLIGHT_AT_EXECUTION"
+                    if request["mode"] == "INITIALIZE"
+                    and request["initialization_mode"] == "RESET_ALL_BUSINESS_FACTS"
+                    else completed.get("price_capture_reader_status") == "AVAILABLE"
+                    and completed.get("baostock_price_budget_plan", {}).get("status")
+                    == "READY"
+                )
+                completed["executable"] = (
+                    self.execution_authorized and source_reader_ready
+                )
                 completed["status"] = (
                     "RESET_RESUME_READY"
+                    if completed["executable"]
+                    else "WAITING_FOR_SOURCE_READER"
                     if self.execution_authorized
                     else "BLOCKED_NOT_AUTHORIZED"
                 )
-                if self.execution_authorized:
+                if completed["executable"]:
                     completed["blocked_reasons"] = [
                         reason
                         for reason in completed.get("blocked_reasons", ())
@@ -2326,13 +2432,9 @@ class DataJobCoordinator:
         for module in request["selected_modules"]:
             if module in output_counts:
                 continue
-            if module == "TDX_RAW":
+            if module == "BAOSTOCK_PRICES":
                 output_counts[module] = max(
-                    1, int(plan.get("history_session_count") or 1)
-                )
-            elif module == "BAOSTOCK":
-                output_counts[module] = max(
-                    1, len(plan.get("baostock_output_sessions", ()))
+                    1, len(plan.get("baostock_price_output_sessions", ()))
                 )
             elif module == "TDX_SECTOR_MEMBERS":
                 output_counts[module] = 1
@@ -2351,61 +2453,24 @@ class DataJobCoordinator:
                 )
         plan["module_output_session_counts"] = output_counts
         plan["operation"] = request["operation"]
-        version_rows = list(plan.get("raw_session_inputs", ()))
         source_identity = [
             {
-                "session_date": item.get("session_date"),
-                "source_package_id": item.get("source_package_id"),
-                "source_capture_id": item.get("source_capture_id"),
+                "source_capture_id": capture_id,
+                "price_coordinate": coordinate,
             }
-            for item in sorted(version_rows, key=lambda value: value["session_date"])
+            for capture_id, coordinate in sorted(
+                {
+                    (
+                        int(item["source_capture_id"]),
+                        str(item["price_coordinate"]),
+                    )
+                    for item in plan.get("price_capture_inputs", ())
+                }
+            )
         ]
-        if "BAOSTOCK" in request["selected_modules"]:
-            source_identity.extend(
-                {
-                    "source": "TDX_RAW_REUSE_FOR_BAOSTOCK",
-                    "session_date": item.get("session_date"),
-                    "source_package_id": item.get("source_package_id"),
-                    "source_capture_id": item.get("source_capture_id"),
-                    "row_count": item.get("row_count"),
-                    "expected_row_count": item.get("expected_row_count"),
-                }
-                for item in plan.get("baostock_raw_session_inputs", ())
-            )
-            bao_units = (
-                coverage.get("completed_units_by_module", {}).get("BAOSTOCK", [])
-                if isinstance(coverage.get("completed_units_by_module"), Mapping)
-                else []
-            )
-            source_identity.extend(
-                {
-                    "source": "BAOSTOCK",
-                    "target_session": item.get("target_session"),
-                    "capture_id": item.get("baostock_capture_id"),
-                    "verified_rows": item.get("verified_rows"),
-                }
-                for item in bao_units
-                if item.get("target_session")
-                in set(plan.get("baostock_output_sessions", ()))
-            )
-        if "ADJUSTED_PRICE" in request["selected_modules"]:
-            source_identity.append(
-                {
-                    "source": "VERIFIED_CORPORATE_ACTION_EVENTS",
-                    "sessions": plan.get("adjusted_price_event_revisions", {}),
-                }
-            )
-            source_identity.append(
-                {
-                    "source": "ADJUSTED_PRICE_RAW_INPUTS",
-                    "sessions": plan.get(
-                        "adjusted_price_raw_identities_by_session", {}
-                    ),
-                }
-            )
         request_identity = {
             "algorithm_revision": "STOCK_A_DATA_JOB_ALGORITHM_R3",
-            "profile_semantics_contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+            "profile_semantics_contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R2",
             "source_versions": source_identity,
             "mode": request["mode"],
             "initialization_mode": request["initialization_mode"],
@@ -2420,28 +2485,13 @@ class DataJobCoordinator:
             "calendar_id": plan.get("calendar_id"),
             "calendar_revision": plan.get("calendar_revision"),
             "operation": request["operation"],
+            "raw_response_journal_enabled": request["raw_response_journal_enabled"],
         }
         plan["source_version_fingerprint"] = hashlib.sha256(
             json.dumps(request_identity, sort_keys=True, separators=(",", ":")).encode(
                 "utf-8"
             )
         ).hexdigest()
-        if "ADJUSTED_PRICE" in request["selected_modules"]:
-            input_statuses = plan.get("adjusted_price_input_status_by_session", {})
-            for day_text in plan.get("module_output_sessions", {}).get(
-                "ADJUSTED_PRICE", ()
-            ):
-                input_status = input_statuses.get(day_text, {})
-                status = input_status.get("status", "NOT_STARTED")
-                _unit(
-                    plan["stage_units"],
-                    stage="ADJUSTED_PRICE",
-                    target_session=date.fromisoformat(day_text),
-                    business_table="stock.source_adjusted_daily_prices",
-                    status=status,
-                    error_code=input_status.get("code"),
-                    error_message=input_status.get("message"),
-                )
         if "SECTOR_PULSE" in request["selected_modules"]:
             sector_source_will_generate = (
                 "TDX_SECTOR_MEMBERS" in request["source_modules"]
@@ -2477,7 +2527,7 @@ class DataJobCoordinator:
                             sector_pair.get("status") != "AVAILABLE"
                             and not sector_source_will_generate
                         )
-                        else "目标日Raw不在已存完整来源包中；保留未计算。"
+                        else "目标日QFQ不在已存完整paired capture中；保留未计算。"
                     )
                     if day_status == "NOT_COMPUTED"
                     else None,
@@ -2523,7 +2573,7 @@ class DataJobCoordinator:
                         ),
                         error_message=None
                         if due and day not in insufficient
-                        else "后继目标Raw没有绑定到同一完整来源包；保留未计算。"
+                        else "后继会话没有绑定到同一完整paired capture；保留未计算。"
                         if day in insufficient
                         else "研究截止内尚无到期后继会话；不读取截止后的行情。",
                     )
@@ -2554,7 +2604,7 @@ class DataJobCoordinator:
                         else None
                     ),
                     error_message=(
-                        "精确前序Raw或行业/GN快照输入不可用；相邻变化保留未计算。"
+                        "精确前序QFQ捕获或行业/GN快照输入不可用；相邻变化保留未计算。"
                         if status == "NOT_COMPUTED"
                         else None
                     ),
@@ -2591,7 +2641,7 @@ class DataJobCoordinator:
                     "sources_ready": False,
                     "source_preflight_status": "REQUIRED_BEFORE_DELETE",
                     "source_preflight_required_before_delete": True,
-                    "source_preflight_message": "任务启动后将先验证官方Raw来源及行业/GN成员来源；任一必需来源不完整时保留现有事实，不执行清理。",
+                    "source_preflight_message": "任务启动后将先验证BaoStock双坐标价格来源及TDX行业/GN成员来源；任一必需来源不完整时保留现有事实，不执行清理。",
                     "irreversible_warning": "业务事实清理提交后不能直接撤销；只有删除前的全部来源与窗口预检通过才会清理。",
                 }
             )
@@ -2599,6 +2649,12 @@ class DataJobCoordinator:
             plan["reset_preview_fingerprint"] = reset_preview[
                 "reset_preview_fingerprint"
             ]
+            if reset_preview.get("complete") is not True:
+                plan["executable"] = False
+                plan["status"] = "RESET_PREVIEW_INCOMPLETE"
+                plan.setdefault("blocked_reasons", []).append(
+                    "RESET_PREVIEW_OR_DATABASE_IDENTITY_INCOMPLETE"
+                )
             reset_target = date.fromisoformat(plan["target_session"])
             for row in reset_preview["affected_tables"]:
                 _unit(
@@ -2692,6 +2748,12 @@ class DataJobCoordinator:
             and request["initialization_mode"] == "RESET_ALL_BUSINESS_FACTS"
         ):
             preview = plan.get("reset_preview")
+            if not isinstance(preview, Mapping) or preview.get("complete") is not True:
+                raise DataJobError(
+                    "RESET_PREVIEW_INCOMPLETE",
+                    "数据库身份或完整清理预览未通过，拒绝创建全库清理任务。",
+                    status=409,
+                )
             if request["reset_confirmed"] is not True:
                 raise DataJobError(
                     "RESET_CONFIRMATION_REQUIRED",
@@ -2762,6 +2824,33 @@ class DataJobCoordinator:
                     **result,
                     "job": data_job_pg.read_job(self.config, job_id=result["job_id"]),
                 }
+            if result.get("reused") is True:
+                resumed = data_job_pg.read_job(self.config, job_id=result["job_id"])
+                closed_statuses = {
+                    "COMPLETED",
+                    "ALREADY_COMPLETE",
+                    "NO_CHANGE",
+                    "CLEARED",
+                    "NOT_DUE",
+                    "SKIPPED_BY_USER",
+                    "SKIPPED_NOT_IMPLEMENTED",
+                }
+                persisted_progress = (
+                    resumed.get("progress", ()) if isinstance(resumed, Mapping) else ()
+                )
+                if len(persisted_progress) == len(plan.get("stage_units", ())) and all(
+                    isinstance(unit, Mapping) and unit.get("status") in closed_statuses
+                    for unit in persisted_progress
+                ):
+                    completed = data_job_pg.finish_job(
+                        self.config, job_id=result["job_id"]
+                    )
+                    return {
+                        "accepted": True,
+                        **completed,
+                        "reused": True,
+                        "completed_from_verified_progress": True,
+                    }
             self._thread = threading.Thread(
                 target=self._execute_job,
                 args=(result["job_id"], plan),
@@ -2777,8 +2866,7 @@ class DataJobCoordinator:
         }
 
     def _execute_job(self, job_id: UUID, plan: Mapping[str, Any]) -> None:
-        prepared_package = None
-        prepared_package_owner = None
+        prepared_reset_inputs = None
         reset_input_bound = False
         job_finished = False
         try:
@@ -2797,7 +2885,9 @@ class DataJobCoordinator:
                     item.get("status") == "CLEARED" for item in reset_progress
                 )
                 expected_input_fingerprint = (
-                    data_job_pg.read_reset_preflight_fingerprint(
+                    None
+                    if reset_already_completed
+                    else data_job_pg.read_reset_preflight_fingerprint(
                         self.config, job_id=job_id
                     )
                 )
@@ -2806,31 +2896,22 @@ class DataJobCoordinator:
                     plan,
                     job_id=job_id,
                     expected_preflight_fingerprint=expected_input_fingerprint,
+                    reset_already_completed=reset_already_completed,
                 )
-                prepared_package = prepared["vipdata_package"]
-                package_owner = prepared["package_owner"]
-                prepared_package_owner = package_owner
-                data_job_pg.bind_reset_preflight_fingerprint(
-                    self.config,
-                    job_id=job_id,
-                    fingerprint=prepared["preflight_fingerprint"],
+                prepared_reset_inputs = prepared
+                if not reset_already_completed:
+                    data_job_pg.bind_reset_preflight_fingerprint(
+                        self.config,
+                        job_id=job_id,
+                        fingerprint=prepared["preflight_fingerprint"],
+                    )
+                    reset_input_bound = True
+                execution_plan["_prepared_baostock_reset_inputs"] = (
+                    prepared_reset_inputs
                 )
-                reset_input_bound = True
-                execution_plan["_prepared_vipdata_package"] = prepared_package
                 execution_plan["_prepared_sector_snapshots"] = prepared[
                     "sector_snapshots"
                 ]
-                from stock_a.sources.tdx.vipdata import vipdata_package_entry_sha256
-
-                if (
-                    vipdata_package_entry_sha256(prepared_package)
-                    != prepared["package_sha256"]
-                ):
-                    raise DataJobError(
-                        "RESET_SOURCE_PACKAGE_CHANGED",
-                        "Raw包在预检完成后发生变化；未开始清理。",
-                        status=409,
-                    )
                 if not reset_already_completed:
                     reset_units = [
                         unit
@@ -2878,13 +2959,6 @@ class DataJobCoordinator:
                             ),
                         )
             if plan.get("operation") in _CLEANUP_OPERATIONS:
-                cleanup_package = plan.get("reuse_raw_package_id")
-                if cleanup_package is not None:
-                    data_job_pg.set_job_source_package(
-                        self.config,
-                        job_id=job_id,
-                        source_package_id=int(cleanup_package),
-                    )
                 _execute_derived_cleanup(
                     config=self.config,
                     job_id=job_id,
@@ -2920,12 +2994,7 @@ class DataJobCoordinator:
                 error_message=error_message,
             )
         finally:
-            if prepared_package_owner is not None and (
-                job_finished or not reset_input_bound
-            ):
-                from stock_a.sources.tdx.vipdata import cleanup_vipdata_package
-
-                cleanup_vipdata_package(prepared_package_owner)
+            prepared_reset_inputs = None
 
     def _begin_units(self, *, job_id: UUID, units: Sequence[Mapping[str, Any]]) -> None:
         data_job_pg.mark_progress_running_batch(self.config, job_id=job_id, units=units)
@@ -2937,14 +3006,12 @@ class DataJobCoordinator:
         stage_code: str,
         target_session: date,
         business_table: str,
-        source_package_id: int | None,
         source_capture_id: int | None,
         profile_history_session_count: int | None,
         d1_history_session_count: int | None,
         expected_rows: int | None,
         inserted_rows: int,
         quality_status: str | None,
-        baostock_capture_id: UUID | None = None,
         no_change: bool = False,
         profile_revision: str | None = None,
         producer_version: str | Sequence[str] | None = None,
@@ -2963,9 +3030,7 @@ class DataJobCoordinator:
             self.config,
             business_table=business_table,
             target_session=target_session,
-            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
-            baostock_capture_id=baostock_capture_id,
             profile_history_session_count=profile_history_session_count,
             d1_history_session_count=d1_history_session_count,
             profile_revision=profile_revision,
@@ -2990,9 +3055,7 @@ class DataJobCoordinator:
                 business_table=business_table,
             )
             expected_identity = {
-                "source_package_id": source_package_id,
                 "source_capture_id": source_capture_id,
-                "baostock_capture_id": baostock_capture_id,
                 "profile_revision": profile_revision,
                 "producer_version": stored_producer_version,
                 "profile_history_session_count": profile_history_session_count,
@@ -3017,9 +3080,23 @@ class DataJobCoordinator:
                 or previous.get("verified_rows") != actual_rows
                 or not identity_matches
             ):
+                identity_differences = {
+                    key: {
+                        "stored": str(previous.get(key))[:160]
+                        if previous is not None
+                        else None,
+                        "current": str(value)[:160],
+                    }
+                    for key, value in expected_identity.items()
+                    if previous is None or previous.get(key) != value
+                }
                 raise DataJobError(
                     "DATA_JOB_READBACK_IDENTITY_CHANGED",
-                    "已核验进度对应的PG来源、算法、窗口或板块快照身份发生变化；任务需要重新计算。",
+                    "已核验进度与本次读回身份不一致："
+                    f"stage={stage_code}，target={target_session.isoformat()}，"
+                    f"table={business_table}，actual_rows={actual_rows}，"
+                    f"stored_verified_rows={previous.get('verified_rows') if previous is not None else None}，"
+                    f"identity_differences={identity_differences}。",
                     status=409,
                 )
             return
@@ -3034,9 +3111,7 @@ class DataJobCoordinator:
             updated_rows=0,
             expected_rows=expected_rows,
             quality_status=quality_status,
-            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
-            baostock_capture_id=baostock_capture_id,
             profile_revision=profile_revision,
             producer_version=stored_producer_version,
             profile_history_session_count=profile_history_session_count,
@@ -3056,35 +3131,418 @@ class DataJobCoordinator:
         )
 
 
+def _prepare_reset_resume_inputs_from_persisted_capture(
+    config: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    *,
+    job_id: UUID,
+    sessions: tuple[date, ...],
+    cutoff: date,
+    budget: Mapping[str, Any],
+) -> dict[str, Any]:
+    """在整库清理已提交后，从已核验PG捕获与G盘档案恢复，不重查BaoStock身份。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from stock_a.application.baostock_response_journal import (
+        BaoStockRawResponseJournal,
+    )
+    from stock_a.sources.baostock.identity import (
+        classify_baostock_board,
+        normalize_baostock_symbol,
+    )
+    from stock_a.sources.tdx.remote_sector import (
+        fetch_remote_sector_files,
+        remote_sector_source_inputs,
+        validate_remote_sector_files,
+    )
+    from stock_a.sources.tdx.sector_members import (
+        parse_remote_sector_source_inputs_with_status,
+    )
+    from stock_a.storage.postgres import baostock_price_facts, source_raw
+    from stock_a.storage.postgres.tdx_sector_members import _validate_limits
+
+    saved_job = data_job_pg.read_job(config, job_id=job_id)
+    source_capture_id = (
+        saved_job.get("source_capture_id") if isinstance(saved_job, Mapping) else None
+    )
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        raise DataJobError(
+            "RESET_RESUME_CAPTURE_MISSING",
+            "既有重初始化任务没有已存BaoStock捕获；拒绝重复请求价格或推断证券池。",
+            status=409,
+        )
+    roster = baostock_price_facts.read_baostock_capture_roster(
+        dict(config), source_capture_id=source_capture_id, cutoff=cutoff
+    )
+    if (
+        roster.get("status") != "AVAILABLE"
+        or roster.get("source_capture_id") != source_capture_id
+        or roster.get("range_start_session") != sessions[0].isoformat()
+        or roster.get("range_end_session") != sessions[-1].isoformat()
+        or roster.get("requested_symbol_count") != len(roster.get("symbols", ()))
+    ):
+        raise DataJobError(
+            "RESET_RESUME_CAPTURE_SCOPE_INVALID",
+            "已存BaoStock捕获证券池、会话范围或配对请求目录未闭合；不重发价格请求。",
+            status=409,
+        )
+
+    roster_rows = tuple(roster.get("symbols", ()))
+    universe = tuple(
+        sorted(
+            str(item.get("source_symbol"))
+            for item in roster_rows
+            if isinstance(item, Mapping) and isinstance(item.get("source_symbol"), str)
+        )
+    )
+    if (
+        len(universe) != len(roster_rows)
+        or not universe
+        or len(set(universe)) != len(universe)
+        or any(normalize_baostock_symbol(symbol) != symbol for symbol in universe)
+    ):
+        raise DataJobError(
+            "RESET_RESUME_CAPTURE_SYMBOLS_INVALID",
+            "已存BaoStock捕获证券代码集合无效或重复；不重发价格请求。",
+            status=409,
+        )
+
+    eligible_sessions_by_symbol: dict[str, tuple[date, ...]] = {}
+    board_by_symbol: dict[str, str] = {}
+    board_counts: dict[str, int] = {}
+    for item in roster_rows:
+        symbol = str(item["source_symbol"])
+        board_identity = classify_baostock_board(symbol)
+        coordinates = item.get("coordinates")
+        if (
+            board_identity is None
+            or board_identity[1] not in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
+            or item.get("eligible_windows_match") is not True
+            or item.get("request_complete") is not True
+            or not isinstance(coordinates, Mapping)
+            or set(coordinates) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+            or any(
+                coordinates[coordinate].get("request_status")
+                not in {"COMPLETED", "NO_DATA"}
+                for coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED")
+            )
+        ):
+            raise DataJobError(
+                "RESET_RESUME_CAPTURE_REQUESTS_INCOMPLETE",
+                f"已存捕获{symbol}的板别、RAW/QFQ请求或有效窗口未闭合；不重发价格请求。",
+                status=409,
+            )
+        try:
+            eligible_start = date.fromisoformat(item["eligible_start_session"])
+            eligible_end = date.fromisoformat(item["eligible_end_session"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise DataJobError(
+                "RESET_RESUME_ELIGIBLE_WINDOW_INVALID",
+                f"已存捕获{symbol}的官方会话有效窗口无效。",
+                status=409,
+            ) from error
+        eligible = tuple(
+            day for day in sessions if eligible_start <= day <= eligible_end
+        )
+        if not eligible:
+            raise DataJobError(
+                "RESET_RESUME_ELIGIBLE_WINDOW_EMPTY",
+                f"已存捕获{symbol}在当前价格会话窗口内没有有效交易会话。",
+                status=409,
+            )
+        eligible_sessions_by_symbol[symbol] = eligible
+        board_by_symbol[symbol] = board_identity[1]
+        board_counts[board_identity[1]] = board_counts.get(board_identity[1], 0) + 1
+
+    names_snapshot = baostock_price_facts.read_baostock_basic_names_for_capture(
+        dict(config), source_capture_id=source_capture_id
+    )
+    names = tuple(names_snapshot.get("names", ()))
+    named_symbols = tuple(
+        sorted(
+            normalize_baostock_symbol(item.get("code"))
+            for item in names
+            if isinstance(item, Mapping)
+        )
+    )
+    if (
+        names_snapshot.get("status") != "AVAILABLE"
+        or names_snapshot.get("source_capture_id") != source_capture_id
+        or named_symbols != universe
+        or len(names) != len(universe)
+    ):
+        raise DataJobError(
+            "RESET_RESUME_BASIC_NAMES_INCOMPLETE",
+            "已存BaoStock基本资料名称快照与捕获证券集合不一致。",
+            status=409,
+        )
+
+    from datetime import datetime
+
+    captured_at = names_snapshot.get("captured_at")
+    if (
+        not isinstance(captured_at, datetime)
+        or captured_at.tzinfo is None
+        or captured_at.utcoffset() is None
+    ):
+        raise DataJobError(
+            "RESET_RESUME_BASIC_NAMES_CLOCK_INVALID",
+            "已存BaoStock名称快照缺少真实带时区捕获时钟。",
+            status=409,
+        )
+
+    capture_uuid = UUID(str(roster.get("capture_uuid")))
+    capture_material = {
+        "start": sessions[0].isoformat(),
+        "end": sessions[-1].isoformat(),
+        "symbols": list(universe),
+    }
+    capture_digest = hashlib.sha256(
+        json.dumps(capture_material, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    expected_capture_uuid = uuid5(
+        NAMESPACE_URL, f"stock-a:baostock:paired-capture:{capture_digest}"
+    )
+    if capture_uuid != expected_capture_uuid:
+        raise DataJobError(
+            "RESET_RESUME_CAPTURE_UUID_MISMATCH",
+            "已存BaoStock捕获UUID与其会话窗口和证券总体不一致。",
+            status=409,
+        )
+
+    expected_rows_by_session = {
+        day: sum(day in eligible for eligible in eligible_sessions_by_symbol.values())
+        for day in sessions
+    }
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
+        _connection,
+        cursor,
+        _scope,
+    ):
+        cursor.execute(
+            """SELECT session_date,count(*)::bigint
+               FROM stock.source_raw_daily WHERE source_capture_id=%s
+               GROUP BY session_date ORDER BY session_date""",
+            (source_capture_id,),
+        )
+        actual_rows_by_session = {row[0]: int(row[1]) for row in cursor.fetchall()}
+    if actual_rows_by_session != expected_rows_by_session:
+        raise DataJobError(
+            "RESET_RESUME_CAPTURE_ROWS_INCOMPLETE",
+            "已存BaoStock双坐标价格行与有效证券×会话总体不一致；不重发价格请求。",
+            status=409,
+        )
+
+    if plan.get("raw_response_journal_enabled") is not True:
+        raise DataJobError(
+            "RAW_RESPONSE_JOURNAL_REQUIRED",
+            "既有捕获恢复必须启用原始响应档案；价格请求保持停止。",
+            status=409,
+        )
+    journal = BaoStockRawResponseJournal(
+        job_id=job_id,
+        capture_uuid=capture_uuid,
+        cutoff=cutoff,
+        range_start_session=sessions[0],
+        range_end_session=sessions[-1],
+    )
+    if not journal.all_requests_complete(universe):
+        raise DataJobError(
+            "RESET_RESUME_RAW_ARCHIVE_INCOMPLETE",
+            "既有捕获对应的G盘RAW/QFQ原始响应档案未完整匹配；拒绝重复请求价格。",
+            status=409,
+        )
+
+    from stock_a.application.tdx_sector_members import (
+        read_tdx_sector_source_snapshot_catalog,
+    )
+
+    planned_pair = plan.get("sector_snapshot_pair")
+    snapshot_ids = (
+        planned_pair.get("snapshot_ids") if isinstance(planned_pair, Mapping) else None
+    )
+    if (
+        not isinstance(snapshot_ids, Mapping)
+        or set(snapshot_ids) != {"INDUSTRY", "CONCEPT"}
+        or any(type(value) is not int or value <= 0 for value in snapshot_ids.values())
+        or snapshot_ids["INDUSTRY"] == snapshot_ids["CONCEPT"]
+    ):
+        raise DataJobError(
+            "RESET_RESUME_SECTOR_SNAPSHOT_PAIR_INVALID",
+            "既有PG恢复任务缺少已验证的行业/GN快照身份；不重复请求来源。",
+            status=409,
+        )
+    try:
+        catalog = read_tdx_sector_source_snapshot_catalog(dict(config))
+        if catalog.get("status") != "AVAILABLE":
+            raise ValueError("PG行业/GN快照目录不可用")
+        catalog_by_id = {
+            int(item["snapshot_id"]): item
+            for item in catalog.get("snapshots", ())
+            if isinstance(item, Mapping) and type(item.get("snapshot_id")) is int
+        }
+        expected_kind = {
+            "INDUSTRY": "TDX_TDXHY_CFG",
+            "CONCEPT": "TDX_INFOHARBOR_BLOCK_DAT",
+        }
+        snapshots = []
+        for kind in ("INDUSTRY", "CONCEPT"):
+            item = catalog_by_id.get(snapshot_ids[kind])
+            if (
+                not isinstance(item, Mapping)
+                or item.get("source_kind") != expected_kind[kind]
+                or int(item.get("catalog_rows", 0)) <= 0
+                or int(item.get("member_rows", 0)) <= 0
+                or int(item.get("invalid_membership_quality_rows", 0)) != 0
+            ):
+                raise ValueError(f"既有{kind}快照身份或PG读回不完整")
+            snapshots.append(dict(item))
+    except Exception as error:
+        raise DataJobError(
+            "RESET_RESUME_SECTOR_PREFLIGHT_FAILED",
+            "既有PG行业/GN成员快照未闭合；恢复时不重复请求行业来源。",
+            status=503,
+        ) from error
+    sector_file_fingerprint = {
+        "reuse_existing_pg_snapshot_ids": {
+            kind: snapshot_ids[kind] for kind in ("INDUSTRY", "CONCEPT")
+        },
+        "snapshots": [
+            {
+                key: item.get(key)
+                for key in (
+                    "snapshot_id",
+                    "source_kind",
+                    "observed_at",
+                    "parse_contract_version",
+                    "source_quality",
+                    "catalog_rows",
+                    "member_rows",
+                )
+            }
+            for item in snapshots
+        ],
+    }
+    max_api = int(budget["max_api_calls_per_batch"])
+    max_logins = int(budget["max_login_batches"])
+    preflight = {
+        "mode": "PERSISTED_CAPTURE_RESUME",
+        "status": "EXISTING_CAPTURE_AND_ARCHIVE_COMPLETE",
+        "completion_status": "PERSISTED_CAPTURE_AND_ARCHIVE_COMPLETE",
+        "identity_requests_performed": False,
+        "price_requests_performed": False,
+        "source_network_called": False,
+        "requested_symbols": len(universe),
+        "target_sessions": [day.isoformat() for day in sessions],
+        "price_api_calls": 0,
+        "planned_price_api_calls": 0,
+        "identity_api_calls": 0,
+        "planned_total_api_calls": 0,
+        "identity_login_batches": 0,
+        "price_login_batches": 0,
+        "planned_initial_price_login_batches": 0,
+        "planned_total_login_batches": 0,
+        "max_login_batches": max_logins,
+        "max_api_calls_per_batch": max_api,
+        "effective_total_api_budget": max_logins * max_api,
+        "effective_price_retry_attempts": 0,
+        "full_capture_deferred_until_after_clear": True,
+        "source_requests_repeated_after_clear": False,
+        "capture_reused": True,
+    }
+    identity = {
+        "status": "REUSED_PERSISTED_BAOSTOCK_CAPTURE",
+        "request_completed_at": captured_at.isoformat(),
+        "login_attempted": False,
+        "verified_source_capture_id": None,
+        "source_capture_id": source_capture_id,
+        "capture_uuid": str(capture_uuid),
+    }
+    fingerprint_material = {
+        "contract": "STOCK_A_RESET_PERSISTED_CAPTURE_RESUME_R1",
+        "source_capture_id": source_capture_id,
+        "capture_uuid": str(capture_uuid),
+        "target_sessions": [day.isoformat() for day in sessions],
+        "source_symbols": list(universe),
+        "basic_names_capture_clock": captured_at.isoformat(),
+        "raw_response_archive_count": journal.response_count,
+        "sector_parse_contract": "|".join(
+            sorted(str(item["parse_contract_version"]) for item in snapshots)
+        ),
+        "sector_sources": sector_file_fingerprint,
+    }
+    preflight_fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "identity_snapshot": identity,
+        "source_symbols": universe,
+        "eligible_sessions_by_symbol": eligible_sessions_by_symbol,
+        "board_by_symbol": board_by_symbol,
+        "board_counts": board_counts,
+        "basic_names": names,
+        "price_preflight": preflight,
+        "capture_uuid": capture_uuid,
+        "raw_response_journal": journal,
+        "price_preflight_symbols": universe,
+        "preflight_login_batches": 0,
+        "price_preflight_sessions": sessions,
+        "sector_snapshots": {
+            "reuse_existing_snapshot_ids": {
+                kind: snapshot_ids[kind] for kind in ("INDUSTRY", "CONCEPT")
+            }
+        },
+        "sector_source_root": "PG_EXISTING_TDX_SOURCE_SNAPSHOTS",
+        "sector_source_fingerprint": sector_file_fingerprint,
+        "preflight_fingerprint": preflight_fingerprint,
+        "preflight_status": "REUSED_PERSISTED_PAIRED_CAPTURE",
+        "source_request_performed": False,
+    }
+
+
 def _prepare_reset_source_inputs(
     config: Mapping[str, Any],
     plan: Mapping[str, Any],
     *,
     job_id: UUID,
     expected_preflight_fingerprint: str | None = None,
+    reset_already_completed: bool = False,
 ) -> dict[str, Any]:
-    """清理前逐会话验证Raw并绑定可恢复的任务级输入。"""
-    from dataclasses import replace
+    """清理前完成BaoStock双坐标小样本与TDX成员来源预检。"""
     from datetime import datetime
-    from pathlib import Path
     from zoneinfo import ZoneInfo
 
+    from stock_a.application.baostock_daily_jobs import (
+        fetch_baostock_price_window,
+    )
+    from stock_a.sources.baostock.client import (
+        BaostockRawResponseSinkError,
+        query_identity_reference,
+    )
+    from stock_a.application.baostock_response_journal import (
+        BaoStockRawResponseJournalError,
+    )
+    from stock_a.sources.baostock.evidence import _UNITS as documented_units
+    from stock_a.sources.baostock.identity import (
+        classify_baostock_board,
+        normalize_baostock_symbol,
+    )
+    from stock_a.sources.tdx.remote_sector import (
+        fetch_remote_sector_files,
+        remote_sector_source_inputs,
+        validate_remote_sector_files,
+    )
     from stock_a.sources.tdx.sector_members import (
-        parse_sector_source_inputs,
-        read_sector_source_inputs,
+        parse_remote_sector_source_inputs_with_status,
     )
-    from stock_a.sources.tdx.vipdata import (
-        VipdataBudgets,
-        VipdataPackage,
-        VipdataSourceConfig,
-        VipdataTargetScanBudget,
-        cleanup_vipdata_package,
-        download_vipdata_package,
-        inspect_vipdata_page,
-        verify_existing_vipdata_package,
-        vipdata_package_entry_sha256,
-    )
-    from stock_a.storage.postgres import source_raw
     from stock_a.storage.postgres.tdx_sector_members import _validate_limits
 
     sessions = tuple(
@@ -3099,8 +3557,8 @@ def _prepare_reset_source_inputs(
         or any(session > cutoff for session in sessions)
     ):
         raise DataJobError(
-            "RESET_RAW_WINDOW_INVALID",
-            "清理预检要求完整、严格递增且不晚于研究截止的Raw窗口。",
+            "RESET_PRICE_WINDOW_INVALID",
+            "清理预检要求完整、递增且不超过预算的BaoStock官方价格窗口。",
             status=409,
         )
     _calendar_id, _calendar_revision, official_sessions = _load_official_sessions(
@@ -3108,217 +3566,508 @@ def _prepare_reset_source_inputs(
     )
     if any(session not in official_sessions for session in sessions):
         raise DataJobError(
-            "RESET_RAW_WINDOW_NOT_OFFICIAL",
-            "清理预检窗口包含不在现行官方日历中的会话；现有事实保持不变。",
+            "RESET_PRICE_WINDOW_NOT_OFFICIAL",
+            "清理预检窗口包含非官方会话；现有业务事实保持不变。",
             status=409,
         )
 
-    temporary_parent = Path("G:/codex_tmp/stock_a_vipdata").resolve()
-    temporary_parent.mkdir(parents=True, exist_ok=True)
-    job_root = temporary_parent / f"reset-job-{job_id.hex}"
-    if job_root.parent != temporary_parent:
-        raise DataJobError(
-            "RESET_TEMP_ROOT_REJECTED", "重置来源临时目录越出G盘授权根。", status=409
-        )
-    source_config = VipdataSourceConfig.from_mapping(
-        config["source_policy"]["vipdata_official"]
+    source_policy = config.get("source_policy")
+    primary = (
+        source_policy.get("baostock_primary")
+        if isinstance(source_policy, Mapping)
+        else None
     )
-    budgets = VipdataBudgets()
-    package_owner = None
-    verified_package = None
-    package_downloaded = False
+    request_budget = (
+        primary.get("request_budget") if isinstance(primary, Mapping) else None
+    )
+    if not isinstance(request_budget, Mapping):
+        raise DataJobError(
+            "RESET_BAOSTOCK_POLICY_INVALID",
+            "清理预检缺少BaoStock唯一来源请求预算；现有业务事实保持不变。",
+            status=409,
+        )
+    budget = dict(request_budget)
+    required_budget = {
+        "max_login_batches",
+        "max_api_calls_per_batch",
+        "query_timeout_seconds",
+        "max_identity_total_seconds",
+        "max_history_session_count",
+        "max_retry_attempts",
+        "retry_backoff_seconds",
+    }
+    if (
+        set(budget) != required_budget
+        or type(budget.get("max_login_batches")) is not int
+        or not 1 <= budget["max_login_batches"] <= 1000
+        or type(budget.get("max_api_calls_per_batch")) is not int
+        or not 1 <= budget["max_api_calls_per_batch"] <= 100
+        or type(budget.get("max_history_session_count")) is not int
+        or not 1 <= budget["max_history_session_count"] <= 250
+        or len(sessions) > budget.get("max_history_session_count", 0)
+        or type(budget.get("max_retry_attempts")) is not int
+        or not 0 <= budget["max_retry_attempts"] <= 3
+        or isinstance(budget.get("query_timeout_seconds"), bool)
+        or not isinstance(budget.get("query_timeout_seconds"), (int, float))
+        or not 0.2 <= float(budget["query_timeout_seconds"]) <= 30
+        or isinstance(budget.get("max_identity_total_seconds"), bool)
+        or not isinstance(budget.get("max_identity_total_seconds"), (int, float))
+        or not 0.5 <= float(budget["max_identity_total_seconds"]) <= 120
+        or isinstance(budget.get("retry_backoff_seconds"), bool)
+        or not isinstance(budget.get("retry_backoff_seconds"), (int, float))
+        or not 0 <= float(budget["retry_backoff_seconds"]) <= 60
+    ):
+        raise DataJobError(
+            "RESET_BAOSTOCK_POLICY_INVALID",
+            "清理预检的BaoStock来源预算超出有界合同；现有业务事实保持不变。",
+            status=409,
+        )
+
+    if reset_already_completed:
+        return _prepare_reset_resume_inputs_from_persisted_capture(
+            config,
+            plan,
+            job_id=job_id,
+            sessions=sessions,
+            cutoff=cutoff,
+            budget=budget,
+        )
+
+    target_text = sessions[-1].isoformat()
     try:
-        cached_packages = tuple(job_root.glob("*.zip")) if job_root.exists() else ()
-        if expected_preflight_fingerprint is not None and len(cached_packages) != 1:
+        identity = query_identity_reference(
+            (target_text,),
+            timeout_seconds=float(budget["query_timeout_seconds"]),
+            max_total_seconds=float(budget["max_identity_total_seconds"]),
+        )
+    except Exception as error:
+        raise DataJobError(
+            "RESET_BAOSTOCK_IDENTITY_PREFLIGHT_FAILED",
+            "清理前BaoStock身份与动态证券名录预检失败；现有业务事实保持不变。",
+            status=503,
+        ) from error
+    calls = identity.get("calls") if isinstance(identity, Mapping) else None
+    basic = calls.get("stock_basic") if isinstance(calls, Mapping) else None
+    daily_lists = calls.get("all_stock") if isinstance(calls, Mapping) else None
+    target_list = (
+        daily_lists.get(target_text) if isinstance(daily_lists, Mapping) else None
+    )
+
+    def identity_stage_summary(value: Any) -> str:
+        if not isinstance(value, Mapping):
+            return "MISSING"
+        return "/".join(
+            (
+                str(value.get("status", "UNKNOWN")),
+                f"complete={value.get('complete')}",
+                f"code={value.get('query_error_code')}",
+                f"local={value.get('local_error')}",
+                f"rows={value.get('rows_seen', len(value.get('rows', ())))}",
+            )
+        )
+
+    if (
+        not isinstance(identity, Mapping)
+        or identity.get("status") != "RESPONSE_RECEIVED"
+        or type(identity.get("verified_source_capture_id")) is not int
+        or identity.get("verified_source_capture_id", 0) <= 0
+        or identity.get("login_attempted") is not True
+        or identity.get("logout_attempted") is not True
+        or identity.get("logout_error_code") != "0"
+        or not isinstance(basic, Mapping)
+        or basic.get("status") != "RESPONSE_RECEIVED"
+        or basic.get("complete") is not True
+        or not isinstance(basic.get("response_fields"), list)
+        or not {"code", "code_name", "ipoDate", "outDate", "type", "status"}.issubset(
+            set(basic["response_fields"])
+        )
+        or not isinstance(basic.get("rows"), list)
+        or not isinstance(target_list, Mapping)
+        or target_list.get("status") != "RESPONSE_RECEIVED"
+        or target_list.get("complete") is not True
+        or not isinstance(target_list.get("response_fields"), list)
+        or not {"code", "code_name", "tradeStatus"}.issubset(
+            set(target_list["response_fields"])
+        )
+        or not isinstance(target_list.get("rows"), list)
+    ):
+        identity_summary = (
+            f"status={identity.get('status', 'UNKNOWN') if isinstance(identity, Mapping) else 'MISSING'}; "
+            f"reason={str(identity.get('reason', ''))[:180] if isinstance(identity, Mapping) else ''}; "
+            f"login={identity.get('login_error_code') if isinstance(identity, Mapping) else None}; "
+            f"logout={identity.get('logout_error_code') if isinstance(identity, Mapping) else None}; "
+            f"verified_capture={identity.get('verified_source_capture_id') if isinstance(identity, Mapping) else None}; "
+            f"basic[{identity_stage_summary(basic)}]; "
+            f"all_stock[{identity_stage_summary(target_list)}]"
+        )
+        raise DataJobError(
+            "RESET_BAOSTOCK_IDENTITY_PREFLIGHT_INCOMPLETE",
+            "BaoStock身份、基本资料或目标日名录未完整真实返回；"
+            f"现有业务事实保持不变。{identity_summary}",
+            status=503,
+        )
+
+    identity_completed_at = identity.get("request_completed_at")
+    try:
+        identity_completed = datetime.fromisoformat(identity_completed_at)
+    except (TypeError, ValueError) as error:
+        raise DataJobError(
+            "RESET_BAOSTOCK_IDENTITY_CLOCK_INVALID",
+            "BaoStock清理前身份目录响应时钟无效，原业务事实保留。",
+            status=503,
+        ) from error
+    if identity_completed.tzinfo is None or identity_completed.utcoffset() is None:
+        raise DataJobError(
+            "RESET_BAOSTOCK_IDENTITY_CLOCK_INVALID",
+            "BaoStock清理前身份目录响应时钟缺少时区，原业务事实保留。",
+            status=503,
+        )
+
+    basic_by_symbol: dict[str, Mapping[str, Any]] = {}
+    for row in basic["rows"]:
+        if not isinstance(row, Mapping):
             raise DataJobError(
-                "RESET_SOURCE_CACHE_MISSING",
-                "重置任务已经清理过业务事实，但原始已核验包缓存缺失；拒绝使用新来源续跑。",
-                status=409,
+                "RESET_BAOSTOCK_BASIC_ROW_INVALID",
+                "BaoStock基本资料行无效。",
+                status=503,
             )
-        if cached_packages:
-            if len(cached_packages) != 1:
+        symbol = normalize_baostock_symbol(row.get("code"))
+        if symbol is None:
+            continue
+        if symbol in basic_by_symbol:
+            raise DataJobError(
+                "RESET_BAOSTOCK_BASIC_DUPLICATE",
+                "BaoStock基本资料代码重复。",
+                status=503,
+            )
+        basic_by_symbol[symbol] = row
+
+    target_symbols: set[str] = set()
+    target_trade_status_by_symbol: dict[str, str] = {}
+    for row in target_list["rows"]:
+        if not isinstance(row, Mapping):
+            raise DataJobError(
+                "RESET_BAOSTOCK_TARGET_LIST_ROW_INVALID",
+                "BaoStock目标日名录行无效。",
+                status=503,
+            )
+        symbol = normalize_baostock_symbol(row.get("code"))
+        if symbol is None:
+            continue
+        if symbol in target_symbols:
+            raise DataJobError(
+                "RESET_BAOSTOCK_TARGET_LIST_DUPLICATE",
+                "BaoStock目标日名录代码重复。",
+                status=503,
+            )
+        target_symbols.add(symbol)
+        trade_status = row.get("tradeStatus")
+        if trade_status not in {"0", "1"}:
+            raise DataJobError(
+                "RESET_BAOSTOCK_TARGET_TRADE_STATUS_INVALID",
+                f"BaoStock目标日名录证券{symbol}交易状态不是0/1。",
+                status=503,
+            )
+        target_trade_status_by_symbol[symbol] = trade_status
+
+    universe: list[str] = []
+    basic_names: list[dict[str, str]] = []
+    eligible_sessions_by_symbol: dict[str, tuple[date, ...]] = {}
+    board_by_symbol: dict[str, str] = {}
+    active_universe_at_target: set[str] = set()
+    for symbol, row in sorted(basic_by_symbol.items()):
+        if row.get("type") != "1":
+            continue
+        board_identity = classify_baostock_board(symbol)
+        if board_identity is None or board_identity[1] not in {
+            "MAIN_BOARD",
+            "GEM",
+            "STAR_BOARD",
+        }:
+            continue
+        try:
+            ipo_date = date.fromisoformat(row["ipoDate"])
+            out_date = (
+                date.fromisoformat(row["outDate"]) if row.get("outDate") else None
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise DataJobError(
+                "RESET_BAOSTOCK_LISTING_DATE_INVALID",
+                f"BaoStock基本资料证券{symbol}的上市区间无效；现有业务事实保持不变。",
+                status=503,
+            ) from error
+        eligible = tuple(
+            session
+            for session in sessions
+            if session >= ipo_date and (out_date is None or session <= out_date)
+        )
+        if not eligible:
+            continue
+        display_name = row.get("code_name")
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise DataJobError(
+                "RESET_BAOSTOCK_NAME_MISSING",
+                f"BaoStock基本资料证券{symbol}缺少名称。",
+                status=503,
+            )
+        universe.append(symbol)
+        eligible_sessions_by_symbol[symbol] = eligible
+        board_by_symbol[symbol] = board_identity[1]
+        basic_names.append({"code": symbol.lower(), "code_name": display_name.strip()})
+        if sessions[-1] >= ipo_date and (out_date is None or sessions[-1] <= out_date):
+            active_universe_at_target.add(symbol)
+    if not universe:
+        raise DataJobError(
+            "RESET_BAOSTOCK_UNIVERSE_EMPTY",
+            "BaoStock类型、上市区间与目标日名录交集为空；现有业务事实保持不变。",
+            status=503,
+        )
+    board_counts: dict[str, int] = {}
+    for board in board_by_symbol.values():
+        board_counts[board] = board_counts.get(board, 0) + 1
+    target_stock_symbols = {
+        symbol
+        for symbol in target_symbols
+        if symbol in basic_by_symbol
+        and basic_by_symbol[symbol].get("type") == "1"
+        and classify_baostock_board(symbol) is not None
+        and classify_baostock_board(symbol)[1] in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
+    }
+    if target_stock_symbols != active_universe_at_target:
+        raise DataJobError(
+            "RESET_BAOSTOCK_TARGET_UNIVERSE_MISMATCH",
+            "BaoStock截止日all-stock名录与基本资料有效type=1上市证券总体不一致；现有业务事实保持不变。",
+            status=503,
+        )
+
+    max_api_calls = int(budget["max_api_calls_per_batch"])
+    max_login_batches = int(budget["max_login_batches"])
+    identity_login_batches = int(identity.get("login_attempted") is True)
+    identity_api_calls = 2
+    required_price_login_batches = 2 * (
+        (len(universe) + max_api_calls - 1) // max_api_calls
+    )
+    planned_price_api_calls = 2 * len(universe)
+    planned_total_api_calls = identity_api_calls + planned_price_api_calls
+    planned_total_login_batches = identity_login_batches + required_price_login_batches
+    effective_total_api_budget = max_login_batches * max_api_calls
+    if (
+        identity_login_batches != 1
+        or planned_total_login_batches > max_login_batches
+        or planned_total_api_calls > effective_total_api_budget
+    ):
+        raise DataJobError(
+            "RESET_BAOSTOCK_REQUEST_BUDGET_EXCEEDED",
+            "身份目录后完整RAW/QFQ捕获超出runtime请求预算，尚未清理原业务事实。",
+            status=409,
+        )
+    preflight_login_batches = 0
+    price_preflight = {
+        "mode": "IDENTITY_ONLY",
+        "status": "IDENTITY_AND_BUDGET_COMPLETE",
+        "completion_status": "IDENTITY_AND_BUDGET_COMPLETE",
+        "identity_requests_performed": True,
+        "price_requests_performed": False,
+        "source_network_called": True,
+        "requested_symbols": len(universe),
+        "target_sessions": [session.isoformat() for session in sessions],
+        "price_api_calls": 0,
+        "planned_price_api_calls": planned_price_api_calls,
+        "identity_api_calls": identity_api_calls,
+        "planned_total_api_calls": planned_total_api_calls,
+        "identity_login_batches": identity_login_batches,
+        "price_login_batches": 0,
+        "planned_initial_price_login_batches": required_price_login_batches,
+        "planned_total_login_batches": planned_total_login_batches,
+        "max_login_batches": max_login_batches,
+        "max_api_calls_per_batch": max_api_calls,
+        "effective_total_api_budget": effective_total_api_budget,
+        "effective_price_retry_attempts": 0,
+        "full_capture_deferred_until_after_clear": True,
+        "source_requests_repeated_after_clear": False,
+    }
+    try:
+        remote_config = dict(config)
+        remote_policy = dict(source_policy)
+        remote_policy["configured_tdx_source_roots"] = []
+        remote_config["source_policy"] = remote_policy
+        remote = fetch_remote_sector_files(remote_config)
+        validate_remote_sector_files(remote)
+        inputs = remote_sector_source_inputs(host=remote.host, files=remote.files)
+        parse_outcome = parse_remote_sector_source_inputs_with_status(
+            inputs,
+            observed_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        )
+        snapshots = parse_outcome.snapshots
+        if parse_outcome.rejected_sources or {
+            item.source_kind for item in snapshots
+        } != {"TDX_TDXHY_CFG", "TDX_INFOHARBOR_BLOCK_DAT"}:
+            raise ValueError("行业与GN概念来源未同时闭合")
+        _validate_limits(snapshots)
+    except Exception as error:
+        raise DataJobError(
+            "RESET_SECTOR_SOURCE_PREFLIGHT_FAILED",
+            "清理前无法在线只读验证完整行业与GN概念成员来源；现有业务事实保持不变。",
+            status=503,
+        ) from error
+    sector_file_fingerprint = {
+        relative: {
+            "size_bytes": evidence.size_bytes,
+            "sha256": hashlib.sha256(evidence.raw).hexdigest(),
+        }
+        for relative, evidence in sorted(inputs.files.items())
+    }
+    capture_material = {
+        "start": sessions[0].isoformat(),
+        "end": sessions[-1].isoformat(),
+        "symbols": list(universe),
+    }
+    capture_digest = hashlib.sha256(
+        json.dumps(
+            capture_material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    capture_uuid = uuid5(
+        NAMESPACE_URL,
+        f"stock-a:baostock:paired-capture:{capture_digest}",
+    )
+    raw_response_journal = None
+    if plan.get("raw_response_journal_enabled") is True:
+        from stock_a.application.baostock_response_journal import (
+            BaoStockRawResponseJournal,
+        )
+
+        raw_response_journal = BaoStockRawResponseJournal(
+            job_id=job_id,
+            capture_uuid=capture_uuid,
+            cutoff=cutoff,
+            range_start_session=sessions[0],
+            range_end_session=sessions[-1],
+        )
+        if expected_preflight_fingerprint is None:
+            archived_request_count = raw_response_journal.response_count
+            if (
+                archived_request_count == 0
+                and raw_response_journal.has_other_capture_archives()
+            ):
                 raise DataJobError(
-                    "RESET_SOURCE_CACHE_AMBIGUOUS",
-                    "任务级Raw缓存不唯一；未清理或继续写入。",
+                    "RESET_RAW_RESPONSE_CAPTURE_ID_CHANGED",
+                    "G盘已有其它捕获身份的BaoStock原始档案；当前总体键不同，拒绝清理后重复抓取。",
                     status=409,
                 )
-            verified_package = verify_existing_vipdata_package(
-                cached_packages[0], budgets=budgets
-            )
-            if verified_package.file_path.resolve().parent != job_root.resolve():
-                raise DataJobError(
-                    "RESET_SOURCE_CACHE_PATH_INVALID",
-                    "重置任务缓存文件越出其G盘任务目录。",
-                    status=409,
-                )
-            package_sha256 = vipdata_package_entry_sha256(verified_package)
-            package_owner = VipdataPackage(
-                file_path=verified_package.file_path,
-                file_name=verified_package.file_name,
-                file_size=verified_package.file_size,
-                sha256=package_sha256,
-                zip_entry_count=verified_package.zip_entry_count,
-                zip_crc=verified_package.zip_crc,
-                total_uncompressed_bytes=verified_package.total_uncompressed_bytes,
-                entry_count_by_market=verified_package.entry_count_by_market,
-                day_entries=verified_package.day_entries,
-                download_final_url=source_config.package_url,
-                request_started_at=verified_package.verified_at,
-                download_finished_at=verified_package.verified_at,
-                temporary_root=job_root,
-            )
-        else:
-            if job_root.exists():
-                if any(job_root.iterdir()):
+            if archived_request_count:
+                missing_archives = 0
+                for symbol in universe:
+                    for adjustment_flag in ("3", "2"):
+                        response = raw_response_journal.read_response(
+                            source_symbol=symbol,
+                            adjustment_flag=adjustment_flag,
+                        )
+                        if (
+                            not isinstance(response, Mapping)
+                            or response.get("status") != "RESPONSE_RECEIVED"
+                            or response.get("complete") is not True
+                            or response.get("query_error_code") != "0"
+                        ):
+                            missing_archives += 1
+                if missing_archives:
                     raise DataJobError(
-                        "RESET_SOURCE_CACHE_DIRTY",
-                        "重置任务缓存目录包含未登记文件；拒绝覆盖。",
+                        "RESET_RAW_RESPONSE_ARCHIVE_INCOMPLETE",
+                        f"现有BaoStock档案缺少{missing_archives}个证券×坐标成功响应；拒绝重新清理或重发已完成行情。",
                         status=409,
                     )
-                job_root.rmdir()
-            if expected_preflight_fingerprint is not None:
+        if expected_preflight_fingerprint is None:
+            archived_request_count = raw_response_journal.response_count
+            if (
+                archived_request_count == 0
+                and raw_response_journal.has_other_capture_archives()
+            ):
                 raise DataJobError(
-                    "RESET_SOURCE_CACHE_MISSING",
-                    "重置任务缺少原始输入缓存；拒绝重新下载不同来源续跑。",
+                    "RESET_RAW_RESPONSE_CAPTURE_ID_CHANGED",
+                    "G盘已有其它BaoStock捕获的原始响应档案；当前证券总体键不同，拒绝清理后重复抓取。",
                     status=409,
                 )
-            try:
-                observation = inspect_vipdata_page(
-                    sessions[-1].isoformat(),
-                    budgets=budgets,
-                    source_config=source_config,
-                )
-            except Exception as error:
-                raise DataJobError(
-                    "RESET_OFFICIAL_SOURCE_PREFLIGHT_FAILED",
-                    "官方Raw来源在清理前不可验证；现有业务事实保持不变。",
-                    status=503,
-                ) from error
-            if observation.status != "PACKAGE_CANDIDATE_READY":
-                raise DataJobError(
-                    "RESET_OFFICIAL_SOURCE_NOT_READY",
-                    observation.reason or "官方Raw来源当前不可验证；现有事实保持不变。",
-                    status=503,
-                )
-            update_at = getattr(observation, "official_update_at", None)
-            if update_at is None or update_at.date() > cutoff:
-                raise DataJobError(
-                    "BLOCKED_SOURCE_AFTER_CUTOFF"
-                    if update_at is not None
-                    else "RESET_SOURCE_CLOCK_UNKNOWN",
-                    "官方来源时钟晚于研究截止或不可验证；未下载行情包，也未清理事实。",
-                    status=409,
-                )
-            job_root.mkdir()
-            package_owner = replace(
-                download_vipdata_package(
-                    observation,
-                    destination_root=job_root,
-                    budgets=budgets,
-                ),
-                temporary_root=job_root,
-            )
-            package_downloaded = True
-            verified_package = verify_existing_vipdata_package(
-                package_owner.file_path, budgets=budgets
-            )
-            package_sha256 = vipdata_package_entry_sha256(verified_package)
-
-        source_raw._validate_source_input(
-            verified_package, sessions[-1], task_scope=_RAW_JOB_SCOPE
+            if archived_request_count:
+                incomplete_archives = 0
+                for symbol in universe:
+                    for adjustment_flag in ("3", "2"):
+                        response = raw_response_journal.read_response(
+                            source_symbol=symbol,
+                            adjustment_flag=adjustment_flag,
+                        )
+                        if (
+                            not isinstance(response, Mapping)
+                            or response.get("status") != "RESPONSE_RECEIVED"
+                            or response.get("complete") is not True
+                            or response.get("query_error_code") != "0"
+                        ):
+                            incomplete_archives += 1
+                if incomplete_archives:
+                    raise DataJobError(
+                        "RESET_RAW_RESPONSE_ARCHIVE_INCOMPLETE",
+                        f"G盘已有BaoStock原始响应，但当前证券×坐标仍缺{incomplete_archives}条成功档案；拒绝再次清理或重复请求。",
+                        status=409,
+                    )
+    fingerprint_material = {
+        "contract": "STOCK_A_RESET_BAOSTOCK_IDENTITY_PREFLIGHT_R1",
+        "target_sessions": [session.isoformat() for session in sessions],
+        "source_symbols": universe,
+        "board_counts": board_counts,
+        "eligible_sessions_by_symbol": {
+            symbol: [session.isoformat() for session in eligible]
+            for symbol, eligible in sorted(eligible_sessions_by_symbol.items())
+        },
+        "identity_target_session": target_text,
+        "capture_uuid": str(capture_uuid),
+        "raw_response_journal_enabled": (
+            plan.get("raw_response_journal_enabled") is True
+        ),
+        "identity_api_calls": price_preflight["identity_api_calls"],
+        "planned_price_api_calls": price_preflight["planned_price_api_calls"],
+        "planned_total_api_calls": price_preflight["planned_total_api_calls"],
+        "planned_total_login_batches": price_preflight["planned_total_login_batches"],
+        "sector_parse_contract": snapshots[0].parse_contract_version,
+        "sector_sources": sector_file_fingerprint,
+    }
+    preflight_fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        expected_preflight_fingerprint is not None
+        and preflight_fingerprint != expected_preflight_fingerprint
+    ):
+        raise DataJobError(
+            "RESET_INPUT_IDENTITY_CHANGED",
+            "恢复任务时BaoStock身份股票池、有效上市窗或TDX成员来源已改变，拒绝使用旧预览。",
+            status=409,
         )
-        raw_preflight = source_raw.preflight_verified_vipdata_history(
-            config,
-            verified_package,
-            sessions,
-            task_scope=_RAW_JOB_SCOPE,
-            scan_budget=VipdataTargetScanBudget(),
-            max_raw_rows=2_000_000,
-        )
-        if raw_preflight["package_sha256"] != package_sha256:
-            raise DataJobError(
-                "RESET_SOURCE_PACKAGE_CHANGED",
-                "Raw包在逐会话预检期间发生变化；现有事实保持不变。",
-                status=409,
-            )
-
-        roots = config.get("source_policy", {}).get("configured_tdx_source_roots")
-        if (
-            config.get("source_policy", {}).get("all_source_roots_read_only")
-            is not True
-            or not isinstance(roots, list)
-            or len(roots) != 1
-            or not isinstance(roots[0], str)
-        ):
-            raise DataJobError(
-                "RESET_SECTOR_SOURCE_NOT_BOUND",
-                "清理前没有唯一只读行业/GN来源根；现有事实保持不变。",
-                status=409,
-            )
-        inputs = read_sector_source_inputs(roots[0])
-        snapshots = parse_sector_source_inputs(
-            inputs, observed_at=datetime.now(ZoneInfo("Asia/Shanghai"))
-        )
-        if {item.source_kind for item in snapshots} != {
-            "TDX_TDXHY_CFG",
-            "TDX_INFOHARBOR_BLOCK_DAT",
-        }:
-            raise DataJobError(
-                "RESET_SECTOR_SOURCE_INCOMPLETE",
-                "清理前无法同时验证行业与GN概念成员来源；现有事实保持不变。",
-                status=409,
-            )
-        _validate_limits(snapshots)
-        sector_file_fingerprint = {
-            relative: {
-                "size_bytes": evidence.size_bytes,
-                "sha256": hashlib.sha256(evidence.raw).hexdigest(),
-            }
-            for relative, evidence in sorted(inputs.files.items())
-        }
-        fingerprint_material = {
-            "contract": "STOCK_A_RESET_INPUT_PREFLIGHT_R1",
-            "target_sessions": [session.isoformat() for session in sessions],
-            "raw_package_sha256": package_sha256,
-            "raw_candidate_total": raw_preflight["candidate_total"],
-            "sector_parse_contract": snapshots[0].parse_contract_version,
-            "sector_sources": sector_file_fingerprint,
-        }
-        preflight_fingerprint = hashlib.sha256(
-            json.dumps(
-                fingerprint_material, sort_keys=True, separators=(",", ":")
-            ).encode("utf-8")
-        ).hexdigest()
-        if (
-            expected_preflight_fingerprint is not None
-            and preflight_fingerprint != expected_preflight_fingerprint
-        ):
-            raise DataJobError(
-                "RESET_INPUT_IDENTITY_CHANGED",
-                "重置恢复时Raw包、候选范围或行业/GN来源与已核验输入不一致；拒绝混用。",
-                status=409,
-            )
-        return {
-            "vipdata_package": verified_package,
-            "package_owner": package_owner,
-            "package_sha256": package_sha256,
-            "candidate_count": raw_preflight["candidate_total"],
-            "planned_raw_rows": raw_preflight["planned_raw_rows"],
-            "raw_preflight": raw_preflight,
-            "sector_snapshots": tuple(snapshots),
-            "sector_source_root": inputs.root,
-            "sector_source_fingerprint": sector_file_fingerprint,
-            "preflight_fingerprint": preflight_fingerprint,
-            "preflight_status": "COMPLETE_BEFORE_DELETE",
-            "source_request_performed": package_downloaded,
-        }
-    except Exception:
-        if package_owner is not None and expected_preflight_fingerprint is None:
-            try:
-                cleanup_vipdata_package(package_owner)
-            except Exception:
-                pass
-        raise
+    return {
+        "identity_snapshot": identity,
+        "source_symbols": tuple(universe),
+        "eligible_sessions_by_symbol": eligible_sessions_by_symbol,
+        "board_by_symbol": board_by_symbol,
+        "board_counts": board_counts,
+        "basic_names": tuple(basic_names),
+        "price_preflight": price_preflight,
+        "capture_uuid": capture_uuid,
+        "raw_response_journal": raw_response_journal,
+        "price_preflight_symbols": tuple(universe),
+        "preflight_login_batches": preflight_login_batches,
+        "price_preflight_sessions": sessions,
+        "sector_snapshots": tuple(snapshots),
+        "sector_source_root": inputs.root,
+        "sector_source_fingerprint": sector_file_fingerprint,
+        "preflight_fingerprint": preflight_fingerprint,
+        "preflight_status": "COMPLETE_BEFORE_DELETE",
+        "source_request_performed": True,
+    }
 
 
 def _execute_derived_cleanup(
@@ -3390,7 +4139,7 @@ def _persist_sector_membership_stage(
     plan: Mapping[str, Any],
     progress_callback: Any,
     begin_callback: Any,
-    prepared_snapshots: Sequence[Any] | None = None,
+    prepared_snapshots: Sequence[Any] | Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if "TDX_SECTOR_MEMBERS" not in set(plan.get("source_modules", ())):
         return None
@@ -3402,20 +4151,85 @@ def _persist_sector_membership_stage(
     if not units:
         return None
     begin_callback(job_id=job_id, units=units)
-    from stock_a.application.tdx_sector_members import ingest_tdx_sector_members
+    from stock_a.application.tdx_sector_members import (
+        read_tdx_sector_source_snapshot_catalog,
+        refresh_remote_tdx_sector_members,
+    )
     from stock_a.storage.postgres.tdx_sector_members import (
         persist_sector_source_snapshots,
     )
 
     if prepared_snapshots is None:
-        result = ingest_tdx_sector_members(dict(config))
+        result = refresh_remote_tdx_sector_members(dict(config), validate_only=False)
+    elif isinstance(prepared_snapshots, Mapping) and isinstance(
+        prepared_snapshots.get("reuse_existing_snapshot_ids"), Mapping
+    ):
+        snapshot_ids = prepared_snapshots["reuse_existing_snapshot_ids"]
+        if (
+            set(snapshot_ids) != {"INDUSTRY", "CONCEPT"}
+            or any(
+                type(value) is not int or value <= 0 for value in snapshot_ids.values()
+            )
+            or snapshot_ids["INDUSTRY"] == snapshot_ids["CONCEPT"]
+        ):
+            raise DataJobError(
+                "SECTOR_REUSE_SNAPSHOT_IDS_INVALID",
+                "复用行业/GN来源快照必须提供一对不同的正整数PG身份。",
+                status=409,
+            )
+        catalog = read_tdx_sector_source_snapshot_catalog(dict(config))
+        catalog_by_id = {
+            int(item["snapshot_id"]): item
+            for item in catalog.get("snapshots", ())
+            if isinstance(item, Mapping) and type(item.get("snapshot_id")) is int
+        }
+        source_kind = {
+            "INDUSTRY": "TDX_TDXHY_CFG",
+            "CONCEPT": "TDX_INFOHARBOR_BLOCK_DAT",
+        }
+        snapshots = []
+        independent_readback: dict[str, dict[str, int]] = {}
+        for kind in ("INDUSTRY", "CONCEPT"):
+            snapshot = catalog_by_id.get(snapshot_ids[kind])
+            if (
+                not isinstance(snapshot, Mapping)
+                or snapshot.get("source_kind") != source_kind[kind]
+                or int(snapshot.get("catalog_rows", 0)) <= 0
+                or int(snapshot.get("member_rows", 0)) <= 0
+                or int(snapshot.get("invalid_membership_quality_rows", 0)) != 0
+            ):
+                raise DataJobError(
+                    "SECTOR_REUSE_SNAPSHOT_READBACK_INCOMPLETE",
+                    f"复用的{kind}行业/GN快照未通过独立PG目录与成员行读回。",
+                    status=409,
+                )
+            snapshots.append(dict(snapshot))
+            independent_readback[str(snapshot_ids[kind])] = {
+                "catalog_rows": int(snapshot["catalog_rows"]),
+                "member_rows": int(snapshot["member_rows"]),
+            }
+        result = {
+            "status": "IDEMPOTENT_ZERO_WRITE",
+            "snapshots": snapshots,
+            "source_root": "PG_EXISTING_TDX_SOURCE_SNAPSHOTS",
+            "source_modified": False,
+            "source_downloaded": False,
+            "source_files_persisted_to_disk": False,
+            "tdx_install_modified": False,
+            "write_summary": {
+                "status": "IDEMPOTENT_READBACK",
+                "independent_readback": independent_readback,
+            },
+        }
     else:
         persisted = persist_sector_source_snapshots(dict(config), prepared_snapshots)
         result = {
             **persisted,
-            "source_root": "PREVALIDATED_READ_ONLY_TDX_ROOT",
+            "source_root": "TDX_REMOTE_PREVALIDATED_IN_MEMORY",
             "source_modified": False,
-            "source_downloaded": False,
+            "source_downloaded": True,
+            "source_files_persisted_to_disk": False,
+            "tdx_install_modified": False,
         }
     snapshots = result.get("snapshots", ())
     snapshot_ids = {
@@ -3471,7 +4285,13 @@ def _persist_sector_membership_stage(
             for item in plan.get("unplanned_producers", ())
             if item.get("stage_code") != "SECTOR_PULSE"
         ]
-    readback = result.get("independent_readback", {})
+    write_summary = result.get("write_summary", {})
+    if not isinstance(write_summary, Mapping):
+        write_summary = {}
+    readback = result.get(
+        "independent_readback",
+        write_summary.get("independent_readback", {}),
+    )
     if not isinstance(readback, Mapping):
         raise DataJobError(
             "SECTOR_SOURCE_READBACK_UNAVAILABLE",
@@ -3495,7 +4315,7 @@ def _persist_sector_membership_stage(
         "stock.tdx_sector_catalog": catalog_rows,
         "stock.tdx_sector_members": member_rows,
     }
-    persistence = result
+    persistence = write_summary or result
     for unit in units:
         table = unit["business_table"]
         progress_callback(
@@ -3503,7 +4323,6 @@ def _persist_sector_membership_stage(
             stage_code="SOURCE_SECTOR_MEMBERS",
             target_session=unit["target_session"],
             business_table=table,
-            source_package_id=None,
             source_capture_id=None,
             profile_history_session_count=None,
             d1_history_session_count=None,
@@ -3519,11 +4338,166 @@ def _persist_sector_membership_stage(
                 )
             ),
             quality_status="COMPLETE_NON_PIT_CURRENT_MEMBERSHIP",
-            no_change=persistence.get("status") == "IDEMPOTENT_READBACK",
+            no_change=(
+                persistence.get("status") == "IDEMPOTENT_READBACK"
+                or result.get("status") in {"IDEMPOTENT_ZERO_WRITE", "VALIDATED_ONLY"}
+            ),
             producer_version="STOCK_A_TDX_SECTOR_SOURCE_MEMBERS_R1",
             sector_snapshot_ids=snapshot_ids,
         )
     return {**result, "sector_snapshot_ids": snapshot_ids}
+
+
+def _baostock_universe_from_identity(
+    identity: Mapping[str, Any],
+    sessions: Sequence[date],
+) -> dict[str, Any]:
+    """按一次BaoStock基本资料与目标日名录构造动态股票有效窗口。"""
+    from stock_a.sources.baostock.identity import (
+        classify_baostock_board,
+        normalize_baostock_symbol,
+    )
+
+    if not sessions:
+        raise DataJobError(
+            "BAOSTOCK_SESSION_WINDOW_EMPTY", "BaoStock股票池缺少官方会话范围。"
+        )
+    target_text = sessions[-1].isoformat()
+    calls = identity.get("calls")
+    basic = calls.get("stock_basic") if isinstance(calls, Mapping) else None
+    all_stock = calls.get("all_stock") if isinstance(calls, Mapping) else None
+    target_list = all_stock.get(target_text) if isinstance(all_stock, Mapping) else None
+    if (
+        identity.get("status") != "RESPONSE_RECEIVED"
+        or type(identity.get("verified_source_capture_id")) is not int
+        or identity.get("verified_source_capture_id", 0) <= 0
+        or identity.get("login_attempted") is not True
+        or identity.get("logout_attempted") is not True
+        or identity.get("logout_error_code") != "0"
+        or not isinstance(basic, Mapping)
+        or basic.get("status") != "RESPONSE_RECEIVED"
+        or basic.get("complete") is not True
+        or not isinstance(basic.get("response_fields"), list)
+        or not {"code", "code_name", "ipoDate", "outDate", "type", "status"}.issubset(
+            set(basic["response_fields"])
+        )
+        or not isinstance(basic.get("rows"), list)
+        or not isinstance(target_list, Mapping)
+        or target_list.get("status") != "RESPONSE_RECEIVED"
+        or target_list.get("complete") is not True
+        or not isinstance(target_list.get("response_fields"), list)
+        or not {"code", "code_name"}.issubset(set(target_list["response_fields"]))
+        or not isinstance(target_list.get("rows"), list)
+    ):
+        raise DataJobError(
+            "BAOSTOCK_IDENTITY_UNIVERSE_INCOMPLETE",
+            "BaoStock基本资料或目标日all-stock响应未通过完整性核验。",
+            status=503,
+        )
+    basic_by_symbol: dict[str, Mapping[str, Any]] = {}
+    for row in basic["rows"]:
+        if not isinstance(row, Mapping):
+            raise DataJobError(
+                "BAOSTOCK_BASIC_ROW_INVALID", "BaoStock基本资料包含非法行。", status=503
+            )
+        symbol = normalize_baostock_symbol(row.get("code"))
+        if symbol is None:
+            continue
+        if symbol in basic_by_symbol:
+            raise DataJobError(
+                "BAOSTOCK_BASIC_DUPLICATE", "BaoStock基本资料证券代码重复。", status=503
+            )
+        basic_by_symbol[symbol] = row
+    target_symbols: set[str] = set()
+    for row in target_list["rows"]:
+        if not isinstance(row, Mapping):
+            raise DataJobError(
+                "BAOSTOCK_TARGET_LIST_ROW_INVALID",
+                "BaoStock目标日名录包含非法行。",
+                status=503,
+            )
+        symbol = normalize_baostock_symbol(row.get("code"))
+        if symbol is not None:
+            if symbol in target_symbols:
+                raise DataJobError(
+                    "BAOSTOCK_TARGET_LIST_DUPLICATE",
+                    "BaoStock目标日名录证券代码重复。",
+                    status=503,
+                )
+            target_symbols.add(symbol)
+
+    symbols: list[str] = []
+    eligible: dict[str, tuple[date, ...]] = {}
+    boards: dict[str, str] = {}
+    names: list[dict[str, str]] = []
+    active_at_target: set[str] = set()
+    for symbol, row in sorted(basic_by_symbol.items()):
+        if row.get("type") != "1":
+            continue
+        board_identity = classify_baostock_board(symbol)
+        if board_identity is None or board_identity[1] not in {
+            "MAIN_BOARD",
+            "GEM",
+            "STAR_BOARD",
+        }:
+            continue
+        try:
+            ipo_date = date.fromisoformat(row["ipoDate"])
+            out_date = (
+                date.fromisoformat(row["outDate"]) if row.get("outDate") else None
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise DataJobError(
+                "BAOSTOCK_LISTING_DATE_INVALID",
+                f"BaoStock证券{symbol}上市区间日期无效。",
+                status=503,
+            ) from error
+        window = tuple(
+            day
+            for day in sessions
+            if day >= ipo_date and (out_date is None or day <= out_date)
+        )
+        if not window:
+            continue
+        name = row.get("code_name")
+        if not isinstance(name, str) or not name.strip():
+            raise DataJobError(
+                "BAOSTOCK_BASIC_NAME_MISSING",
+                f"BaoStock证券{symbol}缺少code_name。",
+                status=503,
+            )
+        symbols.append(symbol)
+        eligible[symbol] = window
+        boards[symbol] = board_identity[1]
+        names.append({"code": symbol.lower(), "code_name": name.strip()})
+        if sessions[-1] in window:
+            active_at_target.add(symbol)
+    target_stock_symbols = {
+        symbol
+        for symbol in target_symbols
+        if symbol in basic_by_symbol
+        and basic_by_symbol[symbol].get("type") == "1"
+        and classify_baostock_board(symbol) is not None
+        and classify_baostock_board(symbol)[1] in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
+    }
+    if not symbols or target_stock_symbols != active_at_target:
+        raise DataJobError(
+            "BAOSTOCK_TARGET_LIST_CROSSCHECK_FAILED",
+            "BaoStock截止日all-stock名录与基本资料有效type=1上市证券总体不一致。",
+            status=503,
+        )
+    board_counts: dict[str, int] = {}
+    for board in boards.values():
+        board_counts[board] = board_counts.get(board, 0) + 1
+    return {
+        "source_symbols": tuple(symbols),
+        "eligible_sessions_by_symbol": eligible,
+        "board_by_symbol": boards,
+        "board_counts": board_counts,
+        "basic_names": tuple(names),
+        "target_symbols": target_symbols,
+        "identity_snapshot": identity,
+    }
 
 
 def _execute_baostock_source_stage(
@@ -3531,325 +4505,712 @@ def _execute_baostock_source_stage(
     config: Mapping[str, Any],
     job_id: UUID,
     plan: Mapping[str, Any],
-    source_package_id: int,
     official_sessions: Sequence[date],
     progress_callback: Any,
     begin_callback: Any,
-) -> None:
-    if "BAOSTOCK" not in set(plan.get("source_modules", ())):
-        return
+) -> dict[str, Any] | None:
+    """创建单一paired捕获并持久化全市场RAW/QFQ价格请求与事实。"""
+    from datetime import datetime, timezone
 
     from stock_a.application.baostock_daily_jobs import (
-        _request_budget,
-        plan_baostock_capture_batches,
-        run_manual_baostock_daily_capture,
+        BaoStockPriceWindowRecord,
+        fetch_baostock_price_window,
+    )
+    from stock_a.application.baostock_response_journal import (
+        BaoStockRawResponseJournalError,
+    )
+    from stock_a.sources.baostock.client import (
+        BaostockRawResponseSinkError,
+        query_identity_reference,
     )
     from stock_a.sources.baostock.evidence import _UNITS as documented_units
-    from stock_a.storage.postgres.data_jobs import read_raw_symbols_by_session
-
-    target_sessions = tuple(
-        date.fromisoformat(item) for item in plan.get("baostock_output_sessions", ())
+    from stock_a.storage.postgres import baostock_price_facts
+    from stock_a.storage.postgres.baostock_price_facts import (
+        RAW_COORDINATE,
+        QFQ_COORDINATE,
     )
-    if not target_sessions:
-        return
+
+    selected_sources = set(plan.get("source_modules", ()))
+    if "BAOSTOCK_PRICES" not in selected_sources:
+        return None
+    sessions = tuple(
+        date.fromisoformat(day) for day in plan.get("raw_history_sessions", ())
+    )
     cutoff = date.fromisoformat(plan["research_cutoff"])
-    raw_coverage = read_raw_symbols_by_session(
-        config,
-        target_sessions=target_sessions,
-        source_package_id=source_package_id,
-        cutoff=cutoff,
+    if (
+        not sessions
+        or tuple(sorted(set(sessions))) != sessions
+        or any(day not in official_sessions or day > cutoff for day in sessions)
+    ):
+        raise DataJobError(
+            "BAOSTOCK_SOURCE_WINDOW_INVALID",
+            "BaoStock来源范围不是截止内官方窗口。",
+            status=409,
+        )
+    prepared = plan.get("_prepared_baostock_reset_inputs")
+    if not isinstance(prepared, Mapping):
+        required_pairs = {
+            (day.isoformat(), coordinate)
+            for day in sessions
+            for coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED")
+        }
+        versions = {
+            (item.get("session_date"), item.get("price_coordinate")): item
+            for item in plan.get("price_capture_inputs", ())
+            if isinstance(item, Mapping)
+        }
+        capture_ids = {
+            item.get("source_capture_id")
+            for key, item in versions.items()
+            if key in required_pairs
+        }
+        if (
+            required_pairs
+            and required_pairs.issubset(versions)
+            and len(capture_ids) == 1
+            and type(next(iter(capture_ids), None)) is int
+            and next(iter(capture_ids)) > 0
+        ):
+            reused_capture_id = int(next(iter(capture_ids)))
+            data_job_pg.set_job_source_capture(
+                config, job_id=job_id, source_capture_id=reused_capture_id
+            )
+            source_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "SOURCE_BAOSTOCK_PRICES"
+            ]
+            begin_callback(job_id=job_id, units=source_units)
+            for unit in source_units:
+                session = unit["target_session"]
+                row_count = data_job_pg.read_business_table_count(
+                    config,
+                    business_table="stock.source_raw_daily",
+                    target_session=session,
+                    source_capture_id=reused_capture_id,
+                    research_cutoff=cutoff,
+                )
+                progress_callback(
+                    job_id=job_id,
+                    stage_code="SOURCE_BAOSTOCK_PRICES",
+                    target_session=session,
+                    business_table="stock.source_raw_daily",
+                    source_capture_id=reused_capture_id,
+                    profile_history_session_count=None,
+                    d1_history_session_count=None,
+                    expected_rows=row_count,
+                    inserted_rows=0,
+                    quality_status="ALREADY_COMPLETE_PAIRED_CAPTURE",
+                    no_change=True,
+                    producer_version="STOCK_A_BAOSTOCK_SOURCE_CAPTURE_R2",
+                )
+            if isinstance(plan, dict):
+                plan["_paired_source_capture_id"] = reused_capture_id
+                plan["_source_symbols"] = tuple()
+            return {
+                "status": "ALREADY_COMPLETE",
+                "source_capture_id": reused_capture_id,
+                "reused": True,
+            }
+    source_policy = config.get("source_policy", {})
+    primary = (
+        source_policy.get("baostock_primary")
+        if isinstance(source_policy, Mapping)
+        else None
     )
-    symbols_by_session = raw_coverage["symbols_by_session"]
-    units = [
-        item
-        for item in plan.get("stage_units", ())
-        if item.get("stage_code") == "SOURCE_BAOSTOCK"
-    ]
-    max_logins, max_queries, _timeout = _request_budget(config)
-    batch_plan = plan_baostock_capture_batches(
-        target_sessions,
-        symbols_by_session,
-        max_login_batches=max_logins,
-        max_queries_per_target_session=max_queries,
-    )
-    if batch_plan["status"] != "READY":
-        reason = (
-            "BaoStock本次范围需要"
-            f"{batch_plan['required_login_batches']}个有界来源登录批次，"
-            f"当前配置仅允许{batch_plan['allowed_login_batches']}个；"
-            "未抽样、未登录且未发送来源请求。"
+    budget = primary.get("request_budget") if isinstance(primary, Mapping) else None
+    if not isinstance(budget, Mapping):
+        raise DataJobError(
+            "BAOSTOCK_PRIMARY_POLICY_INVALID", "BaoStock来源预算缺失。", status=409
         )
-        for unit in units:
-            data_job_pg.mark_progress_unavailable(
-                config,
-                job_id=job_id,
-                stage_code="SOURCE_BAOSTOCK",
-                target_session=unit["target_session"],
-                business_table=unit["business_table"],
-                status="BLOCKED",
-                error_code="BAOSTOCK_REQUEST_BUDGET_EXCEEDED",
-                error_message=reason,
-            )
-        return
-
-    range_capture_ids: dict[tuple[date, date], UUID] = {}
-    capture_by_session: dict[date, UUID] = {}
-    for batch in batch_plan["batches"]:
-        range_key = (batch["range_start"], batch["range_end"])
-        capture_id = range_capture_ids.setdefault(
-            range_key,
-            uuid5(
-                job_id,
-                f"BAOSTOCK_RANGE:{range_key[0].isoformat()}:{range_key[1].isoformat()}",
-            ),
+    max_api = int(budget["max_api_calls_per_batch"])
+    max_login_batches = int(budget["max_login_batches"])
+    query_timeout = float(budget["query_timeout_seconds"])
+    history_limit = int(budget["max_history_session_count"])
+    # 每个DataJob attempt对每个证券/价格坐标最多发起一次外部请求。
+    retry_attempts = 0
+    backoff = float(budget["retry_backoff_seconds"])
+    if len(sessions) > history_limit:
+        raise DataJobError(
+            "BAOSTOCK_SOURCE_WINDOW_OVER_BUDGET",
+            "BaoStock来源窗口超过runtime.defaults中明确登记的历史会话预算。",
+            status=409,
         )
-        for session in batch["target_sessions"]:
-            capture_by_session[session] = capture_id
-
-    begin_callback(job_id=job_id, units=units)
-    inserted_by_session: dict[str, int] = {}
-    statuses_by_session: dict[str, set[str]] = {}
-    errors_by_session: dict[str, list[str]] = {}
-
-    for batch in batch_plan["batches"]:
-        range_key = (batch["range_start"], batch["range_end"])
-        capture_id = range_capture_ids[range_key]
-        run_sessions = tuple(batch["target_sessions"])
-        run_symbols = tuple(batch["source_symbols"])
-        try:
-            outcome = run_manual_baostock_daily_capture(
-                config,
-                manual_start=True,
-                capture_id=capture_id,
-                source_symbols=run_symbols,
-                target_sessions=run_sessions,
-                official_sessions=official_sessions,
-                cutoff=cutoff,
-                units=documented_units,
-            )
-        except Exception as error:  # noqa: BLE001 - BaoStock是可选来源，批次失败不撤销其它来源。
-            for session in run_sessions:
-                errors_by_session.setdefault(session.isoformat(), []).append(
-                    f"{getattr(error, 'code', type(error).__name__)}: {str(error)[:300]}"
-                )
-            continue
-
-        if outcome.get("pg_readback_verified") is True:
-            if UUID(str(outcome.get("capture_id"))) != capture_id:
-                raise DataJobError(
-                    "BAOSTOCK_CAPTURE_ID_MISMATCH",
-                    "BaoStock生产者读回的捕获UUID与本任务确定性请求身份不一致。",
-                    status=409,
-                )
-            for session_text, inserted in outcome.get(
-                "inserted_rows_by_session", {}
-            ).items():
-                inserted_by_session[session_text] = inserted_by_session.get(
-                    session_text, 0
-                ) + int(inserted)
-        else:
-            reason_code = (
-                "BAOSTOCK_REQUEST_BUDGET_EXCEEDED"
-                if outcome.get("status") == "NOT_ATTEMPTED_BUDGET"
-                else outcome.get("persistence_error_code")
-                or outcome.get("readback_error_code")
-                or "BAOSTOCK_SOURCE_NOT_COMPLETE"
-            )
-            reason = str(
-                outcome.get("reason")
-                or "BaoStock本批没有形成完整typed PG读回；TDX及算法阶段继续。"
-            )
-            for session in run_sessions:
-                errors_by_session.setdefault(session.isoformat(), []).append(
-                    f"{reason_code}: {reason[:300]}"
-                )
-        for session in run_sessions:
-            statuses_by_session.setdefault(session.isoformat(), set()).add(
-                str(outcome.get("status") or "UNKNOWN")
-            )
-
-    for unit in units:
-        day = unit["target_session"]
-        session_text = day.isoformat()
-        requested_count = len(symbols_by_session.get(session_text, ()))
-        if requested_count == 0:
-            data_job_pg.mark_progress_unavailable(
-                config,
-                job_id=job_id,
-                stage_code="SOURCE_BAOSTOCK",
-                target_session=day,
-                business_table=unit["business_table"],
-                status="NOT_COMPUTED",
-                error_code="BAOSTOCK_RAW_SYMBOL_SCOPE_EMPTY",
-                error_message="该官方会话没有精确绑定的TDX来源代码；BaoStock不单独推断证券范围。",
-            )
-            continue
-        failures = errors_by_session.get(session_text, [])
-        outcome_statuses = statuses_by_session.get(session_text, set())
-        quality_status = (
-            "INCOMPLETE"
-            if failures
-            else "COMPLETE"
-            if outcome_statuses and outcome_statuses == {"COMPLETED"}
-            else "PARTIAL_WITH_UNKNOWN"
+    if isinstance(prepared, Mapping):
+        universe = tuple(prepared.get("source_symbols", ()))
+        eligible_sessions_by_symbol = prepared.get("eligible_sessions_by_symbol", {})
+        basic_names = tuple(prepared.get("basic_names", ()))
+        identity = prepared.get("identity_snapshot")
+        preflight = prepared.get("price_preflight")
+        preflight_logins = int(prepared.get("preflight_login_batches", 0))
+        identity_preflight_valid = (
+            isinstance(preflight, Mapping)
+            and preflight.get("mode") == "IDENTITY_ONLY"
+            and preflight.get("completion_status") == "IDENTITY_AND_BUDGET_COMPLETE"
+            and preflight.get("source_network_called") is True
+            and preflight.get("identity_requests_performed") is True
         )
-        capture_id = capture_by_session.get(day)
-        if capture_id is None:
-            data_job_pg.mark_progress_unavailable(
-                config,
-                job_id=job_id,
-                stage_code="SOURCE_BAOSTOCK",
-                target_session=day,
-                business_table=unit["business_table"],
-                status="INCOMPLETE",
-                error_code="BAOSTOCK_BATCH_NOT_PLANNED",
-                error_message="TDX Raw来源代码没有生成对应的BaoStock批次。",
-            )
-            continue
-        progress_callback(
-            job_id=job_id,
-            stage_code="SOURCE_BAOSTOCK",
-            target_session=day,
-            business_table=unit["business_table"],
-            source_package_id=None,
-            source_capture_id=None,
-            baostock_capture_id=capture_id,
-            profile_history_session_count=None,
-            d1_history_session_count=None,
-            expected_rows=requested_count,
-            inserted_rows=inserted_by_session.get(session_text, 0),
-            quality_status=quality_status,
-            no_change=(not failures and inserted_by_session.get(session_text, 0) == 0),
-        )
-
-
-def _execute_adjusted_price_stage(
-    *,
-    config: Mapping[str, Any],
-    job_id: UUID,
-    plan: Mapping[str, Any],
-    source_package_id: int,
-    capture_by_session: Mapping[str, int],
-    progress_callback: Any,
-    begin_callback: Any,
-) -> None:
-    """复用现役复权生产者，仅处理公告生效日的精确两会话窗口。"""
-    from stock_a.application.adjusted_prices import produce_adjusted_price_window
-    from stock_a.canonical.adjustment import PRODUCER_VERSION
-
-    units = [
-        unit
-        for unit in plan.get("stage_units", ())
-        if unit.get("stage_code") == "ADJUSTED_PRICE"
-        and unit.get("status") == "NOT_STARTED"
-    ]
-    symbols_by_session = plan.get("adjusted_price_symbols_by_session", {})
-    windows_by_session = plan.get("adjusted_price_source_windows", {})
-    planned_captures = plan.get("adjusted_price_capture_by_session", {})
-    cutoff = date.fromisoformat(plan["research_cutoff"])
-    for unit in units:
-        target = unit["target_session"]
-        target_text = target.isoformat()
-        symbols = tuple(symbols_by_session.get(target_text, ()))
-        source_window = tuple(
-            date.fromisoformat(value)
-            for value in windows_by_session.get(target_text, ())
+        persisted_resume_valid = (
+            isinstance(preflight, Mapping)
+            and preflight.get("mode") == "PERSISTED_CAPTURE_RESUME"
+            and preflight.get("completion_status")
+            == "PERSISTED_CAPTURE_AND_ARCHIVE_COMPLETE"
+            and preflight.get("source_network_called") is False
+            and preflight.get("identity_requests_performed") is False
+            and preflight.get("capture_reused") is True
         )
         if (
-            len(source_window) != 2
-            or source_window[-1] != target
-            or source_window[-1] > cutoff
-            or not symbols
+            not isinstance(preflight, Mapping)
+            or not (identity_preflight_valid or persisted_resume_valid)
+            or preflight.get("price_requests_performed") is not False
+            or preflight.get("full_capture_deferred_until_after_clear") is not True
+            or preflight.get("target_sessions")
+            != [session.isoformat() for session in sessions]
+            or tuple(prepared.get("price_preflight_sessions", ())) != sessions
+            or tuple(prepared.get("price_preflight_symbols", ())) != tuple(universe)
+            or preflight_logins != 0
         ):
-            data_job_pg.mark_progress_unavailable(
-                config,
-                job_id=job_id,
-                stage_code="ADJUSTED_PRICE",
-                target_session=target,
-                business_table="stock.source_adjusted_daily_prices",
-                status="NOT_COMPUTED",
-                error_code="ADJUSTMENT_TWO_SESSION_WINDOW_UNAVAILABLE",
-                error_message="公告目标未绑定截止内两个相邻官方Raw会话；不触发调整生产。",
+            raise DataJobError(
+                "RESET_BAOSTOCK_IDENTITY_PREFLIGHT_INCOMPLETE",
+                "清理前身份/预算预检与当前全量来源范围不一致，拒绝清理。",
+                status=409,
             )
-            continue
-        begin_callback(job_id=job_id, units=[unit])
-        expected_rows = 0
-        inserted_rows = 0
-        statuses: list[str] = []
-        try:
+    else:
+        target_text = sessions[-1].isoformat()
+        identity = query_identity_reference(
+            (target_text,),
+            timeout_seconds=query_timeout,
+            max_total_seconds=float(budget["max_identity_total_seconds"]),
+        )
+        resolved = _baostock_universe_from_identity(identity, sessions)
+        universe = resolved["source_symbols"]
+        eligible_sessions_by_symbol = resolved["eligible_sessions_by_symbol"]
+        basic_names = resolved["basic_names"]
+        preflight = None
+        preflight_logins = 0
+    if (
+        not universe
+        or not isinstance(eligible_sessions_by_symbol, Mapping)
+        or set(eligible_sessions_by_symbol) != set(universe)
+    ):
+        raise DataJobError(
+            "BAOSTOCK_UNIVERSE_INVALID",
+            "BaoStock动态证券池或逐代码窗口未闭合。",
+            status=409,
+        )
+    identity_logins = (
+        int(identity.get("login_attempted") is True)
+        if isinstance(identity, Mapping)
+        else 0
+    )
+    login_used = identity_logins + preflight_logins
+    window_material = {
+        "start": sessions[0].isoformat(),
+        "end": sessions[-1].isoformat(),
+        "symbols": list(universe),
+    }
+    window_digest = hashlib.sha256(
+        json.dumps(window_material, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    capture_uuid = uuid5(
+        NAMESPACE_URL,
+        f"stock-a:baostock:paired-capture:{window_digest}",
+    )
+    if isinstance(prepared, Mapping) and prepared.get("capture_uuid") != capture_uuid:
+        raise DataJobError(
+            "RESET_CAPTURE_UUID_MISMATCH",
+            "清理前预算核验的paired capture身份与正式来源阶段不一致。",
+            status=409,
+        )
+    raw_response_journal = None
+    if plan.get("raw_response_journal_enabled") is True:
+        from stock_a.application.baostock_response_journal import (
+            BaoStockRawResponseJournal,
+        )
+
+        candidate_journal = (
+            prepared.get("raw_response_journal")
+            if isinstance(prepared, Mapping)
+            else None
+        )
+        if not isinstance(candidate_journal, BaoStockRawResponseJournal):
+            raise DataJobError(
+                "RAW_RESPONSE_JOURNAL_UNAVAILABLE",
+                "本次RESET启用了原始响应保护，但预检未准备好G盘JSONL档案。",
+                status=409,
+            )
+        raw_response_journal = candidate_journal
+    captured_at = datetime.fromisoformat(identity["request_completed_at"])
+    if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+        raise DataJobError(
+            "BAOSTOCK_IDENTITY_CLOCK_INVALID", "BaoStock身份响应缺少时区。", status=503
+        )
+    source_capture_id = baostock_price_facts.begin_baostock_price_capture(
+        dict(config),
+        capture_uuid=capture_uuid,
+        range_start_session=sessions[0],
+        range_end_session=sessions[-1],
+        price_coordinates=(RAW_COORDINATE, QFQ_COORDINATE),
+        requested_symbol_count=len(universe),
+        started_at=datetime.now(timezone.utc),
+        parser_contract="STOCK_A_BAOSTOCK_DUAL_COORDINATE_DAILY_R2",
+        unit_contract=documented_units,
+    )
+    roster = baostock_price_facts.read_baostock_capture_roster(
+        dict(config), source_capture_id=source_capture_id, cutoff=cutoff
+    )
+    if roster.get("status") not in {"AVAILABLE", "EMPTY"}:
+        raise DataJobError(
+            "BAOSTOCK_CAPTURE_ROSTER_UNAVAILABLE",
+            "无法读取paired capture证券×坐标断点，拒绝重取成功请求。",
+            status=409,
+        )
+    if roster.get("status") == "AVAILABLE":
+        if (
+            roster.get("range_start_session") != sessions[0].isoformat()
+            or roster.get("range_end_session") != sessions[-1].isoformat()
+            or roster.get("requested_symbol_count") != len(universe)
+            or roster.get("source_capture_unit_contract_version")
+            != documented_units.version
+        ):
+            raise DataJobError(
+                "BAOSTOCK_CAPTURE_ROSTER_SCOPE_MISMATCH",
+                "paired capture范围或单位合同与当前全市场总体不一致。",
+                status=409,
+            )
+    roster_by_symbol = {
+        str(item.get("source_symbol")): item
+        for item in roster.get("symbols", ())
+        if isinstance(item, Mapping) and isinstance(item.get("source_symbol"), str)
+    }
+    if set(roster_by_symbol) - set(universe):
+        raise DataJobError(
+            "BAOSTOCK_CAPTURE_ROSTER_UNIVERSE_MISMATCH",
+            "paired capture已存请求代码不属于当前BaoStock动态总体。",
+            status=409,
+        )
+    for symbol, roster_item in roster_by_symbol.items():
+        eligible = tuple(eligible_sessions_by_symbol[symbol])
+        if (
+            roster_item.get("eligible_windows_match") is not True
+            or roster_item.get("eligible_start_session") != eligible[0].isoformat()
+            or roster_item.get("eligible_end_session") != eligible[-1].isoformat()
+        ):
+            raise DataJobError(
+                "BAOSTOCK_CAPTURE_ROSTER_ELIGIBLE_WINDOW_MISMATCH",
+                f"paired capture代码{symbol}上市有效窗口与当前BaoStock名单不同。",
+                status=409,
+            )
+    data_job_pg.set_job_source_capture(
+        config, job_id=job_id, source_capture_id=source_capture_id
+    )
+    names_result = baostock_price_facts.persist_baostock_basic_names(
+        dict(config),
+        source_capture_id=source_capture_id,
+        names=basic_names,
+        captured_at=captured_at,
+    )
+    source_units = [
+        unit
+        for unit in plan.get("stage_units", ())
+        if unit.get("stage_code") == "SOURCE_BAOSTOCK_PRICES"
+    ]
+    begin_callback(job_id=job_id, units=source_units)
+    before_counts = {
+        session: data_job_pg.read_business_table_count(
+            config,
+            business_table="stock.source_raw_daily",
+            target_session=session,
+            source_capture_id=source_capture_id,
+            research_cutoff=cutoff,
+        )
+        for session in sessions
+    }
+    batch_results: list[dict[str, Any]] = []
+    request_complete_symbols = {
+        coordinate: {
+            symbol
+            for symbol, row in roster_by_symbol.items()
+            if isinstance(row.get("coordinates", {}).get(coordinate), Mapping)
+            and row["coordinates"][coordinate].get("request_status")
+            in {"COMPLETED", "NO_DATA"}
+        }
+        for coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED")
+    }
+    raw_archive_repair_symbols: set[str] = set()
+    if raw_response_journal is not None:
+        raw_archive_repair_symbols = set(
+            baostock_price_facts.read_baostock_raw_repair_symbols(
+                dict(config), source_capture_id=source_capture_id, cutoff=cutoff
+            )
+        )
+        if not raw_archive_repair_symbols.issubset(set(universe)):
+            raise DataJobError(
+                "BAOSTOCK_RAW_REPAIR_UNIVERSE_MISMATCH",
+                "PG缺失RAW的证券集合超出当前BaoStock捕获总体。",
+                status=409,
+            )
+        request_complete_symbols["RAW_UNADJUSTED"].difference_update(
+            raw_archive_repair_symbols
+        )
+    persisted_attempts: dict[str, dict[str, Mapping[str, Any]]] = {
+        "RAW_UNADJUSTED": {},
+        "FORWARD_ADJUSTED": {},
+    }
+    for symbol, roster_item in roster_by_symbol.items():
+        coordinates_for_symbol = roster_item.get("coordinates", {})
+        for coordinate in persisted_attempts:
+            prior_row = (
+                coordinates_for_symbol.get(coordinate)
+                if isinstance(coordinates_for_symbol, Mapping)
+                else None
+            )
+            if isinstance(prior_row, Mapping):
+                persisted_attempts[coordinate][symbol] = {
+                    "request_started_at": prior_row.get("last_attempt_started_at"),
+                    "request_completed_at": prior_row.get("last_attempt_completed_at"),
+                    "status": prior_row.get("request_status", "NOT_ATTEMPTED"),
+                    "response_row_count": int(
+                        prior_row.get("response_row_count", 0) or 0
+                    ),
+                    "attempt_count": int(prior_row.get("attempt_count", 0) or 0),
+                    "local_error": prior_row.get("last_error_code"),
+                    "returned_fields": tuple(prior_row.get("returned_fields", ())),
+                }
+
+    def persist_outcome(
+        symbols: Sequence[str],
+        outcome: Mapping[str, Any],
+        *,
+        count_login_batches: bool = True,
+    ) -> None:
+        nonlocal login_used
+        eligible = {
+            symbol: tuple(eligible_sessions_by_symbol[symbol])
+            for symbol in symbols
+            if tuple(eligible_sessions_by_symbol[symbol])
+        }
+        records = tuple(
+            record
+            for record in outcome.get("records", ())
+            if isinstance(record, BaoStockPriceWindowRecord)
+            and record.source_symbol in eligible
+            and record.session_date in eligible[record.source_symbol]
+        )
+        attempts_by_coordinate = outcome.get("request_attempts", {})
+        request_attempts: dict[str, dict[str, Any]] = {}
+        for coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED"):
+            coordinate_outcome = (
+                attempts_by_coordinate.get(coordinate, {})
+                if isinstance(attempts_by_coordinate, Mapping)
+                else {}
+            )
+            coordinate_attempts: dict[str, Any] = {}
             for symbol in symbols:
-                result = produce_adjusted_price_window(
-                    config,
-                    source_symbol=symbol,
-                    source_package_id=source_package_id,
-                    target_session=target,
-                    source_window_sessions=source_window,
-                    research_cutoff=cutoff,
-                    calendar_id=str(plan["calendar_id"]),
-                    calendar_revision=str(plan["calendar_revision"]),
+                attempt = (
+                    coordinate_outcome.get(symbol)
+                    if isinstance(coordinate_outcome, Mapping)
+                    else None
                 )
-                if result.get("status") != "COMMITTED_SINGLE_NOTICE_WINDOW":
-                    raise DataJobError(
-                        str(
-                            result.get("reason_code") or "ADJUSTED_PRICE_NOT_COMMITTED"
-                        ),
-                        "复权生产者未提交完整的单公告两会话结果。",
-                        status=409,
+                if isinstance(attempt, Mapping):
+                    persisted_attempts[coordinate][symbol] = attempt
+                    coordinate_attempts[symbol] = attempt
+                    if (
+                        attempt.get("status") == "RESPONSE_RECEIVED"
+                        and type(attempt.get("attempt_count")) is int
+                        and attempt.get("attempt_count", 0) > 0
+                    ):
+                        request_complete_symbols[coordinate].add(symbol)
+                    continue
+                prior_attempt = persisted_attempts[coordinate].get(symbol)
+                if prior_attempt is not None:
+                    coordinate_attempts[symbol] = prior_attempt
+                else:
+                    coordinate_attempts[symbol] = {
+                        "request_started_at": None,
+                        "request_completed_at": None,
+                        "status": "NOT_ATTEMPTED_BUDGET",
+                        "response_row_count": 0,
+                        "attempt_count": 0,
+                        "local_error": "REQUEST_NOT_ATTEMPTED",
+                        "returned_fields": None,
+                    }
+            request_attempts[coordinate] = coordinate_attempts
+        clocks = [
+            datetime.fromisoformat(value)
+            for coordinate_rows in request_attempts.values()
+            for attempt in coordinate_rows.values()
+            for value in (
+                attempt.get("request_started_at"),
+                attempt.get("request_completed_at"),
+            )
+            if isinstance(value, str)
+        ]
+        batch_started = min(clocks) if clocks else datetime.now(timezone.utc)
+        batch_completed = max(clocks) if clocks else batch_started
+        if batch_started.tzinfo is None or batch_completed.tzinfo is None:
+            raise DataJobError(
+                "BAOSTOCK_REQUEST_CLOCK_INVALID",
+                "BaoStock逐请求时钟缺少时区。",
+                status=409,
+            )
+        persisted = baostock_price_facts.persist_baostock_price_batch(
+            dict(config),
+            source_capture_id=source_capture_id,
+            records=records,
+            request_attempts=request_attempts,
+            eligible_sessions_by_symbol=eligible,
+            unit_contract=documented_units,
+            batch_started_at=batch_started,
+            batch_completed_at=batch_completed,
+        )
+        if count_login_batches:
+            login_used += int(outcome.get("login_batches", 0) or 0)
+        batch_results.append(
+            {
+                "source_symbols": list(symbols),
+                "api_calls": int(outcome.get("api_calls", 0) or 0),
+                "login_batches": int(outcome.get("login_batches", 0) or 0),
+                "archive_written_requests": int(
+                    outcome.get("archive_written_requests", 0) or 0
+                ),
+                "archive_reused_requests": int(
+                    outcome.get("archive_reused_requests", 0) or 0
+                ),
+                **persisted,
+            }
+        )
+
+    for coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED"):
+        pending_symbols = [
+            symbol
+            for symbol in universe
+            if symbol not in request_complete_symbols[coordinate]
+            and (
+                int(
+                    persisted_attempts[coordinate]
+                    .get(symbol, {})
+                    .get("attempt_count", 0)
+                    or 0
+                )
+                == 0
+                or (
+                    raw_response_journal is not None
+                    and coordinate == "RAW_UNADJUSTED"
+                    and symbol in raw_archive_repair_symbols
+                )
+            )
+        ]
+        for offset in range(0, len(pending_symbols), max_api):
+            symbols = tuple(pending_symbols[offset : offset + max_api])
+            remaining_logins = max_login_batches - login_used
+            if remaining_logins < 1:
+                placeholder_records = []
+                for symbol in symbols:
+                    prior_fields = {
+                        prior_coordinate: tuple(
+                            persisted_attempts[prior_coordinate]
+                            .get(symbol, {})
+                            .get("returned_fields", ())
+                        )
+                        for prior_coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED")
+                        if persisted_attempts[prior_coordinate]
+                        .get(symbol, {})
+                        .get("returned_fields")
+                    }
+                    for session in eligible_sessions_by_symbol[symbol]:
+                        placeholder_records.append(
+                            BaoStockPriceWindowRecord(
+                                source_symbol=symbol,
+                                requested_source_code=symbol.lower(),
+                                source_code=symbol.lower(),
+                                session_date=session,
+                                raw_observation=None,
+                                qfq_ohlc=None,
+                                qfq_observation=None,
+                                response_fields_by_coordinate=prior_fields,
+                                raw_captured_at=None,
+                                qfq_captured_at=None,
+                                coverage_status="NO_BAR_IN_EITHER_COORDINATE_UNKNOWN",
+                            )
+                        )
+                outcome = {
+                    "status": "INCOMPLETE",
+                    "completion_status": "INCOMPLETE",
+                    "login_batches": 0,
+                    "records": tuple(placeholder_records),
+                    "request_attempts": {
+                        coordinate: {
+                            symbol: {
+                                "request_started_at": None,
+                                "request_completed_at": None,
+                                "status": "NOT_ATTEMPTED_BUDGET",
+                                "response_row_count": 0,
+                                "attempt_count": 0,
+                                "local_error": "MAX_LOGIN_BATCHES_EXHAUSTED",
+                                "returned_fields": None,
+                            }
+                            for symbol in symbols
+                        }
+                    },
+                }
+            else:
+                request_attempt_offsets = {
+                    request_coordinate: {
+                        symbol: int(
+                            persisted_attempts[request_coordinate]
+                            .get(symbol, {})
+                            .get("attempt_count", 0)
+                            or 0
+                        )
+                        for symbol in symbols
+                    }
+                    for request_coordinate in (
+                        "RAW_UNADJUSTED",
+                        "FORWARD_ADJUSTED",
                     )
-                expected_rows += int(result.get("expected_rows", 0) or 0)
-                inserted_rows += int(result.get("inserted_rows", 0) or 0)
-                statuses.append(str(result["status"]))
-            if expected_rows != 2 * len(symbols):
-                raise DataJobError(
-                    "ADJUSTED_PRICE_EXPECTED_ROW_COUNT_MISMATCH",
-                    "复权生产结果没有为每个公告代码返回恰好两会话事实。",
-                    status=409,
-                )
-            target_capture_id = capture_by_session.get(target_text)
-            if target_capture_id is None:
-                target_capture_id = planned_captures.get(target_text)
-            if type(target_capture_id) is not int or target_capture_id <= 0:
-                raise DataJobError(
-                    "ADJUSTED_PRICE_TARGET_CAPTURE_UNAVAILABLE",
-                    "公告目标会话没有唯一的同包Raw捕获身份；调整进度保留未完成。",
-                    status=409,
-                )
+                }
+                try:
+                    outcome = fetch_baostock_price_window(
+                        symbols,
+                        sessions,
+                        cutoff=cutoff,
+                        units=documented_units,
+                        max_api_calls_per_batch=max_api,
+                        max_login_batches=remaining_logins,
+                        query_timeout_seconds=query_timeout,
+                        max_history_session_count=history_limit,
+                        max_retry_attempts=retry_attempts,
+                        retry_backoff_seconds=backoff,
+                        coordinates=(coordinate,),
+                        raw_response_journal=raw_response_journal,
+                        request_attempt_offsets=request_attempt_offsets,
+                    )
+                except (
+                    BaostockRawResponseSinkError,
+                    BaoStockRawResponseJournalError,
+                ) as error:
+                    for unit in source_units:
+                        data_job_pg.mark_progress_failed(
+                            config,
+                            job_id=job_id,
+                            stage_code="SOURCE_BAOSTOCK_PRICES",
+                            target_session=unit["target_session"],
+                            business_table=unit["business_table"],
+                            status="FAILED",
+                            error_code="BAOSTOCK_RAW_RESPONSE_JOURNAL_FAILED",
+                            error_message=(
+                                "原始行情响应未成功fsync到外部档案，本价格批次未写PG；"
+                                f"{type(error).__name__}"
+                            ),
+                            source_capture_id=source_capture_id,
+                        )
+                    raise DataJobError(
+                        "BAOSTOCK_RAW_RESPONSE_JOURNAL_FAILED",
+                        "原始行情响应未成功落盘，本价格批次未写入PG。",
+                        status=503,
+                    ) from error
+            persist_outcome(symbols, outcome)
+
+    expected_by_session = {
+        session: sum(
+            session in tuple(eligible_sessions_by_symbol[symbol]) for symbol in universe
+        )
+        for session in sessions
+    }
+    final_roster = baostock_price_facts.read_baostock_capture_roster(
+        dict(config), source_capture_id=source_capture_id, cutoff=cutoff
+    )
+    final_roster_by_symbol = {
+        str(item.get("source_symbol")): item
+        for item in final_roster.get("symbols", ())
+        if isinstance(item, Mapping) and isinstance(item.get("source_symbol"), str)
+    }
+    request_scope_closed = (
+        final_roster.get("status") == "AVAILABLE"
+        and final_roster.get("requested_symbol_count") == len(universe)
+        and set(final_roster_by_symbol) == set(universe)
+        and all(
+            item.get("eligible_windows_match") is True
+            and item.get("request_complete") is True
+            and item.get("eligible_start_session")
+            == eligible_sessions_by_symbol[symbol][0].isoformat()
+            and item.get("eligible_end_session")
+            == eligible_sessions_by_symbol[symbol][-1].isoformat()
+            for symbol, item in final_roster_by_symbol.items()
+            if eligible_sessions_by_symbol.get(symbol)
+        )
+    )
+    incomplete = not request_scope_closed
+    all_session_rows_complete = True
+    for unit in source_units:
+        session = unit["target_session"]
+        actual_rows = data_job_pg.read_business_table_count(
+            config,
+            business_table="stock.source_raw_daily",
+            target_session=session,
+            source_capture_id=source_capture_id,
+            research_cutoff=cutoff,
+        )
+        expected_rows = expected_by_session[session]
+        complete = not incomplete and actual_rows == expected_rows
+        all_session_rows_complete = all_session_rows_complete and complete
+        if complete:
             progress_callback(
                 job_id=job_id,
-                stage_code="ADJUSTED_PRICE",
-                target_session=target,
-                business_table="stock.source_adjusted_daily_prices",
-                source_package_id=source_package_id,
-                source_capture_id=target_capture_id,
+                stage_code="SOURCE_BAOSTOCK_PRICES",
+                target_session=session,
+                business_table="stock.source_raw_daily",
+                source_capture_id=source_capture_id,
                 profile_history_session_count=None,
                 d1_history_session_count=None,
                 expected_rows=expected_rows,
-                inserted_rows=inserted_rows,
-                quality_status=";".join(sorted(set(statuses))),
-                no_change=inserted_rows == 0,
-                producer_version=PRODUCER_VERSION,
-                calendar_revision=str(plan["calendar_revision"]),
+                inserted_rows=max(0, actual_rows - int(before_counts[session] or 0)),
+                quality_status="COMPLETE_RAW_AND_QFQ_REQUESTS",
+                no_change=actual_rows == int(before_counts[session] or 0),
+                producer_version="STOCK_A_BAOSTOCK_SOURCE_CAPTURE_R2",
             )
-        except Exception as error:  # noqa: BLE001 - 局部能力缺口保留具体阶段状态。
-            code = str(getattr(error, "code", type(error).__name__))
-            incomplete = inserted_rows > 0 or code in {
-                "ADJUSTMENT_EVENT_COVERAGE_INCOMPLETE",
-                "ADJUSTMENT_EVENT_WINDOW_NOT_PROVEN",
-                "ADJUSTMENT_EVENT_SYMBOL_MISMATCH",
-                "ADJUSTMENT_EVENT_SESSION_MISMATCH",
-                "ADJUSTED_PRICE_READBACK_MISMATCH",
-                "ADJUSTED_PRICE_EXPECTED_ROW_COUNT_MISMATCH",
-            }
+        else:
             data_job_pg.mark_progress_unavailable(
                 config,
                 job_id=job_id,
-                stage_code="ADJUSTED_PRICE",
-                target_session=target,
-                business_table="stock.source_adjusted_daily_prices",
-                status="INCOMPLETE" if incomplete else "NOT_COMPUTED",
-                error_code=code,
-                error_message=f"调整价格单股生产未闭合：{str(error)[:500]}",
+                stage_code="SOURCE_BAOSTOCK_PRICES",
+                target_session=session,
+                business_table="stock.source_raw_daily",
+                status="INCOMPLETE",
+                error_code="BAOSTOCK_CAPTURE_COVERAGE_INCOMPLETE",
+                error_message=(
+                    f"paired capture {source_capture_id} 该会话读回{actual_rows}/{expected_rows}行，"
+                    "或至少一个证券×坐标请求未完成。"
+                ),
+                source_capture_id=source_capture_id,
             )
+    if incomplete or not all_session_rows_complete:
+        return {
+            "status": "INCOMPLETE",
+            "source_capture_id": source_capture_id,
+            "capture_uuid": str(capture_uuid),
+            "universe_count": len(universe),
+            "batch_results": batch_results,
+            "names_result": names_result,
+            "reason_code": "BAOSTOCK_CAPTURE_COVERAGE_INCOMPLETE",
+        }
+    if isinstance(plan, dict):
+        plan["_paired_source_capture_id"] = source_capture_id
+        plan["_paired_capture_uuid"] = str(capture_uuid)
+        plan["_source_symbols"] = tuple(universe)
+        plan["_eligible_sessions_by_symbol"] = eligible_sessions_by_symbol
+
+    return {
+        "status": "COMPLETED",
+        "source_capture_id": source_capture_id,
+        "capture_uuid": str(capture_uuid),
+        "universe_count": len(universe),
+        "batch_results": batch_results,
+        "names_result": names_result,
+    }
 
 
 def _execute_shared_production_chain(
@@ -3860,1148 +5221,1637 @@ def _execute_shared_production_chain(
     progress_callback: Any,
     begin_callback: Any,
 ) -> None:
-    """复用唯一VIPDATA Raw、Core/Profile、D0/D1及静态研究生产者。"""
+    """运行唯一BaoStock paired capture、TDX成员和Core/Profile生产链。"""
     from stock_a.application.pg_price_profiles import (
         SOURCE_SYMBOL_PROFILE_SCOPE,
         run_source_symbol_price_profile,
     )
     from stock_a.application.runtime_config import _CONFIG_ROOT
-    from stock_a.application.source_formal_admission_production import (
-        SourceFormalAdmissionProductionError,
-        run_source_formal_admission_range_from_saved,
-    )
-    from stock_a.application.source_market_context import (
-        SourceMarketContextError,
-        compute_source_market_context,
-        read_source_market_context,
-    )
-    from stock_a.application.source_market_participation import (
-        SourceMarketParticipationError,
-        produce_market_participation,
-    )
-    from stock_a.application.source_research_day import (
-        run_source_research_day,
-        run_source_static_research_day,
-    )
     from stock_a.contracts import load_price_profile_contract
-    from stock_a.sources.tdx.vipdata import (
-        VipdataBudgets,
-        VipdataSourceConfig,
-        VipdataTargetScanBudget,
-        cleanup_vipdata_package,
-        download_vipdata_package,
-        inspect_vipdata_page,
-    )
-    from stock_a.storage.postgres.market_breadth import (
-        MarketBreadthPgError,
-        persist_market_breadth,
-    )
-    from stock_a.storage.postgres.source_raw import import_verified_vipdata_history
 
-    target = date.fromisoformat(plan["target_session"])
-    profile_history = int(plan.get("profile_history_session_count") or 1)
-    raw_sessions = tuple(
-        date.fromisoformat(day) for day in plan["raw_history_sessions"]
-    )
-    selected_source_modules = set(plan.get("source_modules", ()))
-    if "TDX_RAW" in selected_source_modules:
-        package_unit = next(
-            unit
-            for unit in plan["stage_units"]
-            if unit["business_table"] == "stock.source_packages"
-        )
-        begin_callback(job_id=job_id, units=[package_unit])
-    cutoff = date.fromisoformat(plan["research_cutoff"])
-    package_id_holder: list[int] = []
+    selected_sources = set(plan.get("source_modules", ()))
+    base_modules = set(plan.get("base_modules", ()))
+    research_modules = set(plan.get("research_modules", ()))
+    resolved_unit_keys: set[tuple[str, date, str]] = set()
+    incomplete_stage_errors: list[tuple[str, str]] = []
+    complete_progress_statuses = {
+        "COMPLETED",
+        "ALREADY_COMPLETE",
+        "NO_CHANGE",
+        "CLEARED",
+        "NOT_DUE",
+        "SKIPPED_BY_USER",
+        "SKIPPED_NOT_IMPLEMENTED",
+    }
 
-    def package_verified(package_id: int, inserted: bool) -> None:
-        progress_callback(
-            job_id=job_id,
-            stage_code="SOURCE_RAW",
-            target_session=target,
-            business_table="stock.source_packages",
-            source_package_id=package_id,
-            source_capture_id=None,
-            profile_history_session_count=None,
-            d1_history_session_count=None,
-            expected_rows=1,
-            inserted_rows=int(inserted),
-            quality_status="PACKAGE_VERIFIED",
-            no_change=not inserted,
+    def unit_key(unit: Mapping[str, Any]) -> tuple[str, date, str]:
+        return (
+            str(unit["stage_code"]),
+            unit["target_session"],
+            str(unit["business_table"]),
         )
 
-    def session_verified(result: Mapping[str, Any]) -> None:
-        day = date.fromisoformat(result["target_session"])
-        capture_id = int(result["source_capture_id"])
-        for table, expected, inserted in (
-            ("stock.source_captures", 1, int(result.get("capture_inserted") is True)),
-            (
-                "stock.source_raw_daily",
-                int(result["candidate_total"]),
-                int(result["new_rows_committed"]),
-            ),
-        ):
-            progress_callback(
+    def mark_units_incomplete(
+        units: Sequence[Mapping[str, Any]],
+        *,
+        stage_code: str | None,
+        error: Exception,
+        message_prefix: str,
+    ) -> None:
+        error_code = str(getattr(error, "code", type(error).__name__))
+        for unit in units:
+            unit_stage = stage_code or str(unit["stage_code"])
+            unit_session = unit["target_session"]
+            business_table = str(unit["business_table"])
+            previous = data_job_pg.read_progress_unit(
+                config,
                 job_id=job_id,
-                stage_code="SOURCE_RAW",
-                target_session=day,
-                business_table=table,
-                source_package_id=package_id_holder[0],
-                source_capture_id=capture_id,
-                profile_history_session_count=None,
-                d1_history_session_count=None,
-                expected_rows=expected,
-                inserted_rows=inserted,
-                quality_status=result["status"],
-                no_change=result["status"] == "ALREADY_COMPLETE",
+                stage_code=unit_stage,
+                target_session=unit_session,
+                business_table=business_table,
             )
+            if (
+                isinstance(previous, Mapping)
+                and previous.get("status") in complete_progress_statuses
+            ):
+                resolved_unit_keys.add(unit_key(unit))
+                continue
+            data_job_pg.mark_progress_unavailable(
+                config,
+                job_id=job_id,
+                stage_code=unit_stage,
+                target_session=unit_session,
+                business_table=business_table,
+                status="INCOMPLETE",
+                error_code=error_code,
+                error_message=f"{message_prefix}：{str(error)[:500]}",
+                source_capture_id=source_capture_id,
+            )
+            resolved_unit_keys.add(unit_key(unit))
 
-    def register_package_id(package_id: int, inserted: bool) -> None:
-        package_id_holder.append(package_id)
-        data_job_pg.set_job_source_package(
-            config, job_id=job_id, source_package_id=package_id
+    prepared_sector_snapshots = plan.get("_prepared_sector_snapshots")
+    if (
+        prepared_sector_snapshots is None
+        and plan.get("mode") == "INITIALIZE"
+        and plan.get("initialization_mode") == "REUSE_RAW"
+    ):
+        snapshot_pair = plan.get("sector_snapshot_pair")
+        snapshot_ids = (
+            snapshot_pair.get("snapshot_ids")
+            if isinstance(snapshot_pair, Mapping)
+            else None
         )
-        package_verified(package_id, inserted)
+        if isinstance(snapshot_ids, Mapping):
+            prepared_sector_snapshots = {
+                "reuse_existing_snapshot_ids": dict(snapshot_ids)
+            }
+    if prepared_sector_snapshots is None and plan.get("mode") == "MANUAL_DAILY":
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
 
-    def sessions_started(sessions: Sequence[date]) -> None:
-        selected = set(sessions)
-        units = [
-            unit
-            for unit in plan["stage_units"]
-            if unit["stage_code"] == "SOURCE_RAW"
-            and unit["business_table"]
-            in {"stock.source_captures", "stock.source_raw_daily"}
-            and unit["target_session"] in selected
-        ]
-        begin_callback(job_id=job_id, units=units)
-
+        cutoff_day = date.fromisoformat(plan["research_cutoff"])
+        if cutoff_day < datetime.now(ZoneInfo("Asia/Shanghai")).date():
+            snapshot_pair = plan.get("sector_snapshot_pair")
+            snapshot_ids = (
+                snapshot_pair.get("snapshot_ids")
+                if isinstance(snapshot_pair, Mapping)
+                else None
+            )
+            if isinstance(snapshot_ids, Mapping):
+                prepared_sector_snapshots = {
+                    "reuse_existing_snapshot_ids": dict(snapshot_ids)
+                }
     _persist_sector_membership_stage(
         config=config,
         job_id=job_id,
         plan=plan,
         progress_callback=progress_callback,
         begin_callback=begin_callback,
-        prepared_snapshots=plan.get("_prepared_sector_snapshots"),
+        prepared_snapshots=prepared_sector_snapshots,
     )
 
-    if (
-        selected_source_modules == {"TDX_SECTOR_MEMBERS"}
-        and not plan.get("base_modules")
-        and not plan.get("research_modules")
-    ):
-        return
-
-    if (
-        not selected_source_modules
-        and not plan.get("base_modules")
-        and set(plan.get("research_modules", ())) <= {"ADJUSTED_PRICE"}
-        and not any(
-            unit.get("stage_code") == "ADJUSTED_PRICE"
-            and unit.get("status") == "NOT_STARTED"
-            for unit in plan.get("stage_units", ())
+    if "BAOSTOCK_PRICES" in selected_sources:
+        _calendar_id, _calendar_revision, official_sessions = _load_official_sessions(
+            date.fromisoformat(plan["research_cutoff"])
         )
-    ):
-        return
-
-    reuse_package_id = plan.get("reuse_raw_package_id")
-    raw_session_inputs = plan.get("raw_session_inputs", [])
-    reuse_saved_baostock_raw = (
-        "BAOSTOCK" in selected_source_modules
-        and "TDX_RAW" not in selected_source_modules
-        and not raw_sessions
-        and type(plan.get("baostock_source_package_id")) is int
-    )
-    if reuse_saved_baostock_raw:
-        source_package_id = int(plan["baostock_source_package_id"])
-        package_id_holder.append(source_package_id)
-        saved_inputs = plan.get("baostock_raw_session_inputs", ())
-        data_job_pg.set_job_source_package(
-            config, job_id=job_id, source_package_id=source_package_id
-        )
-        raw_result = {
-            "status": "ALREADY_COMPLETE",
-            "source_package_id": source_package_id,
-            "session_results": [
-                {
-                    "target_session": item["session_date"],
-                    "candidate_total": int(item["expected_row_count"]),
-                    "row_count_before": int(item["row_count"]),
-                    "row_count_after": int(item["row_count"]),
-                    "new_rows_committed": 0,
-                    "source_capture_id": int(item["source_capture_id"]),
-                    "capture_inserted": False,
-                    "status": "ALREADY_COMPLETE",
-                }
-                for item in saved_inputs
-            ],
-        }
-    elif reuse_package_id is not None and len(raw_session_inputs) == len(raw_sessions):
-        package_id_holder.append(int(reuse_package_id))
-        data_job_pg.set_job_source_package(
-            config, job_id=job_id, source_package_id=int(reuse_package_id)
-        )
-        if "TDX_RAW" in selected_source_modules:
-            package_verified(int(reuse_package_id), False)
-            sessions_started(raw_sessions)
-        reused_session_results = [
-            {
-                "target_session": item["session_date"],
-                "candidate_total": int(item["expected_row_count"]),
-                "row_count_before": int(item["row_count"]),
-                "row_count_after": int(item["row_count"]),
-                "new_rows_committed": 0,
-                "source_capture_id": int(item["source_capture_id"]),
-                "capture_inserted": False,
-                "status": "ALREADY_COMPLETE",
-            }
-            for item in raw_session_inputs
-        ]
-        raw_result = {
-            "status": "ALREADY_COMPLETE",
-            "source_package_id": int(reuse_package_id),
-            "session_results": reused_session_results,
-        }
-    elif "TDX_RAW" not in selected_source_modules:
-        raise DataJobError(
-            "RAW_INPUT_WINDOW_UNAVAILABLE",
-            "所选算法需要的全部Raw输入没有绑定同一完整来源包；未触发外部来源读取。",
-            status=409,
-        )
-    else:
-        prepared_package = plan.get("_prepared_vipdata_package")
-        owns_package = prepared_package is None
-        package_owner = None
-        try:
-            if prepared_package is None:
-                source_config = VipdataSourceConfig.from_mapping(
-                    config["source_policy"]["vipdata_official"]
-                )
-                download_budgets = VipdataBudgets()
-                observation = inspect_vipdata_page(
-                    target.isoformat(),
-                    budgets=download_budgets,
-                    source_config=source_config,
-                )
-                if observation.status != "PACKAGE_CANDIDATE_READY":
-                    raise DataJobError(
-                        "BLOCKED_SOURCE_NOT_AVAILABLE",
-                        observation.reason or "VIPDATA来源当前不可验证。",
-                        status=503,
-                    )
-                update_at = getattr(observation, "official_update_at", None)
-                if update_at is None:
-                    raise DataJobError(
-                        "BLOCKED_SOURCE_TIME_UNKNOWN",
-                        "官方来源更新时钟未知；未下载或读取行情包。",
-                        status=409,
-                    )
-                if update_at.date() > cutoff:
-                    raise DataJobError(
-                        "BLOCKED_SOURCE_AFTER_CUTOFF",
-                        "官方来源更新时钟晚于任务截止；未下载或读取行情包。",
-                        status=409,
-                    )
-                package_owner = download_vipdata_package(
-                    observation, budgets=download_budgets
-                )
-                prepared_package = verify_existing_vipdata_package(
-                    package_owner.file_path, budgets=download_budgets
-                )
-            raw_result = import_verified_vipdata_history(
-                config,
-                prepared_package,
-                raw_sessions,
-                task_scope=_RAW_JOB_SCOPE,
-                scan_budget=VipdataTargetScanBudget(),
-                chunk_size=100,
-                max_raw_rows=2_000_000,
-                on_source_package_verified=register_package_id,
-                on_sessions_started=sessions_started,
-                on_session_verified=session_verified,
-            )
-        finally:
-            if owns_package and package_owner is not None:
-                cleanup_vipdata_package(package_owner)
-
-    source_package_id = int(raw_result["source_package_id"])
-    capture_by_session = {
-        item["target_session"]: int(item["source_capture_id"])
-        for item in raw_result["session_results"]
-    }
-    raw_count_by_session = {
-        item["target_session"]: int(item["candidate_total"])
-        for item in raw_result["session_results"]
-    }
-    if "ADJUSTED_PRICE" in plan.get("research_modules", ()):
-        _execute_adjusted_price_stage(
+        source_result = _execute_baostock_source_stage(
             config=config,
             job_id=job_id,
             plan=plan,
-            source_package_id=source_package_id,
-            capture_by_session=capture_by_session,
+            official_sessions=official_sessions,
             progress_callback=progress_callback,
             begin_callback=begin_callback,
         )
-    if "BAOSTOCK" in selected_source_modules:
-        try:
-            _calendar_id, _calendar_revision, official_sessions = (
-                _load_official_sessions(cutoff)
+        if not isinstance(source_result, Mapping) or source_result.get(
+            "status"
+        ) not in {
+            "COMPLETED",
+            "ALREADY_COMPLETE",
+        }:
+            raise DataJobError(
+                str(
+                    (source_result or {}).get(
+                        "reason_code", "BAOSTOCK_SOURCE_CAPTURE_INCOMPLETE"
+                    )
+                ),
+                "BaoStock paired capture未完成；依赖它的研究阶段保持未执行。",
+                status=409,
             )
-            _execute_baostock_source_stage(
-                config=config,
-                job_id=job_id,
-                plan=plan,
-                source_package_id=source_package_id,
-                official_sessions=official_sessions,
-                progress_callback=progress_callback,
-                begin_callback=begin_callback,
-            )
-        except Exception as error:
-            # BaoStock是TDX之外的可选第一层来源；其失败不回滚已提交TDX Raw。
-            for unit in plan["stage_units"]:
-                if unit.get("stage_code") != "SOURCE_BAOSTOCK":
-                    continue
-                data_job_pg.mark_progress_unavailable(
-                    config,
-                    job_id=job_id,
-                    stage_code="SOURCE_BAOSTOCK",
-                    target_session=unit["target_session"],
-                    business_table=unit["business_table"],
-                    status="INCOMPLETE",
-                    error_code=getattr(error, "code", type(error).__name__),
-                    error_message=f"BaoStock补充来源阶段未完成：{str(error)[:500]}",
-                )
-    market_blocked = set(plan["market_breadth_insufficient_history_sessions"])
-    for day_text in plan["market_breadth_sessions"]:
-        day = date.fromisoformat(day_text)
-        if day_text in market_blocked:
-            continue
-        market_units = [
-            unit
-            for unit in plan["stage_units"]
-            if unit["stage_code"] == "MARKET_BREADTH"
-            and unit["target_session"] == day
-            and unit["status"] == "NOT_STARTED"
-        ]
-        begin_callback(job_id=job_id, units=market_units)
-        try:
-            market = compute_source_market_context(
-                config,
-                target_session=day,
-                research_cutoff=cutoff,
-                source_package_id=source_package_id,
-            )
-            market_persistence = persist_market_breadth(config, market)
-        except (SourceMarketContextError, MarketBreadthPgError) as error:
-            unavailable_status = (
-                "INCOMPLETE"
-                if getattr(error, "database_write_attempted", False)
-                else "NOT_COMPUTED"
-            )
-            for unit in market_units:
-                data_job_pg.mark_progress_unavailable(
-                    config,
-                    job_id=job_id,
-                    stage_code="MARKET_BREADTH",
-                    target_session=day,
-                    business_table=unit["business_table"],
-                    status=unavailable_status,
-                    error_code=getattr(error, "code", type(error).__name__),
-                    error_message=str(error),
-                )
-            continue
-        breadth_inserted = int(market_persistence.get("inserted_rows", 0) or 0)
-        breadth_quality = "SOURCE_UNKNOWN_COUNT=" + str(
-            market.calculation.counts.get("UNKNOWN", 0)
-        )
-        for table, expected_rows, inserted_rows in (
-            ("stock.source_market_breadth_days", 1, int(breadth_inserted > 0)),
-            (
-                "stock.source_market_breadth_symbols",
-                int(market.calculation.n_source),
-                breadth_inserted,
-            ),
+        source_capture_id = int(source_result["source_capture_id"])
+    else:
+        capture_inputs = plan.get("price_capture_inputs", ())
+        capture_ids = {
+            item.get("source_capture_id")
+            for item in capture_inputs
+            if isinstance(item, Mapping)
+            and item.get("price_coordinate") in {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        }
+        if (
+            len(capture_ids) != 1
+            or type(next(iter(capture_ids), None)) is not int
+            or not capture_inputs
         ):
-            progress_callback(
-                job_id=job_id,
-                stage_code="MARKET_BREADTH",
-                target_session=day,
-                business_table=table,
-                source_package_id=source_package_id,
-                source_capture_id=capture_by_session[day_text],
-                profile_history_session_count=None,
-                d1_history_session_count=None,
-                expected_rows=expected_rows,
-                inserted_rows=inserted_rows,
-                quality_status=breadth_quality,
-                no_change=market_persistence.get("status")
-                == "IDEMPOTENT_ALREADY_PRESENT",
-                calendar_revision=market.calendar["calendar_revision"],
+            raise DataJobError(
+                "BAOSTOCK_PAIRED_CAPTURE_REQUIRED",
+                "派生任务必须解析到覆盖所需会话和双坐标的同一PG source_capture_id。",
+                status=409,
             )
+        source_capture_id = int(next(iter(capture_ids)))
+    if isinstance(plan, dict):
+        plan["_paired_source_capture_id"] = source_capture_id
 
-    profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
-    d0_requested = set(plan["d0_output_sessions"])
-    d1_requested = set(plan["d1_output_sessions"])
-    d0_days = d0_requested - set(plan["d0_insufficient_previous_sessions"])
-    d1_days = d1_requested - set(plan["d1_insufficient_history_sessions"])
-    profile_blocked = set(plan["profile_insufficient_history_sessions"])
-    profile_days = set(plan["profile_output_sessions"]) - profile_blocked
-    profile_window_counts = plan.get("profile_history_session_counts_by_session", {})
-    d0_profile_window_counts = plan.get(
-        "d0_profile_history_session_counts_by_session", {}
-    )
-    d1_window_counts = plan.get("d1_history_session_counts_by_session", {})
-    output_days = sorted(d0_days | d1_days | profile_days)
-    d1_window = int(plan.get("d1_calculation_session_count") or 1)
-    effective_d1_window = max(2, d1_window)
-    participation_blocked = set(
-        plan.get("market_participation_insufficient_sessions", ())
-    )
-    participation_completed: set[str] = set()
+    if not base_modules and not research_modules:
+        if selected_sources - {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}:
+            raise DataJobError(
+                "DATA_JOB_SOURCE_MODULE_INVALID",
+                "来源层只能选择BaoStock价格和TDX行业/GN成员关系。",
+                status=409,
+            )
+        return
 
-    def produce_participation(day_text: str, history_count: int) -> None:
-        if day_text in participation_blocked or day_text in participation_completed:
-            return
-        day = date.fromisoformat(day_text)
-        market_units = [
-            unit
-            for unit in plan["stage_units"]
-            if unit["stage_code"] == "MARKET_PARTICIPATION"
-            and unit["target_session"] == day
-        ]
-        if not market_units:
-            return
-        begin_callback(job_id=job_id, units=market_units)
-        try:
-            market = read_source_market_context(
-                config,
-                target_session=day,
-                research_cutoff=cutoff,
-                source_package_id=source_package_id,
-                include_symbols=True,
-            )
-            participation = produce_market_participation(config, market)
-        except (SourceMarketContextError, SourceMarketParticipationError) as error:
-            unavailable_status = (
-                "INCOMPLETE"
-                if getattr(error, "database_write_attempted", False)
-                else "NOT_COMPUTED"
-            )
-            for unit in market_units:
-                data_job_pg.mark_progress_unavailable(
-                    config,
-                    job_id=job_id,
-                    stage_code="MARKET_PARTICIPATION",
-                    target_session=day,
-                    business_table=unit["business_table"],
-                    status=unavailable_status,
-                    error_code=getattr(error, "code", type(error).__name__),
-                    error_message=str(error),
-                )
-            participation_completed.add(day_text)
-            return
-        persistence = participation["persistence"]
-        readback = participation["readback"]
-        unknown_reasons = readback.get("denominator", {}).get(
-            "unknown_reason_counts", {}
+    cutoff = date.fromisoformat(plan["research_cutoff"])
+    # 市场宽度先绑定paired capture的QFQ历史坐标，保留既有B_fixed_source分类公式。
+    if "MARKET_BREADTH" in base_modules:
+        from stock_a.application.source_market_context import (
+            compute_source_market_context,
+            read_source_market_context,
         )
-        inserted_reasons = int(persistence.get("inserted_reason_rows", 0) or 0)
-        for table, expected_rows, inserted_rows in (
-            (
-                "stock.source_market_participation_days",
-                1,
-                int(persistence.get("status") == "WRITTEN"),
-            ),
-            (
-                "stock.source_market_participation_unknown_reasons",
-                len(unknown_reasons),
-                inserted_reasons,
-            ),
-        ):
-            progress_callback(
-                job_id=job_id,
-                stage_code="MARKET_PARTICIPATION",
-                target_session=day,
-                business_table=table,
-                source_package_id=source_package_id,
-                source_capture_id=capture_by_session[day_text],
-                profile_history_session_count=history_count,
-                d1_history_session_count=None,
-                expected_rows=expected_rows,
-                inserted_rows=inserted_rows,
-                quality_status=readback.get("status"),
-                no_change=persistence.get("status") == "IDEMPOTENT_ALREADY_PRESENT",
-                profile_revision=participation["profile_revision"],
-                producer_version=participation["producer_version"],
-                calendar_revision=participation["calendar_revision"],
-            )
-        participation_completed.add(day_text)
+        from stock_a.research.source_market_breadth import (
+            SOURCE_MARKET_BREADTH_CONTRACT,
+        )
+        from stock_a.storage.postgres.market_breadth import persist_market_breadth
 
-    for day_text in output_days:
-        day = date.fromisoformat(day_text)
-        profile_input_count = int(
-            profile_window_counts.get(
-                day_text,
-                d0_profile_window_counts.get(day_text, profile_history),
-            )
+        target_days = tuple(
+            date.fromisoformat(day)
+            for day in plan.get("module_output_sessions", {}).get("MARKET_BREADTH", ())
         )
-        d1_input_count = int(d1_window_counts.get(day_text, effective_d1_window))
-        history_count = (
-            profile_input_count if profile_input_count > 0 else d1_input_count
-        )
-        if history_count < 1:
-            continue
-        if day_text in profile_days:
-            history_count = int(profile_window_counts.get(day_text, profile_history))
-            profile_unit = next(
+        for day in target_days:
+            day_units = [
                 unit
-                for unit in plan["stage_units"]
-                if unit["stage_code"] == "CORE_PROFILE"
-                and unit["target_session"] == day
-            )
-            begin_callback(job_id=job_id, units=[profile_unit])
-            profile = run_source_symbol_price_profile(
-                config,
-                target_session=day,
-                source_package_id=source_package_id,
-                scope=SOURCE_SYMBOL_PROFILE_SCOPE,
-                session_count=history_count,
-                page_size=100,
-                profile_contract=profile_contract,
-            )
-            profile_inserted = int(profile.get("inserted_count", 0) or 0)
-            progress_callback(
-                job_id=job_id,
-                stage_code="CORE_PROFILE",
-                target_session=day,
-                business_table="stock.source_symbol_price_profiles",
-                source_package_id=source_package_id,
-                source_capture_id=capture_by_session[day_text],
-                profile_history_session_count=history_count,
-                d1_history_session_count=None,
-                expected_rows=raw_count_by_session[day_text],
-                inserted_rows=profile_inserted,
-                quality_status=profile.get("status"),
-                no_change=profile.get("status") == "IDEMPOTENT_READBACK",
-                profile_revision=profile.get("profile_revision"),
-                calendar_revision=profile.get("calendar_revision"),
-            )
-            produce_participation(day_text, history_count)
-
-        if day_text not in d0_days and day_text not in d1_days:
-            continue
-
-        research_units = [
-            unit
-            for unit in plan["stage_units"]
-            if unit["stage_code"] == "D0_D1"
-            and unit["target_session"] == day
-            and unit["status"] == "NOT_STARTED"
-        ]
-        begin_callback(job_id=job_id, units=research_units)
-        run_d1_window = (
-            d1_input_count
-            if day_text in d1_days
-            else min(effective_d1_window, history_count)
-        )
-        report = run_source_research_day(
-            config,
-            target_session=day,
-            research_cutoff=cutoff,
-            source_package_id=source_package_id,
-            d1_history_session_count=run_d1_window,
-            persist=True,
-            include_d0=day_text in d0_days,
-            include_d1=day_text in d1_days,
-            include_static=False,
-        )
-        persistence = report.get("persistence", {})
-        expected = persistence.get("rows_expected", {})
-        inserted = persistence.get("rows_inserted", {})
-        research_tables: list[str] = []
-        if day_text in d0_days:
-            research_tables.extend(
-                (
-                    "stock.source_d0_launch_day_facts",
-                    "stock.source_research_enrollments",
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "MARKET_BREADTH"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                market = compute_source_market_context(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
                 )
-            )
-        if day_text in d1_days:
-            research_tables.extend(
-                (
-                    "stock.source_d1_structure_day_facts",
-                    "stock.source_d1_material_anchor_day_facts",
+                persisted = persist_market_breadth(config, market)
+                readback = read_source_market_context(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    include_symbols=True,
                 )
-            )
-        for table in research_tables:
-            key = table.removeprefix("stock.")
-            if table == "stock.source_research_enrollments":
-                inserted_rows = int(
-                    persistence.get("research_enrollments", {}).get("inserted", 0) or 0
-                )
-                expected_rows = persistence.get("research_enrollments", {}).get(
-                    "expected"
-                )
-                if type(expected_rows) is not int or expected_rows < 0:
+                if (
+                    readback.pg_result.get("storage_status") != "SAVED"
+                    or readback.cohort.source_capture_id != source_capture_id
+                    or readback.calculation.n_source != market.calculation.n_source
+                    or readback.calculation.counts != market.calculation.counts
+                    or readback.calculation.b_fixed_source
+                    != market.calculation.b_fixed_source
+                ):
                     raise DataJobError(
-                        "D0_ENROLLMENT_EXPECTED_ROWS_UNKNOWN",
-                        "D0入组事务未返回可独立核验的精确预期行数。",
+                        "MARKET_BREADTH_CROSS_TRANSACTION_READBACK_MISMATCH",
+                        "市场宽度QFQ事实独立读取与本次计算不一致。",
                         status=409,
                     )
-            else:
-                inserted_rows = int(inserted.get(key, 0) or 0)
-                expected_rows = expected.get(key)
-            producer_version = persistence.get("producer_versions", {}).get(key)
-            progress_callback(
-                job_id=job_id,
-                stage_code="D0_D1",
-                target_session=day,
-                business_table=table,
-                source_package_id=source_package_id,
-                source_capture_id=capture_by_session[day_text],
-                profile_history_session_count=history_count,
-                d1_history_session_count=effective_d1_window,
-                expected_rows=expected_rows,
-                inserted_rows=inserted_rows,
-                quality_status=report.get("status"),
-                no_change=persistence.get("status") == "IDEMPOTENT_ALREADY_PRESENT",
-                producer_version=producer_version,
-                calendar_revision=persistence.get(
-                    "calendar_revision",
-                    report.get("calendar", {}).get("calendar_revision"),
-                ),
-            )
+                for unit in day_units:
+                    table = unit["business_table"]
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=table,
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=market.calendar["calendar_revision"],
+                        producer_version=SOURCE_MARKET_BREADTH_CONTRACT,
+                        research_cutoff=cutoff,
+                    )
+                    expected_rows = (
+                        1
+                        if table == "stock.source_market_breadth_days"
+                        else market.calculation.n_source
+                    )
+                    inserted_rows = (
+                        int(persisted.get("status") == "WRITTEN")
+                        if table == "stock.source_market_breadth_days"
+                        else int(persisted.get("inserted_rows", 0) or 0)
+                    )
+                    if actual_rows != expected_rows:
+                        raise DataJobError(
+                            "MARKET_BREADTH_ROW_COUNT_MISMATCH",
+                            "市场宽度事实行数与精确QFQ来源分母不一致。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="MARKET_BREADTH",
+                        target_session=day,
+                        business_table=table,
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=expected_rows,
+                        inserted_rows=inserted_rows,
+                        quality_status="COMPLETE_QFQ_CAPTURE_READBACK",
+                        no_change=persisted.get("status")
+                        == "IDEMPOTENT_ALREADY_PRESENT",
+                        calendar_revision=market.calendar["calendar_revision"],
+                        producer_version=SOURCE_MARKET_BREADTH_CONTRACT,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001 - 派生域保留确切失败原因。
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="MARKET_BREADTH",
+                    error=error,
+                    message_prefix="市场宽度QFQ生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"市场宽度({day.isoformat()})未闭合：{str(error)[:300]}",
+                    )
+                )
 
-    for day_text in plan.get("market_participation_sessions", ()):
-        if day_text in profile_days:
-            continue
+    profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
+    profile_revision_by_session: dict[str, str] = {}
+    profile_blocked = set(plan.get("profile_insufficient_history_sessions", ()))
+    profile_days = set(plan.get("profile_output_sessions", ())) - profile_blocked
+    profile_windows = plan.get("profile_history_session_counts_by_session", {})
+    for day_text in sorted(profile_days):
         day = date.fromisoformat(day_text)
+        unit = next(
+            (
+                item
+                for item in plan.get("stage_units", ())
+                if item.get("stage_code") == "CORE_PROFILE"
+                and item.get("target_session") == day
+                and item.get("status") == "NOT_STARTED"
+            ),
+            None,
+        )
+        if unit is None:
+            continue
         history_count = int(
-            profile_window_counts.get(
-                day_text,
-                d0_profile_window_counts.get(day_text, profile_history),
+            profile_windows.get(
+                day_text, plan.get("profile_history_session_count") or 1
             )
         )
-        if history_count > 0:
-            produce_participation(day_text, history_count)
+        begin_callback(job_id=job_id, units=[unit])
+        profile = run_source_symbol_price_profile(
+            config,
+            target_session=day,
+            source_capture_id=source_capture_id,
+            research_cutoff=cutoff,
+            scope=SOURCE_SYMBOL_PROFILE_SCOPE,
+            session_count=history_count,
+            page_size=100,
+            profile_contract=profile_contract,
+        )
+        profile_revision = profile.get("profile_revision")
+        if isinstance(profile_revision, str) and profile_revision:
+            profile_revision_by_session[day_text] = profile_revision
+        progress_callback(
+            job_id=job_id,
+            stage_code="CORE_PROFILE",
+            target_session=day,
+            business_table="stock.source_symbol_price_profiles",
+            source_capture_id=source_capture_id,
+            profile_history_session_count=history_count,
+            d1_history_session_count=None,
+            expected_rows=int(profile.get("source_candidate_count", 0)),
+            inserted_rows=int(profile.get("inserted_count", 0) or 0),
+            quality_status=profile.get("status"),
+            no_change=profile.get("status") == "IDEMPOTENT_READBACK",
+            profile_revision=profile.get("profile_revision"),
+            calendar_revision=profile.get("calendar_revision"),
+            producer_version="STOCK_A_CORE_PROFILE_BAOSTOCK_QFQ_R2",
+        )
+        resolved_unit_keys.add(unit_key(unit))
 
-    for day_text in sorted(d0_days):
-        if day_text in profile_blocked:
-            continue
-        day = date.fromisoformat(day_text)
-        history_count = int(d0_profile_window_counts.get(day_text, 0))
-        if history_count < 1:
-            continue
-        static_units = [
-            unit
-            for unit in plan["stage_units"]
-            if unit["stage_code"] == "STATIC_RESEARCH" and unit["target_session"] == day
-        ]
-        begin_callback(job_id=job_id, units=static_units)
-        static = run_source_static_research_day(
+    # 成交参与使用同捕获、同日完整宽度分母和已保存QFQ Profile中的CNY成交比值。
+    if "MARKET_PARTICIPATION" in base_modules:
+        from stock_a.application.source_market_context import (
+            read_source_market_context,
+        )
+        from stock_a.application.source_market_participation import (
+            produce_market_participation,
+        )
+
+        target_days = tuple(
+            date.fromisoformat(day)
+            for day in plan.get("module_output_sessions", {}).get(
+                "MARKET_PARTICIPATION", ()
+            )
+        )
+        for day in target_days:
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "MARKET_PARTICIPATION"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                market = read_source_market_context(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    include_symbols=True,
+                )
+                if market.pg_result.get("storage_status") != "SAVED":
+                    raise DataJobError(
+                        "MARKET_PARTICIPATION_BREADTH_REQUIRED",
+                        "成交参与依赖的精确市场宽度未保存。",
+                        status=409,
+                    )
+                profile_revision = profile_revision_by_session.get(day.isoformat())
+                if not profile_revision:
+                    from stock_a.application.pg_price_profiles import (
+                        source_symbol_price_profile_snapshots,
+                    )
+
+                    expected_profile_window = int(
+                        profile_windows.get(
+                            day.isoformat(),
+                            plan.get("profile_history_session_count") or 1,
+                        )
+                    )
+                    profile_catalog = source_symbol_price_profile_snapshots(
+                        config, max_target_session=day
+                    )
+                    profile_candidates = [
+                        item
+                        for item in profile_catalog.get("snapshots", ())
+                        if item.get("target_session") == day.isoformat()
+                        and item.get("source_capture_id") == source_capture_id
+                        and item.get("history_session_count") == expected_profile_window
+                        and item.get("complete") is True
+                    ]
+                    profile_revisions = {
+                        item.get("profile_revision")
+                        for item in profile_candidates
+                        if isinstance(item.get("profile_revision"), str)
+                    }
+                    if len(profile_revisions) != 1:
+                        raise DataJobError(
+                            "MARKET_PARTICIPATION_PROFILE_SCOPE_AMBIGUOUS",
+                            "成交参与没有唯一绑定同日、同捕获、同窗口的完整Core/Profile修订。",
+                            status=409,
+                        )
+                    profile_revision = next(iter(profile_revisions))
+                outcome = produce_market_participation(
+                    config,
+                    market,
+                    profile_revision=profile_revision,
+                )
+                readback = outcome.get("readback", {})
+                profile_revision = outcome.get("profile_revision")
+                producer_version = outcome.get("producer_version")
+                unknown_count = len(
+                    readback.get("denominator", {}).get("unknown_reason_counts", {})
+                )
+                for unit in day_units:
+                    table = unit["business_table"]
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=table,
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        profile_revision=profile_revision,
+                        producer_version=producer_version,
+                        calendar_revision=market.calendar["calendar_revision"],
+                        research_cutoff=cutoff,
+                    )
+                    expected_rows = (
+                        1
+                        if table == "stock.source_market_participation_days"
+                        else unknown_count
+                    )
+                    inserted_rows = (
+                        int(outcome["persistence"].get("status") == "WRITTEN")
+                        if table == "stock.source_market_participation_days"
+                        else int(
+                            outcome["persistence"].get("inserted_reason_rows", 0) or 0
+                        )
+                    )
+                    if actual_rows != expected_rows:
+                        raise DataJobError(
+                            "MARKET_PARTICIPATION_ROW_COUNT_MISMATCH",
+                            "成交参与保存行数与UNKNOWN原因分解读回不一致。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="MARKET_PARTICIPATION",
+                        target_session=day,
+                        business_table=table,
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=expected_rows,
+                        inserted_rows=inserted_rows,
+                        quality_status=str(readback.get("status") or "INCOMPLETE"),
+                        no_change=outcome["persistence"].get("status")
+                        == "IDEMPOTENT_ALREADY_PRESENT",
+                        profile_revision=profile_revision,
+                        producer_version=producer_version,
+                        calendar_revision=outcome.get("calendar_revision"),
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001 - 派生域保留确切失败原因。
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="MARKET_PARTICIPATION",
+                    error=error,
+                    message_prefix="成交参与QFQ画像归约或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"成交参与({day.isoformat()})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    # D0/Seed与D1共用同一日Capture键，算法窗口按各目标日显式选择。
+    d0_days = (
+        set(plan.get("d0_output_sessions", ())) if "D0" in research_modules else set()
+    )
+    d1_days = (
+        set(plan.get("d1_output_sessions", ())) if "D1" in research_modules else set()
+    )
+    if d0_days or d1_days:
+        from stock_a.application.source_research_day import run_source_research_day
+
+        d0_history_windows = plan.get(
+            "d0_profile_history_session_counts_by_session", {}
+        )
+        d1_history_windows = plan.get("d1_history_session_counts_by_session", {})
+        for day_text in sorted(d0_days | d1_days):
+            day = date.fromisoformat(day_text)
+            include_d0 = day_text in d0_days
+            include_d1 = day_text in d1_days
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") in {"STATIC_RESEARCH", "D0_D1"}
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+                and (unit.get("stage_code") != "STATIC_RESEARCH" or include_d0)
+                and (
+                    unit.get("stage_code") != "D0_D1"
+                    or unit.get("business_table")
+                    not in {
+                        "stock.source_d0_launch_day_facts",
+                        "stock.source_research_enrollments",
+                    }
+                    or include_d0
+                )
+                and (
+                    unit.get("business_table")
+                    not in {
+                        "stock.source_d1_structure_day_facts",
+                        "stock.source_d1_material_anchor_day_facts",
+                    }
+                    or include_d1
+                )
+            ]
+            if not day_units:
+                continue
+            profile_history_count = int(
+                d0_history_windows.get(
+                    day_text,
+                    profile_windows.get(
+                        day_text, plan.get("profile_history_session_count") or 1
+                    ),
+                )
+            )
+            d1_history_count = int(
+                d1_history_windows.get(
+                    day_text, plan.get("d1_calculation_session_count") or 2
+                )
+            )
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                report = run_source_research_day(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    d1_history_session_count=d1_history_count,
+                    persist=True,
+                    history_session_count=(
+                        profile_history_count if include_d0 else None
+                    ),
+                    include_d0=include_d0,
+                    include_d1=include_d1,
+                    include_static=include_d0,
+                )
+                if report.get("status") != "PERSISTED":
+                    raise DataJobError(
+                        "SOURCE_RESEARCH_DAY_NOT_PERSISTED",
+                        "D0/D1单日生产器没有确认PG提交状态。",
+                        status=409,
+                    )
+                persistence = report.get("persistence", {})
+                static_result = report.get("static_persistence", {})
+                profile_revision = static_result.get("profile_revision")
+                if isinstance(profile_revision, str) and profile_revision:
+                    profile_revision_by_session[day_text] = profile_revision
+                calendar_revision = report.get("calendar", {}).get("calendar_revision")
+                if not isinstance(calendar_revision, str) or not calendar_revision:
+                    raise DataJobError(
+                        "SOURCE_RESEARCH_DAY_CALENDAR_MISSING",
+                        "D0/D1持久化回执缺少官方日历修订。",
+                        status=409,
+                    )
+                for unit in day_units:
+                    table = unit["business_table"]
+                    table_name = table.rsplit(".", 1)[-1]
+                    if unit["stage_code"] == "STATIC_RESEARCH":
+                        source_result = static_result
+                        expected_rows = source_result.get("rows_expected", {}).get(
+                            table_name
+                        )
+                        inserted_rows = source_result.get("rows_inserted", {}).get(
+                            table_name, 0
+                        )
+                        producer_version = source_result.get(
+                            "producer_versions", {}
+                        ).get(table_name)
+                        table_calendar_revisions = source_result.get(
+                            "calendar_revisions", {}
+                        ).get(table_name)
+                        if isinstance(
+                            table_calendar_revisions, Sequence
+                        ) and not isinstance(table_calendar_revisions, (str, bytes)):
+                            unique_calendar_revisions = tuple(
+                                sorted(set(table_calendar_revisions))
+                            )
+                        elif isinstance(table_calendar_revisions, str):
+                            unique_calendar_revisions = (table_calendar_revisions,)
+                        else:
+                            unique_calendar_revisions = ()
+                        if len(unique_calendar_revisions) != 1:
+                            raise DataJobError(
+                                "SOURCE_RESEARCH_DAY_STATIC_CALENDAR_SCOPE_INVALID",
+                                f"{table_name}静态事实没有唯一官方日历修订身份。",
+                                status=409,
+                            )
+                        unit_calendar_revision = unique_calendar_revisions[0]
+                    else:
+                        source_result = persistence
+                        if table_name == "source_research_enrollments":
+                            enrollment = source_result.get("research_enrollments", {})
+                            expected_rows = enrollment.get("expected")
+                            inserted_rows = enrollment.get("inserted", 0)
+                        else:
+                            expected_rows = source_result.get("rows_expected", {}).get(
+                                table_name
+                            )
+                            inserted_rows = source_result.get("rows_inserted", {}).get(
+                                table_name, 0
+                            )
+                        producer_version = source_result.get(
+                            "producer_versions", {}
+                        ).get(table_name)
+                        unit_calendar_revision = calendar_revision
+                    if type(expected_rows) is not int or type(inserted_rows) is not int:
+                        raise DataJobError(
+                            "SOURCE_RESEARCH_DAY_TYPED_COUNT_MISSING",
+                            f"单日生产回执缺少{table_name}的独立预期行数。",
+                            status=409,
+                        )
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=table,
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=(
+                            profile_history_count
+                            if table_name == "source_pool_seed_day_facts"
+                            else None
+                        ),
+                        d1_history_session_count=(
+                            d1_history_count
+                            if table_name
+                            in {
+                                "source_d1_structure_day_facts",
+                                "source_d1_material_anchor_day_facts",
+                            }
+                            else None
+                        ),
+                        profile_revision=(
+                            profile_revision
+                            if table_name == "source_pool_seed_day_facts"
+                            else None
+                        ),
+                        producer_version=producer_version,
+                        calendar_revision=unit_calendar_revision,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows != expected_rows:
+                        raise DataJobError(
+                            "SOURCE_RESEARCH_DAY_ROW_COUNT_MISMATCH",
+                            f"{table_name}独立PG行数{actual_rows}不等于单日typed预期{expected_rows}。"
+                            f" capture={source_capture_id}"
+                            f" producer_version={producer_version!r}"
+                            f" calendar_revision={unit_calendar_revision!r}",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code=unit["stage_code"],
+                        target_session=day,
+                        business_table=table,
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=(
+                            profile_history_count
+                            if table_name
+                            in {
+                                "source_d0_scenario_day_facts",
+                                "source_pool_seed_day_facts",
+                            }
+                            else None
+                        ),
+                        d1_history_session_count=(
+                            d1_history_count
+                            if table_name
+                            in {
+                                "source_d1_structure_day_facts",
+                                "source_d1_material_anchor_day_facts",
+                            }
+                            else None
+                        ),
+                        expected_rows=expected_rows,
+                        inserted_rows=inserted_rows,
+                        quality_status=str(source_result.get("status")),
+                        no_change=inserted_rows == 0,
+                        profile_revision=(
+                            profile_revision
+                            if table_name
+                            in {
+                                "source_d0_scenario_day_facts",
+                                "source_pool_seed_day_facts",
+                            }
+                            else None
+                        ),
+                        producer_version=producer_version,
+                        calendar_revision=unit_calendar_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001 - 故障按真实单日域披露。
+                mark_units_incomplete(
+                    day_units,
+                    stage_code=None,
+                    error=error,
+                    message_prefix="D0/D1计算、typed写入或读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"D0/D1({day.isoformat()})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FOCUS_FORMAL" in research_modules:
+        from stock_a.application.source_formal_admission_production import (
+            run_source_formal_admission_range_from_saved,
+        )
+
+        for day_text in plan.get("module_output_sessions", {}).get("FOCUS_FORMAL", ()):
+            day = date.fromisoformat(day_text)
+            unit = next(
+                (
+                    item
+                    for item in plan.get("stage_units", ())
+                    if item.get("stage_code") == "FOCUS_FORMAL"
+                    and item.get("target_session") == day
+                    and item.get("business_table")
+                    == "stock.source_d0_formal_admission_day_facts"
+                    and item.get("status") == "NOT_STARTED"
+                ),
+                None,
+            )
+            if unit is None:
+                continue
+            begin_callback(job_id=job_id, units=[unit])
+            try:
+                profile_revision = profile_revision_by_session.get(day_text)
+                if not profile_revision:
+                    from stock_a.application.pg_price_profiles import (
+                        source_symbol_price_profile_snapshots,
+                    )
+
+                    expected_profile_window = int(
+                        profile_windows.get(
+                            day_text,
+                            plan.get("profile_history_session_count") or 1,
+                        )
+                    )
+                    profile_catalog = source_symbol_price_profile_snapshots(
+                        config, max_target_session=day
+                    )
+                    profile_revisions = {
+                        item.get("profile_revision")
+                        for item in profile_catalog.get("snapshots", ())
+                        if item.get("target_session") == day_text
+                        and item.get("source_capture_id") == source_capture_id
+                        and item.get("history_session_count") == expected_profile_window
+                        and item.get("complete") is True
+                        and isinstance(item.get("profile_revision"), str)
+                    }
+                    if len(profile_revisions) != 1:
+                        raise DataJobError(
+                            "FOCUS_PROFILE_REVISION_AMBIGUOUS",
+                            f"{day_text}没有唯一完整的Core/Profile修订。",
+                            status=409,
+                        )
+                    profile_revision = next(iter(profile_revisions))
+                    profile_revision_by_session[day_text] = profile_revision
+                report = run_source_formal_admission_range_from_saved(
+                    config,
+                    start_session=day,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    profile_revisions_by_session={day_text: profile_revision},
+                )
+                reports = report.get("reports", ())
+                if report.get("status") != "PERSISTED" or len(reports) != 1:
+                    raise DataJobError(
+                        str(report.get("reason_code") or "FOCUS_FORMAL_NOT_PERSISTED"),
+                        "Focus正式准入未从精确D0来源事实生成并读回。",
+                        status=409,
+                    )
+                day_report = reports[0]
+                profile_revision = day_report.get("profile_revision")
+                producer_version = day_report.get("raw_producer_version")
+                calendar_revision = day_report.get("calendar_revision")
+                expected_rows = int(day_report.get("expected_source_count") or 0)
+                actual_rows = data_job_pg.read_business_table_count(
+                    config,
+                    business_table=unit["business_table"],
+                    target_session=day,
+                    source_capture_id=source_capture_id,
+                    profile_revision=profile_revision,
+                    producer_version=producer_version,
+                    calendar_revision=calendar_revision,
+                    research_cutoff=cutoff,
+                )
+                if (
+                    type(producer_version) is not str
+                    or type(calendar_revision) is not str
+                    or not profile_revision
+                    or expected_rows <= 0
+                    or actual_rows != expected_rows
+                ):
+                    raise DataJobError(
+                        "FOCUS_FORMAL_READBACK_MISMATCH",
+                        "Focus正式准入读取键或完整来源池行数未闭合。",
+                        status=409,
+                    )
+                progress_callback(
+                    job_id=job_id,
+                    stage_code="FOCUS_FORMAL",
+                    target_session=day,
+                    business_table=unit["business_table"],
+                    source_capture_id=source_capture_id,
+                    profile_history_session_count=None,
+                    d1_history_session_count=None,
+                    expected_rows=expected_rows,
+                    inserted_rows=int(day_report.get("inserted_rows", 0) or 0),
+                    quality_status="COMPLETE_QFQ_NON_PIT_CAPTURE_READBACK",
+                    no_change=bool(day_report.get("idempotent_rerun")),
+                    profile_revision=profile_revision,
+                    producer_version=producer_version,
+                    calendar_revision=calendar_revision,
+                )
+                resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001 - Focus缺口准确留在对应研究域。
+                mark_units_incomplete(
+                    [unit],
+                    stage_code="FOCUS_FORMAL",
+                    error=error,
+                    message_prefix="Focus正式准入事实未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"Focus正式准入({day.isoformat()})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    def paired_sector_snapshots() -> dict[str, int]:
+        snapshot_pair = plan.get("sector_snapshot_pair", {})
+        snapshot_ids = plan.get("sector_snapshot_ids")
+        if not isinstance(snapshot_ids, Mapping):
+            snapshot_ids = (
+                snapshot_pair.get("snapshot_ids")
+                if isinstance(snapshot_pair, Mapping)
+                else None
+            )
+        if (
+            not isinstance(snapshot_ids, Mapping)
+            or set(snapshot_ids) != {"INDUSTRY", "CONCEPT"}
+            or any(
+                type(value) is not int or value <= 0 for value in snapshot_ids.values()
+            )
+            or snapshot_ids["INDUSTRY"] == snapshot_ids["CONCEPT"]
+        ):
+            raise DataJobError(
+                "SECTOR_SNAPSHOT_PAIR_UNAVAILABLE",
+                "板块研究必须绑定精确、互异的行业与GN概念成员快照。",
+                status=409,
+            )
+        return {kind: int(snapshot_ids[kind]) for kind in ("INDUSTRY", "CONCEPT")}
+
+    def profile_revision_for_session(day: date) -> str:
+        day_text = day.isoformat()
+        from stock_a.application.pg_research import read_source_version_context
+        from stock_a.storage.postgres.static_research_facts import (
+            read_source_pool_seed_forward_scope,
+        )
+
+        source_version = read_source_version_context(
             config,
             target_session=day,
             research_cutoff=cutoff,
-            source_package_id=source_package_id,
-            persist=True,
-            history_session_count=history_count,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
         )
-        static_persistence = static.get("persistence", {})
-        static_expected = static_persistence.get("rows_expected", {})
-        static_inserted = static_persistence.get("rows_inserted", {})
-        for table in (
-            "stock.source_d0_scenario_day_facts",
-            "stock.source_pool_seed_day_facts",
+        if (
+            source_version.get("status") != "AVAILABLE"
+            or source_version.get("version_status") != "COMPLETE"
+            or source_version.get("source_capture_id") != source_capture_id
+            or source_version.get("price_coordinate") != "FORWARD_ADJUSTED"
+            or source_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
+            or type(source_version.get("capture_expected_row_count")) is not int
+            or source_version.get("capture_expected_row_count", 0) <= 0
         ):
-            key = table.removeprefix("stock.")
-            inserted_rows = int(static_inserted.get(key, 0) or 0)
-            producer_versions = static_persistence.get("producer_versions", {}).get(
-                key, [None]
+            raise DataJobError(
+                "SECTOR_PROFILE_SOURCE_NOT_CLOSED",
+                f"{day_text}没有截止内闭合的BaoStock QFQ paired capture。",
+                status=409,
             )
-            producer_version = (
-                producer_versions
-                if key == "source_d0_scenario_day_facts"
-                else producer_versions[0]
-            )
-            progress_callback(
-                job_id=job_id,
-                stage_code="STATIC_RESEARCH",
-                target_session=day,
-                business_table=table,
-                source_package_id=source_package_id,
-                source_capture_id=capture_by_session[day_text],
-                profile_history_session_count=history_count,
-                d1_history_session_count=effective_d1_window,
-                expected_rows=static_expected.get(key),
-                inserted_rows=inserted_rows,
-                quality_status=static.get("status"),
-                no_change=static_persistence.get("status")
-                == "IDEMPOTENT_ALREADY_PRESENT",
-                profile_revision=static_persistence.get("profile_revision"),
-                producer_version=producer_version,
-                calendar_revision=static_persistence.get("calendar_revisions", {}).get(
-                    key, [None]
-                )[0],
+        expected_revision = profile_revision_by_session.get(day_text)
+        if expected_revision is None:
+            from stock_a.application.pg_price_profiles import (
+                source_symbol_price_profile_snapshots,
             )
 
-    focus_days = set(plan.get("module_output_sessions", {}).get("FOCUS_FORMAL", ()))
-    for day_text in sorted(focus_days):
-        day = date.fromisoformat(day_text)
-        formal_unit = next(
-            unit
-            for unit in plan["stage_units"]
-            if unit["stage_code"] == "FOCUS_FORMAL" and unit["target_session"] == day
-        )
-        begin_callback(job_id=job_id, units=[formal_unit])
-        try:
-            formal_range = run_source_formal_admission_range_from_saved(
-                config,
-                start_session=day,
-                target_session=day,
-                research_cutoff=cutoff,
-                source_package_id=source_package_id,
+            expected_window = profile_windows.get(day_text)
+            if expected_window is None and day_text in set(
+                plan.get("profile_output_sessions", ())
+            ):
+                expected_window = plan.get("profile_history_session_count") or 1
+            profile_catalog = source_symbol_price_profile_snapshots(
+                config, max_target_session=day
             )
-        except SourceFormalAdmissionProductionError as error:
-            data_job_pg.mark_progress_unavailable(
-                config,
-                job_id=job_id,
-                stage_code="FOCUS_FORMAL",
-                target_session=day,
-                business_table="stock.source_d0_formal_admission_day_facts",
-                status=(
-                    "INCOMPLETE"
-                    if "READBACK_MISMATCH" in error.code
-                    else "NOT_COMPUTED"
-                ),
-                error_code=error.code,
-                error_message=str(error),
-            )
-            continue
-        formal_reports = formal_range.get("reports", ())
-        if formal_range.get("status") != "PERSISTED" or len(formal_reports) != 1:
-            data_job_pg.mark_progress_unavailable(
-                config,
-                job_id=job_id,
-                stage_code="FOCUS_FORMAL",
-                target_session=day,
-                business_table="stock.source_d0_formal_admission_day_facts",
-                status="NOT_COMPUTED",
-                error_code=str(
-                    formal_range.get("reason_code") or "FORMAL_ADMISSION_NOT_COMPUTED"
-                ),
-                error_message="已保存D0准入输入未闭合，正式Focus准入保留未计算。",
-            )
-            continue
-        formal = formal_reports[0]
-        progress_callback(
-            job_id=job_id,
-            stage_code="FOCUS_FORMAL",
+            profile_candidates = {
+                item.get("profile_revision")
+                for item in profile_catalog.get("snapshots", ())
+                if item.get("target_session") == day_text
+                and item.get("source_capture_id") == source_capture_id
+                and (
+                    expected_window is None
+                    or item.get("history_session_count") == expected_window
+                )
+                and item.get("complete") is True
+                and isinstance(item.get("profile_revision"), str)
+            }
+            if len(profile_candidates) != 1:
+                raise DataJobError(
+                    "SECTOR_PROFILE_REVISION_AMBIGUOUS",
+                    f"{day_text}没有唯一完整的Core/Profile修订与窗口。",
+                    status=409,
+                )
+            expected_revision = next(iter(profile_candidates))
+        seed_scope = read_source_pool_seed_forward_scope(
+            config,
             target_session=day,
-            business_table="stock.source_d0_formal_admission_day_facts",
-            source_package_id=source_package_id,
-            source_capture_id=int(formal.get("source_capture_id") or 0)
-            or capture_by_session[day_text],
-            profile_history_session_count=None,
-            d1_history_session_count=None,
-            expected_rows=int(formal["source_count"]),
-            inserted_rows=int(formal["inserted_rows"]),
-            quality_status=formal.get("status"),
-            no_change=formal.get("idempotent_rerun") is True,
-            profile_revision=formal.get("profile_revision"),
-            producer_version=formal.get("producer_version"),
-            calendar_revision=formal.get("calendar_revision"),
+            source_capture_id=source_capture_id,
+            expected_source_count=source_version["capture_expected_row_count"],
+            profile_revision=expected_revision,
         )
+        revision = seed_scope.get("profile_revision")
+        if (
+            not isinstance(revision, str)
+            or not revision
+            or seed_scope.get("source_count")
+            != source_version["capture_expected_row_count"]
+            or seed_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
+            or seed_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
+        ):
+            raise DataJobError(
+                "SECTOR_SEED_SCOPE_NOT_CLOSED",
+                f"{day_text}的QFQ Seed/profile修订或完整分母未闭合。",
+                status=409,
+            )
+        if revision != expected_revision:
+            raise DataJobError(
+                "SECTOR_PROFILE_REVISION_MISMATCH",
+                f"{day_text}本次Core/Profile与已存Seed修订不一致。",
+                status=409,
+            )
+        profile_revision_by_session[day_text] = revision
+        return revision
 
-    sector_pair = plan.get("sector_snapshot_pair", {})
-    sector_snapshot_ids = sector_pair.get("snapshot_ids")
-    if "SECTOR_PULSE" in set(plan.get("research_modules", ())):
+    def inserted_count(value: Any) -> int:
+        if type(value) is int:
+            return value
+        if isinstance(value, Mapping):
+            return sum(item for item in value.values() if type(item) is int)
+        return 0
+
+    snapshot_ids = None
+    if {"SECTOR_PULSE", "SECTOR_TRANSITION", "SECTOR_FOLLOWUP"} & research_modules:
+        snapshot_ids = paired_sector_snapshots()
+
+    if "SECTOR_PULSE" in research_modules:
         from stock_a.application.source_sector_pulse import run_source_sector_pulse_day
         from stock_a.storage.postgres.sector_pulse_facts import (
             read_source_sector_pulse_day,
         )
-        from stock_a.storage.postgres.static_research_facts import (
-            read_source_pool_seed_forward_scope,
-        )
 
         for day_text in plan.get("sector_pulse_sessions", ()):
             day = date.fromisoformat(day_text)
-            units = [
+            day_units = [
                 unit
-                for unit in plan["stage_units"]
-                if unit["stage_code"] == "SECTOR_PULSE"
-                and unit["target_session"] == day
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "SECTOR_PULSE"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
             ]
-            if not units or units[0].get("status") == "NOT_COMPUTED":
+            if not day_units:
                 continue
-            if sector_pair.get("status") != "AVAILABLE" or not isinstance(
-                sector_snapshot_ids, Mapping
-            ):
-                for unit in units:
-                    data_job_pg.mark_progress_unavailable(
+            previous_progress = data_job_pg.read_progress_unit(
+                config,
+                job_id=job_id,
+                stage_code="SECTOR_PULSE",
+                target_session=day,
+                business_table=day_units[0]["business_table"],
+            )
+            if isinstance(previous_progress, Mapping):
+                try:
+                    from stock_a.application.pg_research import (
+                        read_source_version_context,
+                    )
+
+                    profile_revision = profile_revision_for_session(day)
+                    pulse_readback = read_source_sector_pulse_day(
                         config,
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        source_pool_count=int(
+                            read_source_version_context(
+                                config,
+                                target_session=day,
+                                research_cutoff=cutoff,
+                                source_capture_id=source_capture_id,
+                                price_coordinate="FORWARD_ADJUSTED",
+                            )["capture_expected_row_count"]
+                        ),
+                        snapshot_ids=snapshot_ids,
+                        profile_revision=profile_revision,
+                    )
+                    expected_by_kind = {
+                        kind: int(
+                            pulse_readback.get("by_kind", {})
+                            .get(kind, {})
+                            .get("read_board_count", 0)
+                        )
+                        for kind in ("INDUSTRY", "CONCEPT")
+                    }
+                    expected_rows = sum(expected_by_kind.values())
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=day_units[0]["business_table"],
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        profile_revision=profile_revision,
+                        sector_snapshot_ids=snapshot_ids,
+                        research_cutoff=cutoff,
+                    )
+                    if (
+                        pulse_readback.get("status") == "AVAILABLE"
+                        and pulse_readback.get("profile_revision") == profile_revision
+                        and all(value > 0 for value in expected_by_kind.values())
+                        and actual_rows == expected_rows
+                    ):
+                        for unit in day_units:
+                            progress_callback(
+                                job_id=job_id,
+                                stage_code="SECTOR_PULSE",
+                                target_session=day,
+                                business_table=unit["business_table"],
+                                source_capture_id=source_capture_id,
+                                profile_history_session_count=None,
+                                d1_history_session_count=None,
+                                expected_rows=expected_rows,
+                                inserted_rows=0,
+                                quality_status=(
+                                    "COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK"
+                                ),
+                                no_change=True,
+                                profile_revision=profile_revision,
+                                producer_version="SOURCE_CROSS_PERIOD_PULSE_R1",
+                                sector_snapshot_ids=snapshot_ids,
+                            )
+                            resolved_unit_keys.add(unit_key(unit))
+                        continue
+                except Exception:  # noqa: BLE001 - 读回不满足时继续现役生产器重算。
+                    pass
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                profile_revision = profile_revision_for_session(day)
+                report = run_source_sector_pulse_day(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    profile_revision=profile_revision,
+                    industry_snapshot_id=snapshot_ids["INDUSTRY"],
+                    concept_snapshot_id=snapshot_ids["CONCEPT"],
+                )
+                if (
+                    report.get("source_capture_id") != source_capture_id
+                    or report.get("price_coordinate") != "FORWARD_ADJUSTED"
+                    or report.get("time_role") != "NON_PIT_RETROSPECTIVE"
+                    or report.get("profile_revision") != profile_revision
+                    or report.get("status")
+                    not in {
+                        "WRITTEN_AND_TYPED_READBACK_VERIFIED",
+                        "IDEMPOTENT_ALREADY_PRESENT",
+                    }
+                ):
+                    raise DataJobError(
+                        "SECTOR_PULSE_CAPTURE_IDENTITY_MISMATCH",
+                        "PULSE结果没有绑定预期paired capture、profile和QFQ坐标。",
+                        status=409,
+                    )
+                readback = read_source_sector_pulse_day(
+                    config,
+                    target_session=day,
+                    source_capture_id=source_capture_id,
+                    source_pool_count=int(report["source_pool_count"]),
+                    snapshot_ids=snapshot_ids,
+                    profile_revision=profile_revision,
+                )
+                expected_by_kind = report.get("board_count_by_kind", {})
+                if (
+                    readback.get("status") != "AVAILABLE"
+                    or readback.get("profile_revision") != profile_revision
+                    or set(readback.get("by_kind", {})) != {"INDUSTRY", "CONCEPT"}
+                    or any(
+                        readback["by_kind"][kind].get("status") != "AVAILABLE"
+                        or readback["by_kind"][kind].get("read_board_count")
+                        != expected_by_kind.get(kind)
+                        or readback["by_kind"][kind].get("expected_board_count")
+                        != expected_by_kind.get(kind)
+                        for kind in ("INDUSTRY", "CONCEPT")
+                    )
+                ):
+                    raise DataJobError(
+                        "SECTOR_PULSE_CROSS_TRANSACTION_READBACK_MISMATCH",
+                        "PULSE行业/GN两类事实在独立PG事务中未按快照、profile与分母闭合。",
+                        status=409,
+                    )
+                readback_state_counts = {
+                    state: 0 for state in ("TRUE", "FALSE", "UNKNOWN")
+                }
+                for group in readback["by_kind"].values():
+                    for fact in group.get("facts", {}).values():
+                        state = fact.get("state")
+                        if state not in readback_state_counts:
+                            raise DataJobError(
+                                "SECTOR_PULSE_READBACK_STATE_INVALID",
+                                "独立读回存在无效PULSE三态。",
+                                status=409,
+                            )
+                        readback_state_counts[state] += 1
+                if readback_state_counts != report.get("pulse_state_counts"):
+                    raise DataJobError(
+                        "SECTOR_PULSE_READBACK_VALUE_MISMATCH",
+                        "PULSE独立读回三态数量与本次算法输出不一致。",
+                        status=409,
+                    )
+                expected_rows = sum(
+                    int(expected_by_kind[kind]) for kind in ("INDUSTRY", "CONCEPT")
+                )
+                actual_rows = data_job_pg.read_business_table_count(
+                    config,
+                    business_table=day_units[0]["business_table"],
+                    target_session=day,
+                    source_capture_id=source_capture_id,
+                    profile_revision=profile_revision,
+                    sector_snapshot_ids=snapshot_ids,
+                    research_cutoff=cutoff,
+                )
+                if actual_rows != expected_rows:
+                    raise DataJobError(
+                        "SECTOR_PULSE_TYPED_ROW_COUNT_MISMATCH",
+                        "PULSE表独立PG行数与行业/GN完整板块分母不一致。",
+                        status=409,
+                    )
+                persistence = report.get("persistence", {})
+                inserted_rows = inserted_count(
+                    persistence.get("rows_inserted", {}).get(
+                        "source_sector_cross_period_pulse_facts", 0
+                    )
+                    if isinstance(persistence.get("rows_inserted"), Mapping)
+                    else persistence.get("rows_inserted", 0)
+                )
+                for unit in day_units:
+                    progress_callback(
                         job_id=job_id,
                         stage_code="SECTOR_PULSE",
                         target_session=day,
                         business_table=unit["business_table"],
-                        status="NOT_COMPUTED",
-                        error_code=sector_pair.get("reason_code")
-                        or "SECTOR_SNAPSHOT_PAIR_NOT_AVAILABLE",
-                        error_message="行业与GN概念快照对不可用；板块结果保留未计算。",
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=expected_rows,
+                        inserted_rows=inserted_rows,
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=persistence.get("status")
+                        == "IDEMPOTENT_ALREADY_PRESENT",
+                        profile_revision=profile_revision,
+                        producer_version="SOURCE_CROSS_PERIOD_PULSE_R1",
+                        sector_snapshot_ids=snapshot_ids,
                     )
-                continue
-            begin_callback(job_id=job_id, units=units)
-            capture_id = capture_by_session[day_text]
-            expected_source_count = raw_count_by_session[day_text]
-            seed_scope = read_source_pool_seed_forward_scope(
-                config,
-                target_session=day,
-                source_package_id=source_package_id,
-                source_capture_id=capture_id,
-                expected_source_count=expected_source_count,
-            )
-            pulse = run_source_sector_pulse_day(
-                config,
-                target_session=day,
-                research_cutoff=cutoff,
-                source_package_id=source_package_id,
-                profile_revision=seed_scope["profile_revision"],
-                industry_snapshot_id=int(sector_snapshot_ids["INDUSTRY"]),
-                concept_snapshot_id=int(sector_snapshot_ids["CONCEPT"]),
-            )
-            readback = read_source_sector_pulse_day(
-                config,
-                target_session=day,
-                source_package_id=source_package_id,
-                source_capture_id=capture_id,
-                source_pool_count=expected_source_count,
-                snapshot_ids=sector_snapshot_ids,
-            )
-            if readback.get("status") != "AVAILABLE":
-                raise DataJobError(
-                    "SECTOR_PULSE_READBACK_INCOMPLETE",
-                    "行业与GN概念PULSE没有在独立事务中闭合读回。",
-                    status=409,
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001 - 该派生域保留精确失败原因。
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="SECTOR_PULSE",
+                    error=error,
+                    message_prefix="行业/GN PULSE QFQ生产或独立读回未闭合",
                 )
-            expected_rows = sum(
-                int(group.get("expected_board_count", 0))
-                for group in readback.get("by_kind", {}).values()
-            )
-            verified_rows = sum(
-                int(group.get("read_board_count", 0))
-                for group in readback.get("by_kind", {}).values()
-            )
-            if verified_rows != expected_rows:
-                raise DataJobError(
-                    "SECTOR_PULSE_READBACK_COUNT_MISMATCH",
-                    "行业与GN概念PULSE目录总数与读回行数不一致。",
-                    status=409,
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"行业/GN PULSE({day_text})未闭合：{str(error)[:300]}",
+                    )
                 )
-            inserted_rows = int(
-                pulse.get("persistence", {})
-                .get("rows_inserted", {})
-                .get("source_sector_cross_period_pulse_facts", 0)
-            )
-            progress_callback(
-                job_id=job_id,
-                stage_code="SECTOR_PULSE",
-                target_session=day,
-                business_table="stock.source_sector_cross_period_pulse_facts",
-                source_package_id=source_package_id,
-                source_capture_id=capture_id,
-                profile_history_session_count=None,
-                d1_history_session_count=None,
-                expected_rows=expected_rows,
-                inserted_rows=inserted_rows,
-                quality_status="COMPLETE_NON_PIT_CURRENT_MEMBERSHIP",
-                no_change=pulse.get("persistence", {}).get("status")
-                == "IDEMPOTENT_ALREADY_PRESENT",
-                profile_revision=seed_scope["profile_revision"],
-                producer_version="SOURCE_CROSS_PERIOD_PULSE_R1",
-                sector_snapshot_ids=sector_snapshot_ids,
-            )
 
-    if "SECTOR_TRANSITION" in set(plan.get("research_modules", ())):
+    if "SECTOR_TRANSITION" in research_modules:
         from stock_a.application.source_sector_pulse import (
-            SourceSectorPulseError,
             run_source_sector_pulse_transition_day,
         )
-        from stock_a.storage.postgres.static_research_facts import (
-            StaticResearchPgError,
-            read_source_pool_seed_forward_scope,
-        )
 
-        transition_pairs = plan.get("sector_transition_pairs", {})
-        for day_text in plan.get("sector_transition_sessions", ()):
-            target_day = date.fromisoformat(day_text)
-            unit = next(
-                (
-                    item
-                    for item in plan["stage_units"]
-                    if item.get("stage_code") == "SECTOR_TRANSITION"
-                    and item.get("target_session") == target_day
-                ),
-                None,
-            )
-            if unit is None or unit.get("status") in {"NOT_COMPUTED", "BLOCKED"}:
+        for target_text, previous_text in sorted(
+            plan.get("sector_transition_pairs", {}).items()
+        ):
+            if previous_text is None:
                 continue
-            previous_text = transition_pairs.get(day_text)
-            if not isinstance(previous_text, str):
-                data_job_pg.mark_progress_unavailable(
-                    config,
-                    job_id=job_id,
-                    stage_code="SECTOR_TRANSITION",
-                    target_session=target_day,
-                    business_table=unit["business_table"],
-                    status="NOT_COMPUTED",
-                    error_code="SECTOR_TRANSITION_PREVIOUS_SESSION_MISSING",
-                    error_message="相邻变化缺少前序官方会话；保留未计算。",
-                )
-                continue
+            target_day = date.fromisoformat(target_text)
             previous_day = date.fromisoformat(previous_text)
-            previous_capture = capture_by_session.get(previous_text)
-            target_capture = capture_by_session.get(day_text)
-            if previous_capture is None or target_capture is None:
-                data_job_pg.mark_progress_unavailable(
-                    config,
-                    job_id=job_id,
-                    stage_code="SECTOR_TRANSITION",
-                    target_session=target_day,
-                    business_table=unit["business_table"],
-                    status="NOT_COMPUTED",
-                    error_code="SECTOR_TRANSITION_RAW_CAPTURE_UNAVAILABLE",
-                    error_message="相邻两端缺少精确Raw捕获；不读取其它版本替代。",
-                )
-                continue
-            if sector_pair.get("status") != "AVAILABLE" or not isinstance(
-                sector_snapshot_ids, Mapping
-            ):
-                data_job_pg.mark_progress_unavailable(
-                    config,
-                    job_id=job_id,
-                    stage_code="SECTOR_TRANSITION",
-                    target_session=target_day,
-                    business_table=unit["business_table"],
-                    status="NOT_COMPUTED",
-                    error_code=sector_pair.get("reason_code")
-                    or "SECTOR_SNAPSHOT_PAIR_NOT_AVAILABLE",
-                    error_message="相邻变化缺少同一有效行业/GN快照对。",
-                )
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "SECTOR_TRANSITION"
+                and unit.get("target_session") == target_day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
                 continue
             try:
-                previous_seed = read_source_pool_seed_forward_scope(
+                from stock_a.application.pg_research import (
+                    read_source_version_context,
+                )
+                from stock_a.storage.postgres.sector_pulse_facts import (
+                    read_source_sector_pulse_day,
+                )
+                from stock_a.storage.postgres.sector_pulse_transitions import (
+                    read_source_sector_pulse_transitions,
+                )
+
+                previous_profile_revision = profile_revision_for_session(previous_day)
+                target_profile_revision = profile_revision_for_session(target_day)
+                previous_source = read_source_version_context(
                     config,
                     target_session=previous_day,
-                    source_package_id=source_package_id,
-                    source_capture_id=previous_capture,
-                    expected_source_count=raw_count_by_session[previous_text],
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
                 )
-                target_seed = read_source_pool_seed_forward_scope(
+                target_source = read_source_version_context(
                     config,
                     target_session=target_day,
-                    source_package_id=source_package_id,
-                    source_capture_id=target_capture,
-                    expected_source_count=raw_count_by_session[day_text],
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
                 )
-                begin_callback(job_id=job_id, units=[unit])
-                transition = run_source_sector_pulse_transition_day(
+                previous_pulse = read_source_sector_pulse_day(
+                    config,
+                    target_session=previous_day,
+                    source_capture_id=source_capture_id,
+                    source_pool_count=int(
+                        previous_source["capture_expected_row_count"]
+                    ),
+                    snapshot_ids=snapshot_ids,
+                    profile_revision=previous_profile_revision,
+                )
+                target_pulse = read_source_sector_pulse_day(
+                    config,
+                    target_session=target_day,
+                    source_capture_id=source_capture_id,
+                    source_pool_count=int(target_source["capture_expected_row_count"]),
+                    snapshot_ids=snapshot_ids,
+                    profile_revision=target_profile_revision,
+                )
+                previous_result = {
+                    **previous_pulse,
+                    "target_session": previous_day.isoformat(),
+                    "profile_revision": previous_profile_revision,
+                    "source_version": previous_source,
+                }
+                target_result = {
+                    **target_pulse,
+                    "target_session": target_day.isoformat(),
+                    "profile_revision": target_profile_revision,
+                    "source_version": target_source,
+                }
+                _calendar_id, prior_calendar_revision, _ = _load_official_sessions(
+                    target_day
+                )
+                stored_transition = read_source_sector_pulse_transitions(
+                    config,
+                    previous_result=previous_result,
+                    target_result=target_result,
+                    calendar_identity={
+                        "calendar_id": plan["calendar_id"],
+                        "calendar_revision": prior_calendar_revision,
+                    },
+                )
+                transition_rows = {
+                    kind: int(
+                        stored_transition.get("by_kind", {})
+                        .get(kind, {})
+                        .get("read_board_count", 0)
+                    )
+                    for kind in ("INDUSTRY", "CONCEPT")
+                }
+                expected_rows = sum(transition_rows.values())
+                actual_rows = data_job_pg.read_business_table_count(
+                    config,
+                    business_table=day_units[0]["business_table"],
+                    target_session=target_day,
+                    source_capture_id=source_capture_id,
+                    profile_revision=target_profile_revision,
+                    calendar_revision=prior_calendar_revision,
+                    sector_snapshot_ids=snapshot_ids,
+                    followup_target_sessions=(previous_day,),
+                    research_cutoff=cutoff,
+                )
+                if (
+                    stored_transition.get("status") == "AVAILABLE"
+                    and all(value > 0 for value in transition_rows.values())
+                    and actual_rows == expected_rows
+                ):
+                    for unit in day_units:
+                        progress_callback(
+                            job_id=job_id,
+                            stage_code="SECTOR_TRANSITION",
+                            target_session=target_day,
+                            business_table=unit["business_table"],
+                            source_capture_id=source_capture_id,
+                            profile_history_session_count=None,
+                            d1_history_session_count=None,
+                            expected_rows=expected_rows,
+                            inserted_rows=0,
+                            quality_status=(
+                                "COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK"
+                            ),
+                            no_change=True,
+                            profile_revision=target_profile_revision,
+                            producer_version=(
+                                "SOURCE_CROSS_PERIOD_PULSE_TRANSITION_R1"
+                            ),
+                            calendar_revision=prior_calendar_revision,
+                            sector_snapshot_ids=snapshot_ids,
+                            followup_target_sessions=(previous_day,),
+                        )
+                        resolved_unit_keys.add(unit_key(unit))
+                    continue
+            except Exception:  # noqa: BLE001 - 旧行读回不完整时走正式转折生产器。
+                pass
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                previous_profile_revision = profile_revision_for_session(previous_day)
+                target_profile_revision = profile_revision_for_session(target_day)
+                report = run_source_sector_pulse_transition_day(
                     config,
                     previous_session=previous_day,
                     target_session=target_day,
                     research_cutoff=cutoff,
-                    previous_source_package_id=source_package_id,
-                    target_source_package_id=source_package_id,
-                    previous_profile_revision=previous_seed["profile_revision"],
-                    target_profile_revision=target_seed["profile_revision"],
-                    industry_snapshot_id=int(sector_snapshot_ids["INDUSTRY"]),
-                    concept_snapshot_id=int(sector_snapshot_ids["CONCEPT"]),
+                    source_capture_id=source_capture_id,
+                    previous_profile_revision=previous_profile_revision,
+                    target_profile_revision=target_profile_revision,
+                    industry_snapshot_id=snapshot_ids["INDUSTRY"],
+                    concept_snapshot_id=snapshot_ids["CONCEPT"],
                 )
-            except (SourceSectorPulseError, StaticResearchPgError) as error:
-                code = getattr(error, "code", type(error).__name__)
-                if str(code).startswith(
-                    (
-                        "SECTOR_PULSE_TRANSITION_RAW_",
-                        "SECTOR_PULSE_TRANSITION_PROFILE_",
-                        "STATIC_RESEARCH_",
-                        "SOURCE_POOL_SEED_",
-                    )
+                expected_by_kind = report.get("transition_rows_expected", {})
+                expected_rows = sum(
+                    int(expected_by_kind.get(kind, 0))
+                    for kind in ("INDUSTRY", "CONCEPT")
+                )
+                readback = report.get("readback", {})
+                if (
+                    report.get("source_capture_id") != source_capture_id
+                    or report.get("price_coordinate") != "FORWARD_ADJUSTED"
+                    or report.get("time_role") != "NON_PIT_RETROSPECTIVE"
+                    or report.get("readback_status") != "AVAILABLE"
+                    or readback.get("status") != "AVAILABLE"
+                    or expected_rows <= 0
                 ):
-                    data_job_pg.mark_progress_unavailable(
-                        config,
+                    raise DataJobError(
+                        "SECTOR_TRANSITION_CAPTURE_READBACK_INVALID",
+                        "相邻PULSE变化缺少同一paired capture的QFQ独立读回。",
+                        status=409,
+                    )
+                calendar_revision = report.get("calendar_identity", {}).get(
+                    "calendar_revision"
+                )
+                actual_rows = data_job_pg.read_business_table_count(
+                    config,
+                    business_table=day_units[0]["business_table"],
+                    target_session=target_day,
+                    source_capture_id=source_capture_id,
+                    profile_revision=target_profile_revision,
+                    calendar_revision=calendar_revision,
+                    sector_snapshot_ids=snapshot_ids,
+                    followup_target_sessions=(previous_day,),
+                    research_cutoff=cutoff,
+                )
+                if actual_rows != expected_rows:
+                    raise DataJobError(
+                        "SECTOR_TRANSITION_TYPED_ROW_COUNT_MISMATCH",
+                        "相邻变化typed表独立PG行数与两个板块快照分母不一致。",
+                        status=409,
+                    )
+                persistence = report.get("persistence", {})
+                for unit in day_units:
+                    progress_callback(
                         job_id=job_id,
                         stage_code="SECTOR_TRANSITION",
                         target_session=target_day,
                         business_table=unit["business_table"],
-                        status="NOT_COMPUTED",
-                        error_code=str(code),
-                        error_message=str(error),
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=expected_rows,
+                        inserted_rows=inserted_count(
+                            persistence.get("rows_inserted", 0)
+                        ),
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=persistence.get("status")
+                        == "IDEMPOTENT_ALREADY_PRESENT",
+                        profile_revision=target_profile_revision,
+                        producer_version="SOURCE_CROSS_PERIOD_PULSE_TRANSITION_R1",
+                        calendar_revision=calendar_revision,
+                        sector_snapshot_ids=snapshot_ids,
+                        followup_target_sessions=(previous_day,),
                     )
-                    continue
-                raise
-            if transition.get("readback_status") != "AVAILABLE":
-                raise DataJobError(
-                    "SECTOR_TRANSITION_READBACK_INCOMPLETE",
-                    "行业/GN相邻变化没有在独立事务中闭合读回。",
-                    status=409,
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001 - 相邻变化保留独立状态。
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="SECTOR_TRANSITION",
+                    error=error,
+                    message_prefix="行业/GN相邻变化QFQ生产或独立读回未闭合",
                 )
-            transition_calendar = transition.get("calendar_identity", {})
-            transition_inserted = transition.get("persistence", {}).get(
-                "rows_inserted", 0
-            )
-            progress_callback(
-                job_id=job_id,
-                stage_code="SECTOR_TRANSITION",
-                target_session=target_day,
-                business_table=unit["business_table"],
-                source_package_id=source_package_id,
-                source_capture_id=target_capture,
-                profile_history_session_count=None,
-                d1_history_session_count=None,
-                expected_rows=int(transition.get("transition_rows_expected", 0)),
-                inserted_rows=int(transition_inserted),
-                quality_status="COMPLETE_NON_PIT_ADJACENT_TRANSITION",
-                no_change=transition.get("persistence", {}).get("status")
-                == "IDEMPOTENT_ALREADY_PRESENT",
-                profile_revision=target_seed["profile_revision"],
-                producer_version="SOURCE_CROSS_PERIOD_PULSE_TRANSITION_R1",
-                calendar_revision=transition_calendar.get("calendar_revision"),
-                sector_snapshot_ids=sector_snapshot_ids,
-                followup_target_sessions=(previous_day,),
-            )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"行业/GN相邻变化({target_text})未闭合：{str(error)[:300]}",
+                    )
+                )
 
-    if "SECTOR_FOLLOWUP" in set(plan.get("research_modules", ())):
+    if "SECTOR_FOLLOWUP" in research_modules:
         from stock_a.application.source_sector_pulse_followup import (
             run_source_sector_pulse_followup_day,
         )
-        from stock_a.storage.postgres.sector_pulse_facts import (
-            read_source_sector_pulse_day,
-        )
 
-        due_map = plan.get("sector_followup_due_targets", {})
+        due_by_session = plan.get("sector_followup_due_targets", {})
         for day_text in plan.get("sector_followup_sessions", ()):
+            due_targets = due_by_session.get(day_text, {})
+            if not due_targets:
+                continue
             day = date.fromisoformat(day_text)
-            units = [
+            day_units = [
                 unit
-                for unit in plan["stage_units"]
-                if unit["stage_code"] == "SECTOR_FOLLOWUP"
-                and unit["target_session"] == day
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "SECTOR_FOLLOWUP"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
             ]
-            if not units or not due_map.get(day_text):
+            if not day_units:
                 continue
-            if any(unit.get("status") == "NOT_COMPUTED" for unit in units):
-                continue
-            if sector_pair.get("status") != "AVAILABLE" or not isinstance(
-                sector_snapshot_ids, Mapping
-            ):
-                for unit in units:
-                    data_job_pg.mark_progress_unavailable(
-                        config,
-                        job_id=job_id,
-                        stage_code="SECTOR_FOLLOWUP",
-                        target_session=day,
-                        business_table=unit["business_table"],
-                        status="NOT_COMPUTED",
-                        error_code="SECTOR_SNAPSHOT_PAIR_NOT_AVAILABLE",
-                        error_message="后继研究缺少行业与GN概念的有效同次观察快照。",
-                    )
-                continue
-            capture_id = capture_by_session.get(day_text)
-            if capture_id is None:
-                raise DataJobError(
-                    "SECTOR_FOLLOWUP_T0_RAW_UNAVAILABLE",
-                    "板块后继T0没有精确Raw捕获；不读取其它会话替代。",
-                    status=409,
-                )
-            pulse_readback = read_source_sector_pulse_day(
-                config,
-                target_session=day,
-                source_package_id=source_package_id,
-                source_capture_id=capture_id,
-                source_pool_count=raw_count_by_session[day_text],
-                snapshot_ids=sector_snapshot_ids,
-            )
-            if pulse_readback.get("status") != "AVAILABLE":
-                for unit in units:
-                    data_job_pg.mark_progress_unavailable(
-                        config,
-                        job_id=job_id,
-                        stage_code="SECTOR_FOLLOWUP",
-                        target_session=day,
-                        business_table=unit["business_table"],
-                        status="NOT_COMPUTED",
-                        error_code="SECTOR_FOLLOWUP_PULSE_INPUT_UNAVAILABLE",
-                        error_message="T0行业与GN概念PULSE没有完整精确读回。",
-                    )
-                continue
-            due_targets = {
-                int(horizon): date.fromisoformat(target_date)
-                for horizon, target_date in due_map[day_text].items()
-            }
-            target_package_ids = {horizon: source_package_id for horizon in due_targets}
-            begin_callback(job_id=job_id, units=units)
-            followup = run_source_sector_pulse_followup_day(
-                config,
-                target_session=day,
-                research_cutoff=cutoff,
-                source_package_id=source_package_id,
-                target_package_ids=target_package_ids,
-            )
-            persistence = followup.get("persistence", {})
-            if (
-                followup.get("status") != "PERSISTED"
-                or followup.get("independent_transaction_readback") != "PASS"
-            ):
-                raise DataJobError(
-                    "SECTOR_FOLLOWUP_READBACK_INCOMPLETE",
-                    "行业与GN概念后继结果未在独立事务中闭合读回。",
-                    status=409,
-                )
-            inserted_by_table = {
-                "stock.source_sector_pulse_followup_facts": int(
-                    persistence.get("rows_inserted", 0) or 0
-                ),
-                "stock.source_sector_pulse_cohort_group_facts": int(
-                    persistence.get("cohort_group_rows_inserted", 0) or 0
-                ),
-                "stock.source_sector_pulse_cohort_reason_facts": int(
-                    persistence.get("cohort_reason_rows_inserted", 0) or 0
-                ),
-            }
-            expected_by_table = {
-                "stock.source_sector_pulse_followup_facts": int(
-                    persistence.get("rows_expected", 0) or 0
-                ),
-                "stock.source_sector_pulse_cohort_group_facts": int(
-                    persistence.get("cohort_group_rows_expected", 0) or 0
-                ),
-                "stock.source_sector_pulse_cohort_reason_facts": int(
-                    persistence.get("cohort_reason_rows_expected", 0) or 0
-                ),
-            }
-            for unit in units:
-                table = unit["business_table"]
-                progress_callback(
-                    job_id=job_id,
-                    stage_code="SECTOR_FOLLOWUP",
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                report = run_source_sector_pulse_followup_day(
+                    config,
                     target_session=day,
-                    business_table=table,
-                    source_package_id=source_package_id,
-                    source_capture_id=capture_id,
-                    profile_history_session_count=None,
-                    d1_history_session_count=None,
-                    expected_rows=expected_by_table[table],
-                    inserted_rows=inserted_by_table[table],
-                    quality_status=followup.get("readback_status"),
-                    no_change=persistence.get("status") == "IDEMPOTENT_ALREADY_PRESENT",
-                    profile_revision=followup.get("input", {}).get("profile_revision"),
-                    producer_version="SOURCE_SECTOR_PULSE_FOLLOWUP_CLOSE_R1",
-                    calendar_revision=followup.get("input", {}).get(
-                        "calendar_revision"
-                    ),
-                    sector_snapshot_ids=followup.get("input", {}).get(
-                        "snapshot_ids", sector_snapshot_ids
-                    ),
-                    followup_target_sessions=tuple(due_targets.values()),
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
                 )
+                persistence = report.get("persistence", {})
+                input_scope = report.get("input", {})
+                calendar_revision = input_scope.get("calendar_revision")
+                profile_revision = input_scope.get("profile_revision")
+                readback_status = report.get("readback_status")
+                expected_by_table = {
+                    "source_sector_pulse_followup_facts": persistence.get(
+                        "rows_expected"
+                    ),
+                    "source_sector_pulse_cohort_group_facts": persistence.get(
+                        "cohort_group_rows_expected"
+                    ),
+                    "source_sector_pulse_cohort_reason_facts": persistence.get(
+                        "cohort_reason_rows_expected"
+                    ),
+                }
+                due_sessions = tuple(
+                    date.fromisoformat(value)
+                    for _horizon, value in sorted(
+                        (
+                            (int(horizon), endpoint)
+                            for horizon, endpoint in due_targets.items()
+                        )
+                    )
+                )
+                if (
+                    report.get("status") != "PERSISTED"
+                    or report.get("source_capture_id") != source_capture_id
+                    or report.get("price_coordinate") != "FORWARD_ADJUSTED"
+                    or report.get("time_role") != "NON_PIT_RETROSPECTIVE"
+                    or report.get("independent_transaction_readback") != "PASS"
+                    or readback_status != "AVAILABLE"
+                    or not profile_revision
+                    or not calendar_revision
+                    or not due_sessions
+                    or report.get("incomplete_horizons")
+                    or not isinstance(input_scope.get("snapshot_ids"), Mapping)
+                ):
+                    raise DataJobError(
+                        "SECTOR_FOLLOWUP_CAPTURE_READBACK_INVALID",
+                        "PULSE后继闭合状态、 paired capture、QFQ坐标或到期会话不完整。",
+                        status=409,
+                    )
+                for unit in day_units:
+                    table_name = unit["business_table"].rsplit(".", 1)[-1]
+                    expected_rows = expected_by_table.get(table_name)
+                    if type(expected_rows) is not int:
+                        raise DataJobError(
+                            "SECTOR_FOLLOWUP_TYPED_COUNT_MISSING",
+                            f"后继生产回执缺少{table_name}的typed预期行数。",
+                            status=409,
+                        )
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        profile_revision=profile_revision,
+                        calendar_revision=calendar_revision,
+                        sector_snapshot_ids=input_scope["snapshot_ids"],
+                        followup_target_sessions=due_sessions,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows != expected_rows:
+                        raise DataJobError(
+                            "SECTOR_FOLLOWUP_TYPED_ROW_COUNT_MISMATCH",
+                            f"{table_name}独立PG行数与到期QFQ后继typed预期不一致。",
+                            status=409,
+                        )
+                    inserted_field = {
+                        "source_sector_pulse_followup_facts": "rows_inserted",
+                        "source_sector_pulse_cohort_group_facts": "cohort_group_rows_inserted",
+                        "source_sector_pulse_cohort_reason_facts": "cohort_reason_rows_inserted",
+                    }[table_name]
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="SECTOR_FOLLOWUP",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=expected_rows,
+                        inserted_rows=inserted_count(
+                            persistence.get(inserted_field, 0)
+                        ),
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=persistence.get("status")
+                        == "IDEMPOTENT_ALREADY_PRESENT",
+                        profile_revision=profile_revision,
+                        producer_version="SOURCE_SECTOR_PULSE_FOLLOWUP_CLOSE_R1",
+                        calendar_revision=calendar_revision,
+                        sector_snapshot_ids=input_scope["snapshot_ids"],
+                        followup_target_sessions=due_sessions,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001 - 每张后继事实表各自标记未闭合。
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="SECTOR_FOLLOWUP",
+                    error=error,
+                    message_prefix="PULSE后继QFQ生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"PULSE后继({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    pending_units = []
+    for unit in plan.get("stage_units", ()):
+        if (
+            unit.get("status") not in {"NOT_STARTED", "RUNNING"}
+            or unit_key(unit) in resolved_unit_keys
+            or unit.get("stage_code")
+            in {
+                "SOURCE_BAOSTOCK_PRICES",
+                "SOURCE_SECTOR_MEMBERS",
+                "CORE_PROFILE",
+            }
+        ):
+            continue
+        stored = data_job_pg.read_progress_unit(
+            config,
+            job_id=job_id,
+            stage_code=unit["stage_code"],
+            target_session=unit["target_session"],
+            business_table=unit["business_table"],
+        )
+        if (
+            isinstance(stored, Mapping)
+            and stored.get("status") in complete_progress_statuses
+        ):
+            resolved_unit_keys.add(unit_key(unit))
+            continue
+        pending_units.append(unit)
+    if pending_units:
+        for unit in pending_units:
+            data_job_pg.mark_progress_unavailable(
+                config,
+                job_id=job_id,
+                stage_code=unit["stage_code"],
+                target_session=unit["target_session"],
+                business_table=unit["business_table"],
+                status="INCOMPLETE",
+                error_code="DATA_JOB_STAGE_NOT_RESOLVED",
+                error_message="本任务的现役处理器未闭合该事实单元；保留INCOMPLETE状态。",
+                source_capture_id=source_capture_id,
+            )
+        raise DataJobError(
+            "DATA_JOB_STAGE_NOT_RESOLVED",
+            "本任务结束时仍有派生事实单元未完成或未读回。",
+            status=409,
+        )
+    if incomplete_stage_errors:
+        code, message = incomplete_stage_errors[0]
+        raise DataJobError(
+            code,
+            message,
+            status=409,
+        )
 
 
 __all__ = [

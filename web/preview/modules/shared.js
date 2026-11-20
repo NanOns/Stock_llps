@@ -61,6 +61,7 @@ const state = {
   timelineContext: null,
   timelineRequest: 0,
   timelineNavigation: false,
+  priceCoordinate: "FORWARD_ADJUSTED",
   rawPeriods: null,
   rawPeriodContext: null,
   rawPeriodRequest: 0,
@@ -113,9 +114,6 @@ const labels = {
   PG_HISTORY_SESSION_MISSING: "PG缺少所需历史会话",
   HISTORY_WINDOW_INCOMPLETE: "历史窗口不完整",
   EVALUATED: "已计算",
-  TDX_TARGET_BAR_PRESENT: "目标日有Bar",
-  TDX_TARGET_BAR_MISSING: "目标日缺Bar",
-  TDX_READ_FAILED: "目标日读取失败",
   TARGET_SESSION_BAR_MISSING: "目标会话缺少Bar",
   RECORDS_COMPLETE: "PG窗口记录齐全",
   HISTORY_ROW_NOT_STORED: "历史Raw行未保存",
@@ -126,6 +124,7 @@ const labels = {
   NON_PIT_RETROSPECTIVE: "NON_PIT回溯研究",
   UNKNOWN_NOT_CONNECTED: "官方上市总体未接通",
   RAW_UNADJUSTED: "原始未复权坐标",
+  FORWARD_ADJUSTED: "BaoStock前复权坐标",
   USABLE: "价格窗口可用",
   INSUFFICIENT_VALID_BARS: "有效Bar不足",
   PRICE_FIELDS_UNKNOWN: "价格字段未知",
@@ -208,10 +207,10 @@ const profileFieldLabels = {
   "profile.trend": "趋势状态",
 };
 const pricePositionDefinitions = {
-  c_vs_ma20: { label: "收盘 vs MA20", left: "RAW收盘", right: "MA20" },
+  c_vs_ma20: { label: "收盘 vs MA20", left: "前复权收盘", right: "MA20" },
   c_vs_prior_high20: {
     label: "收盘 vs 严格前20会话高点",
-    left: "RAW收盘",
+    left: "前复权收盘",
     right: "严格前20会话高点",
   },
   ma5_vs_ma20: { label: "MA5 vs MA20", left: "MA5", right: "MA20" },
@@ -268,11 +267,11 @@ async function api(url, options) {
 function selectedVersion() {
   const option = $("versionSelect").selectedOptions[0];
   if (!option || !option.value.includes("|")) return null;
-  const [target_session, rawPackageId] = option.value.split("|");
-  const source_package_id = Number(rawPackageId);
-  if (!Number.isSafeInteger(source_package_id) || source_package_id <= 0)
+  const [target_session, rawCaptureId] = option.value.split("|");
+  const source_capture_id = Number(rawCaptureId);
+  if (!Number.isSafeInteger(source_capture_id) || source_capture_id <= 0)
     return null;
-  return { target_session, source_package_id };
+  return { target_session, source_capture_id };
 }
 function clearResult() {
   $("stockResult").hidden = true;
