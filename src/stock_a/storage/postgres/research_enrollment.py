@@ -14,6 +14,17 @@ from stock_a.domain.source_research_observation import (
 )
 from stock_a.storage.postgres.source_raw import _transaction
 
+_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+_D1_PRODUCER_VERSION = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
+_D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
+_POOL_RULE_IDS = (
+    "LAUNCH_CONFIRM",
+    "RECOVERY_TURN",
+    "s1",
+    "s2",
+    "seed",
+)
+
 
 class EnrollmentConflict(ValueError):
     """登记业务键已有不同内容，拒绝静默覆盖。"""
@@ -34,11 +45,18 @@ def _profile_revision_context(
 
 
 def _read_rule_day_contexts(
-    cursor: Any, *, sessions: Sequence[date], source_capture_id: int
+    cursor: Any,
+    *,
+    sessions: Sequence[date],
+    source_capture_id: int,
+    required_rule_ids: Sequence[str] | None = None,
 ) -> dict[date, dict[str, Any]]:
     """读取每个目标日各自闭合的Raw、Profile、Seed、D1和规则范围。"""
     from stock_a.storage.postgres.research_facts import RULES, RULE_VERSION, SCOPE
 
+    required_rules = frozenset(required_rule_ids or _POOL_RULE_IDS)
+    if not required_rules or not required_rules.issubset(RULES):
+        raise ValueError("规则登记范围必须是现行冻结规则的非空子集")
     selected = tuple(sorted(set(sessions)))
     if not selected:
         return {}
@@ -86,14 +104,25 @@ def _read_rule_day_contexts(
     )
     capture_rows = cursor.fetchall()
     cursor.execute(
-        """SELECT target_session,source_capture_id,profile_revision,
-                  history_requested_session_count,history_stored_session_count,
+        """SELECT p.target_session,p.source_capture_id,p.profile_revision,
+                  p.history_requested_session_count,
                   history_calendar_id,history_calendar_revision,history_window_start,
-                  history_window_end,price_coordinate,count(*),count(DISTINCT source_symbol)
-           FROM source_symbol_price_profiles
-           WHERE target_session=ANY(%s) AND source_capture_id=%s
-           GROUP BY 1,2,3,4,5,6,7,8,9,10 ORDER BY 1,2,3""",
-        (list(selected), source_capture_id),
+                  history_window_end,price_coordinate,
+                  min(history_stored_session_count),max(history_stored_session_count),
+                  count(*),count(DISTINCT p.source_symbol)
+           FROM source_symbol_price_profiles p
+           WHERE p.target_session=ANY(%s) AND p.source_capture_id=%s
+             AND p.price_coordinate='FORWARD_ADJUSTED'
+             AND EXISTS (
+                 SELECT 1 FROM source_pool_seed_day_facts s
+                 WHERE s.target_session=p.target_session
+                   AND s.source_capture_id=p.source_capture_id
+                   AND s.profile_revision=p.profile_revision
+                   AND s.producer_version=%s
+                   AND s.price_coordinate='FORWARD_ADJUSTED'
+             )
+           GROUP BY 1,2,3,4,5,6,7,8,9 ORDER BY 1,2,3""",
+        (list(selected), source_capture_id, _SEED_PRODUCER_VERSION),
     )
     profile_rows = cursor.fetchall()
     cursor.execute(
@@ -103,8 +132,9 @@ def _read_rule_day_contexts(
                   count(DISTINCT source_symbol)
            FROM source_pool_seed_day_facts
            WHERE target_session=ANY(%s) AND source_capture_id=%s
+             AND producer_version=%s
            GROUP BY 1,2,3,4,5,6,7,8,9,10,11 ORDER BY 1,2,3""",
-        (list(selected), source_capture_id),
+        (list(selected), source_capture_id, _SEED_PRODUCER_VERSION),
     )
     seed_rows = cursor.fetchall()
     cursor.execute(
@@ -114,19 +144,21 @@ def _read_rule_day_contexts(
                   count(*),count(DISTINCT source_symbol),count(DISTINCT structure_type)
            FROM source_d1_structure_day_facts
            WHERE target_session=ANY(%s) AND source_capture_id=%s
+             AND producer_version=%s
            GROUP BY 1,2,3,4,5,6,7,8,9,10 ORDER BY 1,2,3""",
-        (list(selected), source_capture_id),
+        (list(selected), source_capture_id, _D1_PRODUCER_VERSION),
     )
     d1_rows = cursor.fetchall()
     cursor.execute(
         """SELECT target_session,source_capture_id,rule_version,profile_revision,
                   history_session_count,d1_history_session_count,event_window_start,
                   calendar_revision,scope,count(*),count(DISTINCT source_symbol),
-                  count(DISTINCT rule_id)
+                  count(DISTINCT rule_id),array_agg(DISTINCT rule_id ORDER BY rule_id)
            FROM source_rule_evaluations
            WHERE target_session=ANY(%s) AND source_capture_id=%s
+             AND rule_id=ANY(%s)
            GROUP BY 1,2,3,4,5,6,7,8,9 ORDER BY 1,2,3,4""",
-        (list(selected), source_capture_id),
+        (list(selected), source_capture_id, list(sorted(required_rules))),
     )
     rule_rows = cursor.fetchall()
 
@@ -198,12 +230,13 @@ def _read_rule_day_contexts(
             profile_capture,
             profile_revision,
             requested_count,
-            stored_count,
             history_calendar_id,
             history_calendar_revision,
             profile_start,
             profile_end,
             profile_coordinate,
+            minimum_stored_count,
+            maximum_stored_count,
             profile_count,
             profile_symbols,
         ) = profile
@@ -243,7 +276,8 @@ def _read_rule_day_contexts(
             and d1_count == raw_count * 5
             and d1_symbols == raw_count
             and structure_count == 5
-            and requested_count == stored_count == history_count
+            and requested_count == history_count
+            and 0 <= minimum_stored_count <= maximum_stored_count <= requested_count
             and profile_start == seed_start
             and profile_end == seed_end == session
             and profile_end == session
@@ -313,6 +347,7 @@ def _read_rule_day_contexts(
             rule_count,
             rule_symbols,
             rule_id_count,
+            stored_rule_ids,
         ) = rule_scope
         rules_complete = (
             rule_capture == capture
@@ -323,9 +358,10 @@ def _read_rule_day_contexts(
             and event_window_start == d1_start
             and rule_calendar_revision == history_calendar_revision
             and scope == SCOPE
-            and rule_count == raw_count * len(RULES)
+            and rule_count == raw_count * len(required_rules)
             and rule_symbols == raw_count
-            and rule_id_count == len(RULES)
+            and rule_id_count == len(required_rules)
+            and frozenset(stored_rule_ids) == required_rules
             and d1_end == session
         )
         context.update(
@@ -340,6 +376,7 @@ def _read_rule_day_contexts(
                 "event_window_start": event_window_start,
                 "calendar_revision": rule_calendar_revision,
                 "scope": scope,
+                "rule_ids": tuple(sorted(stored_rule_ids)),
             },
         )
         contexts[session] = context
@@ -439,6 +476,7 @@ def _rule_context_comparable(
             before_rule["d1_history_count"] == target_rule["d1_history_count"],
             before_rule["calendar_revision"] == target_rule["calendar_revision"],
             before_rule["scope"] == target_rule["scope"],
+            before_rule["rule_ids"] == target_rule["rule_ids"],
             before_rule["event_window_start"] == before_context["d1"]["window_start"],
             target_rule["event_window_start"] == target_context["d1"]["window_start"],
         )
@@ -765,10 +803,19 @@ def insert_rule_enrollments(
     d1_history_count: int,
     event_window_start: date,
     calendar_revision: str,
+    rule_ids: Sequence[str] | None = None,
 ) -> dict[str, int]:
     """在同规则、同来源和合法自然窗口下关联相邻前态。"""
+    from stock_a.storage.postgres.research_facts import RULES
+
+    selected_rules = tuple(sorted(set(rule_ids or _POOL_RULE_IDS)))
+    if not selected_rules or not set(selected_rules).issubset(RULES):
+        raise ValueError("规则登记范围必须是现行冻结规则的非空子集")
     contexts = _read_rule_day_contexts(
-        cursor, sessions=(before, target), source_capture_id=source_capture_id
+        cursor,
+        sessions=(before, target),
+        source_capture_id=source_capture_id,
+        required_rule_ids=selected_rules,
     )
     current_context = contexts.get(target)
     current_rule = (current_context or {}).get("rule") or {}
@@ -822,12 +869,14 @@ def insert_rule_enrollments(
              ON r.rule_id='LAUNCH_CONFIRM' AND d.target_session=r.target_session
             AND d.before_session=%s AND d.source_capture_id=r.source_capture_id
             AND d.target_capture_id=r.source_capture_id AND d.source_symbol=r.source_symbol
+            AND d.producer_version=%s
             AND d.calendar_revision=r.calendar_revision AND d.after_state=r.state
             AND d.price_coordinate='FORWARD_ADJUSTED'
            WHERE r.target_session=%s AND r.source_capture_id=%s
              AND r.rule_version=%s AND r.profile_revision=%s AND r.history_session_count=%s
              AND r.d1_history_session_count=%s AND r.event_window_start=%s
              AND r.calendar_revision=%s AND r.state='TRUE'
+             AND r.rule_id=ANY(%s)
            GROUP BY r.id,r.source_symbol,r.rule_id ORDER BY r.id""",
         (
             before,
@@ -838,6 +887,7 @@ def insert_rule_enrollments(
             previous_event_window_start,
             current_event_window_start,
             before,
+            _D0_LAUNCH_PRODUCER_VERSION,
             target,
             source_capture_id,
             rule_version,
@@ -846,6 +896,7 @@ def insert_rule_enrollments(
             d1_history_count,
             event_window_start,
             calendar_revision,
+            list(selected_rules),
         ),
     )
     rule_rows = cursor.fetchall()
@@ -1061,37 +1112,20 @@ def persist_existing_enrollments(
         cursor.execute(
             """SELECT rule_version,profile_revision,history_session_count,
                       d1_history_session_count,event_window_start,calendar_revision,
-                      count(*),count(DISTINCT source_symbol),count(DISTINCT rule_id),
-                      count(*) FILTER (WHERE rule_id = ANY(%s))
+                      count(*),count(DISTINCT source_symbol),count(DISTINCT rule_id)
                FROM source_rule_evaluations
                WHERE target_session=%s AND source_capture_id=%s
-                 AND d1_history_session_count=%s
+                 AND d1_history_session_count=%s AND rule_id=ANY(%s)
                GROUP BY 1,2,3,4,5,6""",
-            (
-                [
-                    "LAUNCH_CONFIRM",
-                    "RECOVERY_TURN",
-                    "s1",
-                    "s2",
-                    "seed",
-                    "D1_T0",
-                    "D1_ANCHOR_WINDOW",
-                    "STRONG_PULLBACK_DIAGNOSTIC",
-                    "TREND_CONTINUE_DIAGNOSTIC",
-                ],
-                target,
-                source_capture_id,
-                d1_history_count,
-            ),
+            (target, source_capture_id, d1_history_count, list(_POOL_RULE_IDS)),
         )
         scopes = cursor.fetchall()
-        if len(scopes) != 1 or tuple(scopes[0][-4:]) != (
-            raw_count * 9,
+        if len(scopes) != 1 or tuple(scopes[0][-3:]) != (
+            raw_count * len(_POOL_RULE_IDS),
             raw_count,
-            9,
-            raw_count * 9,
+            len(_POOL_RULE_IDS),
         ):
-            raise ValueError("规则事实不是唯一完整的九规则来源池范围")
+            raise ValueError("核心五规则事实不是唯一完整的全池范围")
         version, profile, history_count, d1_count, window_start, calendar_revision = (
             scopes[0][:6]
         )
@@ -1137,6 +1171,7 @@ def persist_existing_enrollments(
             d1_history_count=d1_count,
             event_window_start=window_start,
             calendar_revision=calendar_revision,
+            rule_ids=_POOL_RULE_IDS,
         )
     return {
         "status": "PERSISTED",

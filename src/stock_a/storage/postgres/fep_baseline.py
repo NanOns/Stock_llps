@@ -126,6 +126,21 @@ _RESTATABLE_COLUMNS = (
 )
 
 
+def _forward_calendar_matches_rule_scope(
+    *,
+    rule_revision: str,
+    forward_revision: str,
+    target_session: date,
+    endpoint_session: date,
+) -> bool:
+    """接纳历史窗口复合修订中同一年度的精确官方日历分量。"""
+    if rule_revision == forward_revision:
+        return True
+    if target_session.year != endpoint_session.year:
+        return False
+    return f"{target_session.year}:{forward_revision}" in rule_revision.split("+")
+
+
 def read_fep_source_contexts(
     config: Mapping[str, Any],
     *,
@@ -342,12 +357,22 @@ def read_fep_source_contexts(
                         coordinate == "FORWARD_ADJUSTED"
                         and scope == "NON_PIT_EXPLORATORY"
                         and path_version == PATH_VERSION
-                        and forward_calendar_revision == calendar_revision
+                        and _forward_calendar_matches_rule_scope(
+                            rule_revision=calendar_revision,
+                            forward_revision=forward_calendar_revision,
+                            target_session=target,
+                            endpoint_session=endpoint_session,
+                        )
                         and endpoint_session <= research_cutoff
                     ),
                 }
                 scoped_rows[symbol] = forward
-                if forward_calendar_revision == calendar_revision:
+                if _forward_calendar_matches_rule_scope(
+                    rule_revision=calendar_revision,
+                    forward_revision=forward_calendar_revision,
+                    target_session=target,
+                    endpoint_session=endpoint_session,
+                ):
                     forward_by_horizon[horizon][symbol] = forward
 
             cursor.execute(
@@ -475,11 +500,15 @@ def persist_fep_baseline_rows(
         f"VALUES ({','.join(['%s'] * len(_COLUMNS))}) ON CONFLICT DO NOTHING"
     )
     rules = sorted({row[5] for row in values})
-    capture_ids = sorted({row[1] for row in values})
+    capture_ids = sorted({row[1] for row in values if row[1] is not None})
     cutoffs = sorted({row[0] for row in values})
     horizons = sorted({row[17] for row in values})
     lanes = sorted({row[16] for row in values})
-    if len(capture_ids) != 1 or len(cutoffs) != 1:
+    if (
+        len(capture_ids) != 1
+        or any(row[1] not in {None, capture_ids[0]} for row in values)
+        or len(cutoffs) != 1
+    ):
         raise ValueError("单次FEP写入必须绑定唯一截止与BaoStock来源捕获")
 
     def business_key(row: tuple[Any, ...]) -> tuple[Any, ...]:
@@ -511,7 +540,8 @@ def persist_fep_baseline_rows(
         inserted = cursor.rowcount
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
-                WHERE research_cutoff=%s AND source_capture_id=%s
+                WHERE research_cutoff=%s
+                  AND (source_capture_id=%s OR source_capture_id IS NULL)
                   AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
                 ORDER BY summary_scope,target_session,period_start_session,
                          rule_id,lane,horizon,condition_code,group_code,metric_code""",
@@ -551,7 +581,8 @@ def persist_fep_baseline_rows(
         if restated:
             cursor.execute(
                 f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
-                    WHERE research_cutoff=%s AND source_capture_id=%s
+                    WHERE research_cutoff=%s
+                      AND (source_capture_id=%s OR source_capture_id IS NULL)
                       AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
                     ORDER BY summary_scope,target_session,period_start_session,
                              rule_id,lane,horizon,condition_code,group_code,metric_code""",
@@ -950,13 +981,43 @@ def read_fep_baseline(
     ):
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
-                WHERE research_cutoff=%s AND source_capture_id=%s
+                WHERE research_cutoff=%s
+                  AND (source_capture_id=%s OR source_capture_id IS NULL)
                   AND rule_id=%s AND horizon=%s AND lane=ANY(%s)
                 ORDER BY lane,summary_scope,target_session,condition_code,group_code,metric_code""",
             (research_cutoff, source_capture_id, rule_id, horizon, list(query_lanes)),
         )
-        comparison_rows = cursor.fetchall()
-    rows = [row for row in comparison_rows if row[_COLUMNS.index("lane")] == lane]
+        stored_rows = cursor.fetchall()
+    index = {name: _COLUMNS.index(name) for name in _COLUMNS}
+    t0_rows = [row for row in stored_rows if row[index["summary_scope"]] == "T0"]
+    target_sessions = {row[index["target_session"]] for row in t0_rows}
+    equal_rows = []
+    if target_sessions:
+        period_start = min(target_sessions)
+        period_end = max(target_sessions)
+        context_columns = (
+            "rule_version",
+            "profile_family",
+            "calendar_revision",
+            "path_rule_version",
+            "source_time_quality",
+            "parser_contract",
+            "lane",
+            "horizon",
+        )
+        t0_contexts = {
+            tuple(row[index[name]] for name in context_columns) for row in t0_rows
+        }
+        equal_rows = [
+            row
+            for row in stored_rows
+            if row[index["summary_scope"]] == "EQUAL_DATE"
+            and row[index["period_start_session"]] == period_start
+            and row[index["period_end_session"]] == period_end
+            and tuple(row[index[name]] for name in context_columns) in t0_contexts
+        ]
+    comparison_rows = tuple((*t0_rows, *equal_rows))
+    rows = [row for row in comparison_rows if row[index["lane"]] == lane]
     if not rows:
         return {
             "status": "NOT_COMPUTED",

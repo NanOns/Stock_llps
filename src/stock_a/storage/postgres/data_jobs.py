@@ -81,6 +81,12 @@ _MODULE_PROGRESS_TABLES = {
         }
     ),
     "FOCUS_FORMAL": frozenset({"stock.source_d0_formal_admission_day_facts"}),
+    "FOCUS_RESEARCH_CONTEXT": frozenset(
+        {
+            "stock.source_rule_evaluations",
+            "stock.source_t0_early_observation_facts",
+        }
+    ),
     "SECTOR_PULSE": frozenset(
         {
             "stock.source_sector_cross_period_pulse_facts",
@@ -2503,6 +2509,61 @@ def read_business_table_count(
                 calendar_revision,
             ),
         ),
+        "stock.source_t0_early_observation_facts": (
+            """SELECT count(*)
+               FROM stock.source_t0_early_observation_facts o
+               JOIN stock.source_pool_seed_day_facts s ON s.id=o.seed_fact_id
+               WHERE o.target_session=%s AND o.source_capture_id=%s
+                 AND o.hypothesis_version=%s
+                 AND o.research_mode='NON_PIT_EXPLORATORY'
+                 AND o.price_coordinate='FORWARD_ADJUSTED'
+                 AND s.profile_revision=%s
+                 AND s.history_session_count=%s
+                 AND s.producer_version='SOURCE_POOL_SEED_CORE_PROFILE_R2'
+                 AND (o.membership_snapshot_id=ANY(%s::bigint[])
+                      OR o.membership_snapshot_id IS NULL)""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                profile_revision,
+                profile_history_session_count,
+                snapshots,
+            ),
+        ),
+        "stock.source_rule_evaluations": (
+            """SELECT count(*)
+               FROM stock.source_rule_evaluations r
+               WHERE r.target_session=%s AND r.source_capture_id=%s
+                 AND r.rule_version=%s AND r.profile_revision=%s
+                 AND r.history_session_count=%s
+                 AND r.d1_history_session_count=%s
+                 AND r.calendar_revision=%s AND r.scope='NON_PIT_EXPLORATORY'
+                 AND r.event_window_start=(
+                     SELECT min(d.history_window_start)
+                     FROM stock.source_d1_structure_day_facts d
+                     WHERE d.target_session=%s AND d.source_capture_id=%s
+                       AND d.d1_history_session_count=%s
+                       AND d.calendar_revision=%s
+                       AND d.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R3'
+                       AND d.research_mode='NON_PIT_RETROSPECTIVE'
+                       AND d.price_coordinate='FORWARD_ADJUSTED'
+                     HAVING count(DISTINCT d.history_window_start)=1
+                 )""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                profile_revision,
+                profile_history_session_count,
+                d1_history_session_count,
+                calendar_revision,
+                target_session,
+                source_capture_id,
+                d1_history_session_count,
+                calendar_revision,
+            ),
+        ),
         "stock.source_market_breadth_days": (
             """SELECT count(*) FROM stock.source_market_breadth_days
                WHERE target_session=%s AND source_capture_id=%s
@@ -2657,6 +2718,8 @@ def read_business_table_count(
         "stock.source_d1_material_anchor_day_facts",
         "stock.source_research_enrollments",
         "stock.source_d0_formal_admission_day_facts",
+        "stock.source_rule_evaluations",
+        "stock.source_t0_early_observation_facts",
         "stock.source_market_breadth_days",
         "stock.source_market_breadth_symbols",
         "stock.source_market_participation_days",
@@ -2676,9 +2739,21 @@ def read_business_table_count(
     if business_table in {
         "stock.source_symbol_price_profiles",
         "stock.source_pool_seed_day_facts",
+        "stock.source_rule_evaluations",
+        "stock.source_t0_early_observation_facts",
     } and (profile_history_session_count is None or not profile_revision):
         raise DataJobPgError(
             "DATA_JOB_READBACK_KEY_REQUIRED", "画像读回缺少捕获、窗口或修订键"
+        )
+    if business_table == "stock.source_rule_evaluations" and (
+        type(d1_history_session_count) is not int
+        or d1_history_session_count <= 0
+        or not calendar_revision
+        or not producer_versions
+        or len(producer_versions) != 1
+    ):
+        raise DataJobPgError(
+            "DATA_JOB_READBACK_KEY_REQUIRED", "冻结规则读回缺少版本、D1窗口或日历修订键"
         )
     if business_table == "stock.source_sector_cross_period_pulse_facts" and (
         not profile_revision
@@ -2691,6 +2766,19 @@ def read_business_table_count(
     ):
         raise DataJobPgError(
             "DATA_JOB_READBACK_KEY_REQUIRED", "板块PULSE读回缺少画像修订或双快照键"
+        )
+    if business_table == "stock.source_t0_early_observation_facts" and (
+        not profile_revision
+        or not isinstance(sector_snapshot_ids, Mapping)
+        or set(sector_snapshot_ids) != {"INDUSTRY", "CONCEPT"}
+        or any(
+            type(value) is not int or value <= 0
+            for value in sector_snapshot_ids.values()
+        )
+        or sector_snapshot_ids["INDUSTRY"] == sector_snapshot_ids["CONCEPT"]
+    ):
+        raise DataJobPgError(
+            "DATA_JOB_READBACK_KEY_REQUIRED", "T0观察读回缺少画像修订或互异双快照键"
         )
     if business_table == "stock.source_sector_pulse_adjacent_transitions" and (
         not profile_revision

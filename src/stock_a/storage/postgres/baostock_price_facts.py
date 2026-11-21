@@ -3013,8 +3013,10 @@ def read_baostock_price_page(
     limit: int,
     market: str,
     board: str,
+    allow_full_pool_page: bool = False,
 ) -> dict[str, Any]:
     """按真实BaoStock捕获和所选坐标读取一页价格候选。"""
+    maximum_page_size = 5000 if allow_full_pool_page is True else 100
     if (
         type(target_session) is not date
         or type(cutoff) is not date
@@ -3022,13 +3024,22 @@ def read_baostock_price_page(
         or type(offset) is not int
         or offset < 0
         or type(limit) is not int
-        or not 1 <= limit <= 100
+        or not 1 <= limit <= maximum_page_size
+        or type(allow_full_pool_page) is not bool
+        or allow_full_pool_page
+        and (
+            type(source_capture_id) is not int
+            or source_capture_id <= 0
+            or market != "ALL"
+            or board != "ALL"
+        )
         or market not in {"ALL", "SH", "SZ", "BJ"}
         or board not in {"ALL", "MAIN_BOARD", "GEM", "STAR_BOARD", "BEIJING_BOARD"}
         or price_coordinate not in (RAW_COORDINATE, QFQ_COORDINATE)
     ):
         raise BaoStockPriceFactsError(
-            "PRICE_PAGE_SCOPE_INVALID", "价格候选分页参数无效"
+            "PRICE_PAGE_SCOPE_INVALID",
+            "价格候选分页参数无效；普通页最多100行，全池页须绑定捕获并读取全部市场与板别",
         )
     catalog = read_baostock_price_catalog(config, cutoff=cutoff)
     versions = [

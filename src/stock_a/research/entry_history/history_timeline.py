@@ -132,6 +132,57 @@ def _timeline_qfq_ohlc(row: Mapping[str, Any] | None) -> dict[str, Any]:
     return result | {"quality": quality, "reason": reason}
 
 
+def _timeline_raw_activity(
+    row: Mapping[str, Any] | None, *, field: str
+) -> dict[str, Any]:
+    """RAW活动值始终取未复权typed列，QFQ只改变价格坐标。"""
+    unit = "SHARES" if field == "volume" else "CNY"
+    expected_unit_status = "SHARES_VERIFIED" if field == "volume" else "CNY_VERIFIED"
+    if row is None:
+        return {
+            "value": None,
+            "quality": "UNKNOWN",
+            "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            "unit": unit,
+            "unit_status": None,
+            "price_coordinate": "RAW_UNADJUSTED",
+        }
+    value = row.get(f"raw_{field}")
+    quality = row.get(f"{field}_quality") or "UNKNOWN"
+    reason = row.get(f"{field}_reason")
+    unit_status = row.get(f"{field}_unit_status")
+    if quality == "OBSERVED":
+        try:
+            exact = exact_number(value)
+        except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+            exact = None
+        if exact is None or exact < 0:
+            quality = "BAD_VALUE"
+            reason = reason or f"RAW_{field.upper()}_INVALID"
+        elif unit_status != expected_unit_status:
+            quality = "UNKNOWN"
+            reason = reason or f"RAW_{field.upper()}_UNIT_UNVERIFIED"
+        else:
+            return {
+                "value": _render_field(FieldValue(exact))["value"],
+                "quality": "OBSERVED",
+                "reason": None,
+                "unit": unit,
+                "unit_status": unit_status,
+                "price_coordinate": "RAW_UNADJUSTED",
+            }
+    return {
+        "value": None,
+        "quality": quality
+        if quality in {"UNKNOWN", "NOT_APPLICABLE", "BAD_VALUE"}
+        else "UNKNOWN",
+        "reason": reason or f"RAW_{field.upper()}_QUALITY_UNKNOWN",
+        "unit": unit,
+        "unit_status": unit_status,
+        "price_coordinate": "RAW_UNADJUSTED",
+    }
+
+
 def _raw_coordinate_price_timeline(
     *,
     symbol: str,
@@ -222,6 +273,11 @@ def _raw_coordinate_price_timeline(
                     else "UNKNOWN_HISTORY_SESSION_NOT_STORED"
                 ),
                 "raw_ohlc": raw_ohlc,
+                "raw_activity": {
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "volume": _timeline_raw_activity(row, field="volume"),
+                    "amount": _timeline_raw_activity(row, field="amount"),
+                },
                 "raw_close": raw_ohlc["close"],
                 "qfq_ohlc": qfq_ohlc,
                 "qfq_close": qfq_ohlc["close"],
@@ -1382,6 +1438,11 @@ def research_stock_pg_history_timeline(
             if row
             else "UNKNOWN_HISTORY_SESSION_NOT_STORED",
             "raw_ohlc": raw_ohlc,
+            "raw_activity": {
+                "price_coordinate": "RAW_UNADJUSTED",
+                "volume": _timeline_raw_activity(row, field="volume"),
+                "amount": _timeline_raw_activity(row, field="amount"),
+            },
             "qfq_ohlc": qfq_ohlc,
             "raw_close": raw_close_field,
             "qfq_close": qfq_close_field,

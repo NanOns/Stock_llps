@@ -6386,6 +6386,28 @@ async function openStock(symbol, row = {}) {
         periodResults.textContent = "该周期没有可用历史记录。";
         return;
       }
+      const rawActivityText = (activity) => {
+        const displayField = (field, unit, unitStatus) => {
+          if (
+            field?.quality === "OBSERVED" &&
+            field.unit_status === unitStatus &&
+            activity?.price_coordinate === "RAW_UNADJUSTED"
+          )
+            return `${format(field.value)} ${unit}`;
+          const quality =
+            {
+              UNKNOWN: "未知",
+              NOT_COMPUTED: "未计算",
+              NOT_APPLICABLE: "不适用",
+              BAD_VALUE: "非法值",
+            }[field?.quality] ||
+            field?.quality ||
+            "未知";
+          const reason = field?.reason ? `：${field.reason}` : "";
+          return `${quality}${reason}`;
+        };
+        return `RAW成交量 ${displayField(activity?.volume, "股", "SHARES_VERIFIED")} · RAW成交额 ${displayField(activity?.amount, "元", "CNY_VERIFIED")}`;
+      };
       for (const item of [...entries].reverse()) {
         const label = kind === "day" ? item.session_date : item.period_key;
         const qfq = history.coordinate === "FORWARD_ADJUSTED";
@@ -6414,8 +6436,8 @@ async function openStock(symbol, row = {}) {
             : "BaoStock未复权";
         const line =
           val("close") == null
-            ? `${label} · ${coordinateLabel} · ${quality || "UNKNOWN"} · ${reason || "价格不可用"}`
-            : `${label} · ${coordinateLabel} · 开 ${format(val("open"))}　高 ${format(val("high"))}　低 ${format(val("low"))}　收 ${format(val("close"))} · ${quality || "UNKNOWN"}`;
+            ? `${label} · ${coordinateLabel} · ${quality || "UNKNOWN"} · ${reason || "价格不可用"} · ${rawActivityText(item.raw_activity)}`
+            : `${label} · ${coordinateLabel} · 开 ${format(val("open"))}　高 ${format(val("high"))}　低 ${format(val("low"))}　收 ${format(val("close"))} · ${quality || "UNKNOWN"} · ${rawActivityText(item.raw_activity)}`;
         periodResults.append(node("div", line, "history-row"));
       }
     }

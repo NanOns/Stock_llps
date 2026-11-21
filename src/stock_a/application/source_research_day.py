@@ -290,6 +290,8 @@ def persist_source_t1_forward_from_saved(
             rows_by_symbol[symbol],
             1,
             target_session=endpoint_session,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
             saved_through=min(research_cutoff, endpoint_session),
         )
     paths = prepare_forward_path_rows(

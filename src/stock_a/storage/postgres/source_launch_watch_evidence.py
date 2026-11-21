@@ -13,17 +13,19 @@ from stock_a.storage.postgres import source_raw
 
 
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
-_RULE_IDS = (
+_POOL_RULE_IDS = (
     "LAUNCH_CONFIRM",
     "RECOVERY_TURN",
     "s1",
     "s2",
     "seed",
-    "D1_T0",
-    "D1_ANCHOR_WINDOW",
+)
+_UNIMPLEMENTED_RULE_IDS = ("D1_T0", "D1_ANCHOR_WINDOW")
+_DIAGNOSTIC_RULE_IDS = (
     "STRONG_PULLBACK_DIAGNOSTIC",
     "TREND_CONTINUE_DIAGNOSTIC",
 )
+_RULE_IDS = (*_POOL_RULE_IDS, *_UNIMPLEMENTED_RULE_IDS, *_DIAGNOSTIC_RULE_IDS)
 _D1_STRUCTURE_TYPES = (
     "PIVOT_LOW",
     "PIVOT_HIGH",
@@ -312,6 +314,8 @@ def read_source_launch_watch_evidence(
             rule_scope_params += (selected_profile_revision,)
         if selected_history_session_count is not None:
             rule_scope_params += (selected_history_session_count,)
+        rule_scope_filter += " AND rule_id=ANY(%s)"
+        rule_scope_params += (list(_POOL_RULE_IDS),)
         cursor.execute(
             """SELECT rule_version, profile_revision, history_session_count,
                       d1_history_session_count, event_window_start, calendar_revision,
@@ -335,9 +339,9 @@ def read_source_launch_watch_evidence(
         else:
             rule_scope_status = (
                 "AVAILABLE"
-                if int(rule_scopes[0][7]) == scoped_source_count * len(_RULE_IDS)
+                if int(rule_scopes[0][7]) == scoped_source_count * len(_POOL_RULE_IDS)
                 and int(rule_scopes[0][8]) == scoped_source_count
-                and int(rule_scopes[0][9]) == len(_RULE_IDS)
+                and int(rule_scopes[0][9]) == len(_POOL_RULE_IDS)
                 else "INCOMPLETE"
             )
         rule_scope = rule_scopes[0] if len(rule_scopes) == 1 else None
@@ -433,6 +437,36 @@ def read_source_launch_watch_evidence(
                 ),
             )
             rule_rows = cursor.fetchall()
+
+        diagnostic_focus_symbols: set[str] = set()
+        if rule_scope is not None:
+            cursor.execute(
+                """SELECT DISTINCT o.source_symbol
+                   FROM source_t0_early_observation_facts o
+                   JOIN source_pool_seed_day_facts s ON s.id=o.seed_fact_id
+                   WHERE o.target_session=%s AND o.source_capture_id=%s
+                     AND o.hypothesis_version=%s
+                     AND o.research_mode=%s AND o.price_coordinate=%s
+                     AND o.d0_fact_id IS NOT NULL
+                     AND s.target_session=o.target_session
+                     AND s.source_capture_id=o.source_capture_id
+                     AND s.profile_revision=%s
+                     AND s.history_session_count=%s
+                     AND s.price_coordinate=%s
+                     AND o.source_symbol=ANY(%s)""",
+                (
+                    target_session,
+                    source_capture_id,
+                    "EARLY_BOARD_RELATIVE_T0_R1",
+                    "NON_PIT_EXPLORATORY",
+                    "FORWARD_ADJUSTED",
+                    rule_scope[1],
+                    rule_scope[2],
+                    "FORWARD_ADJUSTED",
+                    list(symbols),
+                ),
+            )
+            diagnostic_focus_symbols = {str(row[0]) for row in cursor.fetchall()}
 
         d1_rows: list[tuple[Any, ...]] = []
         if d1_scope is not None:
@@ -588,19 +622,50 @@ def read_source_launch_watch_evidence(
             }
 
         rules = rule_by_symbol.get(symbol, {})
-        missing_rule_ids = [rule_id for rule_id in _RULE_IDS if rule_id not in rules]
-        complete_rules = {
-            rule_id: rules.get(
-                rule_id,
-                {
+        missing_rule_ids: list[str] = []
+        complete_rules: dict[str, dict[str, Any]] = {}
+        for rule_id in _RULE_IDS:
+            fact = rules.get(rule_id)
+            if fact is not None:
+                complete_rules[rule_id] = {**fact, "fact_status": "AVAILABLE"}
+            elif rule_id in _UNIMPLEMENTED_RULE_IDS:
+                complete_rules[rule_id] = {
+                    "state": "UNKNOWN",
+                    "reasons": [
+                        "SKIPPED_NOT_IMPLEMENTED",
+                        "NO_CURRENT_FORMULA_PRODUCER",
+                    ],
+                    "event_count": 0,
+                    "scope": "NON_PIT_EXPLORATORY",
+                    "fact_status": "SKIPPED_NOT_IMPLEMENTED",
+                }
+                missing_rule_ids.append(rule_id)
+            elif rule_id in _DIAGNOSTIC_RULE_IDS:
+                registered = symbol in diagnostic_focus_symbols
+                fact_status = "NOT_COMPUTED" if registered else "NOT_APPLICABLE"
+                reason_code = (
+                    "T0_FOCUS_DIAGNOSTIC_NOT_PERSISTED_FOR_EXACT_INPUT"
+                    if registered
+                    else "NO_T0_FOCUS_REGISTRATION_FOR_SYMBOL"
+                )
+                complete_rules[rule_id] = {
+                    "state": "UNKNOWN",
+                    "reasons": [fact_status, reason_code],
+                    "event_count": 0,
+                    "scope": "NON_PIT_EXPLORATORY",
+                    "fact_status": fact_status,
+                }
+                if registered:
+                    missing_rule_ids.append(rule_id)
+            else:
+                complete_rules[rule_id] = {
                     "state": "UNKNOWN",
                     "reasons": ["RULE_FACT_NOT_SAVED_FOR_EXACT_INPUT"],
                     "event_count": 0,
                     "scope": "NON_PIT_EXPLORATORY",
-                },
-            )
-            for rule_id in _RULE_IDS
-        }
+                    "fact_status": "NOT_COMPUTED",
+                }
+                missing_rule_ids.append(rule_id)
         known_rule_count = sum(
             item["state"] in {"TRUE", "FALSE"} for item in complete_rules.values()
         )
@@ -613,6 +678,8 @@ def read_source_launch_watch_evidence(
         elif missing_rule_ids:
             rules_status = "PARTIAL"
             rule_reason_codes = ["RULE_FACTS_INCOMPLETE_FOR_SOURCE_SYMBOL"]
+            if any(rule_id in _UNIMPLEMENTED_RULE_IDS for rule_id in missing_rule_ids):
+                rule_reason_codes.append("RULES_SKIPPED_NOT_IMPLEMENTED")
         else:
             rules_status = "AVAILABLE"
             rule_reason_codes = []
@@ -729,6 +796,7 @@ def read_source_launch_watch_evidence(
                             "profile_revision": rule_scope[1],
                             "history_session_count": int(rule_scope[2]),
                             "d1_history_session_count": int(rule_scope[3]),
+                            "partition_rule_ids": list(_POOL_RULE_IDS),
                             "event_window_start": rule_scope[4].isoformat()
                             if isinstance(rule_scope[4], date)
                             else str(rule_scope[4]),
@@ -842,6 +910,7 @@ def read_source_launch_watch_evidence(
             "profile_revision": rule_scope[1],
             "history_session_count": rule_scope[2],
             "d1_history_session_count": rule_scope[3],
+            "partition_rule_ids": list(_POOL_RULE_IDS),
             "event_window_start": rule_scope[4].isoformat()
             if isinstance(rule_scope[4], date)
             else str(rule_scope[4]),
@@ -2209,7 +2278,10 @@ def read_source_launch_watch_page(
 ), scope_status AS (
     SELECT (SELECT status FROM d0_scope_status) AS d0,
            (SELECT status FROM seed_scope_status) AS seed,
-           (SELECT status FROM rule_scope_status) AS rules,
+           CASE WHEN (SELECT status FROM rule_scope_status)='AVAILABLE'
+                THEN 'PARTIAL'
+                ELSE (SELECT status FROM rule_scope_status)
+           END AS rules,
            (SELECT status FROM d1_scope_status) AS d1,
            CASE WHEN (SELECT status FROM seed_scope_status)='AVAILABLE'
                   AND (SELECT status FROM rule_scope_status)='AVAILABLE'
@@ -2490,7 +2562,7 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
                 d1_history_session_count,
                 selected_history_session_count,
                 selected_profile_revision,
-                list(_RULE_IDS),
+                list(_POOL_RULE_IDS),
                 watch_group,
                 board_kind,
                 board_native_id,
@@ -2550,7 +2622,7 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
             "source_pool_python_rows_materialized": len(results),
             "source_rule_rows_returned": 0,
             "source_rule_rows_expected_for_full_scope": expected_source_count
-            * len(_RULE_IDS),
+            * len(_POOL_RULE_IDS),
             "pg_page_query_seconds": time.perf_counter() - started,
         },
     }
@@ -2781,7 +2853,7 @@ def read_source_launch_watch_board_rps_comparisons(
         cursor.execute(
             """WITH params AS (
     SELECT %s::date AS target_session,%s::bigint AS source_capture_id,
-           %s::bigint AS source_capture_id,%s::text AS profile_revision,
+           %s::text AS profile_revision,
            %s::text AS producer_contract,%s::text AS producer_version,
            %s::smallint AS history_session_count,%s::text AS calendar_id,
            %s::text AS calendar_revision,%s::text AS research_mode,
@@ -2796,7 +2868,6 @@ def read_source_launch_watch_board_rps_comparisons(
     FROM source_raw_daily r CROSS JOIN params p
     WHERE r.session_date=p.target_session
       AND r.source_capture_id=p.source_capture_id
-      AND r.source_capture_id=p.source_capture_id
 ), source_count AS (
     SELECT count(*)::numeric AS expected_source_count FROM source_scope
 ), seed AS MATERIALIZED (
@@ -2805,7 +2876,6 @@ def read_source_launch_watch_board_rps_comparisons(
            s.rps20_quality,s.rps20_reason
     FROM source_pool_seed_day_facts s CROSS JOIN params p
     WHERE s.target_session=p.target_session
-      AND s.source_capture_id=p.source_capture_id
       AND s.source_capture_id=p.source_capture_id
       AND s.profile_revision=p.profile_revision
       AND s.producer_contract=p.producer_contract
@@ -2921,7 +2991,6 @@ ORDER BY selected.snapshot_id,selected.board_kind,
          selected.metric""",
             (
                 target_session,
-                source_capture_id,
                 source_capture_id,
                 seed_scope["profile_revision"],
                 seed_scope["producer_contract"],

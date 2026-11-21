@@ -25,6 +25,8 @@ _SNAPSHOT_ROLES = {
     "INDUSTRY": "TDX_TDXHY_CFG",
     "CONCEPT": "TDX_INFOHARBOR_BLOCK_DAT",
 }
+_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+_D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _SEED_SCOPE_FIELDS = (
     "profile_revision",
     "producer_contract",
@@ -131,10 +133,11 @@ def read_source_t0_early_observation_inputs(
                       count(DISTINCT s.source_symbol)::bigint
                FROM source_pool_seed_day_facts s
                WHERE s.target_session=%s AND s.source_capture_id=%s
+                 AND s.producer_version=%s
                GROUP BY s.profile_revision,s.producer_contract,s.producer_version,
                         s.history_session_count,s.calendar_id,s.calendar_revision,
                         s.research_mode,s.price_coordinate""",
-            (target_session, source_capture_id),
+            (target_session, source_capture_id, _SEED_PRODUCER_VERSION),
         )
         seed_scopes = cursor.fetchall()
         if (
@@ -147,6 +150,7 @@ def read_source_t0_early_observation_inputs(
                 "指定来源版本的Seed/Profile分区不唯一或未闭合到Raw来源池分母",
             )
         seed_scope = dict(zip(_SEED_SCOPE_FIELDS, seed_scopes[0][:-2], strict=True))
+        seed_scope["source_count"] = expected_source_count
 
         cursor.execute(
             """SELECT snapshot_id,source_kind,research_mode,source_quality,rows_declared
@@ -176,8 +180,14 @@ def read_source_t0_early_observation_inputs(
                LEFT JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
                WHERE COALESCE(d.target_session,r.target_session)=%s
                  AND COALESCE(d.source_capture_id,r.source_capture_id)=%s
-                 AND COALESCE(d.target_capture_id,r.source_capture_id)=%s""",
-            (target_session, source_capture_id, source_capture_id),
+                 AND COALESCE(d.target_capture_id,r.source_capture_id)=%s
+                 AND (d.id IS NULL OR d.producer_version=%s)""",
+            (
+                target_session,
+                source_capture_id,
+                source_capture_id,
+                _D0_LAUNCH_PRODUCER_VERSION,
+            ),
         )
         expected_registration_count = int(cursor.fetchone()[0])
 
@@ -195,6 +205,7 @@ def read_source_t0_early_observation_inputs(
     WHERE COALESCE(d.target_session,r.target_session)=%s
       AND COALESCE(d.source_capture_id,r.source_capture_id)=%s
       AND COALESCE(d.target_capture_id,r.source_capture_id)=%s
+      AND (d.id IS NULL OR d.producer_version=%s)
 ), memberships AS MATERIALIZED (
     SELECT m.source_symbol,c.id AS catalog_id,c.snapshot_id,
            c.board_kind,c.board_native_id,
@@ -210,6 +221,7 @@ def read_source_t0_early_observation_inputs(
     FROM source_d0_launch_day_facts d
     WHERE d.target_session=%s AND d.source_capture_id=%s
       AND d.target_capture_id=%s
+      AND d.producer_version=%s
     GROUP BY d.source_symbol
 )
 SELECT p.enrollment_id,p.enrollment_kind,p.reason_code,
@@ -233,6 +245,14 @@ JOIN source_pool_seed_day_facts s
   ON s.target_session=p.target_session
  AND s.source_capture_id=p.source_capture_id
  AND s.source_symbol=p.source_symbol
+ AND s.profile_revision=%s
+ AND s.producer_contract=%s
+ AND s.producer_version=%s
+ AND s.history_session_count=%s
+ AND s.calendar_id=%s
+ AND s.calendar_revision=%s
+ AND s.research_mode=%s
+ AND s.price_coordinate=%s
 LEFT JOIN d0_scope d ON d.source_symbol=p.source_symbol
 LEFT JOIN memberships m ON m.source_symbol=p.source_symbol
 ORDER BY p.enrollment_id,m.board_kind,m.board_native_id COLLATE "C" """,
@@ -240,10 +260,13 @@ ORDER BY p.enrollment_id,m.board_kind,m.board_native_id COLLATE "C" """,
                 target_session,
                 source_capture_id,
                 source_capture_id,
+                _D0_LAUNCH_PRODUCER_VERSION,
                 [snapshot_ids["INDUSTRY"], snapshot_ids["CONCEPT"]],
                 target_session,
                 source_capture_id,
                 source_capture_id,
+                _D0_LAUNCH_PRODUCER_VERSION,
+                *(seed_scope[name] for name in _SEED_SCOPE_FIELDS),
             ),
         )
         raw_rows = cursor.fetchall()
@@ -297,7 +320,7 @@ ORDER BY p.enrollment_id,m.board_kind,m.board_native_id COLLATE "C" """,
         )
     if any(
         item["seed_research_mode"] != "NON_PIT_RETROSPECTIVE"
-        or item["seed_price_coordinate"] != "RAW_UNADJUSTED"
+        or item["seed_price_coordinate"] != "FORWARD_ADJUSTED"
         for item in registrations_by_id.values()
     ):
         raise T0EarlyObservationPgError(
@@ -494,7 +517,7 @@ def persist_source_t0_early_observation_facts(
             or _SYMBOL.fullmatch(row["source_symbol"]) is None
             or row["hypothesis_version"] != "EARLY_BOARD_RELATIVE_T0_R1"
             or row["research_mode"] != "NON_PIT_EXPLORATORY"
-            or row["price_coordinate"] != "RAW_UNADJUSTED"
+            or row["price_coordinate"] != "FORWARD_ADJUSTED"
         ):
             raise T0EarlyObservationPgError(
                 "T0_EARLY_ROW_SEMANTICS_INVALID", "观察行身份、版本或NON_PIT语义无效"

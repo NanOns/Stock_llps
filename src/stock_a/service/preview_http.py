@@ -2395,7 +2395,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             symbols=page_symbols,
             rule_scope=(
                 evidence.get("rule_scope")
-                if evidence.get("rules_status") == "AVAILABLE"
+                if isinstance(evidence.get("rule_scope"), Mapping)
                 else None
             ),
         )
@@ -7586,7 +7586,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         symbols=[symbol],
                         rule_scope=(
                             saved_evidence.get("rule_scope")
-                            if saved_evidence.get("rules_status") == "AVAILABLE"
+                            if isinstance(saved_evidence.get("rule_scope"), Mapping)
                             else None
                         ),
                     ).get(symbol, [])

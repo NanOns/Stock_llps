@@ -178,7 +178,7 @@ def finalize_prior_shape_observation(item):
 
 
 def read_source_shape_cohort(config, day, *, research_cutoff, source_capture_id):
-    """对完整T0来源池复用回踩、续强诊断；历史RPS按会话共享。"""
+    """对T0 Focus登记代码复用回踩、续强诊断；历史RPS按会话共享。"""
     target = day["session"]
     source = day["scenarios"]["RECOVERY_TURN"]["source_version"]
     source_capture_id = source["source_capture_id"]
@@ -232,7 +232,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_capture_id)
             price_coordinate="FORWARD_ADJUSTED",
             cutoff=research_cutoff,
             offset=offset,
-            limit=100,
+            limit=5000,
         )
         if (
             page.get("source_capture_id") != source_capture_id
@@ -302,7 +302,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_capture_id)
                     target_session=prior,
                     research_cutoff=research_cutoff,
                     source_capture_id=source_capture_id,
-                    page_size=1000,
+                    page_size=5000,
                 )["facts"]
             except RawSourcePgError as error:
                 if error.code != "PG_SOURCE_NO_MATCH":

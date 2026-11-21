@@ -37,6 +37,7 @@ const STAGE_LABELS = {
   MARKET_BREADTH: "市场宽度",
   MARKET_PARTICIPATION: "成交参与",
   FOCUS_FORMAL: "Focus正式准入",
+  FOCUS_RESEARCH_CONTEXT: "Focus规则与早期板内观察",
   SECTOR_PULSE: "行业 / 概念 PULSE",
   SECTOR_TRANSITION: "行业 / 概念相邻变化",
   SECTOR_FOLLOWUP: "板块跨日跟踪",

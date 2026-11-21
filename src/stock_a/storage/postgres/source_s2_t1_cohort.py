@@ -41,9 +41,10 @@ _SCOPE_SELECT = """SELECT profile_revision, producer_contract, producer_version,
        count(DISTINCT source_symbol)::bigint
     FROM source_pool_seed_day_facts
     WHERE target_session=%s AND source_capture_id=%s
+      AND producer_version='SOURCE_POOL_SEED_CORE_PROFILE_R2'
     GROUP BY profile_revision, producer_contract, producer_version,
              history_session_count, calendar_id, calendar_revision,
-             research_mode, price_coordinate,
+             research_mode, price_coordinate, source_capture_id,
              source_time_quality, source_clock_role, source_available_at
     ORDER BY profile_revision, producer_version"""
 
@@ -322,9 +323,9 @@ def _summary_payload(rows: Sequence[tuple[Any, ...]]) -> dict[str, Any]:
             "status": "INCOMPLETE",
             "reason_codes": ["S2_T1_STATS_DIMENSIONS_INCOMPLETE"],
         }
-    base_context = tuple(records[0][column] for column in COHORT_COLUMNS[:18])
+    base_context = tuple(records[0][column] for column in COHORT_COLUMNS[:17])
     if any(
-        tuple(record[column] for column in COHORT_COLUMNS[:18]) != base_context
+        tuple(record[column] for column in COHORT_COLUMNS[:17]) != base_context
         for record in records[1:]
     ):
         return {"status": "AMBIGUOUS", "reason_codes": ["S2_T1_STATS_CONTEXT_MIXED"]}

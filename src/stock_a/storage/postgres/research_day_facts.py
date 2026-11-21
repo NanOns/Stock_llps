@@ -34,6 +34,22 @@ _STRUCTURE_TYPE_SET = frozenset(_STRUCTURE_TYPES)
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _D1_PRODUCER_VERSION = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+
+
+def _calendar_revision_matches_target_year(
+    revision: str, *, target_year: int, target_revision: str
+) -> bool:
+    """允许D1复合修订中与D0目标日相同的年度日历组件。"""
+    if revision == target_revision:
+        return True
+    components: dict[int, str] = {}
+    for item in revision.split("+"):
+        year_text, separator, annual_revision = item.partition(":")
+        if separator and year_text.isdecimal() and annual_revision:
+            components[int(year_text)] = annual_revision
+    return components.get(target_year) == target_revision
+
+
 _D0_COLUMNS = (
     "before_session",
     "target_session",
@@ -1919,7 +1935,14 @@ def read_source_research_day(
                 d0_source_capture_id=d0_scope[16],
                 d1_source_capture_id=source_capture_id,
             )
-        if d0_scope[10] != calendar_revision or d0_scope[17] != before_session:
+        if (
+            not _calendar_revision_matches_target_year(
+                calendar_revision,
+                target_year=target_session.year,
+                target_revision=d0_scope[10],
+            )
+            or d0_scope[17] != before_session
+        ):
             return incomplete_result(
                 "D0与D1目标日、前态或官方日历上下文不一致",
                 d0_before_session=_json_value(d0_scope[17]),
@@ -2461,21 +2484,41 @@ def read_source_board_comparison(
                 )
 
         cursor.execute(
-            "SELECT DISTINCT r.source_capture_id,c.normalized_count "
-            "FROM source_raw_daily r JOIN source_captures c "
-            "ON c.capture_id=r.source_capture_id "
-            "AND c.target_session=r.session_date "
-            "WHERE r.session_date=%s AND r.source_capture_id=%s "
-            "ORDER BY r.source_capture_id LIMIT 2",
+            "SELECT c.capture_id,c.provider,c.range_start_session,"
+            "c.range_end_session,c.price_coordinates,"
+            "count(r.source_symbol)::bigint,"
+            "count(DISTINCT r.source_symbol)::bigint "
+            "FROM source_captures c LEFT JOIN source_raw_daily r "
+            "ON r.source_capture_id=c.capture_id AND r.session_date=%s "
+            "WHERE c.capture_id=%s "
+            "GROUP BY c.capture_id,c.provider,c.range_start_session,"
+            "c.range_end_session,c.price_coordinates "
+            "ORDER BY c.capture_id LIMIT 2",
             (target_session, source_capture_id),
         )
         captures = cursor.fetchall()
         if len(captures) != 1:
             raise ResearchDayPgError(
                 "BOARD_COMPARISON_SOURCE_VERSION_AMBIGUOUS",
-                "目标日与来源包没有唯一Raw捕获",
+                "目标日期与来源捕获没有唯一Raw事实范围",
             )
-        target_capture_id, expected_source_count = captures[0]
+        (
+            target_capture_id,
+            capture_provider,
+            capture_range_start,
+            capture_range_end,
+            price_coordinates,
+            source_row_count,
+            source_symbol_count,
+        ) = captures[0]
+        capture_scope_valid = (
+            capture_provider == "BAOSTOCK"
+            and capture_range_start is not None
+            and capture_range_start <= target_session
+            and capture_range_end is not None
+            and target_session <= capture_range_end
+            and set(price_coordinates or ()) == {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        )
         cursor.execute(
             "SELECT source_symbol FROM source_raw_daily "
             "WHERE session_date=%s AND source_capture_id=%s "
@@ -2485,7 +2528,10 @@ def read_source_board_comparison(
         source_symbols = {row[0] for row in cursor.fetchall()}
         source_pool_status = (
             "AVAILABLE"
-            if len(source_symbols) == expected_source_count
+            if capture_scope_valid
+            and source_row_count > 0
+            and source_row_count == source_symbol_count
+            and len(source_symbols) == source_symbol_count
             else "INCOMPLETE"
         )
 
@@ -2555,7 +2601,7 @@ def read_source_board_comparison(
             d0_by_symbol = {row[0]: (row[1], row[2]) for row in rows}
             d0_status = (
                 "AVAILABLE"
-                if len(d0_by_symbol) == len(source_symbols)
+                if len(d0_by_symbol) == source_symbol_count
                 else "INCOMPLETE"
             )
 
@@ -2631,7 +2677,7 @@ def read_source_board_comparison(
                 seed_by_symbol = {row[0]: row[1] or "UNKNOWN" for row in rows}
                 seed_status = (
                     "AVAILABLE"
-                    if len(seed_by_symbol) == len(source_symbols)
+                    if len(seed_by_symbol) == source_symbol_count
                     and {row[0] for row in rows} == source_symbols
                     else "INCOMPLETE"
                 )
@@ -2699,7 +2745,7 @@ def read_source_board_comparison(
                 }
                 d1_status = (
                     "AVAILABLE"
-                    if len(d1_by_symbol) == len(source_symbols)
+                    if len(d1_by_symbol) == source_symbol_count
                     and all(
                         item[2] == len(_STRUCTURE_TYPES)
                         for item in d1_by_symbol.values()
@@ -2734,7 +2780,7 @@ def read_source_board_comparison(
         return {
             "membership_count": len(symbols),
             "source_pool_member_count": len(in_source),
-            "source_pool_denominator": len(source_symbols),
+            "source_pool_denominator": source_symbol_count,
             "d0_new_count": len(new_symbols) if d0_status == "AVAILABLE" else None,
             "seed": {
                 "status": seed_status,
@@ -2775,7 +2821,7 @@ def read_source_board_comparison(
         "status": "AVAILABLE" if source_pool_status == "AVAILABLE" else "INCOMPLETE",
         "target_session": target_session.isoformat(),
         "source_capture_id": source_capture_id,
-        "source_pool_count": len(source_symbols),
+        "source_pool_count": source_symbol_count,
         "d0_scope_status": d0_status,
         "seed_scope_status": seed_status,
         "seed_selection": {

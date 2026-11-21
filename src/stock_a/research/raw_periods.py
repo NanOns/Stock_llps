@@ -55,6 +55,14 @@ class RawDailyBar:
     close: Fraction | None
     valid_price_bar: bool
     source_capture_id: int | None
+    raw_volume: Fraction | None
+    raw_volume_quality: str
+    raw_volume_reason: str | None
+    volume_unit_status: str | None
+    raw_amount: Fraction | None
+    raw_amount_quality: str
+    raw_amount_reason: str | None
+    amount_unit_status: str | None
     trade_status_state: str = "UNKNOWN"
     trade_status_reason: str | None = None
 
@@ -91,6 +99,14 @@ class RawPeriodBar:
     high_session: date | None
     low_session: date | None
     close_session: date | None
+    raw_volume: Fraction | None
+    raw_volume_quality: str
+    raw_volume_reason: str | None
+    volume_unit_status: str | None
+    raw_amount: Fraction | None
+    raw_amount_quality: str
+    raw_amount_reason: str | None
+    amount_unit_status: str | None
     daily_rows: tuple[RawDailyBar, ...]
     suspended_session_count: int = 0
     unknown_trade_status_count: int = 0
@@ -173,6 +189,14 @@ def _daily_bar(
             close=None,
             valid_price_bar=False,
             source_capture_id=None,
+            raw_volume=None,
+            raw_volume_quality="UNKNOWN",
+            raw_volume_reason="PG_HISTORY_SESSION_MISSING",
+            volume_unit_status=None,
+            raw_amount=None,
+            raw_amount_quality="UNKNOWN",
+            raw_amount_reason="PG_HISTORY_SESSION_MISSING",
+            amount_unit_status=None,
         )
     if _session(row.get("session_date")) != session:
         raise ContractError("Raw周期输入行日期错配")
@@ -208,6 +232,22 @@ def _daily_bar(
         and quality == "OBSERVED"
         and _valid_ohlc(values)
     )
+    raw_volume, raw_volume_quality, raw_volume_reason = _raw_activity_field(
+        row,
+        value_field="raw_volume",
+        quality_field="volume_quality",
+        reason_field="volume_reason",
+        unit_field="volume_unit_status",
+        expected_unit="SHARES_VERIFIED",
+    )
+    raw_amount, raw_amount_quality, raw_amount_reason = _raw_activity_field(
+        row,
+        value_field="raw_amount",
+        quality_field="amount_quality",
+        reason_field="amount_reason",
+        unit_field="amount_unit_status",
+        expected_unit="CNY_VERIFIED",
+    )
     return RawDailyBar(
         session=session,
         price_coordinate=price_coordinate,
@@ -221,9 +261,75 @@ def _daily_bar(
         close=values[3],
         valid_price_bar=valid,
         source_capture_id=source_capture_id,
+        raw_volume=raw_volume,
+        raw_volume_quality=raw_volume_quality,
+        raw_volume_reason=raw_volume_reason,
+        volume_unit_status=row.get("volume_unit_status"),
+        raw_amount=raw_amount,
+        raw_amount_quality=raw_amount_quality,
+        raw_amount_reason=raw_amount_reason,
+        amount_unit_status=row.get("amount_unit_status"),
         trade_status_state=trade_status_state,
         trade_status_reason=trade_status_reason,
     )
+
+
+def _raw_activity_field(
+    row: Mapping[str, Any],
+    *,
+    value_field: str,
+    quality_field: str,
+    reason_field: str,
+    unit_field: str,
+    expected_unit: str,
+) -> tuple[Fraction | None, str, str | None]:
+    quality = row.get(quality_field)
+    reason = row.get(reason_field)
+    value = _fraction(row.get(value_field))
+    if quality == "OBSERVED":
+        if value is None or value < 0:
+            return None, "BAD_VALUE", reason or f"{value_field.upper()}_INVALID"
+        if row.get(unit_field) != expected_unit:
+            return None, "UNKNOWN", f"{value_field.upper()}_UNIT_UNVERIFIED"
+        return value, "OBSERVED", None
+    if quality in {"UNKNOWN", "NOT_APPLICABLE", "BAD_VALUE"}:
+        return None, str(quality), reason or f"{value_field.upper()}_{quality}"
+    return None, "UNKNOWN", reason or f"{value_field.upper()}_QUALITY_UNKNOWN"
+
+
+def _aggregate_raw_activity(
+    rows: Sequence[RawDailyBar],
+    *,
+    field: str,
+    unit_status_field: str,
+    expected_unit: str,
+    calendar_closed: bool,
+    window_truncated_session_count: int,
+) -> tuple[Fraction | None, str, str | None, str | None]:
+    unit_statuses = {getattr(row, unit_status_field) for row in rows}
+    unit_status = expected_unit if unit_statuses == {expected_unit} else "UNKNOWN"
+    if not calendar_closed:
+        return None, "NOT_COMPUTED", "CALENDAR_PERIOD_NOT_CLOSED", unit_status
+    if window_truncated_session_count:
+        return None, "UNKNOWN", "WINDOW_START_TRUNCATED", unit_status
+    values = [getattr(row, field) for row in rows]
+    qualities = [getattr(row, f"{field}_quality") for row in rows]
+    if (
+        rows
+        and unit_status == expected_unit
+        and all(quality == "OBSERVED" for quality in qualities)
+        and all(value is not None and value >= 0 for value in values)
+    ):
+        return sum(values, Fraction(0)), "OBSERVED", None, expected_unit
+    reasons = list(
+        dict.fromkeys(
+            getattr(row, f"{field}_reason")
+            for row in rows
+            if getattr(row, f"{field}_reason")
+        )
+    )
+    reason = "|".join(reasons) or f"{field.upper()}_PERIOD_INCOMPLETE"
+    return None, "UNKNOWN", reason, unit_status
 
 
 def _period_identity(kind: str, session: date) -> tuple[str, int]:
@@ -308,6 +414,27 @@ def _aggregate_period(
     if not valid_rows:
         reasons.append("NO_VALID_PRICE_COORDINATE_BAR")
 
+    raw_volume, raw_volume_quality, raw_volume_reason, volume_unit_status = (
+        _aggregate_raw_activity(
+            daily_rows,
+            field="raw_volume",
+            unit_status_field="volume_unit_status",
+            expected_unit="SHARES_VERIFIED",
+            calendar_closed=calendar_closed,
+            window_truncated_session_count=truncated_count,
+        )
+    )
+    raw_amount, raw_amount_quality, raw_amount_reason, amount_unit_status = (
+        _aggregate_raw_activity(
+            daily_rows,
+            field="raw_amount",
+            unit_status_field="amount_unit_status",
+            expected_unit="CNY_VERIFIED",
+            calendar_closed=calendar_closed,
+            window_truncated_session_count=truncated_count,
+        )
+    )
+
     first = valid_rows[0] if valid_rows else None
     last = valid_rows[-1] if valid_rows else None
     high_row = max(valid_rows, key=lambda row: row.high) if valid_rows else None
@@ -344,6 +471,14 @@ def _aggregate_period(
         high_session=high_row.session if expose_prices and high_row else None,
         low_session=low_row.session if expose_prices and low_row else None,
         close_session=last.session if expose_prices and last else None,
+        raw_volume=raw_volume,
+        raw_volume_quality=raw_volume_quality,
+        raw_volume_reason=raw_volume_reason,
+        volume_unit_status=volume_unit_status,
+        raw_amount=raw_amount,
+        raw_amount_quality=raw_amount_quality,
+        raw_amount_reason=raw_amount_reason,
+        amount_unit_status=amount_unit_status,
         daily_rows=daily_rows if calendar_closed else (),
         suspended_session_count=suspended_session_count,
         unknown_trade_status_count=unknown_trade_status_count,
@@ -838,6 +973,23 @@ def raw_period_payload(
             "high_source_capture_id": high_row.source_capture_id if high_row else None,
             "low_source_capture_id": low_row.source_capture_id if low_row else None,
         },
+        "raw_activity": {
+            "price_coordinate": "RAW_UNADJUSTED",
+            "volume": {
+                "value": _fraction_payload(period.raw_volume),
+                "quality": period.raw_volume_quality,
+                "reason": period.raw_volume_reason,
+                "unit": "SHARES",
+                "unit_status": period.volume_unit_status,
+            },
+            "amount": {
+                "value": _fraction_payload(period.raw_amount),
+                "quality": period.raw_amount_quality,
+                "reason": period.raw_amount_reason,
+                "unit": "CNY",
+                "unit_status": period.amount_unit_status,
+            },
+        },
         "daily_rows": [
             {
                 "session": row.session.isoformat(),
@@ -854,6 +1006,23 @@ def raw_period_payload(
                 "low": _fraction_payload(row.low) if include_daily_prices else None,
                 "close": _fraction_payload(row.close) if include_daily_prices else None,
                 "source_capture_id": row.source_capture_id,
+                "raw_activity": {
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "volume": {
+                        "value": _fraction_payload(row.raw_volume),
+                        "quality": row.raw_volume_quality,
+                        "reason": row.raw_volume_reason,
+                        "unit": "SHARES",
+                        "unit_status": row.volume_unit_status,
+                    },
+                    "amount": {
+                        "value": _fraction_payload(row.raw_amount),
+                        "quality": row.raw_amount_quality,
+                        "reason": row.raw_amount_reason,
+                        "unit": "CNY",
+                        "unit_status": row.amount_unit_status,
+                    },
+                },
             }
             for row in period.daily_rows
         ],

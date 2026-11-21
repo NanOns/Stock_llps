@@ -18,7 +18,7 @@ from stock_a.storage.postgres.sector_pulse_facts import (
 from stock_a.storage.postgres.source_launch_watch_evidence import (
     read_source_launch_watch_board_rps_comparisons,
 )
-from stock_a.storage.postgres.source_raw import read_source_version_context
+from stock_a.application.pg_research import read_source_version_context
 from stock_a.storage.postgres.t0_early_observations import (
     persist_source_t0_early_observation_facts,
     read_source_t0_early_observation_inputs,
@@ -328,7 +328,6 @@ def persist_source_t0_early_observations_from_saved(
         target_pulse_ids=transition_targets,
         previous_session=previous_session,
         target_session=target_session,
-        source_capture_id=source_capture_id,
         previous_source_capture_id=previous_capture_id,
         target_source_capture_id=source_version["source_capture_id"],
         previous_profile_revision=previous_profile_revision,
@@ -468,10 +467,13 @@ def persist_source_t0_early_observations_from_saved(
                 )
                 metric = comparison.get(metric_name, {})
                 status = metric.get("status", "NOT_COMPUTED")
+                quality = (
+                    metric.get("quality") or registration.get(quality_name) or "UNKNOWN"
+                )
+                if quality == "UNKNOWN_DATA":
+                    quality = "UNKNOWN"
                 metric_details[metric_name] = {
-                    "quality": metric.get("quality")
-                    or registration.get(quality_name)
-                    or "UNKNOWN",
+                    "quality": quality,
                     "reason": metric.get("reason") or registration.get(reason_name),
                     "rank_first": metric.get("rank_first")
                     if status == "AVAILABLE"

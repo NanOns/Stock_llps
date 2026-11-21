@@ -8,6 +8,7 @@ from datetime import date
 from fractions import Fraction
 from typing import Any
 
+from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.source_fep_baseline import aggregate_days, summarize_day
 from stock_a.storage.postgres.fep_baseline import (
@@ -597,10 +598,24 @@ def prepare_fep_baseline(
             "source_io_attempted": False,
             "ddl_executed": False,
         }
-    _, _, calendar_revision, calendar_sessions = _load_calendar(research_cutoff)
-    if any(context["calendar_revision"] != calendar_revision for context in contexts):
-        raise ValueError("T0日历修订与官方交易日历不一致，拒绝生产FEP")
+    calendar_data, _, calendar_revision, calendar_sessions = _load_calendar(
+        research_cutoff
+    )
+    annual_calendar_revision = calendar_data.get("revision")
     session_index = {session: index for index, session in enumerate(calendar_sessions)}
+    for context in contexts:
+        target = context["target_session"]
+        resolved, _window, rule_calendar_revision = resolve_pg_history_window(
+            target.isoformat(), context["d1_history_session_count"]
+        )
+        annual_component = f"{target.year}:{annual_calendar_revision}"
+        if (
+            resolved != target
+            or target not in session_index
+            or rule_calendar_revision != context["calendar_revision"]
+            or annual_component not in context["calendar_revision"].split("+")
+        ):
+            raise ValueError("T0规则与Forward不在同一官方日历修订链，拒绝生产FEP")
     by_aggregate_identity: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for context in contexts:
         identity = (

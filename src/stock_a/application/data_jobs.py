@@ -55,6 +55,10 @@ _STAGE_TABLES = {
         "stock.source_research_enrollments",
     ),
     "FOCUS_FORMAL": ("stock.source_d0_formal_admission_day_facts",),
+    "FOCUS_RESEARCH_CONTEXT": (
+        "stock.source_rule_evaluations",
+        "stock.source_t0_early_observation_facts",
+    ),
     "SECTOR_PULSE": ("stock.source_sector_cross_period_pulse_facts",),
     "SECTOR_TRANSITION": ("stock.source_sector_pulse_adjacent_transitions",),
     "SECTOR_FOLLOWUP": (
@@ -73,6 +77,7 @@ _STAGE_ORDER = {
     "D0_D1": 6,
     "STATIC_RESEARCH": 7,
     "FOCUS_FORMAL": 8,
+    "FOCUS_RESEARCH_CONTEXT": 8,
     "SECTOR_PULSE": 9,
     "SECTOR_TRANSITION": 10,
     "SECTOR_FOLLOWUP": 11,
@@ -94,11 +99,6 @@ _MODULES = {
 }
 _UNCOORDINATED_RESEARCH_CONSUMERS = (
     (
-        "source_rule_evaluations",
-        "规则评估",
-        "当前菜单协调器没有该现役生产者，清理后依赖它的规则与观察读取会保留未计算状态。",
-    ),
-    (
         "source_cohort_group_stats",
         "Cohort分组统计",
         "当前菜单协调器没有该现役生产者，清理后Cohort统计读取会保留未计算状态。",
@@ -117,11 +117,6 @@ _UNCOORDINATED_RESEARCH_CONSUMERS = (
         "source_research_observation_segment_days",
         "观察持续分段",
         "当前菜单协调器没有该现役生产者，清理后观察分段读取会保留未计算状态。",
-    ),
-    (
-        "source_t0_early_observation_facts",
-        "T0早期观察",
-        "当前菜单协调器没有该现役生产者，清理后T0早期观察读取会保留未计算状态。",
     ),
 )
 _CLEANUP_OPERATIONS = {"CLEAR_DERIVED", "CLEAR_AND_REGENERATE"}
@@ -536,11 +531,13 @@ def build_data_job_plan(
     cutoff: date,
     raw_coverage: Mapping[str, Any],
     execution_authorized: bool,
+    sector_pair: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from datetime import datetime
 
     """按官方日历、BaoStock坐标捕获和截止日生成不写数据的任务计划。"""
     request = _request_fields(body)
+    sector_pair = sector_pair if isinstance(sector_pair, Mapping) else {}
     if type(cutoff) is not date:
         raise DataJobError("DATA_JOB_CUTOFF_REQUIRED", "服务必须绑定明确研究截止日。")
     mode = request["mode"]
@@ -998,6 +995,8 @@ def build_data_job_plan(
                 d1_inputs[day] = ()
     if "SECTOR_PULSE" in selected_research_modules:
         required_raw_sessions.update(module_output_sessions.get("SECTOR_PULSE", ()))
+    if "FOCUS_FORMAL" in selected_research_modules:
+        required_raw_sessions.update(module_output_sessions.get("FOCUS_FORMAL", ()))
     if "SECTOR_TRANSITION" in selected_research_modules:
         for target_text, previous_text in sector_transition_pairs.items():
             required_raw_sessions.add(date.fromisoformat(target_text))
@@ -1582,6 +1581,18 @@ def build_data_job_plan(
         formal_status = (
             "NOT_COMPUTED" if day.isoformat() in focus_insufficient else "NOT_STARTED"
         )
+        rules_status = (
+            "NOT_COMPUTED"
+            if day.isoformat() in focus_insufficient
+            or day.isoformat() in d1_insufficient
+            else "NOT_STARTED"
+        )
+        t0_status = (
+            "NOT_COMPUTED"
+            if day.isoformat() in focus_insufficient
+            or sector_pair.get("status") != "AVAILABLE"
+            else "NOT_STARTED"
+        )
         _unit(
             units,
             stage="FOCUS_FORMAL",
@@ -1594,6 +1605,38 @@ def build_data_job_plan(
             error_message="D0或Core/Profile前置事实未闭合，正式Focus准入保留未计算。"
             if formal_status == "NOT_COMPUTED"
             else None,
+        )
+        _unit(
+            units,
+            stage="FOCUS_RESEARCH_CONTEXT",
+            target_session=day,
+            business_table="stock.source_rule_evaluations",
+            status=rules_status,
+            error_code=(
+                "FROZEN_RULE_INPUTS_UNAVAILABLE"
+                if rules_status == "NOT_COMPUTED"
+                else None
+            ),
+            error_message=(
+                "冻结规则所需的D0/Seed/Profile或D1 QFQ输入不可用；不补造规则值。"
+                if rules_status == "NOT_COMPUTED"
+                else None
+            ),
+        )
+        _unit(
+            units,
+            stage="FOCUS_RESEARCH_CONTEXT",
+            target_session=day,
+            business_table="stock.source_t0_early_observation_facts",
+            status=t0_status,
+            error_code=(
+                "T0_EARLY_INPUTS_UNAVAILABLE" if t0_status == "NOT_COMPUTED" else None
+            ),
+            error_message=(
+                "T0观察所需的D0/Profile输入或行业/GN快照对不可用；保留未计算。"
+                if t0_status == "NOT_COMPUTED"
+                else None
+            ),
         )
     for day in d1_sessions:
         status = "NOT_COMPUTED" if day.isoformat() in d1_insufficient else "NOT_STARTED"
@@ -1620,6 +1663,7 @@ def build_data_job_plan(
             ("STATIC_RESEARCH", "stock.source_pool_seed_day_facts"),
             ("D0_D1", "stock.source_d0_launch_day_facts"),
             ("D0_D1", "stock.source_research_enrollments"),
+            ("FOCUS_RESEARCH_CONTEXT", "stock.source_rule_evaluations"),
         ):
             _unit(
                 units,
@@ -1638,6 +1682,15 @@ def build_data_job_plan(
             status="SKIPPED_BY_USER",
             error_code="SKIPPED_BY_USER",
             error_message="用户关闭D0输出，正式Focus准入随之跳过。",
+        )
+        _unit(
+            units,
+            stage="FOCUS_RESEARCH_CONTEXT",
+            target_session=target,
+            business_table="stock.source_t0_early_observation_facts",
+            status="SKIPPED_BY_USER",
+            error_code="SKIPPED_BY_USER",
+            error_message="用户关闭D0输出，T0早期观察随之跳过。",
         )
     if d1_count == 0 and request["legacy_request"]:
         for table in (
@@ -2078,6 +2131,7 @@ class DataJobCoordinator:
             "SECTOR_PULSE",
             "SECTOR_TRANSITION",
             "SECTOR_FOLLOWUP",
+            "FOCUS_FORMAL",
         } & set(request["selected_modules"]):
             from stock_a.application.source_sector_pulse import (
                 resolve_source_sector_snapshot_pair,
@@ -2089,6 +2143,7 @@ class DataJobCoordinator:
             cutoff=self.research_cutoff,
             raw_coverage=coverage,
             execution_authorized=self.execution_authorized,
+            sector_pair=sector_pair,
         )
         plan["raw_response_journal_enabled"] = request["raw_response_journal_enabled"]
         source_policy = self.config.get("source_policy", {})
@@ -6826,6 +6881,293 @@ def _execute_shared_production_chain(
                     (
                         str(getattr(error, "code", type(error).__name__)),
                         f"PULSE后继({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FOCUS_FORMAL" in research_modules:
+        from stock_a.application.source_frozen_rules import (
+            SourceFrozenRulesError,
+            persist_source_computable_rules_from_saved,
+        )
+
+        unavailable_rule_codes = {
+            "SOURCE_RULE_D0_SCOPE_NOT_CLOSED",
+            "SOURCE_RULE_SOURCE_SCOPE_NOT_CLOSED",
+            "SOURCE_RULE_SEED_SCOPE_NOT_CLOSED",
+            "SOURCE_RULE_D1_SCOPE_NOT_CLOSED",
+            "SOURCE_RULE_CALENDAR_REVISION_MISMATCH",
+            "SOURCE_RULE_D1_WINDOW_INVALID",
+            "SOURCE_RULE_RPS_SCOPE_NOT_CLOSED",
+            "SOURCE_RULE_DIAGNOSTIC_SCOPE_NOT_CLOSED",
+        }
+        for day_text in plan.get("module_output_sessions", {}).get("FOCUS_FORMAL", ()):
+            day = date.fromisoformat(day_text)
+            unit = next(
+                (
+                    item
+                    for item in plan.get("stage_units", ())
+                    if item.get("stage_code") == "FOCUS_RESEARCH_CONTEXT"
+                    and item.get("target_session") == day
+                    and item.get("business_table") == "stock.source_rule_evaluations"
+                    and item.get("status") == "NOT_STARTED"
+                ),
+                None,
+            )
+            if unit is None:
+                continue
+            begin_callback(job_id=job_id, units=[unit])
+            try:
+                context_snapshot_ids = paired_sector_snapshots()
+            except DataJobError:
+                context_snapshot_ids = None
+            try:
+                profile_revision = profile_revision_for_session(day)
+                history_count = int(
+                    profile_windows.get(
+                        day_text, plan.get("profile_history_session_count") or 1
+                    )
+                )
+                report = persist_source_computable_rules_from_saved(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    profile_revision=profile_revision,
+                    history_session_count=history_count,
+                    snapshot_ids=context_snapshot_ids,
+                )
+                producer_version = report.get("persistence", {}).get("rule_version")
+                if report.get("status") not in {"PERSISTED", "IDEMPOTENT"}:
+                    raise DataJobError(
+                        "SOURCE_RULE_PRODUCER_NOT_PERSISTED",
+                        "冻结规则唯一生产者没有确认PG提交。",
+                        status=409,
+                    )
+                expected_rows = int(report["persistence"]["expected_rows"])
+                d1_history_count = int(report["d1_history_session_count"])
+                calendar_revision = report["calendar_revision"]
+                actual_rows = data_job_pg.read_business_table_count(
+                    config,
+                    business_table=unit["business_table"],
+                    target_session=day,
+                    source_capture_id=source_capture_id,
+                    profile_history_session_count=history_count,
+                    d1_history_session_count=d1_history_count,
+                    profile_revision=profile_revision,
+                    producer_version=producer_version,
+                    calendar_revision=calendar_revision,
+                    research_cutoff=cutoff,
+                )
+                if (
+                    type(producer_version) is not str
+                    or actual_rows != expected_rows
+                    or report.get("source_symbol_count") <= 0
+                    or expected_rows != sum(report["rule_scope_counts"].values())
+                ):
+                    raise DataJobError(
+                        "SOURCE_RULE_TYPED_READBACK_MISMATCH",
+                        "冻结规则事实独立PG读回未闭合到精确规则子集分母。",
+                        status=409,
+                    )
+                progress_callback(
+                    job_id=job_id,
+                    stage_code="FOCUS_RESEARCH_CONTEXT",
+                    target_session=day,
+                    business_table=unit["business_table"],
+                    source_capture_id=source_capture_id,
+                    profile_history_session_count=history_count,
+                    d1_history_session_count=d1_history_count,
+                    expected_rows=expected_rows,
+                    inserted_rows=int(
+                        report["persistence"].get("inserted_rows", 0) or 0
+                    ),
+                    quality_status=(
+                        f"PARTIAL_RULE_SET_{len(report['supported_rule_ids'])}_OF_9"
+                    ),
+                    no_change=int(report["persistence"].get("inserted_rows", 0) or 0)
+                    == 0,
+                    profile_revision=profile_revision,
+                    producer_version=producer_version,
+                    calendar_revision=calendar_revision,
+                    sector_snapshot_ids=context_snapshot_ids,
+                )
+                resolved_unit_keys.add(unit_key(unit))
+            except SourceFrozenRulesError as error:
+                if error.code in unavailable_rule_codes:
+                    data_job_pg.mark_progress_unavailable(
+                        config,
+                        job_id=job_id,
+                        stage_code="FOCUS_RESEARCH_CONTEXT",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        status="NOT_COMPUTED",
+                        error_code=error.code,
+                        error_message=str(error)[:500],
+                        source_capture_id=source_capture_id,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+                    continue
+                mark_units_incomplete(
+                    [unit],
+                    stage_code="FOCUS_RESEARCH_CONTEXT",
+                    error=error,
+                    message_prefix="冻结规则计算或PG写入未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        error.code,
+                        f"冻结规则({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+            except Exception as error:  # noqa: BLE001 - 冻结规则与其余Focus事实分开报告。
+                mark_units_incomplete(
+                    [unit],
+                    stage_code="FOCUS_RESEARCH_CONTEXT",
+                    error=error,
+                    message_prefix="冻结规则计算或PG独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"冻结规则({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FOCUS_FORMAL" in research_modules:
+        from stock_a.application.source_t0_early_observation import (
+            HYPOTHESIS_VERSION,
+            SourceT0EarlyObservationError,
+            persist_source_t0_early_observations_from_saved,
+        )
+
+        for day_text in plan.get("module_output_sessions", {}).get("FOCUS_FORMAL", ()):
+            day = date.fromisoformat(day_text)
+            unit = next(
+                (
+                    item
+                    for item in plan.get("stage_units", ())
+                    if item.get("stage_code") == "FOCUS_RESEARCH_CONTEXT"
+                    and item.get("target_session") == day
+                    and item.get("business_table")
+                    == "stock.source_t0_early_observation_facts"
+                    and item.get("status") == "NOT_STARTED"
+                ),
+                None,
+            )
+            if unit is None:
+                continue
+            begin_callback(job_id=job_id, units=[unit])
+            try:
+                snapshot_ids = paired_sector_snapshots()
+                profile_revision = profile_revision_for_session(day)
+                report = persist_source_t0_early_observations_from_saved(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    snapshot_ids=snapshot_ids,
+                )
+                seed_scope = report.get("seed_scope", {})
+                expected_rows = report.get("context_rows_expected")
+                if (
+                    report.get("status") not in {"PERSISTED", "IDEMPOTENT"}
+                    or report.get("target_session") != day_text
+                    or report.get("source_capture_id") != source_capture_id
+                    or report.get("profile_revision") != profile_revision
+                    or seed_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
+                    or seed_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
+                    or type(expected_rows) is not int
+                    or expected_rows <= 0
+                ):
+                    raise DataJobError(
+                        "T0_EARLY_PRODUCER_SCOPE_INVALID",
+                        "T0板内观察没有闭合到精确捕获、QFQ Seed修订和已存登记。",
+                        status=409,
+                    )
+                actual_rows = data_job_pg.read_business_table_count(
+                    config,
+                    business_table=unit["business_table"],
+                    target_session=day,
+                    source_capture_id=source_capture_id,
+                    profile_history_session_count=int(
+                        seed_scope["history_session_count"]
+                    ),
+                    profile_revision=profile_revision,
+                    producer_version=HYPOTHESIS_VERSION,
+                    sector_snapshot_ids=snapshot_ids,
+                    research_cutoff=cutoff,
+                )
+                if actual_rows != expected_rows:
+                    raise DataJobError(
+                        "T0_EARLY_TYPED_READBACK_MISMATCH",
+                        "T0板内观察独立PG行数与本次保存的精确快照上下文不一致。",
+                        status=409,
+                    )
+                progress_callback(
+                    job_id=job_id,
+                    stage_code="FOCUS_RESEARCH_CONTEXT",
+                    target_session=day,
+                    business_table=unit["business_table"],
+                    source_capture_id=source_capture_id,
+                    profile_history_session_count=int(
+                        seed_scope["history_session_count"]
+                    ),
+                    d1_history_session_count=None,
+                    expected_rows=expected_rows,
+                    inserted_rows=int(
+                        report.get("persistence", {}).get("rows_inserted", 0) or 0
+                    ),
+                    quality_status="COMPLETE_QFQ_NON_PIT_T0_CONTEXT_READBACK",
+                    no_change=(
+                        int(report.get("persistence", {}).get("rows_inserted", 0) or 0)
+                        == 0
+                    ),
+                    profile_revision=profile_revision,
+                    producer_version=HYPOTHESIS_VERSION,
+                    calendar_revision=seed_scope["calendar_revision"],
+                    sector_snapshot_ids=snapshot_ids,
+                )
+                resolved_unit_keys.add(unit_key(unit))
+            except SourceT0EarlyObservationError as error:
+                if error.code == "T0_EARLY_NO_STORED_ENROLLMENTS":
+                    data_job_pg.mark_progress_unavailable(
+                        config,
+                        job_id=job_id,
+                        stage_code="FOCUS_RESEARCH_CONTEXT",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        status="NOT_COMPUTED",
+                        error_code=error.code,
+                        error_message=(
+                            "目标日没有已存T0登记；保留NOT_COMPUTED，不生成空范围观察。"
+                        ),
+                        source_capture_id=source_capture_id,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+                    continue
+                mark_units_incomplete(
+                    [unit],
+                    stage_code="FOCUS_RESEARCH_CONTEXT",
+                    error=error,
+                    message_prefix="T0早期观察PG生产未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        error.code,
+                        f"T0早期观察({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+            except Exception as error:  # noqa: BLE001 - Focus中T0研究维度独立保留状态。
+                mark_units_incomplete(
+                    [unit],
+                    stage_code="FOCUS_RESEARCH_CONTEXT",
+                    error=error,
+                    message_prefix="T0早期观察PG生产或异连接读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"T0早期观察({day_text})未闭合：{str(error)[:300]}",
                     )
                 )
 

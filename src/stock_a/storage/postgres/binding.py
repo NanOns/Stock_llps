@@ -71,6 +71,8 @@ _MIGRATION_FILES = (
     "0057_source_switch_star_board_research_scope.sql",
     "0058_source_switch_full_baostock_response_fields.sql",
     "0059_source_switch_multisession_capture_business_keys.sql",
+    "0060_source_switch_t0_early_observation_qfq_coordinate.sql",
+    "0061_source_switch_fep_equal_date_null_capture.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -118,6 +120,9 @@ _TASK_SCOPE_MIGRATIONS = {
     "R00_ADJUSTED_PRICE_PG_CLOSURE_R1": frozenset({52, 53}),
     "SOURCE_SWITCH_01_BAOSTOCK_PRICE_PG_RESET_E2E_R1_20261119": frozenset(
         {54, 55, 56, 57, 58, 59}
+    ),
+    "SOURCE_SWITCH_01_CONSUMER_02_T0_RULE_FOCUS_PG_DEV_R1_20261121": frozenset(
+        {60, 61}
     ),
 }
 _BASE_TABLES = {
@@ -311,6 +316,8 @@ _RELATIONS_BY_MIGRATION_COUNT[56] = _RELATIONS_BY_MIGRATION_COUNT[55]
 _RELATIONS_BY_MIGRATION_COUNT[57] = _RELATIONS_BY_MIGRATION_COUNT[56]
 _RELATIONS_BY_MIGRATION_COUNT[58] = _RELATIONS_BY_MIGRATION_COUNT[57]
 _RELATIONS_BY_MIGRATION_COUNT[59] = _RELATIONS_BY_MIGRATION_COUNT[58]
+_RELATIONS_BY_MIGRATION_COUNT[60] = _RELATIONS_BY_MIGRATION_COUNT[59]
+_RELATIONS_BY_MIGRATION_COUNT[61] = _RELATIONS_BY_MIGRATION_COUNT[60]
 
 
 class BindingRefused(Exception):

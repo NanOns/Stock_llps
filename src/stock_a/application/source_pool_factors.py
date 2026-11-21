@@ -30,7 +30,7 @@ def read_source_pool_rps(
     target_session: date,
     research_cutoff: date,
     source_capture_id: int,
-    page_size: int = 1000,
+    page_size: int = 5000,
 ) -> dict[str, Any]:
     """按paired BaoStock capture读取两个完整QFQ横截面端点。"""
     if (
@@ -40,7 +40,7 @@ def read_source_pool_rps(
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or type(page_size) is not int
-        or not 1 <= page_size <= 1000
+        or not 1 <= page_size <= 5000
     ):
         raise ValueError("RPS目标、截止、paired capture或分页上限无效")
     from stock_a.research.entry_history.support import (
@@ -65,9 +65,10 @@ def read_source_pool_rps(
                 source_capture_id=source_capture_id,
                 price_coordinate="FORWARD_ADJUSTED",
                 offset=page_offset,
-                limit=min(page_size, 100),
+                limit=page_size,
                 market="ALL",
                 board="ALL",
+                allow_full_pool_page=True,
             )
             if page.get("source_capture_id") != source_capture_id:
                 raise ValueError("RPS端点没有绑定请求的paired capture")

@@ -17,6 +17,7 @@ from stock_a.storage.postgres.research_day_facts import _insert_rows, _row_match
 _TABLE = "source_sector_cross_period_pulse_facts"
 _ALGORITHM = "SOURCE_CROSS_PERIOD_PULSE_R1"
 _KINDS = ("INDUSTRY", "CONCEPT")
+_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 _COLUMNS = (
     "target_session",
     "source_capture_id",
@@ -782,6 +783,7 @@ def read_source_sector_pulse_day(
         return {
             "status": "NOT_COMPUTED",
             "profile_revision": None,
+            "source_capture_id": source_capture_id,
             "by_kind": result_by_kind,
             "database_write_attempted": False,
             "cross_period_recalculated": False,
@@ -794,9 +796,13 @@ def read_source_sector_pulse_day(
         seed_scope_predicate = (
             "target_session=%s AND source_capture_id=%s "
             "AND price_coordinate='FORWARD_ADJUSTED' "
-            "AND producer_version IS NOT NULL"
+            "AND producer_version=%s"
         )
-        seed_scope_parameters: tuple[Any, ...] = (target_session, source_capture_id)
+        seed_scope_parameters: tuple[Any, ...] = (
+            target_session,
+            source_capture_id,
+            _SEED_PRODUCER_VERSION,
+        )
         if profile_revision is not None:
             seed_scope_predicate += " AND profile_revision=%s"
             seed_scope_parameters = (*seed_scope_parameters, profile_revision)
@@ -827,6 +833,7 @@ def read_source_sector_pulse_day(
             return {
                 "status": "NOT_COMPUTED",
                 "profile_revision": None,
+                "source_capture_id": source_capture_id,
                 "by_kind": result_by_kind,
                 "database_write_attempted": False,
                 "cross_period_recalculated": False,
@@ -940,6 +947,7 @@ def read_source_sector_pulse_day(
     return {
         "status": overall,
         "profile_revision": profile_revision,
+        "source_capture_id": source_capture_id,
         "by_kind": result_by_kind,
         "database_write_attempted": False,
         "cross_period_recalculated": False,
@@ -997,6 +1005,7 @@ def read_source_sector_pulse_for_boards(
         return {
             "status": "NOT_COMPUTED",
             "reason_codes": ["NO_MAPPED_BOARD_FOR_PAGE"],
+            "source_capture_id": source_capture_id,
             "by_board": {},
             "board_count": 0,
             "database_write_attempted": False,
@@ -1011,8 +1020,8 @@ def read_source_sector_pulse_for_boards(
             "SELECT profile_revision,count(*)::bigint,count(DISTINCT source_symbol)::bigint "
             "FROM source_pool_seed_day_facts WHERE target_session=%s "
             "AND source_capture_id=%s AND price_coordinate='FORWARD_ADJUSTED' "
-            "GROUP BY profile_revision ORDER BY profile_revision",
-            (target_session, source_capture_id),
+            "AND producer_version=%s GROUP BY profile_revision ORDER BY profile_revision",
+            (target_session, source_capture_id, _SEED_PRODUCER_VERSION),
         )
         seed_scopes = cursor.fetchall()
         if (
@@ -1028,6 +1037,7 @@ def read_source_sector_pulse_for_boards(
             return {
                 "status": "NOT_COMPUTED",
                 "reason_codes": [reason],
+                "source_capture_id": source_capture_id,
                 "by_board": {
                     f"{kind}:{native_id}": {
                         "status": "NOT_COMPUTED",
@@ -1126,6 +1136,7 @@ ORDER BY requested.board_kind,requested.board_native_id COLLATE "C" OFFSET 0""",
         if any(status == "AVAILABLE" for status in statuses)
         else "NOT_COMPUTED",
         "reason_codes": [] if complete else ["PULSE_SELECTED_BOARD_FACTS_INCOMPLETE"],
+        "source_capture_id": source_capture_id,
         "by_board": by_board,
         "board_count": len(normalized),
         "database_write_attempted": False,

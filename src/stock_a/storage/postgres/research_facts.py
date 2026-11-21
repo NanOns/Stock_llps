@@ -13,6 +13,7 @@ from stock_a.storage.postgres.source_raw import _transaction
 RULE_VERSION = "SOURCE_COHORT_RULES_R1"
 PATH_VERSION = "SOURCE_RAW_FORWARD_PATH_R1"
 SCOPE = "NON_PIT_EXPLORATORY"
+_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 
 
 class ResearchFactNotFound(ValueError):
@@ -428,10 +429,11 @@ def write_forward_path_rows(
                       research_mode,price_coordinate,count(*),count(DISTINCT source_symbol)
                FROM source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s
+                 AND producer_version=%s
                GROUP BY profile_revision,producer_contract,producer_version,
                         history_session_count,calendar_id,calendar_revision,
                         research_mode,price_coordinate""",
-            (target, source_capture_id),
+            (target, source_capture_id, _SEED_PRODUCER_VERSION),
         )
         seed_scopes = cursor.fetchall()
         if (
@@ -579,8 +581,8 @@ def read_forward_path_scope(
     endpoint_counts = {"OBSERVED": 0, "UNKNOWN": 0}
     path_counts = {"OBSERVED": 0, "UNKNOWN": 0}
     for row in stored:
-        endpoint_counts[row[9]] = endpoint_counts.get(row[9], 0) + 1
-        path_counts[row[13]] = path_counts.get(row[13], 0) + 1
+        endpoint_counts[row[8]] = endpoint_counts.get(row[8], 0) + 1
+        path_counts[row[12]] = path_counts.get(row[12], 0) + 1
     return {
         "status": "READ_BACK_MATCHED",
         "transaction": "REPEATABLE READ READ ONLY",
@@ -618,6 +620,189 @@ def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, ar
         if actual != row:
             raise ResearchFactConflict(f"{table}业务键已存在不同事实，整事务回滚")
     return inserted
+
+
+def write_computed_rule_rows(
+    config,
+    *,
+    rules: Sequence[Sequence[Any]],
+    rule_ids: Sequence[str],
+    expected_symbols_by_rule: Mapping[str, Sequence[str]],
+    enrollment_rule_ids: Sequence[str],
+    previous_session: date,
+) -> dict[str, Any]:
+    """原子保存已计算规则范围，并为完整规则总体建立真实相邻登记。"""
+    selected_rules = tuple(sorted(set(rule_ids)))
+    enrollment_rules = tuple(sorted(set(enrollment_rule_ids)))
+    if (
+        not rules
+        or not selected_rules
+        or not set(selected_rules).issubset(RULES)
+        or len(selected_rules) != len(rule_ids)
+        or not isinstance(expected_symbols_by_rule, Mapping)
+        or set(expected_symbols_by_rule) != set(selected_rules)
+        or not set(enrollment_rules).issubset(selected_rules)
+        or type(previous_session) is not date
+        or any(len(row) != len(RULE_COLUMNS) for row in rules)
+    ):
+        raise ValueError("已计算规则事实的写入范围无效")
+
+    first = tuple(rules[0])
+    target = first[RULE_COLUMNS.index("target_session")]
+    source_capture_id = first[RULE_COLUMNS.index("source_capture_id")]
+    metadata_columns = (
+        "target_session",
+        "source_capture_id",
+        "rule_version",
+        "profile_revision",
+        "history_session_count",
+        "d1_history_session_count",
+        "event_window_start",
+        "calendar_revision",
+        "scope",
+    )
+    metadata = tuple(first[RULE_COLUMNS.index(name)] for name in metadata_columns)
+    if (
+        type(target) is not date
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or type(metadata[4]) is not int
+        or type(metadata[5]) is not int
+        or metadata[2] != RULE_VERSION
+        or metadata[4] <= 0
+        or metadata[5] <= 0
+        or type(metadata[6]) is not date
+        or not isinstance(metadata[3], str)
+        or not metadata[3]
+        or not isinstance(metadata[7], str)
+        or not metadata[7]
+        or metadata[8] != SCOPE
+        or previous_session >= target
+    ):
+        raise ValueError("规则事实缺少精确日期、Profile、D1窗口或NON_PIT身份")
+
+    expected_by_rule: dict[str, set[str]] = {rule: set() for rule in selected_rules}
+    keys = set()
+    for row_value in rules:
+        row = tuple(row_value)
+        row_metadata = tuple(row[RULE_COLUMNS.index(name)] for name in metadata_columns)
+        rule = row[RULE_COLUMNS.index("rule_id")]
+        symbol = row[RULE_COLUMNS.index("source_symbol")]
+        state = row[RULE_COLUMNS.index("state")]
+        reasons = row[RULE_COLUMNS.index("reasons")]
+        event_count = row[RULE_COLUMNS.index("event_count")]
+        numerator = row[RULE_COLUMNS.index("frozen_line_numerator")]
+        denominator = row[RULE_COLUMNS.index("frozen_line_denominator")]
+        line_source = row[RULE_COLUMNS.index("frozen_line_source")]
+        if (
+            row_metadata != metadata
+            or rule not in expected_by_rule
+            or not isinstance(symbol, str)
+            or state not in {"TRUE", "FALSE", "UNKNOWN"}
+            or not isinstance(reasons, (list, tuple))
+            or any(not isinstance(reason, str) for reason in reasons)
+            or type(event_count) is not int
+            or event_count < 0
+            or (numerator is None) != (denominator is None)
+            or denominator is not None
+            and (type(denominator) is not int or denominator <= 0)
+            or numerator is not None
+            and type(numerator) is not int
+            or line_source is not None
+            and not isinstance(line_source, str)
+            or row[RULE_COLUMNS.index("scope")] != SCOPE
+        ):
+            raise ValueError("规则事实包含无效三态、原因、计数或冻结线")
+        key = tuple(row[RULE_COLUMNS.index(name)] for name in RULE_KEY)
+        if key in keys or symbol in expected_by_rule[rule]:
+            raise ValueError("规则事实存在重复真实业务键或代码")
+        keys.add(key)
+        expected_by_rule[rule].add(symbol)
+
+    declared_symbols = {
+        rule: set(expected_symbols_by_rule[rule]) for rule in selected_rules
+    }
+    if any(
+        not symbols or symbols != expected_by_rule[rule]
+        for rule, symbols in declared_symbols.items()
+    ):
+        raise ValueError("每条可计算规则实际写入行数与声明业务范围不一致")
+
+    from stock_a.storage.postgres.source_raw import _transaction
+
+    with _transaction(config, write=True, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            "SELECT source_symbol,source_capture_id FROM source_raw_daily "
+            "WHERE session_date=%s AND source_capture_id=%s ORDER BY source_symbol",
+            (target, source_capture_id),
+        )
+        raw_rows = cursor.fetchall()
+        raw_symbols = {row[0] for row in raw_rows}
+        if (
+            not raw_symbols
+            or len(raw_rows) != len(raw_symbols)
+            or any(row[1] != source_capture_id for row in raw_rows)
+            or any(
+                not symbols.issubset(raw_symbols)
+                for symbols in expected_by_rule.values()
+            )
+            or any(expected_by_rule[rule] != raw_symbols for rule in enrollment_rules)
+        ):
+            raise ValueError("规则事实或相邻登记与同捕获Raw来源池不一致")
+
+        inserted = _insert_and_compare(
+            cursor,
+            "source_rule_evaluations",
+            RULE_COLUMNS,
+            [tuple(row) for row in rules],
+            RULE_KEY,
+            "target_session=%s AND source_capture_id=%s",
+            (target, source_capture_id),
+        )
+        from stock_a.storage.postgres.research_enrollment import (
+            insert_rule_enrollments,
+        )
+
+        enrollment = None
+        if enrollment_rules:
+            enrollment = insert_rule_enrollments(
+                cursor,
+                target=target,
+                before=previous_session,
+                source_capture_id=source_capture_id,
+                rule_version=metadata[2],
+                profile_revision=metadata[3],
+                history_count=metadata[4],
+                d1_history_count=metadata[5],
+                event_window_start=metadata[6],
+                calendar_revision=metadata[7],
+                rule_ids=enrollment_rules,
+            )
+    return {
+        "status": "PERSISTED"
+        if inserted or (enrollment and enrollment.get("inserted"))
+        else "IDEMPOTENT",
+        "target_session": target.isoformat(),
+        "source_capture_id": source_capture_id,
+        "rule_version": metadata[2],
+        "profile_revision": metadata[3],
+        "history_session_count": metadata[4],
+        "d1_history_session_count": metadata[5],
+        "event_window_start": metadata[6].isoformat(),
+        "calendar_revision": metadata[7],
+        "rule_ids": list(selected_rules),
+        "enrollment_rule_ids": list(enrollment_rules),
+        "source_symbol_count": len(raw_symbols),
+        "expected_rows": len(rules),
+        "inserted_rows": int(inserted),
+        "research_enrollments": enrollment,
+        "transaction": "SERIALIZABLE_RULE_SUBSET_AND_ENROLLMENTS",
+        "ddl_executed": False,
+    }
 
 
 def restate_forward_path_metrics(
