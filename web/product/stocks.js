@@ -83,59 +83,7 @@ export function renderBaoStockPriceSource(data) {
     return section;
   }
 
-  const qfq = row.price_coordinate === "FORWARD_ADJUSTED";
-  const coordinatePrefix = qfq ? "qfq_" : "raw_";
-  const priceQuality = qfq ? "qfq_price_quality" : "price_quality";
-  const priceReason = qfq ? "qfq_price_reason" : "price_reason";
-  const fields = {
-    open: {
-      value: row[`${coordinatePrefix}open`],
-      quality: row[priceQuality],
-      reason: row[priceReason],
-    },
-    high: {
-      value: row[`${coordinatePrefix}high`],
-      quality: row[priceQuality],
-      reason: row[priceReason],
-    },
-    low: {
-      value: row[`${coordinatePrefix}low`],
-      quality: row[priceQuality],
-      reason: row[priceReason],
-    },
-    close: {
-      value: row[`${coordinatePrefix}close`],
-      quality: row[priceQuality],
-      reason: row[priceReason],
-    },
-    volume: {
-      value: qfq ? row.qfq_volume : row.raw_volume,
-      quality: row.volume_quality,
-      reason: row.volume_reason,
-      unit: "股",
-    },
-    amount: {
-      value: qfq ? row.qfq_amount : row.raw_amount,
-      quality: row.amount_quality,
-      reason: row.amount_reason,
-      unit: "元",
-    },
-    turn: {
-      value: qfq ? row.qfq_turn_value : row.raw_turn_value,
-      quality: qfq ? row.qfq_turn_quality : row.raw_turn_quality,
-      reason: qfq ? row.qfq_turn_reason : row.raw_turn_reason,
-    },
-    tradestatus: {
-      value: qfq ? row.qfq_tradestatus_value : row.raw_tradestatus_value,
-      quality: qfq ? row.qfq_tradestatus_quality : row.raw_tradestatus_quality,
-      reason: qfq ? row.qfq_tradestatus_reason : row.raw_tradestatus_reason,
-    },
-    is_st: {
-      value: qfq ? row.qfq_is_st_value : row.raw_is_st_value,
-      quality: qfq ? row.qfq_is_st_quality : row.raw_is_st_quality,
-      reason: qfq ? row.qfq_is_st_reason : row.raw_is_st_reason,
-    },
-  };
+  const { fields, labels, qfq } = buildBaoStockPriceSourceView(row);
   const source = {
     ...row,
     source_capture_id: data?.source_capture_id ?? row.source_capture_id,
@@ -179,17 +127,6 @@ export function renderBaoStockPriceSource(data) {
     ),
   );
 
-  const labels = {
-    open: "开盘",
-    high: "最高",
-    low: "最低",
-    close: "收盘",
-    volume: "成交量",
-    amount: "成交额",
-    turn: "换手率",
-    tradestatus: "交易状态",
-    is_st: "ST标记",
-  };
   const grid = element("div", null, "fact-grid");
   for (const [name, label] of Object.entries(labels)) {
     const field = source.fields?.[name] || {};
@@ -204,6 +141,83 @@ export function renderBaoStockPriceSource(data) {
   }
   section.append(grid);
   return section;
+}
+
+export function buildBaoStockPriceSourceView(row) {
+  const qfq = row?.price_coordinate === "FORWARD_ADJUSTED";
+  const coordinatePrefix = qfq ? "qfq_" : "raw_";
+  const priceQuality = qfq ? "qfq_price_quality" : "price_quality";
+  const priceReason = qfq ? "qfq_price_reason" : "price_reason";
+  const fields = {
+    open: {
+      value: row?.[`${coordinatePrefix}open`],
+      quality: row?.[priceQuality],
+      reason: row?.[priceReason],
+    },
+    high: {
+      value: row?.[`${coordinatePrefix}high`],
+      quality: row?.[priceQuality],
+      reason: row?.[priceReason],
+    },
+    low: {
+      value: row?.[`${coordinatePrefix}low`],
+      quality: row?.[priceQuality],
+      reason: row?.[priceReason],
+    },
+    close: {
+      value: row?.[`${coordinatePrefix}close`],
+      quality: row?.[priceQuality],
+      reason: row?.[priceReason],
+    },
+    volume: {
+      value: row?.raw_volume,
+      quality: row?.volume_quality,
+      reason: row?.volume_reason,
+      unit: "股",
+      price_coordinate: "RAW_UNADJUSTED",
+    },
+    amount: {
+      value: row?.raw_amount,
+      quality: row?.amount_quality,
+      reason: row?.amount_reason,
+      unit: "元",
+      price_coordinate: "RAW_UNADJUSTED",
+    },
+    turn: {
+      value: row?.raw_turn_value,
+      quality: row?.raw_turn_quality,
+      reason: row?.raw_turn_reason,
+      unit: "比例",
+      source_coordinate: "RAW_UNADJUSTED",
+    },
+    tradestatus: {
+      value: qfq ? row?.qfq_tradestatus_value : row?.raw_tradestatus_value,
+      quality: qfq
+        ? row?.qfq_tradestatus_quality
+        : row?.raw_tradestatus_quality,
+      reason: qfq ? row?.qfq_tradestatus_reason : row?.raw_tradestatus_reason,
+    },
+    is_st: {
+      value: qfq ? row?.qfq_is_st_value : row?.raw_is_st_value,
+      quality: qfq ? row?.qfq_is_st_quality : row?.raw_is_st_quality,
+      reason: qfq ? row?.qfq_is_st_reason : row?.raw_is_st_reason,
+    },
+  };
+  return {
+    qfq,
+    fields,
+    labels: {
+      open: "开盘",
+      high: "最高",
+      low: "最低",
+      close: "收盘",
+      volume: "成交量（RAW未复权）",
+      amount: "成交额（RAW未复权）",
+      turn: "换手率（RAW当日比例）",
+      tradestatus: "交易状态",
+      is_st: "ST标记",
+    },
+  };
 }
 
 export function renderD1StockDetail(stock, root = byId("stockContent")) {

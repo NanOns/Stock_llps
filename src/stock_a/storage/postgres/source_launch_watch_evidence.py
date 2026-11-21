@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any, Mapping, Sequence
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.storage.postgres import source_raw
 
 
@@ -32,6 +33,10 @@ _D1_STRUCTURE_TYPES = (
 )
 _VALID_STATES = frozenset({"TRUE", "FALSE", "UNKNOWN"})
 _D0_SCENARIOS = ("LAUNCH_CONFIRM", "RECOVERY_TURN")
+_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+_D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
+_D0_RECOVERY_PRODUCER_VERSION = "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R5"
+_D1_STRUCTURE_PRODUCER_VERSION = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
 
 
 def _scope_status(rows: Sequence[tuple[Any, ...]], expected_count: int) -> str:
@@ -148,6 +153,7 @@ def read_source_launch_watch_evidence(
     single_symbol_only: bool = False,
     expected_before_session: date | None = None,
     selected_profile_revision: str | None = None,
+    selected_history_session_count: int | None = None,
     membership_snapshot_ids: Mapping[str, int | None] | None = None,
     _scope_symbol: str | None = None,
 ) -> dict[str, Any]:
@@ -173,6 +179,22 @@ def read_source_launch_watch_evidence(
                 type(d1_history_session_count) is not int
                 or not 1 <= d1_history_session_count <= 32767
             )
+        )
+        or (
+            selected_history_session_count is not None
+            and (
+                type(selected_history_session_count) is not int
+                or not 1 <= selected_history_session_count <= 250
+            )
+        )
+        or (
+            selected_profile_revision is not None
+            and selected_history_session_count is None
+        )
+        or selected_profile_revision is not None
+        and (
+            not isinstance(selected_profile_revision, str)
+            or re.fullmatch(PROFILE_REVISION_PATTERN, selected_profile_revision) is None
         )
     ):
         raise ValueError("D0首页研究证据读取键无效")
@@ -223,6 +245,7 @@ def read_source_launch_watch_evidence(
             d1_history_session_count=d1_history_session_count,
             expected_before_session=expected_before_session,
             selected_profile_revision=selected_profile_revision,
+            selected_history_session_count=selected_history_session_count,
             membership_snapshot_ids=membership_snapshot_ids,
             _scope_symbol=symbols[0],
         )
@@ -240,17 +263,21 @@ def read_source_launch_watch_evidence(
         cursor,
         _connection_identity,
     ):
-        seed_scope_filter = " AND source_symbol=%s" if _scope_symbol else ""
-        if selected_profile_revision is not None:
-            seed_scope_filter += " AND profile_revision=%s"
+        seed_scope_filter = " AND producer_version=%s"
         seed_scope_params: tuple[Any, ...] = (
             target_session,
             source_capture_id,
+            _SEED_PRODUCER_VERSION,
         )
         if _scope_symbol:
+            seed_scope_filter += " AND source_symbol=%s"
             seed_scope_params += (_scope_symbol,)
         if selected_profile_revision is not None:
+            seed_scope_filter += " AND profile_revision=%s"
             seed_scope_params += (selected_profile_revision,)
+        if selected_history_session_count is not None:
+            seed_scope_filter += " AND history_session_count=%s"
+            seed_scope_params += (selected_history_session_count,)
         cursor.execute(
             """SELECT profile_revision, producer_contract, producer_version,
                       history_session_count, calendar_id, calendar_revision,
@@ -273,6 +300,8 @@ def read_source_launch_watch_evidence(
         rule_scope_filter = " AND source_symbol=%s" if _scope_symbol else ""
         if selected_profile_revision is not None:
             rule_scope_filter += " AND profile_revision=%s"
+        if selected_history_session_count is not None:
+            rule_scope_filter += " AND history_session_count=%s"
         rule_scope_params: tuple[Any, ...] = (
             target_session,
             source_capture_id,
@@ -281,6 +310,8 @@ def read_source_launch_watch_evidence(
             rule_scope_params += (_scope_symbol,)
         if selected_profile_revision is not None:
             rule_scope_params += (selected_profile_revision,)
+        if selected_history_session_count is not None:
+            rule_scope_params += (selected_history_session_count,)
         cursor.execute(
             """SELECT rule_version, profile_revision, history_session_count,
                       d1_history_session_count, event_window_start, calendar_revision,
@@ -319,6 +350,8 @@ def read_source_launch_watch_evidence(
         d1_symbol_clause = " AND source_symbol=%s" if _scope_symbol else ""
         if _scope_symbol:
             d1_scope_params += (_scope_symbol,)
+        d1_version_clause = " AND producer_version=%s"
+        d1_scope_params += (_D1_STRUCTURE_PRODUCER_VERSION,)
         d1_count_clause = ""
         if d1_history_session_count is not None:
             d1_count_clause = " AND d1_history_session_count=%s"
@@ -331,6 +364,7 @@ def read_source_launch_watch_evidence(
                FROM source_d1_structure_day_facts
                WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s"""
             + d1_symbol_clause
+            + d1_version_clause
             + d1_count_clause
             + " GROUP BY d1_history_session_count, calendar_revision, producer_contract,"
             " producer_version, material_change_contract, research_mode, price_coordinate"
@@ -438,12 +472,16 @@ def read_source_launch_watch_evidence(
                    WHERE target_session=%s AND source_capture_id=%s
                      AND source_symbol=ANY(%s)
                      AND scenario=ANY(%s)
+                     AND ((scenario='LAUNCH_CONFIRM' AND producer_version=%s)
+                       OR (scenario='RECOVERY_TURN' AND producer_version=%s))
                    ORDER BY source_symbol, scenario, producer_version, calendar_revision""",
                 (
                     target_session,
                     source_capture_id,
                     list(symbols),
                     list(_D0_SCENARIOS),
+                    _D0_LAUNCH_PRODUCER_VERSION,
+                    _D0_RECOVERY_PRODUCER_VERSION,
                 ),
             )
             for row in cursor.fetchall():
@@ -919,11 +957,12 @@ def read_source_seed_t1_outcomes(
                       count(DISTINCT source_symbol)::bigint
                FROM source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s
+                 AND producer_version=%s
                GROUP BY profile_revision, producer_contract, producer_version,
                         history_session_count, calendar_id, calendar_revision,
                         research_mode, price_coordinate
                ORDER BY profile_revision, producer_version""",
-            (target_session, source_capture_id),
+            (target_session, source_capture_id, _SEED_PRODUCER_VERSION),
         )
         scopes = cursor.fetchall()
         if not scopes:
@@ -999,11 +1038,12 @@ def read_source_seed_t1_outcomes(
                               count(DISTINCT source_symbol)::bigint
                        FROM source_pool_seed_day_facts
                        WHERE target_session=%s AND source_capture_id=%s
+                         AND producer_version=%s
                        GROUP BY profile_revision, producer_contract, producer_version,
                                 history_session_count, calendar_id, calendar_revision,
                                 research_mode, price_coordinate
                        ORDER BY profile_revision, producer_version""",
-                    (next_session, endpoint_capture[0]),
+                    (next_session, endpoint_capture[0], _SEED_PRODUCER_VERSION),
                 )
                 endpoint_seed_scopes = cursor.fetchall()
                 if not endpoint_seed_scopes:
@@ -1103,6 +1143,10 @@ def read_source_seed_t1_outcomes(
                     AND p.endpoint_session=%s
                    WHERE s.target_session=%s AND s.source_capture_id=%s
                      AND s.profile_revision=%s
+                     AND s.producer_contract=%s AND s.producer_version=%s
+                     AND s.history_session_count=%s AND s.calendar_id=%s
+                     AND s.calendar_revision=%s AND s.research_mode=%s
+                     AND s.price_coordinate=%s
                      AND s.source_symbol=ANY(%s)
                    ORDER BY s.source_symbol""",
                 (
@@ -1111,7 +1155,7 @@ def read_source_seed_t1_outcomes(
                     next_session,
                     target_session,
                     source_capture_id,
-                    seed_scope[0],
+                    *seed_scope[:8],
                     list(symbols),
                 ),
             )
@@ -1398,12 +1442,16 @@ def _read_single_symbol_context(
            WHERE target_session=%s AND source_capture_id=%s
              AND source_symbol=%s
              AND scenario=ANY(%s)
+             AND ((scenario='LAUNCH_CONFIRM' AND producer_version=%s)
+               OR (scenario='RECOVERY_TURN' AND producer_version=%s))
            ORDER BY scenario, producer_version, calendar_revision""",
         (
             target_session,
             source_capture_id,
             source_symbol,
             ["LAUNCH_CONFIRM", "RECOVERY_TURN"],
+            _D0_LAUNCH_PRODUCER_VERSION,
+            _D0_RECOVERY_PRODUCER_VERSION,
         ),
     )
     for row in cursor.fetchall():
@@ -1420,6 +1468,7 @@ def _read_single_symbol_context(
         source_capture_id,
         source_capture_id,
         source_symbol,
+        _D0_LAUNCH_PRODUCER_VERSION,
     )
     before_clause = ""
     if expected_before_session is not None:
@@ -1434,7 +1483,8 @@ def _read_single_symbol_context(
                   calendar_revision, research_mode, price_coordinate
            FROM source_d0_launch_day_facts
            WHERE target_session=%s AND source_capture_id=%s
-             AND target_capture_id=%s AND source_symbol=%s"""
+             AND target_capture_id=%s AND source_symbol=%s
+             AND producer_version=%s"""
         + before_clause
         + " ORDER BY before_session, producer_version, calendar_revision",
         launch_params,
@@ -1489,8 +1539,9 @@ def _read_single_symbol_context(
                FROM source_d0_scenario_day_facts
                WHERE target_session=%s AND source_capture_id=%s
                  AND source_symbol=%s AND scenario='LAUNCH_CONFIRM'
+                 AND producer_version=%s
                ORDER BY producer_version, calendar_revision""",
-            (row[0], row[1], source_symbol),
+            (row[0], row[1], source_symbol, _D0_LAUNCH_PRODUCER_VERSION),
         )
         before_scenario_rows = cursor.fetchall()
         before_scenario = (
@@ -1868,6 +1919,8 @@ def read_source_launch_watch_page(
     offset: int,
     limit: int,
     d1_history_session_count: int | None = None,
+    selected_history_session_count: int | None = None,
+    selected_profile_revision: str | None = None,
     board_kind: str | None = None,
     board_native_id: str | None = None,
     board_snapshot_id: int | None = None,
@@ -1906,6 +1959,18 @@ def read_source_launch_watch_page(
         or not 1 <= d1_history_session_count <= 75
     ):
         invalid_fields.append("D1历史会话数")
+    if selected_history_session_count is not None and (
+        type(selected_history_session_count) is not int
+        or not 1 <= selected_history_session_count <= 250
+    ):
+        invalid_fields.append("画像历史会话数")
+    if (selected_profile_revision is None) != (selected_history_session_count is None):
+        invalid_fields.append("画像历史会话数与修订配对")
+    if selected_profile_revision is not None and (
+        not isinstance(selected_profile_revision, str)
+        or re.fullmatch(PROFILE_REVISION_PATTERN, selected_profile_revision) is None
+    ):
+        invalid_fields.append("画像修订")
     if (board_kind is None) != (board_native_id is None):
         invalid_fields.append("板块类型与原生ID配对")
     if (board_kind is None) != (board_snapshot_id is None):
@@ -1934,7 +1999,10 @@ def read_source_launch_watch_page(
     SELECT %s::date AS before_session, %s::date AS target_session,
            %s::bigint AS source_capture_id, %s::bigint AS before_capture_id,
            %s::bigint AS target_capture_id, %s::bigint AS expected_source_count,
-           %s::smallint AS d1_history_session_count, %s::text[] AS rule_ids,
+           %s::smallint AS d1_history_session_count,
+           %s::smallint AS selected_history_session_count,
+           %s::text AS selected_profile_revision,
+           %s::text[] AS rule_ids,
            %s::text AS watch_group, %s::text AS board_kind,
            %s::text AS board_native_id, %s::bigint AS board_snapshot_id,
            %s::integer AS page_offset, %s::integer AS page_limit
@@ -1957,6 +2025,7 @@ def read_source_launch_watch_page(
       AND d.source_capture_id=p.source_capture_id
       AND d.before_capture_id=p.before_capture_id
       AND d.target_capture_id=p.target_capture_id
+      AND d.producer_version='STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5'
     GROUP BY d.producer_version, d.algorithm_contract, d.session_contract,
              d.calendar_revision
 ), d0_scope_status AS (
@@ -2001,6 +2070,11 @@ def read_source_launch_watch_page(
     WHERE s.target_session=p.target_session
       AND s.source_capture_id=p.source_capture_id
       AND s.source_capture_id=p.target_capture_id
+      AND s.producer_version='SOURCE_POOL_SEED_CORE_PROFILE_R2'
+      AND (p.selected_history_session_count IS NULL
+           OR s.history_session_count=p.selected_history_session_count)
+      AND (p.selected_profile_revision IS NULL
+           OR s.profile_revision=p.selected_profile_revision)
     GROUP BY s.profile_revision, s.producer_contract, s.producer_version,
              s.history_session_count, s.calendar_id, s.calendar_revision,
              s.research_mode, s.price_coordinate
@@ -2047,6 +2121,10 @@ def read_source_launch_watch_page(
       AND r.source_capture_id=p.source_capture_id
       AND r.source_capture_id=p.target_capture_id
       AND r.rule_id=ANY(p.rule_ids)
+      AND (p.selected_history_session_count IS NULL
+           OR r.history_session_count=p.selected_history_session_count)
+      AND (p.selected_profile_revision IS NULL
+           OR r.profile_revision=p.selected_profile_revision)
     GROUP BY r.rule_version, r.profile_revision, r.history_session_count,
              r.d1_history_session_count, r.event_window_start,
              r.calendar_revision, r.scope
@@ -2094,6 +2172,7 @@ def read_source_launch_watch_page(
       AND d.target_capture_id=p.target_capture_id
       AND (p.d1_history_session_count IS NULL
            OR d.d1_history_session_count=p.d1_history_session_count)
+      AND d.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R3'
     GROUP BY d.d1_history_session_count, d.calendar_revision,
              d.producer_contract, d.producer_version,
              d.material_change_contract, d.research_mode, d.price_coordinate
@@ -2409,6 +2488,8 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
                 target_capture_id,
                 expected_source_count,
                 d1_history_session_count,
+                selected_history_session_count,
+                selected_profile_revision,
                 list(_RULE_IDS),
                 watch_group,
                 board_kind,
@@ -2535,6 +2616,7 @@ def read_source_launch_watch_d0_boards(
       AND d.source_capture_id=p.source_capture_id
       AND d.before_capture_id=p.before_capture_id
       AND d.target_capture_id=p.target_capture_id
+      AND d.producer_version='STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5'
     GROUP BY d.producer_version,d.algorithm_contract,d.session_contract,
              d.calendar_revision
 ), scope_status AS (
@@ -2658,6 +2740,7 @@ def read_source_launch_watch_board_rps_comparisons(
         or not isinstance(board_symbol_contexts, Sequence)
         or not isinstance(seed_scope, Mapping)
         or any(not seed_scope.get(name) for name in scope_fields)
+        or seed_scope.get("producer_version") != _SEED_PRODUCER_VERSION
         or type(seed_scope.get("history_session_count")) is not int
         or not 1 <= seed_scope["history_session_count"] <= 75
     ):

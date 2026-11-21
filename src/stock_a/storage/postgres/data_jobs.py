@@ -331,7 +331,7 @@ def read_raw_coverage(config: Mapping[str, Any], *, cutoff: date) -> dict[str, A
                JOIN stock.source_market_breadth_symbols s
                  ON s.breadth_day_id=d.id
                WHERE d.target_session<=%s
-                 AND d.contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R2'
+                 AND d.contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R3'
                GROUP BY d.target_session,d.source_capture_id,
                         d.contract_version,d.calendar_revision
                ORDER BY d.target_session,d.source_capture_id""",
@@ -2507,14 +2507,14 @@ def read_business_table_count(
             """SELECT count(*) FROM stock.source_market_breadth_days
                WHERE target_session=%s AND source_capture_id=%s
                  AND calendar_revision=%s
-                 AND contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R2'""",
+                 AND contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R3'""",
             lambda: (target_session, source_capture_id, calendar_revision),
         ),
         "stock.source_market_breadth_symbols": (
             """SELECT count(*) FROM stock.source_market_breadth_symbols
                WHERE target_session=%s AND source_capture_id=%s
                  AND calendar_revision=%s
-                 AND contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R2'""",
+                 AND contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R3'""",
             lambda: (target_session, source_capture_id, calendar_revision),
         ),
         "stock.source_market_participation_days": (
@@ -3341,6 +3341,8 @@ def mark_progress_verified(
     industry_snapshot_id: int | None = None,
     concept_snapshot_id: int | None = None,
     no_change: bool = False,
+    warning_code: str | None = None,
+    warning_message: str | None = None,
 ) -> None:
     """独立读回后，仅按真实来源捕获数字键登记提交进度。"""
     counts = (verified_rows, inserted_rows, updated_rows)
@@ -3351,6 +3353,18 @@ def mark_progress_verified(
     ):
         raise DataJobPgError(
             "DATA_JOB_ROW_COUNT_INVALID", "预期行数必须为非负整数或未知"
+        )
+    if (warning_code is None) != (warning_message is None) or (
+        warning_code is not None
+        and (
+            not isinstance(warning_code, str)
+            or not warning_code.strip()
+            or not isinstance(warning_message, str)
+            or not warning_message.strip()
+        )
+    ):
+        raise DataJobPgError(
+            "DATA_JOB_WARNING_INVALID", "完成阶段的告警代码与说明必须同时有效"
         )
     for field_name, value in (
         ("source_capture_id", source_capture_id),
@@ -3414,7 +3428,8 @@ def mark_progress_verified(
                    profile_revision=%s,producer_version=%s,
                    profile_history_session_count=%s,d1_history_session_count=%s,
                    calendar_revision=%s,industry_snapshot_id=%s,concept_snapshot_id=%s,
-                   quality_status=%s,verified_at=clock_timestamp(),
+                   quality_status=%s,error_code=%s,error_message=%s,
+                   verified_at=clock_timestamp(),
                    completed_at=clock_timestamp(),updated_at=clock_timestamp()
                WHERE job_id=%s AND stage_code=%s AND target_session=%s
                  AND business_table=%s AND status='RUNNING'""",
@@ -3433,6 +3448,8 @@ def mark_progress_verified(
                 industry_snapshot_id,
                 concept_snapshot_id,
                 quality_status,
+                warning_code,
+                warning_message,
                 job_id,
                 stage_code,
                 target_session,

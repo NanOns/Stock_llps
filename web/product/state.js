@@ -49,6 +49,45 @@ export function displayBoardName(item) {
   return item?.board_name?.trim() || "板块名称未知";
 }
 
+export function selectProfileScopeFromRecentJobs(
+  profiles,
+  recentJobs,
+  targetSession,
+  sourceCaptureId,
+) {
+  if (!Array.isArray(profiles) || !Array.isArray(recentJobs)) return null;
+  const targetProfiles = profiles.filter(
+    (item) =>
+      item?.complete === true &&
+      item.target_session === targetSession &&
+      Number(item.source_capture_id) === Number(sourceCaptureId) &&
+      item.price_coordinate === "FORWARD_ADJUSTED",
+  );
+  const job = recentJobs.find((item) => {
+    const modules = Array.isArray(item?.selected_modules)
+      ? item.selected_modules.map((value) => String(value).toUpperCase())
+      : [];
+    return (
+      item?.target_session === targetSession &&
+      Number(item.source_capture_id) === Number(sourceCaptureId) &&
+      ["COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"].includes(item.status) &&
+      String(item.daily_mode || "").toUpperCase() !== "SOURCE_ONLY" &&
+      (modules.includes("CORE_PROFILE") || modules.includes("D0")) &&
+      Number.isInteger(item.profile_history_session_count) &&
+      item.profile_history_session_count >= 1 &&
+      item.profile_history_session_count <= 250
+    );
+  });
+  if (!job) return null;
+  const matches = targetProfiles.filter(
+    (item) => item.history_session_count === job.profile_history_session_count,
+  );
+  return {
+    history_session_count: job.profile_history_session_count,
+    profile_revision: matches.length === 1 ? matches[0].profile_revision : null,
+  };
+}
+
 export function buildD1MaterialRequest(context, board, offsets, symbol = null) {
   return {
     target_session: context.target_session,

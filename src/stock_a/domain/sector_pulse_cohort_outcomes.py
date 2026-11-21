@@ -229,7 +229,7 @@ def build_sector_pulse_cohort_outcomes(
             or pulse.get("research_mode") != "NON_PIT_RETROSPECTIVE"
             or pulse.get("membership_mode")
             != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-            or pulse.get("price_coordinate") != "RAW_UNADJUSTED"
+            or pulse.get("price_coordinate") != "FORWARD_ADJUSTED"
             or pulse.get("formal_rotation_state") != "NOT_EVALUATED"
         ):
             raise ValueError("T0 PULSE三态、板块目录或质量字段不合法")

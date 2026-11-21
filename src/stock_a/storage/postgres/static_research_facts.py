@@ -168,6 +168,10 @@ _SEED_KEY = (
 _D0_TABLE = "source_d0_scenario_day_facts"
 _SEED_TABLE = "source_pool_seed_day_facts"
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
+_D0_PRODUCER_VERSIONS = {
+    "LAUNCH_CONFIRM": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5",
+    "RECOVERY_TURN": "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R5",
+}
 
 
 class StaticResearchPgError(ValueError):
@@ -317,8 +321,7 @@ def persist_static_d0_reference_scenario(
             "STATIC_D0_SCENARIO_INVALID", "D0参考事实场景与计算结果不一致"
         )
     rows = _d0_rows({scenario: page}, require_complete=False)
-    first = rows[0]
-    predicate, params = _scope_predicate(_D0_TABLE, _D0_COLUMNS, first)
+    predicate, params = _scope_predicate(_D0_TABLE, _D0_COLUMNS, rows)
     for attempt in range(5):
         try:
             inserted = {}
@@ -439,7 +442,7 @@ def _seed_rows(
             "source_capture_id": source["source_capture_id"],
             "profile_revision": profile_revision,
             "producer_contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
-            "producer_version": "SOURCE_POOL_SEED_CORE_PROFILE_R1",
+            "producer_version": "SOURCE_POOL_SEED_CORE_PROFILE_R2",
             "history_window_start": history_window[0],
             "history_window_end": history_window[-1],
             "history_session_count": len(history_window),
@@ -580,26 +583,39 @@ def _seed_rows(
 
 
 def _scope_predicate(
-    table: str, columns: Sequence[str], row: Sequence[Any]
+    table: str, columns: Sequence[str], rows: Sequence[Sequence[Any]]
 ) -> tuple[str, tuple[Any, ...]]:
-    if len(columns) != len(row):
+    if not rows or any(len(columns) != len(row) for row in rows):
         raise StaticResearchPgError(
             "STATIC_ROW_SHAPE_MISMATCH",
-            f"静态研究表{table}行宽{len(row)}与列合同{len(columns)}不一致",
+            f"静态研究表{table}行宽与列合同{len(columns)}不一致",
         )
+    row = rows[0]
     names = dict(zip(columns, row, strict=True))
+    if table == _D0_TABLE:
+        scenarios = sorted({str(item[columns.index("scenario")]) for item in rows})
+        producer_versions = sorted(
+            {str(item[columns.index("producer_version")]) for item in rows}
+        )
+        calendar_revisions = sorted(
+            {str(item[columns.index("calendar_revision")]) for item in rows}
+        )
+        return (
+            "target_session=%s AND source_capture_id=%s AND scenario=ANY(%s) "
+            "AND producer_version=ANY(%s) AND calendar_revision=ANY(%s)",
+            (
+                names["target_session"],
+                names["source_capture_id"],
+                scenarios,
+                producer_versions,
+                calendar_revisions,
+            ),
+        )
     scope = (
-        (
-            "target_session",
-            "source_capture_id",
-        )
-        if table == _D0_TABLE
-        else (
-            "target_session",
-            "source_capture_id",
-            "profile_revision",
-            "producer_version",
-        )
+        "target_session",
+        "source_capture_id",
+        "profile_revision",
+        "producer_version",
     )
     return " AND ".join(f"{name}=%s" for name in scope), tuple(
         names[name] for name in scope
@@ -687,7 +703,7 @@ def _persist_once(config, scenarios, groups, profile_revision) -> dict[str, Any]
             rows = sorted(
                 rows, key=lambda row: tuple(row[columns.index(name)] for name in key)
             )
-            predicate, params = _scope_predicate(table, columns, rows[0])
+            predicate, params = _scope_predicate(table, columns, rows)
             cursor.execute(
                 f"SELECT {', '.join(columns)} FROM {table} WHERE {predicate} ORDER BY {', '.join(key)}",
                 params,
@@ -796,6 +812,7 @@ def read_source_d0_scenario_day(
                 JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
                 WHERE d.target_session=%s AND d.target_session<=%s
                   AND d.source_capture_id=%s AND d.scenario=%s
+                  AND d.producer_version=%s
                   AND d.price_coordinate=%s AND c.provider='BAOSTOCK'
                   AND c.range_start_session<=d.target_session
                   AND d.target_session<=c.range_end_session
@@ -809,6 +826,7 @@ def read_source_d0_scenario_day(
                 cutoff,
                 source_capture_id,
                 scenario,
+                _D0_PRODUCER_VERSIONS[scenario],
                 price_coordinate,
                 cutoff,
             ),
@@ -941,7 +959,7 @@ def read_source_pool_seed_facts(
     source_capture_id: int,
     price_coordinate: str,
     profile_revision: str,
-    producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
+    producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R2",
 ) -> list[dict[str, Any]]:
     """按BaoStock capture、QFQ坐标及显式截止读取Seed事实全池行。"""
     if (
@@ -1005,6 +1023,7 @@ def read_source_pool_seed_forward_scope(
     source_capture_id: int,
     expected_source_count: int,
     profile_revision: str | None = None,
+    history_session_count: int | None = None,
 ) -> dict[str, Any]:
     """读取唯一闭合Seed范围，供已存T0来源池的后继生产复用。"""
     if (
@@ -1014,7 +1033,15 @@ def read_source_pool_seed_forward_scope(
         or type(expected_source_count) is not int
         or expected_source_count <= 0
         or profile_revision is not None
-        and (not isinstance(profile_revision, str) or not profile_revision)
+        and (
+            not isinstance(profile_revision, str)
+            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
+        )
+        or history_session_count is not None
+        and (
+            type(history_session_count) is not int
+            or not 1 <= history_session_count <= 250
+        )
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_FORWARD_KEY_INVALID", "后继生产Seed键或完整分母无效"
@@ -1024,25 +1051,55 @@ def read_source_pool_seed_forward_scope(
         cursor,
         _,
     ):
-        scope_predicate = "target_session=%s AND source_capture_id=%s"
-        scope_parameters: tuple[Any, ...] = (target_session, source_capture_id)
+        scope_predicate = (
+            "target_session=%s AND source_capture_id=%s AND producer_version=%s"
+        )
+        scope_parameters: tuple[Any, ...] = (
+            target_session,
+            source_capture_id,
+            "SOURCE_POOL_SEED_CORE_PROFILE_R2",
+        )
         if profile_revision is not None:
             scope_predicate += " AND profile_revision=%s"
             scope_parameters = (*scope_parameters, profile_revision)
+        if history_session_count is not None:
+            scope_predicate += " AND history_session_count=%s"
+            scope_parameters = (*scope_parameters, history_session_count)
         cursor.execute(
             f"""SELECT profile_revision, producer_contract, producer_version,
                        history_session_count, calendar_id, calendar_revision,
                        research_mode, price_coordinate, count(*)::bigint,
                        count(DISTINCT source_symbol)::bigint,
+                       count(*) FILTER (WHERE EXISTS (
+                           SELECT 1 FROM source_raw_daily r
+                           WHERE r.session_date=s.target_session
+                             AND r.source_capture_id=s.source_capture_id
+                             AND r.source_symbol=s.source_symbol
+                       ))::bigint,
+                       count(*) FILTER (WHERE EXISTS (
+                           SELECT 1 FROM source_symbol_price_profiles p
+                           WHERE p.target_session=s.target_session
+                             AND p.source_capture_id=s.source_capture_id
+                             AND p.source_symbol=s.source_symbol
+                             AND p.profile_revision=s.profile_revision
+                             AND p.history_window_start=s.history_window_start
+                             AND p.history_window_end=s.history_window_end
+                             AND p.history_requested_session_count=s.history_session_count
+                             AND p.history_calendar_id=s.calendar_id
+                             AND (p.history_calendar_revision=s.calendar_revision OR
+                               strpos('+' || p.history_calendar_revision || '+', '+' ||
+                                 to_char(s.target_session, 'YYYY') || ':' || s.calendar_revision || '+') > 0)
+                             AND p.price_coordinate=s.price_coordinate
+                       ))::bigint,
                        count(*) FILTER (WHERE s2_state='TRUE')::bigint,
                        count(*) FILTER (WHERE s2_state='FALSE')::bigint,
                        count(*) FILTER (WHERE s2_state='UNKNOWN')::bigint
-                FROM {_SEED_TABLE}
+                FROM {_SEED_TABLE} s
                 WHERE {scope_predicate}
-                GROUP BY profile_revision, producer_contract, producer_version,
-                         history_session_count, calendar_id, calendar_revision,
-                         research_mode, price_coordinate
-                ORDER BY profile_revision, producer_version""",
+                GROUP BY s.profile_revision, s.producer_contract, s.producer_version,
+                         s.history_session_count, s.calendar_id, s.calendar_revision,
+                         s.research_mode, s.price_coordinate
+                ORDER BY s.profile_revision, s.producer_version""",
             scope_parameters,
         )
         scopes = cursor.fetchall()
@@ -1050,17 +1107,26 @@ def read_source_pool_seed_forward_scope(
             raise StaticResearchPgError(
                 "STATIC_SEED_NOT_COMPUTED", "T0没有已存Seed事实，拒绝重算替代"
             )
-        if len(scopes) != 1:
+        complete_scopes = [
+            item
+            for item in scopes
+            if int(item[8]) == expected_source_count
+            and int(item[9]) == expected_source_count
+            and int(item[10]) == expected_source_count
+            and int(item[11]) == expected_source_count
+        ]
+        if len(complete_scopes) > 1:
             raise StaticResearchPgError(
                 "STATIC_SEED_SCOPE_AMBIGUOUS", "T0存在多个Seed修订范围，拒绝猜选"
             )
-        scope = scopes[0]
-        if scope[8] != expected_source_count or scope[9] != expected_source_count:
+        if not complete_scopes:
             raise StaticResearchPgError(
-                "STATIC_SEED_SCOPE_INCOMPLETE", "T0已存Seed与闭合Raw来源分母不一致"
+                "STATIC_SEED_SCOPE_INCOMPLETE",
+                "T0已存Seed/Profile与闭合Raw来源分母不一致",
             )
+        scope = complete_scopes[0]
         if (
-            scope[2] != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
+            scope[2] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
             or scope[6] != "NON_PIT_RETROSPECTIVE"
             or scope[7] != "FORWARD_ADJUSTED"
         ):
@@ -1071,15 +1137,12 @@ def read_source_pool_seed_forward_scope(
         cursor.execute(
             f"""SELECT source_symbol FROM {_SEED_TABLE}
                 WHERE target_session=%s AND source_capture_id=%s
-                   AND profile_revision=%s
-                  AND producer_version=%s
+                  AND profile_revision=%s AND producer_contract=%s
+                  AND producer_version=%s AND history_session_count=%s
+                  AND calendar_id=%s AND calendar_revision=%s
+                  AND research_mode=%s AND price_coordinate=%s
                 ORDER BY source_symbol""",
-            (
-                target_session,
-                source_capture_id,
-                scope[0],
-                scope[2],
-            ),
+            (target_session, source_capture_id, *scope[:8]),
         )
         symbols = tuple(row[0] for row in cursor.fetchall())
     if len(symbols) != expected_source_count or len(set(symbols)) != len(symbols):
@@ -1097,9 +1160,9 @@ def read_source_pool_seed_forward_scope(
         "price_coordinate": scope[7],
         "source_count": scope[8],
         "s2_state_counts": {
-            "TRUE": scope[10],
-            "FALSE": scope[11],
-            "UNKNOWN": scope[12],
+            "TRUE": scope[12],
+            "FALSE": scope[13],
+            "UNKNOWN": scope[14],
         },
         "source_symbols": symbols,
     }
@@ -1113,7 +1176,7 @@ def read_source_stock_seed_fact(
     profile_revision: str,
     source_symbol: str,
     expected_source_count: int,
-    producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
+    producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R2",
 ) -> dict[str, Any]:
     """按完整来源身份核验分区后，只读取单股行；分母须来自已闭合的Raw版本目录。"""
     if (
@@ -1126,7 +1189,7 @@ def read_source_stock_seed_fact(
         or _SYMBOL.fullmatch(source_symbol) is None
         or type(expected_source_count) is not int
         or expected_source_count <= 0
-        or producer_version != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
+        or producer_version != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_SINGLE_KEY_INVALID", "单股Seed读取必须绑定合法完整业务键"
@@ -1329,7 +1392,7 @@ def read_seed_profile_returns(
     target_session: date,
     source_capture_id: int,
     profile_revision: str,
-    producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
+    producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R2",
 ) -> dict[str, dict[str, Any]]:
     """按完整身份连接旧Seed与同窗口画像，返回来源明确的收益字段。"""
     columns = tuple(

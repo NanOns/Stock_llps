@@ -117,6 +117,45 @@ def _source_price_bar_from_pg_row(
     )
 
 
+def trade_status_state_from_pg_row(
+    row: Mapping[str, Any] | None, *, price_coordinate: str
+) -> tuple[str, str | None]:
+    """独立读取RAW/QFQ坐标对应的BaoStock交易状态，不从OHLC推断成交。"""
+    if price_coordinate == "RAW_UNADJUSTED":
+        value_column = "raw_tradestatus_value"
+        quality_column = "raw_tradestatus_quality"
+        reason_column = "raw_tradestatus_reason"
+        status_column = "bar_status"
+        status_reason_column = "bar_reason"
+    elif price_coordinate == "FORWARD_ADJUSTED":
+        value_column = "qfq_tradestatus_value"
+        quality_column = "qfq_tradestatus_quality"
+        reason_column = "qfq_tradestatus_reason"
+        status_column = "qfq_bar_status"
+        status_reason_column = "qfq_bar_reason"
+    else:
+        raise ResearchEntryError(
+            "PRICE_COORDINATE_INVALID", "交易状态只支持RAW_UNADJUSTED或FORWARD_ADJUSTED"
+        )
+    if row is None:
+        return "UNKNOWN", "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+    if row.get(status_column) != "TARGET_PRESENT":
+        return "UNKNOWN", str(
+            row.get(status_reason_column)
+            or row.get(status_column)
+            or "TARGET_BAR_NOT_PRESENT"
+        )
+    value = row.get(value_column)
+    quality = row.get(quality_column)
+    if quality != "OBSERVED":
+        return "UNKNOWN", str(row.get(reason_column) or "TRADE_STATUS_UNKNOWN")
+    if type(value) in (str, int) and str(value) == "1":
+        return "ACTUAL", None
+    if type(value) in (str, int) and str(value) == "0":
+        return "CONFIRMED_SUSPENSION", "TRADE_STATUS_CONFIRMED_SUSPENSION"
+    return "UNKNOWN", str(row.get(reason_column) or "TRADE_STATUS_VALUE_INVALID")
+
+
 def _core_observation_from_pg_price_row(
     row: Mapping[str, Any] | None,
     *,
@@ -148,12 +187,8 @@ def _core_observation_from_pg_price_row(
         )
     if price_coordinate == "RAW_UNADJUSTED":
         status_column, reason_column = "bar_status", "bar_reason"
-        trade_status_value = row.get("raw_tradestatus_value")
-        trade_status_quality = row.get("raw_tradestatus_quality")
     elif price_coordinate == "FORWARD_ADJUSTED":
         status_column, reason_column = "qfq_bar_status", "qfq_bar_reason"
-        trade_status_value = row.get("qfq_tradestatus_value")
-        trade_status_quality = row.get("qfq_tradestatus_quality")
     else:
         raise ResearchEntryError(
             "PRICE_COORDINATE_INVALID", "价格坐标只支持RAW_UNADJUSTED或FORWARD_ADJUSTED"
@@ -161,6 +196,9 @@ def _core_observation_from_pg_price_row(
     status = row.get(status_column)
     if status not in {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}:
         raise ResearchEntryError("PG_PRICE_STATUS_INVALID", "PG来源价格状态未登记")
+    trade_state, trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate=price_coordinate
+    )
     amount = _field_from_pg_raw(row, "raw_amount", "amount_quality", "amount_reason")
     volume = _field_from_pg_raw(row, "raw_volume", "volume_quality", "volume_reason")
     native_amount = _field_from_pg_raw(
@@ -205,7 +243,11 @@ def _core_observation_from_pg_price_row(
         )
         return CoreObservation(
             session=session,
-            state="UNKNOWN",
+            state=(
+                "CONFIRMED_SUSPENSION"
+                if trade_state == "CONFIRMED_SUSPENSION"
+                else "UNKNOWN"
+            ),
             coordinate_id=coordinate_id,
             open=unknown(reason),
             high=unknown(reason),
@@ -216,15 +258,9 @@ def _core_observation_from_pg_price_row(
             native_amount=native_amount,
             native_volume=native_volume,
         )
-    state = (
-        "CONFIRMED_SUSPENSION"
-        if trade_status_quality == "OBSERVED" and trade_status_value == "0"
-        else "ACTUAL"
-        if trade_status_quality == "OBSERVED" and trade_status_value == "1"
-        else "UNKNOWN"
-    )
+    state = trade_state
     if state == "UNKNOWN":
-        reason = "TRADE_STATUS_UNKNOWN"
+        reason = trade_reason or "TRADE_STATUS_UNKNOWN"
         return CoreObservation(
             session=session,
             state=state,

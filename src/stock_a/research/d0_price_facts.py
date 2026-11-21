@@ -8,6 +8,8 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Mapping, Sequence
 
+from stock_a.research.entry_history.support import trade_status_state_from_pg_row
+
 
 @dataclass(frozen=True)
 class D0FirstDayDamage:
@@ -124,9 +126,18 @@ def calculate_d0_first_day_damage(
                 source_capture_id=source_capture_id,
                 price_coordinate=price_coordinate,
             )
-        if row.get("bar_status") != "TARGET_PRESENT":
+        if row.get("qfq_bar_status") != "TARGET_PRESENT":
             return _unknown(
                 "OFFICIAL_SESSION_BAR_MISSING",
+                sessions=window,
+                missing=(session,),
+            )
+        trade_state, trade_reason = trade_status_state_from_pg_row(
+            row, price_coordinate="FORWARD_ADJUSTED"
+        )
+        if trade_state != "ACTUAL":
+            return _unknown(
+                trade_reason or "TRADE_STATUS_UNKNOWN",
                 sessions=window,
                 missing=(session,),
             )

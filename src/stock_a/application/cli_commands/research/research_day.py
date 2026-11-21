@@ -148,11 +148,19 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 persist_source_rps_pulse_t0_groups_from_saved,
             )
 
+            source_capture_id = getattr(args, "source_capture_id", None)
+            if source_capture_id is None:
+                # 仅为现役入口兼容旧属性名；该值在此路径中严格按BaoStock capture ID读取。
+                source_capture_id = getattr(args, "source_package_id", None)
+            if type(source_capture_id) is not int or source_capture_id <= 0:
+                raise ValueError("RPS×PULSE必须提供有效BaoStock来源捕获ID")
             report = persist_source_rps_pulse_t0_groups_from_saved(
                 config,
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                source_package_id=args.source_package_id,
+                source_capture_id=source_capture_id,
+                history_session_count=getattr(args, "history_session_count", None),
+                profile_revision=getattr(args, "profile_revision", None),
             )
             report["configuration_path"] = str(config_path)
             report["ok"] = report.get("status") in {

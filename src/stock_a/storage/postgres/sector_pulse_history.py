@@ -9,6 +9,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+from stock_a.research.source_market_breadth import SOURCE_MARKET_BREADTH_CONTRACT
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.sector_pulse_facts import (
     _ALGORITHM,
@@ -52,7 +53,7 @@ def _read_market_context(
 FROM source_market_breadth_days
 WHERE target_session=%s AND target_session<=%s AND source_capture_id=%s
   AND price_coordinate='FORWARD_ADJUSTED'
-  AND calendar_id=%s AND calendar_revision=%s
+  AND calendar_id=%s AND calendar_revision=%s AND contract_version=%s
 ORDER BY id LIMIT 2""",
         (
             target_session,
@@ -60,6 +61,7 @@ ORDER BY id LIMIT 2""",
             capture_id,
             calendar_id,
             calendar_revision,
+            SOURCE_MARKET_BREADTH_CONTRACT,
         ),
     )
     breadth_days = cursor.fetchall()

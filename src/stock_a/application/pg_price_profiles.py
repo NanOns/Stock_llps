@@ -699,6 +699,9 @@ def read_source_symbol_price_profile_observation(
     *,
     target_session: date,
     source_capture_id: int,
+    research_cutoff: date | None = None,
+    history_session_count: int | None = None,
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """按Raw捕获、来源包和现存画像修订投影已保存Core/Profile画像及质量。"""
     if type(source_capture_id) is not int or source_capture_id <= 0:
@@ -722,8 +725,11 @@ def read_source_symbol_price_profile_observation(
             config,
             target_session=target_session,
             source_capture_id=source_capture_id,
+            research_cutoff=research_cutoff,
             current_profile_revision=_PROFILE_REVISION,
             current_producer_version=_PRODUCER_SEMANTICS_VERSION,
+            history_session_count=history_session_count,
+            requested_profile_revision=profile_revision,
         )
     except (RawSourcePgError, PriceProfilePgError) as error:
         raise PgPriceProfileError(

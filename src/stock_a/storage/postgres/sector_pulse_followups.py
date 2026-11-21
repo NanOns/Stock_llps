@@ -19,6 +19,7 @@ _TABLE = "source_sector_pulse_followup_facts"
 _PULSE_TABLE = "source_sector_cross_period_pulse_facts"
 _FOLLOWUP = "SOURCE_SECTOR_PULSE_FOLLOWUP_CLOSE_R1"
 _PULSE_ALGORITHM = "SOURCE_CROSS_PERIOD_PULSE_R1"
+_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 _KINDS = ("INDUSTRY", "CONCEPT")
 _HORIZONS = (1, 3, 5)
 _PULSE_STATES = ("TRUE", "FALSE", "UNKNOWN")
@@ -412,11 +413,12 @@ def read_source_sector_pulse_followup_inputs(
        count(DISTINCT profile_revision)::bigint, min(producer_version), max(producer_version)
 FROM source_pool_seed_day_facts
 WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
-  AND price_coordinate='FORWARD_ADJUSTED'""",
+  AND producer_version=%s AND price_coordinate='FORWARD_ADJUSTED'""",
             (
                 t0_session,
                 source_capture_id,
                 identity["profile_revision"],
+                _SEED_PRODUCER_VERSION,
             ),
         )
         seed_count, seed_symbols, revision_count, producer_min, producer_max = (
@@ -426,7 +428,7 @@ WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
             int(seed_count) != int(identity["source_pool_count"])
             or int(seed_symbols) != int(identity["source_pool_count"])
             or int(revision_count) != 1
-            or producer_min != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
+            or producer_min != _SEED_PRODUCER_VERSION
             or producer_max != producer_min
         ):
             raise SectorPulseFollowupPgError(

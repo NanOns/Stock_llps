@@ -596,6 +596,39 @@ def _profile_revision(value: Any) -> str:
     return value
 
 
+def _selected_profile_history_session_count(
+    profile_observation: Mapping[str, Any] | None,
+    *,
+    requested_history_session_count: int | None,
+    requested_profile_revision: str | None,
+) -> int | None:
+    """只以完整唯一Profile的请求窗口选会话数，不要求每行都有全历史。"""
+    if not isinstance(profile_observation, Mapping):
+        return None
+    selection = profile_observation.get("profile_revision_selection")
+    selected = profile_observation.get("selected_revision")
+    if not isinstance(selection, Mapping) or not isinstance(selected, Mapping):
+        return None
+    if (
+        selection.get("current_version_match_count") != 1
+        or selection.get("selected_version_match") is not True
+    ):
+        return None
+    requested_min = selected.get("min_history_requested_sessions")
+    requested_max = selected.get("max_history_requested_sessions")
+    if (
+        type(requested_min) is not int
+        or requested_min != requested_max
+        or not 1 <= requested_min <= 250
+        or requested_history_session_count is not None
+        and requested_min != requested_history_session_count
+        or requested_profile_revision is not None
+        and selected.get("profile_revision") != requested_profile_revision
+    ):
+        return None
+    return requested_min
+
+
 def _price_coordinate(value: Any) -> str:
     if not isinstance(value, str) or value not in _PRICE_COORDINATES:
         raise PreviewHttpError(
@@ -1615,6 +1648,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         limit: int,
         watch_group: str,
         d1_history_session_count: int | None,
+        history_session_count: int | None,
+        profile_revision: str | None,
         board_kind: str | None,
         board_native_id: str | None,
     ) -> dict[str, Any]:
@@ -1682,6 +1717,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 offset=offset,
                 limit=limit,
                 d1_history_session_count=d1_history_session_count,
+                selected_history_session_count=history_session_count,
+                selected_profile_revision=profile_revision,
                 board_kind=board_kind,
                 board_native_id=board_native_id,
                 board_snapshot_id=board_snapshot_id,
@@ -1715,6 +1752,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             source_capture_id=after_source["source_capture_id"],
             expected_source_count=after_source["capture_expected_row_count"],
             source_symbols=sorted(page_symbols),
+            profile_history_session_count=history_session_count,
+            profile_revision=profile_revision,
         )
         t0_summary_query_started = time.perf_counter()
         from stock_a.storage.postgres.t0_early_observations import (
@@ -1740,6 +1779,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 expected_source_count=after_source["capture_expected_row_count"],
                 source_symbols=page_symbols,
                 d1_history_session_count=d1_history_session_count,
+                selected_history_session_count=history_session_count,
+                selected_profile_revision=profile_revision,
             )
             from stock_a.application.source_d0_tdx_membership import (
                 read_tdx_sector_memberships_for_symbols,
@@ -2973,6 +3014,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         }
         board_fields = {"board_kind", "board_native_id"}
         evidence_fields = {"d1_history_session_count"}
+        profile_fields = {"history_session_count", "profile_revision"}
         watch_fields = {"watch_group"}
         before_capture_field = {"before_source_capture_id"}
         if not isinstance(body, dict) or not required.issubset(body):
@@ -2987,11 +3029,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 required
                 | (board_fields if has_board else set())
                 | (evidence_fields if has_evidence else set())
+                | (profile_fields if has_profile else set())
                 | (watch_fields if has_watch else set())
                 | (before_capture_field if has_before_capture else set())
             )
             for has_board in (False, True)
             for has_evidence in (False, True)
+            for has_profile in (False, True)
             for has_watch in (False, True)
             for has_before_capture in (False, True)
         }
@@ -3071,6 +3115,22 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if "d1_history_session_count" in body
             else None
         )
+        history_session_count = (
+            _positive_int(body["history_session_count"], "history_session_count", 250)
+            if "history_session_count" in body
+            else None
+        )
+        profile_revision = (
+            _profile_revision(body["profile_revision"])
+            if "profile_revision" in body
+            else None
+        )
+        if (history_session_count is None) != (profile_revision is None):
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_PROFILE_SCOPE_INVALID",
+                "Profile历史会话数与画像修订须成对提供",
+            )
 
         board_kind: str | None = None
         board_native_id: str | None = None
@@ -3126,6 +3186,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             limit=limit,
             watch_group=watch_group,
             d1_history_session_count=d1_history_session_count,
+            history_session_count=history_session_count,
+            profile_revision=profile_revision,
             board_kind=board_kind,
             board_native_id=board_native_id,
         )
@@ -3141,11 +3203,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "board_a",
             "board_b",
         }
-        if not isinstance(body, dict) or set(body) != required:
+        optional = {"history_session_count", "profile_revision"}
+        if (
+            not isinstance(body, dict)
+            or set(body) - required - optional
+            or not required <= set(body)
+            or ("history_session_count" in body) != ("profile_revision" in body)
+        ):
             raise PreviewHttpError(
                 400,
                 "BOARD_COMPARISON_FIELDS_INVALID",
-                "双板块比较请求字段不完整或含额外字段",
+                "双板块比较须提供完整字段；Profile会话数与修订须成对提供",
             )
         target = _iso_date(body["target_session"])
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
@@ -3154,6 +3222,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         source_capture_id = _capture_id(body["source_capture_id"])
         history_count = _positive_int(
             body["d1_history_session_count"], "d1_history_session_count", 32767
+        )
+        profile_history_count = (
+            _positive_int(body["history_session_count"], "history_session_count", 250)
+            if "history_session_count" in body
+            else None
+        )
+        profile_revision = (
+            _profile_revision(body["profile_revision"])
+            if "profile_revision" in body
+            else None
         )
         snapshots = {
             "INDUSTRY": (
@@ -3202,6 +3280,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target_session=target,
                 source_capture_id=source_capture_id,
                 d1_history_session_count=history_count,
+                history_session_count=profile_history_count,
+                profile_revision=profile_revision,
                 snapshot_ids=snapshots,
                 board_a_kind=board_a[0],
                 board_a_native_id=board_a[1],
@@ -4144,6 +4224,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "symbol",
                         "industry_snapshot_id",
                         "concept_snapshot_id",
+                        "history_session_count",
                         "profile_revision",
                         "board_kind",
                         "board_native_id",
@@ -4161,6 +4242,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         400,
                         "QUERY_REQUIRED",
                         "须提供目标会话、来源捕获和D1窗口会话数",
+                    )
+                if ("history_session_count" in values) != (
+                    "profile_revision" in values
+                ):
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_SCOPE_INVALID",
+                        "Profile历史会话数与修订须成对提供",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
@@ -4199,6 +4288,24 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             ),
                             "d1_history_session_count",
                             32767,
+                        ),
+                        history_session_count=(
+                            _positive_int(
+                                _nonnegative_int(
+                                    values["history_session_count"],
+                                    "history_session_count",
+                                    250,
+                                ),
+                                "history_session_count",
+                                250,
+                            )
+                            if "history_session_count" in values
+                            else None
+                        ),
+                        profile_revision=(
+                            _profile_revision(values["profile_revision"])
+                            if "profile_revision" in values
+                            else None
                         ),
                         offset=_nonnegative_int(values.get("offset", "0"), "offset"),
                         limit=_positive_int(
@@ -5149,7 +5256,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/preview/sector-change-context":
                 values = _query(
                     self.path,
-                    {"target_session", "source_capture_id", "price_coordinate"},
+                    {
+                        "target_session",
+                        "source_capture_id",
+                        "price_coordinate",
+                        "history_session_count",
+                        "profile_revision",
+                    },
                 )
                 if not {
                     "target_session",
@@ -5173,11 +5286,37 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "板块变化及跨会话画像固定使用BaoStock FORWARD_ADJUSTED坐标",
                     )
                 requested_source_capture_id = _capture_id(values["source_capture_id"])
+                requested_history_session_count = (
+                    _positive_int(
+                        _nonnegative_int(
+                            values["history_session_count"],
+                            "history_session_count",
+                            250,
+                        ),
+                        "history_session_count",
+                        250,
+                    )
+                    if "history_session_count" in values
+                    else None
+                )
+                requested_profile_revision = (
+                    _profile_revision(values["profile_revision"])
+                    if "profile_revision" in values
+                    else None
+                )
+                if requested_profile_revision is not None and (
+                    requested_history_session_count is None
+                ):
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_CHANGE_PROFILE_SCOPE_INVALID",
+                        "精确画像修订必须同时提供history_session_count",
+                    )
                 catalog = read_tdx_sector_source_snapshot_catalog(
                     self.preview_server.state.config
                 )
                 profile_observation = None
-                history_session_count = 75
+                history_session_count = None
                 d1_history_session_count = None
                 if "source_capture_id" in values:
                     source_capture_id = requested_source_capture_id
@@ -5189,13 +5328,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         price_coordinate=price_coordinate,
                     )
                     try:
-                        profile_observation = (
-                            read_source_symbol_price_profile_observation(
-                                self.preview_server.state.config,
-                                self.preview_server.state.profile_contract,
-                                target_session=target,
-                                source_capture_id=source_context["source_capture_id"],
-                            )
+                        profile_observation = read_source_symbol_price_profile_observation(
+                            self.preview_server.state.config,
+                            self.preview_server.state.profile_contract,
+                            target_session=target,
+                            source_capture_id=source_context["source_capture_id"],
+                            research_cutoff=self.preview_server.state.research_cutoff,
+                            history_session_count=requested_history_session_count,
+                            profile_revision=requested_profile_revision,
                         )
                     except PgPriceProfileError as error:
                         profile_observation = {
@@ -5203,41 +5343,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "reason_code": error.code,
                             "reason": str(error),
                         }
-                    selection_value = (
-                        profile_observation.get("profile_revision_selection")
-                        if isinstance(profile_observation, Mapping)
-                        else None
+                    history_session_count = _selected_profile_history_session_count(
+                        profile_observation,
+                        requested_history_session_count=requested_history_session_count,
+                        requested_profile_revision=requested_profile_revision,
                     )
-                    selection = (
-                        selection_value if isinstance(selection_value, Mapping) else {}
-                    )
-                    selected_revision_value = (
-                        profile_observation.get("selected_revision")
-                        if isinstance(profile_observation, Mapping)
-                        else None
-                    )
-                    selected_revision = (
-                        selected_revision_value
-                        if isinstance(selected_revision_value, Mapping)
-                        else {}
-                    )
-                    requested_min = selected_revision.get(
-                        "min_history_requested_sessions"
-                    )
-                    requested_max = selected_revision.get(
-                        "max_history_requested_sessions"
-                    )
-                    stored_min = selected_revision.get("min_history_stored_sessions")
-                    stored_max = selected_revision.get("max_history_stored_sessions")
-                    if (
-                        selection.get("candidate_revision_count") == 1
-                        and selection.get("current_version_match_count") == 1
-                        and selection.get("selected_version_match") is True
-                        and type(requested_min) is int
-                        and requested_min == requested_max == stored_min == stored_max
-                        and 1 <= requested_min <= 75
-                    ):
-                        history_session_count = requested_min
                     try:
                         d1_scope = read_source_research_day_scope(
                             self.preview_server.state.config,
@@ -5248,14 +5358,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         raise PreviewHttpError(409, error.code, str(error)) from error
                     if d1_scope.get("status") == "SAVED_SCOPE_UNIQUE":
                         d1_history_session_count = d1_scope["d1_history_session_count"]
-                try:
-                    _resolved_target, sessions, calendar_revision = (
-                        resolve_pg_history_window(
-                            target.isoformat(), history_session_count
+                sessions = ()
+                calendar_revision = None
+                if history_session_count is not None:
+                    try:
+                        _resolved_target, sessions, calendar_revision = (
+                            resolve_pg_history_window(
+                                target.isoformat(), history_session_count
+                            )
                         )
-                    )
-                except ResearchEntryError as error:
-                    raise PreviewHttpError(409, error.code, str(error)) from error
+                    except ResearchEntryError as error:
+                        raise PreviewHttpError(409, error.code, str(error)) from error
                 snapshots = []
                 for snapshot in catalog["snapshots"]:
                     observed = datetime.fromisoformat(snapshot["observed_at"])
@@ -5272,21 +5385,23 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         }
                     )
                 window_options = []
-                for event_session_count in (1, 5, 10):
-                    if len(sessions) < event_session_count + 1:
-                        continue
-                    window_options.append(
-                        {
-                            "event_session_count": event_session_count,
-                            "event_window_start": sessions[
-                                -(event_session_count + 1)
-                            ].isoformat(),
-                            "target_session": target.isoformat(),
-                            "pg_history_session_count": min(
-                                history_session_count, event_session_count + 23
-                            ),
-                        }
-                    )
+                if history_session_count is not None:
+                    for event_session_count in (1, 5, 10):
+                        if len(sessions) < event_session_count + 1:
+                            continue
+                        window_options.append(
+                            {
+                                "event_session_count": event_session_count,
+                                "event_window_start": sessions[
+                                    -(event_session_count + 1)
+                                ].isoformat(),
+                                "target_session": target.isoformat(),
+                                "pg_history_session_count": min(
+                                    history_session_count,
+                                    event_session_count + 23,
+                                ),
+                            }
+                        )
                 self._send_json(
                     200,
                     {
@@ -5297,9 +5412,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "price_coordinate": price_coordinate,
                         "time_role": "NON_PIT_RETROSPECTIVE",
                         "official_calendar_revision": calendar_revision,
-                        "previous_session": sessions[-2].isoformat(),
-                        "source_history_start": sessions[0].isoformat(),
-                        "source_history_session_count": len(sessions),
+                        "previous_session": sessions[-2].isoformat()
+                        if len(sessions) >= 2
+                        else None,
+                        "source_history_start": sessions[0].isoformat()
+                        if sessions
+                        else None,
+                        "source_history_session_count": history_session_count,
                         "d1_history_session_count": d1_history_session_count,
                         "profile_observation": profile_observation,
                         "last_service_error": self.preview_server.state.last_service_error,
@@ -7392,6 +7511,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     single_symbol_only=True,
                     expected_before_session=sessions[-2] if len(sessions) > 1 else None,
                     selected_profile_revision=profile_revision,
+                    selected_history_session_count=session_count,
                     membership_snapshot_ids=membership_snapshot_ids,
                 )
                 single_evidence = saved_evidence["by_symbol"][symbol]
@@ -7608,6 +7728,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "source_capture_expected_row_count"
                     ],
                     source_symbols=[symbol],
+                    profile_history_session_count=session_count,
+                    profile_revision=profile_revision,
                 )
                 formal_d0_admission = present_source_formal_admission(
                     stored_day=formal_admission_day,

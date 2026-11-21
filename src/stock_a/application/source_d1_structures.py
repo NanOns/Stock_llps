@@ -1946,7 +1946,7 @@ def discover_source_d1_structures(
         if structure_changes
         else "SOURCE_LEVEL_D1_MULTI_STRUCTURE_DISCOVERY",
         "contract": STRUCTURE_CONTRACT,
-        "producer_version": "STOCK_A_D1_BAOSTOCK_QFQ_R2",
+        "producer_version": "STOCK_A_D1_BAOSTOCK_QFQ_R3",
         "scope": "FIVE_SOURCE_LEVEL_RESEARCH_TYPES_NOT_FORMAL_D1_TEN_TYPE_CLOSURE",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
@@ -2391,7 +2391,7 @@ def evaluate_source_d1_structure_timeline(
     )
     return {
         "contract": STRUCTURE_CONTRACT,
-        "producer_version": "STOCK_A_D1_BAOSTOCK_QFQ_R2",
+        "producer_version": "STOCK_A_D1_BAOSTOCK_QFQ_R3",
         "status": "SOURCE_SYMBOL_D1_STRUCTURE_HISTORY",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",

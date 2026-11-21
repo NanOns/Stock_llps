@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Mapping, Sequence
 
+from stock_a.research.source_market_breadth import SOURCE_MARKET_BREADTH_CONTRACT
 from stock_a.storage.postgres import source_raw
 
 
@@ -400,8 +401,9 @@ def read_source_board_relative_history_inputs(
                           read_failed_count,history_row_count,session_t1,session_t3
                    FROM source_market_breadth_days
                    WHERE target_session=%s AND source_capture_id=%s
+                     AND contract_version=%s
                    ORDER BY id""",
-                (session, capture_id),
+                (session, capture_id, SOURCE_MARKET_BREADTH_CONTRACT),
             )
             breadth_rows = cursor.fetchall()
             if len(breadth_rows) == 1:

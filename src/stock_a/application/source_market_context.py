@@ -15,6 +15,7 @@ from stock_a.domain.market_presentation import (
 )
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
+from stock_a.research.entry_history.support import trade_status_state_from_pg_row
 from stock_a.research.source_market_breadth import (
     QfqPriceObservation,
     SourceCohortIdentity,
@@ -233,6 +234,7 @@ def compute_source_market_context(
 
     observations = []
     status_counts = {"TARGET_PRESENT": 0, "TARGET_MISSING": 0, "READ_FAILED": 0}
+    trade_status_counts = {"ACTUAL": 0, "CONFIRMED_SUSPENSION": 0, "UNKNOWN": 0}
     for symbol in source_symbols:
         for session in needed_sessions:
             row = rows_by_key.get((symbol, session))
@@ -241,17 +243,27 @@ def compute_source_market_context(
                 quality = "UNKNOWN"
                 price_reason = bar_reason
                 close = None
+                trade_status_state, trade_status_reason = (
+                    "UNKNOWN",
+                    "TRADE_STATUS_HISTORY_ROW_NOT_STORED",
+                )
             else:
-                bar_status = row.get("bar_status") or "READ_FAILED"
-                bar_reason = row.get("bar_reason")
-                quality = row.get("selected_price_quality") or "UNKNOWN"
-                price_reason = row.get("selected_price_reason")
-                close = row.get("selected_close")
+                bar_status = row.get("qfq_bar_status") or "READ_FAILED"
+                bar_reason = row.get("qfq_bar_reason")
+                quality = row.get("qfq_price_quality") or "UNKNOWN"
+                price_reason = row.get("qfq_price_reason")
+                close = row.get("qfq_close")
                 if bar_status not in status_counts:
                     bar_status = "READ_FAILED"
                     bar_reason = bar_reason or "PRICE_BAR_STATUS_INVALID"
+                trade_status_state, trade_status_reason = (
+                    trade_status_state_from_pg_row(
+                        row, price_coordinate="FORWARD_ADJUSTED"
+                    )
+                )
             if session == target_session:
                 status_counts[bar_status] += 1
+                trade_status_counts[trade_status_state] += 1
             observations.append(
                 QfqPriceObservation(
                     source_symbol=symbol,
@@ -262,6 +274,8 @@ def compute_source_market_context(
                     price_reason=price_reason or bar_reason,
                     bar_status=bar_status,
                     price_coordinate="FORWARD_ADJUSTED",
+                    trade_status_state=trade_status_state,
+                    trade_status_reason=trade_status_reason,
                 )
             )
     source_version = {
@@ -277,6 +291,7 @@ def compute_source_market_context(
         "price_row_count": len(source_symbols),
         "capture_expected_price_row_count": len(source_symbols),
         "target_status_counts": status_counts,
+        "target_trade_status_counts": trade_status_counts,
     }
     cohort = SourceCohortIdentity(
         target_session=target_session,

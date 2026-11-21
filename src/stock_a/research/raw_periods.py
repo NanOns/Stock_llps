@@ -18,6 +18,7 @@ from stock_a.research.profile import (
     WindowIdentity,
     evaluate_profile_kernel,
 )
+from stock_a.research.entry_history.support import trade_status_state_from_pg_row
 
 
 RAW_PERIOD_ALGORITHM_ID = "R02_SOURCE_SYMBOL_BAOSTOCK_COORDINATE_PERIOD_OHLC_R2"
@@ -54,6 +55,8 @@ class RawDailyBar:
     close: Fraction | None
     valid_price_bar: bool
     source_capture_id: int | None
+    trade_status_state: str = "UNKNOWN"
+    trade_status_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,8 @@ class RawPeriodBar:
     low_session: date | None
     close_session: date | None
     daily_rows: tuple[RawDailyBar, ...]
+    suspended_session_count: int = 0
+    unknown_trade_status_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -171,7 +176,13 @@ def _daily_bar(
         )
     if _session(row.get("session_date")) != session:
         raise ContractError("Raw周期输入行日期错配")
-    bar_status = row.get("bar_status")
+    bar_status_column = (
+        "bar_status" if price_coordinate == "RAW_UNADJUSTED" else "qfq_bar_status"
+    )
+    bar_reason_column = (
+        "bar_reason" if price_coordinate == "RAW_UNADJUSTED" else "qfq_bar_reason"
+    )
+    bar_status = row.get(bar_status_column)
     if bar_status not in _BAR_STATUSES:
         raise ContractError("Raw周期输入含未登记来源状态")
     if price_coordinate not in _PRICE_FIELDS_BY_COORDINATE:
@@ -181,6 +192,9 @@ def _daily_bar(
         raise ContractError("Raw周期输入价格坐标与请求不一致")
     price_fields = _PRICE_FIELDS_BY_COORDINATE[price_coordinate]
     quality_field, reason_field = _QUALITY_FIELDS_BY_COORDINATE[price_coordinate]
+    trade_status_state, trade_status_reason = trade_status_state_from_pg_row(
+        row, price_coordinate=price_coordinate
+    )
     values = tuple(_fraction(row.get(name)) for name in price_fields)
     quality = row.get(quality_field)
     source_capture_id = row.get("source_capture_id")
@@ -189,13 +203,16 @@ def _daily_bar(
     ):
         raise ContractError("Raw周期来源捕获ID必须是正整数或空值")
     valid = (
-        bar_status == "TARGET_PRESENT" and quality == "OBSERVED" and _valid_ohlc(values)
+        bar_status == "TARGET_PRESENT"
+        and trade_status_state == "ACTUAL"
+        and quality == "OBSERVED"
+        and _valid_ohlc(values)
     )
     return RawDailyBar(
         session=session,
         price_coordinate=price_coordinate,
         bar_status=bar_status,
-        bar_reason=row.get("bar_reason"),
+        bar_reason=row.get(bar_reason_column),
         price_quality=str(quality or "UNKNOWN"),
         price_reason=row.get(reason_field),
         open=values[0],
@@ -204,6 +221,8 @@ def _daily_bar(
         close=values[3],
         valid_price_bar=valid,
         source_capture_id=source_capture_id,
+        trade_status_state=trade_status_state,
+        trade_status_reason=trade_status_reason,
     )
 
 
@@ -234,17 +253,27 @@ def _aggregate_period(
     )
     daily_rows = tuple(rows_by_session[day] for day in elapsed_sessions)
     valid_rows = tuple(row for row in daily_rows if row.valid_price_bar)
+    suspended_session_count = sum(
+        row.trade_status_state == "CONFIRMED_SUSPENSION" for row in daily_rows
+    )
+    unknown_trade_status_count = sum(
+        row.bar_status in _BAR_STATUSES and row.trade_status_state == "UNKNOWN"
+        for row in daily_rows
+    )
     missing_history_count = sum(
         row.bar_status == "HISTORY_ROW_NOT_STORED" for row in daily_rows
     )
     target_missing_count = sum(row.bar_status == "TARGET_MISSING" for row in daily_rows)
     read_failed_count = sum(row.bar_status == "READ_FAILED" for row in daily_rows)
     invalid_price_count = sum(
-        row.bar_status == "TARGET_PRESENT" and not row.valid_price_bar
+        row.bar_status == "TARGET_PRESENT"
+        and row.trade_status_state == "ACTUAL"
+        and not row.valid_price_bar
         for row in daily_rows
     )
     calendar_closed = expected_sessions[-1] <= target_session
     truncated_count = sum(day < window_start for day in expected_sessions)
+    blocking_reasons: list[str] = []
     reasons: list[str] = []
     if truncated_count:
         reasons.append("WINDOW_START_TRUNCATED")
@@ -256,13 +285,22 @@ def _aggregate_period(
         reasons.append("SOURCE_READ_FAILED")
     if invalid_price_count:
         reasons.append("PRICE_BAR_INVALID_OR_UNKNOWN")
+    if suspended_session_count:
+        reasons.append("CONFIRMED_SUSPENSION_SKIPPED_FROM_PERIOD_OHLC")
+    if unknown_trade_status_count:
+        reasons.append("TRADE_STATUS_UNKNOWN")
+    blocking_reasons.extend(
+        reason
+        for reason in reasons
+        if reason != "CONFIRMED_SUSPENSION_SKIPPED_FROM_PERIOD_OHLC"
+    )
     if not calendar_closed:
         coverage_status = "UNFINISHED"
         reasons.append("CALENDAR_PERIOD_NOT_CLOSED_AS_OF_TARGET")
     elif (
-        not reasons
+        not blocking_reasons
         and len(daily_rows) == len(expected_sessions)
-        and len(valid_rows) == len(expected_sessions)
+        and len(valid_rows) + suspended_session_count == len(expected_sessions)
     ):
         coverage_status = "COMPLETE"
     else:
@@ -307,6 +345,8 @@ def _aggregate_period(
         low_session=low_row.session if expose_prices and low_row else None,
         close_session=last.session if expose_prices and last else None,
         daily_rows=daily_rows if calendar_closed else (),
+        suspended_session_count=suspended_session_count,
+        unknown_trade_status_count=unknown_trade_status_count,
     )
 
 
@@ -452,12 +492,21 @@ def summarize_raw_history_rows(
             row.bar_status != "HISTORY_ROW_NOT_STORED" for row in daily
         ),
         "valid_price_bar_count": sum(row.valid_price_bar for row in daily),
+        "suspended_session_count": sum(
+            row.trade_status_state == "CONFIRMED_SUSPENSION" for row in daily
+        ),
+        "unknown_trade_status_count": sum(
+            row.bar_status in _BAR_STATUSES and row.trade_status_state == "UNKNOWN"
+            for row in daily
+        ),
         "target_missing_count": sum(
             row.bar_status == "TARGET_MISSING" for row in daily
         ),
         "read_failed_count": sum(row.bar_status == "READ_FAILED" for row in daily),
         "invalid_price_count": sum(
-            row.bar_status == "TARGET_PRESENT" and not row.valid_price_bar
+            row.bar_status == "TARGET_PRESENT"
+            and row.trade_status_state == "ACTUAL"
+            and not row.valid_price_bar
             for row in daily
         ),
         "missing_history_count": sum(
@@ -759,6 +808,8 @@ def raw_period_payload(
         "elapsed_expected_session_count": period.elapsed_expected_session_count,
         "stored_raw_row_count": period.stored_raw_row_count,
         "valid_price_bar_count": period.valid_price_bar_count,
+        "suspended_session_count": period.suspended_session_count,
+        "unknown_trade_status_count": period.unknown_trade_status_count,
         "target_missing_count": period.target_missing_count,
         "read_failed_count": period.read_failed_count,
         "invalid_price_count": period.invalid_price_count,
@@ -793,6 +844,8 @@ def raw_period_payload(
                 "price_coordinate": row.price_coordinate,
                 "bar_status": row.bar_status,
                 "bar_reason": row.bar_reason,
+                "trade_status_state": row.trade_status_state,
+                "trade_status_reason": row.trade_status_reason,
                 "price_quality": row.price_quality,
                 "price_reason": row.price_reason,
                 "valid_price_bar": row.valid_price_bar,

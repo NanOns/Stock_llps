@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import date
+import re
 from typing import Any
 
+from stock_a.contracts.profile_revision import (
+    PROFILE_REVISION_PATTERN,
+    profile_revision_history_session_count,
+)
 from . import source_raw
 
 
 _TABLE = "source_d0_formal_admission_day_facts"
+_D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
+_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 _STATES = ("READY", "BLOCKED", "NOT_READY", "NOT_REQUIRED")
 _GATE_COLUMNS = {
     "research_universe": ("research_universe_state", "research_universe_reason"),
@@ -135,10 +142,17 @@ def list_saved_launch_sessions(
             """SELECT DISTINCT target_session
                FROM source_d0_scenario_day_facts
                WHERE scenario='LAUNCH_CONFIRM' AND source_capture_id=%s
+                 AND producer_version=%s
                  AND target_session >= %s AND target_session <= %s
                  AND target_session <= %s
                ORDER BY target_session""",
-            (source_capture_id, start_session, target_session, research_cutoff),
+            (
+                source_capture_id,
+                _D0_LAUNCH_PRODUCER_VERSION,
+                start_session,
+                target_session,
+                research_cutoff,
+            ),
         )
         return [row[0] for row in cursor.fetchall()]
 
@@ -157,6 +171,14 @@ def read_saved_source_fact_ids(
     expected_source_count: int,
 ) -> dict[str, dict[str, Any]]:
     """为完整的D0与Core/Profile输入绑定真实PG事实行编号。"""
+    if producer_version != _D0_LAUNCH_PRODUCER_VERSION or seed_producer_version not in {
+        None,
+        _SEED_PRODUCER_VERSION,
+    }:
+        raise FormalAdmissionPgError(
+            "FORMAL_ADMISSION_PRODUCER_VERSION_UNSUPPORTED",
+            "正式准入读取只接受现役D0 Launch R3与Seed R2生产版本",
+        )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
@@ -218,6 +240,10 @@ def _validate_row(row: Mapping[str, Any]) -> None:
         )
     if row["admission_status"] not in _STATES:
         raise ValueError("正式准入状态不在冻结枚举内")
+    if row["raw_producer_version"] != _D0_LAUNCH_PRODUCER_VERSION:
+        raise ValueError("正式准入只接受当前D0 Launch R3原始事实")
+    if row["seed_producer_version"] not in {None, _SEED_PRODUCER_VERSION}:
+        raise ValueError("正式准入只接受当前Seed R2画像事实")
     if row["raw_role"] not in {"FORMAL", "DIAGNOSTIC"}:
         raise ValueError("LAUNCH原始事实角色必须显式为FORMAL或DIAGNOSTIC")
     if row["raw_state"] not in {"TRUE", "FALSE", "UNKNOWN"}:
@@ -295,8 +321,10 @@ def persist_source_formal_admission_rows(
         cursor.execute(
             f"SELECT {columns_sql} FROM {_TABLE} "
             "WHERE target_session=%s AND source_capture_id=%s "
-            "AND scenario='LAUNCH_CONFIRM' ORDER BY source_symbol",
-            (target_session, source_capture_id),
+            "AND scenario='LAUNCH_CONFIRM' AND raw_producer_version=%s "
+            "AND algorithm_contract=%s AND session_contract=%s "
+            "AND calendar_revision=%s ORDER BY source_symbol",
+            (*exact_scope[:2], *exact_scope[3:]),
         )
         existing = cursor.fetchall()
         if len(existing) != expected_source_count:
@@ -363,6 +391,8 @@ def read_source_formal_admission_day(
     source_capture_id: int,
     expected_source_count: int,
     source_symbols: Sequence[str] | None = None,
+    profile_history_session_count: int | None = None,
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """只读已完成准入事实；不计算Raw、不修复缺失分区。"""
     if (
@@ -373,6 +403,22 @@ def read_source_formal_admission_day(
         or source_capture_id <= 0
         or type(expected_source_count) is not int
         or expected_source_count <= 0
+        or profile_history_session_count is not None
+        and (
+            type(profile_history_session_count) is not int
+            or not 1 <= profile_history_session_count <= 250
+        )
+        or profile_revision is not None
+        and (
+            not isinstance(profile_revision, str)
+            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
+        )
+        or profile_history_session_count is not None
+        and profile_revision is None
+        or profile_revision is not None
+        and profile_history_session_count is not None
+        and profile_revision_history_session_count(profile_revision)
+        != profile_history_session_count
     ):
         raise ValueError("准入Reader必须绑定日期、来源版本和闭合分母")
     selected = None if source_symbols is None else tuple(source_symbols)
@@ -387,6 +433,76 @@ def read_source_formal_admission_day(
         cursor,
         _,
     ):
+        scope_predicate = (
+            "target_session=%s AND source_capture_id=%s "
+            "AND scenario='LAUNCH_CONFIRM' AND raw_producer_version=%s"
+        )
+        scope_parameters: tuple[Any, ...] = (
+            target_session,
+            source_capture_id,
+            _D0_LAUNCH_PRODUCER_VERSION,
+        )
+        if profile_revision is not None:
+            scope_predicate += " AND profile_revision=%s"
+            scope_parameters += (profile_revision,)
+        cursor.execute(
+            f"SELECT DISTINCT history_session_count,profile_revision FROM {_TABLE} "
+            f"WHERE {scope_predicate} "
+            "ORDER BY history_session_count,profile_revision LIMIT 2",
+            scope_parameters,
+        )
+        scopes = cursor.fetchall()
+        if not scopes:
+            return {
+                "status": "NOT_COMPUTED",
+                "reason_code": "FORMAL_ADMISSION_NOT_COMPUTED_FOR_EXACT_INPUT",
+                "target_session": target_session.isoformat(),
+                "source_capture_id": source_capture_id,
+                "source_count": expected_source_count,
+                "profile_history_session_count": profile_history_session_count,
+                "profile_revision": profile_revision,
+                "counts": None,
+                "by_symbol": {},
+                "transaction": "REPEATABLE READ READ ONLY",
+                "database_write_attempted": False,
+            }
+        if len(scopes) > 1:
+            return {
+                "status": "AMBIGUOUS",
+                "reason_code": "FORMAL_ADMISSION_SCOPE_AMBIGUOUS",
+                "target_session": target_session.isoformat(),
+                "source_capture_id": source_capture_id,
+                "source_count": expected_source_count,
+                "profile_history_session_count": profile_history_session_count,
+                "profile_revision": profile_revision,
+                "counts": None,
+                "by_symbol": {},
+                "transaction": "REPEATABLE READ READ ONLY",
+                "database_write_attempted": False,
+            }
+        selected_d0_history_session_count, selected_profile_revision = scopes[0]
+        selected_profile_history_session_count = (
+            profile_revision_history_session_count(selected_profile_revision)
+            if selected_profile_revision is not None
+            else None
+        )
+        if (
+            profile_history_session_count is not None
+            and selected_profile_history_session_count != profile_history_session_count
+        ):
+            return {
+                "status": "NOT_COMPUTED",
+                "reason_code": "FORMAL_ADMISSION_PROFILE_REVISION_MISMATCH",
+                "target_session": target_session.isoformat(),
+                "source_capture_id": source_capture_id,
+                "source_count": expected_source_count,
+                "profile_history_session_count": profile_history_session_count,
+                "profile_revision": selected_profile_revision,
+                "counts": None,
+                "by_symbol": {},
+                "transaction": "REPEATABLE READ READ ONLY",
+                "database_write_attempted": False,
+            }
         cursor.execute(
             f"""SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint,
                        min(source_count), max(source_count),
@@ -395,8 +511,18 @@ def read_source_formal_admission_day(
                        count(*) FILTER (WHERE admission_status='NOT_READY')::bigint,
                        count(*) FILTER (WHERE admission_status='NOT_REQUIRED')::bigint
                 FROM {_TABLE}
-                WHERE target_session=%s AND source_capture_id=%s AND scenario='LAUNCH_CONFIRM'""",
-            (target_session, source_capture_id),
+                WHERE target_session=%s AND source_capture_id=%s
+                  AND scenario='LAUNCH_CONFIRM'
+                  AND raw_producer_version=%s
+                  AND history_session_count IS NOT DISTINCT FROM %s
+                  AND profile_revision IS NOT DISTINCT FROM %s""",
+            (
+                target_session,
+                source_capture_id,
+                _D0_LAUNCH_PRODUCER_VERSION,
+                selected_d0_history_session_count,
+                selected_profile_revision,
+            ),
         )
         row_count, distinct_count, min_source_count, max_source_count, *counts = (
             cursor.fetchone()
@@ -408,6 +534,9 @@ def read_source_formal_admission_day(
                 "target_session": target_session.isoformat(),
                 "source_capture_id": source_capture_id,
                 "source_count": expected_source_count,
+                "history_session_count": selected_d0_history_session_count,
+                "profile_history_session_count": selected_profile_history_session_count,
+                "profile_revision": selected_profile_revision,
                 "counts": None,
                 "by_symbol": {},
                 "transaction": "REPEATABLE READ READ ONLY",
@@ -425,6 +554,9 @@ def read_source_formal_admission_day(
                 "target_session": target_session.isoformat(),
                 "source_capture_id": source_capture_id,
                 "source_count": expected_source_count,
+                "history_session_count": selected_d0_history_session_count,
+                "profile_history_session_count": selected_profile_history_session_count,
+                "profile_revision": selected_profile_revision,
                 "stored_rows": int(row_count),
                 "distinct_source_count": int(distinct_count),
                 "counts": None,
@@ -493,8 +625,18 @@ def read_source_formal_admission_day(
                 f"SELECT {', '.join(columns)} FROM {_TABLE} "
                 "WHERE target_session=%s AND source_capture_id=%s "
                 "AND scenario='LAUNCH_CONFIRM' "
+                "AND raw_producer_version=%s "
+                "AND history_session_count IS NOT DISTINCT FROM %s "
+                "AND profile_revision IS NOT DISTINCT FROM %s "
                 "AND source_symbol=ANY(%s) ORDER BY source_symbol",
-                (target_session, source_capture_id, list(selected)),
+                (
+                    target_session,
+                    source_capture_id,
+                    _D0_LAUNCH_PRODUCER_VERSION,
+                    selected_d0_history_session_count,
+                    selected_profile_revision,
+                    list(selected),
+                ),
             )
             for values in cursor.fetchall():
                 item = dict(zip(columns, values, strict=True))
@@ -556,6 +698,9 @@ def read_source_formal_admission_day(
             "contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
             "target_session": target_session.isoformat(),
             "source_capture_id": source_capture_id,
+            "history_session_count": selected_d0_history_session_count,
+            "profile_history_session_count": selected_profile_history_session_count,
+            "profile_revision": selected_profile_revision,
             "identity_scope": "SOURCE_SYMBOL_ONLY",
             "research_mode": "NON_PIT_EXPLORATORY",
             "price_coordinate": "FORWARD_ADJUSTED",

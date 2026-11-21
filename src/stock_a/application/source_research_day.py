@@ -95,6 +95,8 @@ def persist_source_t1_forward_from_saved(
     target_session: date,
     research_cutoff: date,
     source_capture_id: int,
+    history_session_count: int | None = None,
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """复用已存Raw、Seed和价格路径算法，生产单一T+1 typed范围。"""
     if (
@@ -103,6 +105,10 @@ def persist_source_t1_forward_from_saved(
         or target_session > research_cutoff
         or type(source_capture_id) is not int
         or source_capture_id <= 0
+        or history_session_count is not None
+        and (type(history_session_count) is not int or history_session_count < 1)
+        or profile_revision is not None
+        and (not isinstance(profile_revision, str) or not profile_revision)
     ):
         raise SourceResearchDayError(
             "T1_FORWARD_SCOPE_INVALID", "T+1目标、研究截止或paired capture无效"
@@ -187,6 +193,8 @@ def persist_source_t1_forward_from_saved(
         target_session=target_session,
         source_capture_id=source["source_capture_id"],
         expected_source_count=source["capture_expected_row_count"],
+        profile_revision=profile_revision,
+        history_session_count=history_session_count,
     )
     if seed_scope["calendar_revision"] != target_calendar["revision"]:
         raise SourceResearchDayError(
@@ -1451,9 +1459,7 @@ def prepare_source_research_day(
             else "SKIPPED_BY_USER"
         ),
         d1_producer_version=(
-            "STOCK_A_D1_FIVE_STRUCTURE_SOURCE_READER_R1"
-            if include_d1
-            else "SKIPPED_BY_USER"
+            "STOCK_A_D1_BAOSTOCK_QFQ_R3" if include_d1 else "SKIPPED_BY_USER"
         ),
         d1_material_change_contract=(
             _required_text(

@@ -99,15 +99,20 @@ def read_source_sector_pulse_directory_page(
        count(DISTINCT profile_revision)::bigint,min(producer_version),max(producer_version)
 FROM source_pool_seed_day_facts
 WHERE target_session=%s AND source_capture_id=%s
-  AND profile_revision=%s""",
-            (target_session, source_capture_id, profile_revision),
+  AND profile_revision=%s AND producer_version=%s""",
+            (
+                target_session,
+                source_capture_id,
+                profile_revision,
+                "SOURCE_POOL_SEED_CORE_PROFILE_R2",
+            ),
         )
         seed = cursor.fetchone()
         if (
             int(seed[0]) != source_pool_count
             or int(seed[1]) != source_pool_count
             or int(seed[2]) != 1
-            or seed[3] != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
+            or seed[3] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
             or seed[4] != seed[3]
         ):
             raise SectorPulsePgError(

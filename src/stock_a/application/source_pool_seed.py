@@ -50,6 +50,8 @@ from stock_a.storage.postgres.static_research_facts import (
     read_seed_profile_returns,
 )
 
+SOURCE_POOL_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+
 
 def _tri(value: bool | None, reason: str | None = None) -> dict[str, Any]:
     return {
@@ -390,9 +392,13 @@ def source_seed_predicates(
     liquidity = _tri(None, "UNKNOWN_UNIT_UNVERIFIED")
     actual = (
         _tri(True)
-        if preview["target_bar_status"] == "BAOSTOCK_TARGET_BAR_PRESENT"
-        and preview["price_research_status"] == "AVAILABLE"
-        else _tri(None, "TARGET_ACTUAL_OR_PRICE_UNKNOWN")
+        if preview.get("actual_quote_state") == "ACTUAL"
+        else _tri(False, "CONFIRMED_SUSPENSION_NO_ACTUAL_QUOTE")
+        if preview.get("actual_quote_state") == "CONFIRMED_SUSPENSION"
+        else _tri(
+            None,
+            str(preview.get("actual_quote_reason") or "TARGET_ACTUAL_OR_PRICE_UNKNOWN"),
+        )
     )
     formal_universe = _tri(None, "DATE_VALID_IDENTITY_LIFECYCLE_EVIDENCE_MISSING")
     formal_coordinate = _tri(None, "QFQ_NON_PIT_COORDINATE_IS_NOT_FORMAL_PIT")
@@ -552,10 +558,37 @@ def _seed_preview(candidate: Mapping[str, Any], context: tuple[Any, ...]):
         if error.code != "PG_HISTORY_INPUT_CONFLICT":
             raise
         return None, error.code
+    target_row = next(
+        (
+            row
+            for row in candidate["history_rows"]
+            if row.get("session_date") == target_session
+        ),
+        None,
+    )
+    target_observation = _core_observation_from_pg_price_row(
+        target_row,
+        session=target_session,
+        source_capture_id=source_capture_id,
+        price_coordinate="RAW_UNADJUSTED",
+        coordinate_id=(
+            f"RAW_UNADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:"
+            f"{candidate['source_symbol']}"
+        ),
+    )
+    actual_quote_reason = (
+        target_observation.close.reason
+        if target_observation.state == "UNKNOWN"
+        else "CONFIRMED_SUSPENSION_NO_ACTUAL_QUOTE"
+        if target_observation.state == "CONFIRMED_SUSPENSION"
+        else None
+    )
     return {
         "window": {"calendar_id": preview["window"]["calendar_id"]},
         "target_bar_status": preview["target_bar_status"],
         "price_research_status": preview["price_research_status"],
+        "actual_quote_state": target_observation.state,
+        "actual_quote_reason": actual_quote_reason,
         "core": preview["core"],
         "profile_preview": {
             "components": [
@@ -796,25 +829,11 @@ def compute_source_pool_seed(
                     )
                     prior_close = observations[-2].close
                 current_close = observations[-1].close
+                actual_quote_state = preview["actual_quote_state"]
                 raw_quote = tuple(
                     target_row.get(column)
                     for column in ("raw_open", "raw_high", "raw_low", "raw_close")
                 )
-                valid_quote = (
-                    target_row.get("bar_status") == "TARGET_PRESENT"
-                    and target_row.get("price_quality") == "OBSERVED"
-                    and all(
-                        value is not None and not isinstance(value, bool)
-                        for value in raw_quote
-                    )
-                )
-                if valid_quote:
-                    opening, high, low, close = (Fraction(value) for value in raw_quote)
-                    valid_quote = (
-                        min(opening, high, low, close) > 0
-                        and low <= min(opening, close)
-                        and high >= max(opening, low, close)
-                    )
                 current_ma = preview["core"]["fields"]["core.ma20"]
                 if (
                     previous is not None
@@ -837,7 +856,9 @@ def compute_source_pool_seed(
                 else:
                     cross = _tri(None, "PREVIOUS_MA20_CROSS_INPUT_UNKNOWN")
                 seed = source_seed_predicates(
-                    preview, rps["facts"][symbol]["rps5_delta3_pp"], cross
+                    preview,
+                    rps["facts"][symbol]["rps5_delta3_pp"],
+                    cross,
                 )
                 seed["core"] = {
                     key: preview["core"]["fields"][key]
@@ -852,8 +873,14 @@ def compute_source_pool_seed(
                     )
                 }
                 seed["native_price"] = {
-                    "actual_quote": valid_quote,
-                    "raw_close": str(Fraction(raw_quote[3])) if valid_quote else None,
+                    "actual_quote": actual_quote_state == "ACTUAL",
+                    "actual_quote_state": actual_quote_state,
+                    "actual_quote_reason": preview["actual_quote_reason"],
+                    "raw_close": (
+                        str(Fraction(raw_quote[3]))
+                        if actual_quote_state == "ACTUAL"
+                        else None
+                    ),
                     "qfq_close": str(current_close.value)
                     if current_close and current_close.quality == "OBSERVED"
                     else None,
@@ -908,6 +935,7 @@ def compute_source_pool_seed(
         raise ValueError("Seed事实没有覆盖完整来源池")
     seed_counts = Counter(fact["seed"]["state"] for fact in seed_facts.values())
     result = {
+        "producer_version": SOURCE_POOL_SEED_PRODUCER_VERSION,
         "target_session": target_session,
         "research_cutoff": research_cutoff,
         "source_capture_id": source_capture_id,
@@ -1187,6 +1215,8 @@ def read_source_pool_seed(
             native_fields[f"core.{name}"] = item
         native = {
             "actual_quote": bool(row["target_actual_quote"]),
+            "actual_quote_state": predicates["actual_bar"]["state"],
+            "actual_quote_reason": predicates["actual_bar"]["reason"],
             "close": str(
                 Fraction(
                     int(row["target_close_numerator"]),
@@ -1341,6 +1371,7 @@ def read_source_pool_seed(
     first = rows[0]
     result = {
         "status": "SAVED",
+        "producer_version": SOURCE_POOL_SEED_PRODUCER_VERSION,
         "target_session": target_session,
         "research_cutoff": research_cutoff,
         "source_capture_id": source_capture_id,
@@ -1402,17 +1433,29 @@ def _board_native(pool, symbols, peer_members, board_id, *, peer_cache=None):
         value = item.get("value")
         return Fraction(value["exact"]) if item.get("quality") == "OBSERVED" else None
 
+    def quote_state(symbol):
+        native = facts.get(symbol, {}).get("native_price", {})
+        state = native.get("actual_quote_state")
+        if state in {"ACTUAL", "TRUE"}:
+            return "TRUE"
+        if state in {"CONFIRMED_SUSPENSION", "FALSE"}:
+            return "FALSE"
+        if state == "UNKNOWN":
+            return "UNKNOWN"
+        return "TRUE" if native.get("actual_quote") is True else "UNKNOWN"
+
     def metrics(members):
         n = len(members)
-        quotes = sum(
-            bool(facts.get(s, {}).get("native_price", {}).get("actual_quote"))
-            for s in members
-        )
+        quote_states = [quote_state(symbol) for symbol in members]
+        quotes = quote_states.count("TRUE")
+        suspended_quotes = quote_states.count("FALSE")
+        unknown_quotes = quote_states.count("UNKNOWN")
         quote_ok = n >= 5 and quotes >= 5 and 5 * quotes >= 4 * n
         out = {
             "member_count": n,
             "actual_quote_count": quotes,
-            "actual_quote_unknown_count": n - quotes,
+            "actual_quote_suspended_count": suspended_quotes,
+            "actual_quote_unknown_count": unknown_quotes,
             "matched_source_count": sum(s in facts for s in members),
             "unmapped_source_count": sum(s not in facts for s in members),
             "quote_coverage": str(Fraction(quotes, n)) if n else None,
@@ -1441,7 +1484,7 @@ def _board_native(pool, symbols, peer_members, board_id, *, peer_cache=None):
             native = facts.get(s, {}).get("native_price", {})
             ma = field(s, "core.ma20")
             if (
-                native.get("actual_quote")
+                quote_state(s) == "TRUE"
                 and native.get("close") is not None
                 and ma is not None
             ):
@@ -1577,13 +1620,25 @@ def _cross_period_boards(peer_members, inputs):
         n = len(members)
         endpoints = {}
         for endpoint in (target, prior, previous):
-            quotes = sum(
-                bool(inputs.get(s, {}).get(endpoint, {}).get("actual_quote"))
-                for s in members
-            )
+            states = []
+            for symbol in members:
+                item = inputs.get(symbol, {}).get(endpoint, {})
+                state = item.get("actual_quote_state")
+                if state in {"ACTUAL", "TRUE"}:
+                    states.append("TRUE")
+                elif state in {"CONFIRMED_SUSPENSION", "FALSE"}:
+                    states.append("FALSE")
+                elif state == "UNKNOWN":
+                    states.append("UNKNOWN")
+                else:
+                    states.append(
+                        "TRUE" if item.get("actual_quote") is True else "UNKNOWN"
+                    )
+            quotes = states.count("TRUE")
             endpoints[endpoint] = {
                 "actual_quote_count": quotes,
-                "unknown_quote_count": n - quotes,
+                "suspended_quote_count": states.count("FALSE"),
+                "unknown_quote_count": states.count("UNKNOWN"),
                 "quote_coverage": str(Fraction(quotes, n)) if n else None,
             }
         result = {

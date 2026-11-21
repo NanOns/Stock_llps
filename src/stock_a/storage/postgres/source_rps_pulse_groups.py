@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import date
 from fractions import Fraction
-from typing import Any
+from typing import Any, Sequence
 
 from stock_a.domain.source_rps_pulse import classify_rank_change
 
@@ -13,6 +13,7 @@ from . import source_raw
 
 
 _CALCULATION_VERSION = "RPS_PULSE_T0_GROUPED_FORWARD_R1"
+_SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 _MAX_RELATION_ROWS = 20000
 _MAX_OUTCOME_ROWS = 60000
 _HORIZONS = (1, 3, 5)
@@ -85,6 +86,210 @@ _INSERT_COLUMNS = (
 )
 
 
+def _seed_history_windows_are_contiguous(
+    *,
+    previous_count: int,
+    previous_start: date,
+    previous_end: date,
+    current_count: int,
+    current_start: date,
+    current_end: date,
+    previous_session: date,
+    target_session: date,
+    official_sessions: Sequence[date],
+) -> bool:
+    """校验相邻官方会话的画像窗：先扩容，再在上限滚动。"""
+    if (
+        type(previous_count) is not int
+        or type(current_count) is not int
+        or previous_count < 1
+        or current_count < 1
+        or any(
+            type(value) is not date
+            for value in (
+                previous_start,
+                previous_end,
+                current_start,
+                current_end,
+                previous_session,
+                target_session,
+            )
+        )
+        or not isinstance(official_sessions, (list, tuple))
+        or any(type(value) is not date for value in official_sessions)
+    ):
+        return False
+    if len(set(official_sessions)) != len(official_sessions) or any(
+        left >= right for left, right in zip(official_sessions, official_sessions[1:])
+    ):
+        return False
+    positions = {session: index for index, session in enumerate(official_sessions)}
+    required = (
+        previous_start,
+        previous_end,
+        current_start,
+        current_end,
+        previous_session,
+        target_session,
+    )
+    if any(session not in positions for session in required):
+        return False
+    previous_index = positions[previous_session]
+    target_index = positions[target_session]
+    previous_start_index = positions[previous_start]
+    previous_end_index = positions[previous_end]
+    current_start_index = positions[current_start]
+    current_end_index = positions[current_end]
+    if (
+        target_index != previous_index + 1
+        or previous_end != previous_session
+        or current_end != target_session
+        or previous_start_index > previous_end_index
+        or current_start_index > current_end_index
+        or previous_end_index - previous_start_index + 1 != previous_count
+        or current_end_index - current_start_index + 1 != current_count
+    ):
+        return False
+    grew_with_fixed_start = (
+        current_count == previous_count + 1
+        and current_start_index == previous_start_index
+    )
+    rolled_at_same_size = (
+        current_count == previous_count
+        and current_start_index == previous_start_index + 1
+    )
+    return grew_with_fixed_start or rolled_at_same_size
+
+
+def _select_adjacent_seed_scope_pair(
+    previous_scopes: Sequence[Sequence[Any]],
+    target_scopes: Sequence[Sequence[Any]],
+    *,
+    previous_session: date,
+    target_session: date,
+    official_sessions: Sequence[date],
+    expected_source_count: int,
+    history_session_count: int | None = None,
+    profile_revision: str | None = None,
+) -> tuple[str, Sequence[Any] | None, Sequence[Any] | None, str | None]:
+    """选择唯一闭合Seed前后态；优先等长窗口，否则接受首次扩容。"""
+
+    def complete(scope: Sequence[Any]) -> bool:
+        return (
+            len(scope) >= 18
+            and scope[4] == _SEED_PRODUCER_VERSION
+            and int(scope[14]) == expected_source_count
+            and int(scope[15]) == expected_source_count
+            and int(scope[16]) == expected_source_count
+            and int(scope[17]) == expected_source_count
+        )
+
+    target_matches = [
+        scope
+        for scope in target_scopes
+        if len(scope) >= 18
+        and scope[4] == _SEED_PRODUCER_VERSION
+        and (history_session_count is None or scope[5] == history_session_count)
+        and (profile_revision is None or scope[2] == profile_revision)
+    ]
+    current_candidates = [scope for scope in target_matches if complete(scope)]
+    if not current_candidates:
+        reason = (
+            "ADJACENT_SEED_SCOPE_INCOMPLETE"
+            if target_matches
+            else "ADJACENT_SEED_SCOPE_NOT_COMPUTED"
+        )
+        return "NOT_COMPUTED", None, None, reason
+
+    if not previous_scopes:
+        return (
+            "NOT_COMPUTED",
+            None,
+            None,
+            "ADJACENT_SEED_SCOPE_NOT_COMPUTED",
+        )
+    previous_candidates = [scope for scope in previous_scopes if complete(scope)]
+    if not previous_candidates:
+        return (
+            "NOT_COMPUTED",
+            None,
+            None,
+            "ADJACENT_SEED_SCOPE_INCOMPLETE"
+            if previous_scopes
+            else "ADJACENT_SEED_SCOPE_NOT_COMPUTED",
+        )
+
+    same_fields = (1, 3, 4, 6, 7, 8, 9, 12, 13)
+    pairs: list[tuple[Sequence[Any], Sequence[Any]]] = []
+    had_same_context = False
+    had_invalid_window = False
+    for current in current_candidates:
+        same_context = [
+            before
+            for before in previous_candidates
+            if all(before[index] == current[index] for index in same_fields)
+        ]
+        had_same_context = had_same_context or bool(same_context)
+        valid_same_n = [
+            before
+            for before in same_context
+            if before[5] == current[5]
+            and _seed_history_windows_are_contiguous(
+                previous_count=before[5],
+                previous_start=before[10],
+                previous_end=before[11],
+                current_count=current[5],
+                current_start=current[10],
+                current_end=current[11],
+                previous_session=previous_session,
+                target_session=target_session,
+                official_sessions=official_sessions,
+            )
+        ]
+        if valid_same_n:
+            pairs.extend((before, current) for before in valid_same_n)
+            continue
+        valid_growth = [
+            before
+            for before in same_context
+            if current[5] == before[5] + 1
+            and _seed_history_windows_are_contiguous(
+                previous_count=before[5],
+                previous_start=before[10],
+                previous_end=before[11],
+                current_count=current[5],
+                current_start=current[10],
+                current_end=current[11],
+                previous_session=previous_session,
+                target_session=target_session,
+                official_sessions=official_sessions,
+            )
+        ]
+        if valid_growth:
+            pairs.extend((before, current) for before in valid_growth)
+        elif same_context:
+            had_invalid_window = True
+
+    if len(pairs) == 1:
+        before, current = pairs[0]
+        return "AVAILABLE", before, current, None
+    if len(pairs) > 1:
+        return (
+            "NOT_COMPARABLE",
+            None,
+            None,
+            "ADJACENT_SEED_SCOPE_AMBIGUOUS",
+        )
+    if had_same_context and had_invalid_window:
+        return (
+            "NOT_COMPARABLE",
+            None,
+            None,
+            "HISTORY_WINDOW_NOT_CONTIGUOUS",
+        )
+    return "NOT_COMPARABLE", None, None, "ADJACENT_SEED_SCOPE_CHANGED"
+
+
 def _read_latest_mapped_t0(
     cursor: Any, *, target: date, source_capture_id: int
 ) -> list[tuple[Any, ...]]:
@@ -130,6 +335,9 @@ def _read_source_context(
     previous: date,
     source_capture_id: int,
     research_cutoff: date,
+    official_sessions: Sequence[date],
+    history_session_count: int | None = None,
+    profile_revision: str | None = None,
 ):
     """核对单个覆盖多个会话的BaoStock paired capture及逐日请求分母。"""
     cursor.execute(
@@ -280,40 +488,71 @@ def _read_source_context(
     scopes_by_day: dict[date, list[tuple]] = defaultdict(list)
     if not reasons and source_symbols_by_day:
         cursor.execute(
-            """SELECT DISTINCT target_session,source_capture_id,
-                      profile_revision,producer_contract,producer_version,
-                      history_session_count,calendar_id,calendar_revision,
-                      research_mode,price_coordinate,history_window_start,
-                      history_window_end,source_time_quality,source_clock_role
-               FROM source_pool_seed_day_facts
-               WHERE source_capture_id=%s AND target_session=ANY(%s::date[])
-               ORDER BY target_session,source_capture_id""",
-            (source_capture_id, [previous, target]),
+            """SELECT s.target_session,s.source_capture_id,
+                      s.profile_revision,s.producer_contract,s.producer_version,
+                      s.history_session_count,s.calendar_id,s.calendar_revision,
+                      s.research_mode,s.price_coordinate,s.history_window_start,
+                      s.history_window_end,s.source_time_quality,s.source_clock_role,
+                      count(*)::bigint,
+                      count(DISTINCT s.source_symbol)::bigint,
+                      count(*) FILTER (WHERE EXISTS (
+                          SELECT 1 FROM source_raw_daily r
+                          WHERE r.session_date=s.target_session
+                            AND r.source_capture_id=s.source_capture_id
+                            AND r.source_symbol=s.source_symbol
+                      ))::bigint,
+                      count(*) FILTER (WHERE EXISTS (
+                          SELECT 1 FROM source_symbol_price_profiles p
+                          WHERE p.target_session=s.target_session
+                            AND p.source_capture_id=s.source_capture_id
+                            AND p.source_symbol=s.source_symbol
+                            AND p.profile_revision=s.profile_revision
+                            AND p.history_window_start=s.history_window_start
+                            AND p.history_window_end=s.history_window_end
+                            AND p.history_requested_session_count=s.history_session_count
+                            AND p.history_calendar_id=s.calendar_id
+                            AND (p.history_calendar_revision=s.calendar_revision OR
+                              strpos('+' || p.history_calendar_revision || '+', '+' ||
+                                to_char(s.target_session, 'YYYY') || ':' || s.calendar_revision || '+') > 0)
+                            AND p.price_coordinate=s.price_coordinate
+                      ))::bigint
+               FROM source_pool_seed_day_facts s
+               WHERE s.source_capture_id=%s AND s.target_session=ANY(%s::date[])
+                 AND s.producer_version=%s
+               GROUP BY s.target_session,s.source_capture_id,
+                        s.profile_revision,s.producer_contract,s.producer_version,
+                        s.history_session_count,s.calendar_id,s.calendar_revision,
+                        s.research_mode,s.price_coordinate,s.history_window_start,
+                        s.history_window_end,s.source_time_quality,s.source_clock_role
+               ORDER BY s.target_session,s.source_capture_id,s.profile_revision""",
+            (
+                source_capture_id,
+                [previous, target],
+                _SEED_PRODUCER_VERSION,
+            ),
         )
         for row in cursor.fetchall():
             scopes_by_day[row[0]].append(row)
 
-    before_scopes = scopes_by_day.get(previous, [])
-    current_scopes = scopes_by_day.get(target, [])
-    if not before_scopes or not current_scopes:
-        reasons.append("ADJACENT_SEED_SCOPE_NOT_COMPUTED")
-    elif len(before_scopes) != 1 or len(current_scopes) != 1:
-        reasons.append("ADJACENT_SEED_SCOPE_AMBIGUOUS")
+    scope_status, before, current, scope_reason = _select_adjacent_seed_scope_pair(
+        scopes_by_day.get(previous, []),
+        scopes_by_day.get(target, []),
+        previous_session=previous,
+        target_session=target,
+        official_sessions=official_sessions,
+        expected_source_count=len(source_symbols_by_day.get(target, ())),
+        history_session_count=history_session_count,
+        profile_revision=profile_revision,
+    )
+    if scope_status != "AVAILABLE" or before is None or current is None:
+        reasons.append(scope_reason or "ADJACENT_SEED_SCOPE_NOT_COMPUTED")
     else:
-        before = before_scopes[0]
-        current = current_scopes[0]
-        same_fields = (3, 4, 6, 7, 8, 9, 12, 13)
-        if any(before[index] != current[index] for index in same_fields):
-            reasons.append("ADJACENT_SEED_SCOPE_CHANGED")
         if current[8] != "NON_PIT_RETROSPECTIVE":
             reasons.append("RESEARCH_MODE_UNSUPPORTED")
         if current[9] != "FORWARD_ADJUSTED":
             reasons.append("PRICE_COORDINATE_UNSUPPORTED")
         if before[11] != previous or current[11] != target:
             reasons.append("HISTORY_WINDOW_END_MISMATCH")
-        count_contiguous = current[5] == before[5] + 1 and current[10] == before[10]
-        if not count_contiguous:
-            reasons.append("HISTORY_WINDOW_NOT_CONTIGUOUS")
 
     if source_symbols_by_day and source_symbols_by_day.get(
         previous
@@ -342,8 +581,8 @@ def _read_source_context(
         else None,
         "status": status,
         "reason_codes": sorted(set(reasons)),
-        "previous_scope": before_scopes[0] if len(before_scopes) == 1 else None,
-        "current_scope": current_scopes[0] if len(current_scopes) == 1 else None,
+        "previous_scope": before,
+        "current_scope": current,
     }
 
 
@@ -654,6 +893,9 @@ def persist_source_rps_pulse_t0_change_facts(
     previous_session: date,
     research_cutoff: date,
     source_capture_id: int,
+    official_sessions: Sequence[date],
+    history_session_count: int | None = None,
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """单日事务内读取已存前态/Seed/T0并幂等保存关系级RPS变化事实。"""
     if (
@@ -663,8 +905,29 @@ def persist_source_rps_pulse_t0_change_facts(
         or not previous_session < target_session <= research_cutoff
         or type(source_capture_id) is not int
         or source_capture_id <= 0
+        or not isinstance(official_sessions, (list, tuple))
+        or any(type(session) is not date for session in official_sessions)
+        or history_session_count is not None
+        and (
+            type(history_session_count) is not int
+            or not 1 <= history_session_count <= 250
+        )
+        or profile_revision is not None
+        and (not isinstance(profile_revision, str) or not profile_revision)
+        or profile_revision is not None
+        and history_session_count is None
     ):
         raise ValueError("RPS×PULSE离线生产的T0、前态、截止或捕获ID无效")
+    official_positions = {
+        session: index for index, session in enumerate(official_sessions)
+    }
+    if (
+        previous_session not in official_positions
+        or target_session not in official_positions
+        or official_positions[target_session]
+        != official_positions[previous_session] + 1
+    ):
+        raise ValueError("RPS×PULSE前态与目标日必须是相邻官方交易会话")
 
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
@@ -699,6 +962,9 @@ def persist_source_rps_pulse_t0_change_facts(
                 previous=previous_session,
                 source_capture_id=source_capture_id,
                 research_cutoff=research_cutoff,
+                official_sessions=official_sessions,
+                history_session_count=history_session_count,
+                profile_revision=profile_revision,
             )
             metrics_by_fact: dict[int, dict[str, tuple]] = defaultdict(dict)
             if (

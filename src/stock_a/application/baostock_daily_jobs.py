@@ -591,6 +591,7 @@ def fetch_baostock_price_window(
     }
     archive_written_requests = 0
     archive_reused_requests = 0
+    archive_warnings: list[dict[str, Any]] = []
     coordinate_stats: dict[str, dict[str, Any]] = {
         coordinate: {
             "adjustflag": flag,
@@ -657,13 +658,21 @@ def fetch_baostock_price_window(
                 archived_responses: dict[str, Mapping[str, Any]] = {}
                 symbols_to_query = []
                 for symbol in batch_symbols:
-                    archived = (
-                        raw_response_journal.read_response(
-                            source_symbol=symbol, adjustment_flag=adjustflag
-                        )
-                        if raw_response_journal is not None
-                        else None
-                    )
+                    archived = None
+                    if raw_response_journal is not None:
+                        try:
+                            archived = raw_response_journal.read_response(
+                                source_symbol=symbol, adjustment_flag=adjustflag
+                            )
+                        except Exception as error:
+                            archive_warnings.append(
+                                {
+                                    "code": "RAW_RESPONSE_ARCHIVE_READ_FAILED",
+                                    "source_symbol": symbol,
+                                    "adjustflag": adjustflag,
+                                    "error_type": type(error).__name__,
+                                }
+                            )
                     if archived is None:
                         symbols_to_query.append(symbol)
                     else:
@@ -677,10 +686,15 @@ def fetch_baostock_price_window(
                             or archived.get("adjustflag") != adjustflag
                             or archived.get("coordinate") != coordinate
                         ):
-                            raise BaoStockDailyJobError(
-                                "RAW_RESPONSE_JOURNAL_RECORD_INVALID",
-                                "已归档响应与请求坐标不匹配，拒绝重新出网或写PG。",
+                            archive_warnings.append(
+                                {
+                                    "code": "RAW_RESPONSE_ARCHIVE_RECORD_INVALID",
+                                    "source_symbol": symbol,
+                                    "adjustflag": adjustflag,
+                                }
                             )
+                            symbols_to_query.append(symbol)
+                            continue
                         if archived.get("complete") is False:
                             raw_fields = archived.get("raw_response_fields")
                             raw_values = archived.get("raw_row_values")
@@ -735,6 +749,16 @@ def fetch_baostock_price_window(
                                     "local_error": None,
                                     "replayed_after_raw_archive": True,
                                 }
+                            else:
+                                archive_warnings.append(
+                                    {
+                                        "code": "RAW_RESPONSE_ARCHIVE_REPLAY_INVALID",
+                                        "source_symbol": symbol,
+                                        "adjustflag": adjustflag,
+                                    }
+                                )
+                                symbols_to_query.append(symbol)
+                                continue
                         archived_responses[symbol] = archived
                         archived_symbols[coordinate].add(symbol)
                         attempted_symbols[coordinate].add(symbol)
@@ -764,14 +788,26 @@ def fetch_baostock_price_window(
                         attempt_number = (
                             request_attempts[coordinate][symbol]["attempt_count"] + 1
                         )
-                        receipts.append(
-                            raw_response_journal.archive_response(
+                        try:
+                            receipt = raw_response_journal.archive_response(
                                 source_symbol=symbol,
                                 adjustment_flag=adjustflag,
                                 response=raw_response,
                                 request_attempt_number=attempt_number,
                             )
-                        )
+                        except Exception as error:
+                            # 外部JSONL是追查附件。归档失败不能抹掉本次已收到的
+                            # 行情响应；调用方仍须将真实响应校验并持久化至PG。
+                            archive_warnings.append(
+                                {
+                                    "code": "RAW_RESPONSE_ARCHIVE_WRITE_FAILED",
+                                    "source_symbol": symbol,
+                                    "adjustflag": adjustflag,
+                                    "error_type": type(error).__name__,
+                                }
+                            )
+                            return
+                        receipts.append(receipt)
 
                     try:
                         network_response = query_daily_range_rows(
@@ -1192,6 +1228,12 @@ def fetch_baostock_price_window(
         "retry_passes_used": retry_passes_used,
         "archive_written_requests": archive_written_requests,
         "archive_reused_requests": archive_reused_requests,
+        "archive_status": "WARNING"
+        if archive_warnings
+        else "AVAILABLE"
+        if raw_response_journal is not None
+        else "NOT_REQUESTED",
+        "archive_warnings": tuple(archive_warnings),
         "records": tuple(records),
         "record_count": len(records),
         "paired_record_count": pair_count,

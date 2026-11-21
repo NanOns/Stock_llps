@@ -15,6 +15,7 @@ from stock_a.application.source_formal_admission import (
 )
 from stock_a.domain import FieldValue, unknown
 from stock_a.research.d0_price_facts import calculate_d0_first_day_damage
+from stock_a.research.entry_history.support import trade_status_state_from_pg_row
 from stock_a.application.pg_research import read_source_version_context
 from stock_a.storage.postgres.baostock_price_facts import (
     read_baostock_price_history_batch,
@@ -81,6 +82,32 @@ def _aware_datetime(value: object) -> datetime | None:
     raise SourceFormalAdmissionProductionError(
         "FORMAL_ADMISSION_CAPTURE_TIME_INVALID", "来源捕获时间类型无效"
     )
+
+
+def _seed_actual_quote_gate(seed: Mapping[str, Any]) -> FieldValue:
+    """优先读取Seed actual_bar三态，兼容早期仅保存布尔投影的行。"""
+    predicate_ids = seed.get("predicate_ids")
+    predicate_states = seed.get("predicate_states")
+    predicate_reasons = seed.get("predicate_reasons")
+    if (
+        isinstance(predicate_ids, (list, tuple))
+        and isinstance(predicate_states, (list, tuple))
+        and isinstance(predicate_reasons, (list, tuple))
+        and len(predicate_ids) == len(predicate_states) == len(predicate_reasons)
+        and "actual_bar" in predicate_ids
+    ):
+        index = predicate_ids.index("actual_bar")
+        state = predicate_states[index]
+        if state == "TRUE":
+            return FieldValue(True)
+        if state == "FALSE":
+            return FieldValue(False)
+        if state == "UNKNOWN":
+            return unknown(str(predicate_reasons[index] or "TRADE_STATUS_UNKNOWN"))
+    value = seed.get("target_actual_quote")
+    if type(value) is bool:
+        return FieldValue(value)
+    return unknown("TARGET_ACTUAL_QUOTE_NOT_COMPUTED")
 
 
 def _negated_bool_gate(
@@ -159,8 +186,14 @@ def _raw_history_for_candidates(
                         "session_date",
                         "source_capture_id",
                         "bar_status",
+                        "bar_reason",
+                        "qfq_bar_status",
+                        "qfq_bar_reason",
                         "qfq_price_quality",
                         "qfq_price_reason",
+                        "qfq_tradestatus_value",
+                        "qfq_tradestatus_quality",
+                        "qfq_tradestatus_reason",
                         "qfq_price_coordinate",
                         "price_coordinate",
                         "qfq_open",
@@ -214,14 +247,20 @@ def _line_inputs(
     close = None
     phc20 = None
     current = history.get(target_session)
+    current_trade_state, current_trade_reason = trade_status_state_from_pg_row(
+        current, price_coordinate="FORWARD_ADJUSTED"
+    )
     if (
         current is not None
         and current.get("source_capture_id") == source_capture_id
         and current.get("qfq_price_quality") == "OBSERVED"
+        and current_trade_state == "ACTUAL"
     ):
         close = _fraction(current.get("qfq_close"))
     if close is None:
-        close_field = unknown("T0_QFQ_CLOSE_NOT_OBSERVED_IN_PAIRED_CAPTURE")
+        close_field = unknown(
+            current_trade_reason or "T0_QFQ_CLOSE_NOT_OBSERVED_IN_PAIRED_CAPTURE"
+        )
     else:
         close_field = FieldValue(close)
 
@@ -233,8 +272,12 @@ def _line_inputs(
             or row.get("session_date") != session
             or row.get("source_symbol") != symbol
             or row.get("source_capture_id") != source_capture_id
-            or row.get("bar_status") != "TARGET_PRESENT"
+            or row.get("qfq_bar_status") != "TARGET_PRESENT"
             or row.get("qfq_price_quality") != "OBSERVED"
+            or trade_status_state_from_pg_row(row, price_coordinate="FORWARD_ADJUSTED")[
+                0
+            ]
+            != "ACTUAL"
         ):
             prior_closes = []
             break
@@ -481,11 +524,7 @@ def run_source_formal_admission_from_saved(
                 core_gate = unknown(seed_scope_reason)
                 extension_gate = unknown(seed_scope_reason)
             else:
-                actual_gate = (
-                    FieldValue(seed["target_actual_quote"])
-                    if type(seed.get("target_actual_quote")) is bool
-                    else unknown("TARGET_ACTUAL_QUOTE_NOT_COMPUTED")
-                )
+                actual_gate = _seed_actual_quote_gate(seed)
                 core_gate = _negated_bool_gate(
                     seed.get("core_price_damage"),
                     seed.get("core_price_damage_quality"),
@@ -699,6 +738,10 @@ def run_source_formal_admission_from_saved(
         target_session=target_session,
         source_capture_id=source_capture_id,
         expected_source_count=expected_count,
+        profile_history_session_count=(
+            seed_scope["history_session_count"] if seed_scope else None
+        ),
+        profile_revision=profile_revision,
     )
     if readback.get("status") != "AVAILABLE" or readback.get("counts") != {
         "READY": result["ready_count"],

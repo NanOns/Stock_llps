@@ -12,7 +12,7 @@ from typing import Any
 
 _SOURCE_SYMBOL = re.compile(r"^(SH|SZ|BJ)\.[0-9]{6}$")
 _PRICE_COORDINATE = "FORWARD_ADJUSTED"
-SOURCE_MARKET_BREADTH_CONTRACT = "MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R2"
+SOURCE_MARKET_BREADTH_CONTRACT = "MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R3"
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,8 @@ class QfqPriceObservation:
     price_reason: str | None
     bar_status: str
     price_coordinate: str = _PRICE_COORDINATE
+    trade_status_state: str = "UNKNOWN"
+    trade_status_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,14 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
             raise ValueError("价格观察包含固定来源集合以外的代码")
         if observation.session_date not in needed_sessions:
             raise ValueError("价格观察不属于t、t-1、t-3、t-4官方会话")
+        if observation.trade_status_state not in {
+            "ACTUAL",
+            "CONFIRMED_SUSPENSION",
+            "UNKNOWN",
+        }:
+            raise ValueError(
+                "BaoStock交易状态必须是ACTUAL、CONFIRMED_SUSPENSION或UNKNOWN"
+            )
         if key in seen:
             raise ValueError("相同来源代码和官方会话存在重复QFQ价格")
         seen.add(key)
@@ -229,6 +239,18 @@ def _observed_close(
         return None, "QFQ_READ_FAILED", observation.price_reason
     if observation.bar_status != "TARGET_PRESENT":
         return None, "BAR_STATUS_NOT_OBSERVED", observation.price_reason
+    if observation.trade_status_state == "CONFIRMED_SUSPENSION":
+        return (
+            None,
+            "CONFIRMED_SUSPENSION_NO_LEGAL_QFQ_PRICE",
+            observation.trade_status_reason,
+        )
+    if observation.trade_status_state != "ACTUAL":
+        return (
+            None,
+            "TRADE_STATUS_UNKNOWN",
+            observation.trade_status_reason or observation.price_reason,
+        )
     if observation.price_quality != "OBSERVED":
         reason = (
             observation.price_reason or f"PRICE_QUALITY_{observation.price_quality}"

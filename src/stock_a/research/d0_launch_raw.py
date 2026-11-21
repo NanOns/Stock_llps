@@ -8,6 +8,7 @@ from fractions import Fraction
 from typing import Any, Mapping, Sequence
 
 from stock_a.research.d0_price_facts import calculate_d0_first_day_damage
+from stock_a.research.entry_history.support import trade_status_state_from_pg_row
 
 
 _SCENARIO = "LAUNCH_CONFIRM"
@@ -158,8 +159,15 @@ def _window_row(
         return row, None, "RAW_TARGET_CAPTURE_MISMATCH"
     if price_coordinate != "FORWARD_ADJUSTED":
         return row, None, "RAW_COORDINATE_MISMATCH"
-    if row.get("bar_status") != "TARGET_PRESENT":
+    if row.get("qfq_bar_status") != "TARGET_PRESENT":
         return row, None, "OFFICIAL_SESSION_BAR_MISSING"
+    trade_state, trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate="FORWARD_ADJUSTED"
+    )
+    if trade_state == "CONFIRMED_SUSPENSION":
+        return row, None, "CONFIRMED_SUSPENSION_NO_ACTUAL_BAR"
+    if trade_state != "ACTUAL":
+        return row, None, trade_reason or "TRADE_STATUS_UNKNOWN"
     if row.get("qfq_price_quality") == "BAD_VALUE":
         return row, None, "RAW_PRICE_QUALITY_BAD"
     if row.get("qfq_price_quality") != "OBSERVED":
@@ -218,6 +226,11 @@ def _raw_amount(
         return None, "OFFICIAL_SESSION_BAR_MISSING"
     if row.get("source_capture_id") != source_capture_id:
         return None, "RAW_SOURCE_IDENTITY_MISMATCH"
+    trade_state, trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate="RAW_UNADJUSTED"
+    )
+    if trade_state != "ACTUAL":
+        return None, trade_reason or "TRADE_STATUS_UNKNOWN"
     if row.get("raw_amount_quality") != "RAW_SOURCE_VALUE_OBSERVED":
         if row.get("raw_amount_quality") == "BAD_VALUE":
             return None, "RAW_AMOUNT_QUALITY_BAD"
@@ -235,8 +248,16 @@ def _window_payload(
     fields = (
         "bar_status",
         "bar_reason",
+        "qfq_bar_status",
+        "qfq_bar_reason",
         "qfq_price_quality",
         "qfq_price_reason",
+        "qfq_tradestatus_value",
+        "qfq_tradestatus_quality",
+        "qfq_tradestatus_reason",
+        "raw_tradestatus_value",
+        "raw_tradestatus_quality",
+        "raw_tradestatus_reason",
         "raw_amount_quality",
         "raw_amount_reason",
         "amount_unit_status",

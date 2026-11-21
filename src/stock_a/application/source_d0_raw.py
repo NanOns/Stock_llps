@@ -37,7 +37,10 @@ from stock_a.research.entry_history.history_preview import (
     research_stock_pg_history_preview,
 )
 from stock_a.research.entry_history.history_timeline import post_signal_price_facts
-from stock_a.research.entry_history.support import _core_observation_from_pg_price_row
+from stock_a.research.entry_history.support import (
+    _core_observation_from_pg_price_row,
+    trade_status_state_from_pg_row,
+)
 from stock_a.storage.postgres.d0_raw import (
     MAX_SOURCE_SYMBOLS,
     D0RawPgError,
@@ -938,11 +941,22 @@ def attach_recovery_failure_followup(
             or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
         ):
             reason = "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH"
-        elif (
-            row.get("bar_status") != "TARGET_PRESENT"
-            or row.get("qfq_price_quality") != "OBSERVED"
-        ):
+        elif row.get("qfq_bar_status") != "TARGET_PRESENT":
+            reason = "FOLLOWUP_QFQ_BAR_MISSING"
+        elif row.get("qfq_price_quality") != "OBSERVED":
             reason = "FOLLOWUP_PRICE_UNKNOWN"
+        elif (
+            trade_status_state_from_pg_row(row, price_coordinate="FORWARD_ADJUSTED")[0]
+            != "ACTUAL"
+        ):
+            trade_state, trade_reason = trade_status_state_from_pg_row(
+                row, price_coordinate="FORWARD_ADJUSTED"
+            )
+            reason = (
+                "FOLLOWUP_CONFIRMED_SUSPENSION_NO_ACTUAL_BAR"
+                if trade_state == "CONFIRMED_SUSPENSION"
+                else trade_reason or "FOLLOWUP_TRADE_STATUS_UNKNOWN"
+            )
         else:
             try:
                 if any(
@@ -1273,9 +1287,21 @@ def _iso(value: Any) -> str | None:
 
 
 def _target_row_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    raw_trade_state, raw_trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate="RAW_UNADJUSTED"
+    )
+    qfq_trade_state, qfq_trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate="FORWARD_ADJUSTED"
+    )
     return {
         "target_bar_status": row.get("bar_status"),
         "target_bar_reason": row.get("bar_reason"),
+        "qfq_bar_status": row.get("qfq_bar_status"),
+        "qfq_bar_reason": row.get("qfq_bar_reason"),
+        "raw_trade_status_state": raw_trade_state,
+        "raw_trade_status_reason": raw_trade_reason,
+        "qfq_trade_status_state": qfq_trade_state,
+        "qfq_trade_status_reason": qfq_trade_reason,
         "raw_ohlc": {
             key: _fraction(row.get(column))
             for key, column in (
@@ -1836,9 +1862,9 @@ def query_source_d0_raw_launch(
         "contract": "STOCK_A_D0_LAUNCH_CONFIRM_BAOSTOCK_QFQ_R2"
         if scenario == "LAUNCH_CONFIRM"
         else "STOCK_A_D0_RECOVERY_TURN_BAOSTOCK_QFQ_R2",
-        "producer_version": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R2"
+        "producer_version": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
         if scenario == "LAUNCH_CONFIRM"
-        else "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R2",
+        else "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R5",
         "algorithm_contract": "ALG-28 + §11.6 D0_SCENARIO_FACTS_R3",
         "scenario": scenario,
         "scenario_role": "DIAGNOSTIC_ONLY",
@@ -2262,7 +2288,7 @@ def _query_source_d0_raw_launch_changes(
     return {
         "ok": True,
         "contract": "STOCK_A_D0_LAUNCH_ADJACENT_TRANSITION_BAOSTOCK_QFQ_R2",
-        "producer_version": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R2",
+        "producer_version": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5",
         "action": "changes",
         "scenario": scenario,
         "pair_status": "COMPARABLE",

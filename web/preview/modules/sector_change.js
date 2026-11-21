@@ -334,10 +334,32 @@ async function loadSectorChangeContext() {
     sectorInvalidate("请选择PG中已有的目标日期与价格捕获。");
     return;
   }
+  const selectedProfileRevision = $("sectorProfileRevisionSelect").value;
   sectorPopulateProfileRevisions(version);
+  const profiles = sectorExactProfile(version);
+  if (
+    profiles.some(
+      (snapshot) => snapshot.profile_revision === selectedProfileRevision,
+    )
+  ) {
+    $("sectorProfileRevisionSelect").value = selectedProfileRevision;
+  }
+  const selectedProfile = profiles.find(
+    (snapshot) =>
+      snapshot.profile_revision === $("sectorProfileRevisionSelect").value,
+  );
+  const query = {
+    target_session: version.target_session,
+    source_capture_id: version.source_capture_id,
+    price_coordinate: "FORWARD_ADJUSTED",
+  };
+  if (selectedProfile) {
+    query.history_session_count = String(selectedProfile.history_session_count);
+    query.profile_revision = selectedProfile.profile_revision;
+  }
   try {
     const context = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: version.target_session, source_capture_id: version.source_capture_id, price_coordinate: "FORWARD_ADJUSTED" })}`,
+      `/api/preview/sector-change-context?${new URLSearchParams(query)}`,
     );
     if (
       request !== state.sectorChange.contextRequest ||
@@ -1137,6 +1159,10 @@ function initializeSectorChangeExplorer() {
       "sectorEventWindowSelect",
     ])
       $(id).addEventListener("change", () => sectorInvalidate());
+    $("sectorProfileRevisionSelect").addEventListener(
+      "change",
+      loadSectorChangeContext,
+    );
     $("sectorChangeQuery").addEventListener("click", loadSectorChangeView);
     $("sectorExplainButton").addEventListener("click", loadSectorChangeView);
     $("sectorExplainSymbol").addEventListener("input", () => {

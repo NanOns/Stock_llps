@@ -14,8 +14,10 @@ from stock_a.research.entry_history.history_preview import (
 )
 from stock_a.research.entry_context.sessions import _load_calendar, _parse_target
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
-from stock_a.research.entry_history.support import _source_price_bar_from_pg_row
-from stock_a.research.entry_history.support import _source_price_bar_from_pg_row
+from stock_a.research.entry_history.support import (
+    _source_price_bar_from_pg_row,
+    trade_status_state_from_pg_row,
+)
 
 _PRICE_RELATION_FIELDS = (
     "core.ma5",
@@ -112,7 +114,7 @@ def _timeline_qfq_ohlc(row: Mapping[str, Any] | None) -> dict[str, Any]:
         } | {"quality": "UNKNOWN", "reason": reason}
     selected = _source_price_bar_from_pg_row(row, price_coordinate="FORWARD_ADJUSTED")
     if selected is None:
-        reason = row.get("bar_reason") or "QFQ_TARGET_BAR_MISSING"
+        reason = row.get("qfq_bar_reason") or "QFQ_TARGET_BAR_MISSING"
         return {
             name: {"value": None, "quality": "UNKNOWN", "reason": reason}
             for name in ("open", "high", "low", "close")
@@ -165,6 +167,7 @@ def _raw_coordinate_price_timeline(
     }
     status_counts: dict[str, int] = {}
     quality_counts: dict[str, int] = {}
+    trade_status_counts = {"ACTUAL": 0, "CONFIRMED_SUSPENSION": 0, "UNKNOWN": 0}
     points: list[dict[str, Any]] = []
     valid_count = 0
     for index, session in enumerate(sessions):
@@ -173,9 +176,13 @@ def _raw_coordinate_price_timeline(
         status_counts[status] = status_counts.get(status, 0) + 1
         quality = str(row.get("price_quality") or "UNKNOWN") if row else "UNKNOWN"
         quality_counts[quality] = quality_counts.get(quality, 0) + 1
+        trade_status_state, trade_status_reason = trade_status_state_from_pg_row(
+            row, price_coordinate="RAW_UNADJUSTED"
+        )
+        trade_status_counts[trade_status_state] += 1
         raw_ohlc = _timeline_raw_ohlc(row)
         qfq_ohlc = _timeline_qfq_ohlc(row)
-        if raw_ohlc.get("quality") == "OBSERVED":
+        if trade_status_state == "ACTUAL" and raw_ohlc.get("quality") == "OBSERVED":
             valid_count += 1
         history_count = min(index + 1, 20)
         ma_window = {
@@ -206,6 +213,8 @@ def _raw_coordinate_price_timeline(
                 "time_role": "NON_PIT_RETROSPECTIVE",
                 "raw_row_present": row is not None,
                 "raw_status": status,
+                "raw_trade_status_state": trade_status_state,
+                "raw_trade_status_reason": trade_status_reason,
                 "raw_price_quality": quality,
                 "raw_price_reason": (
                     row.get("price_reason")
@@ -317,6 +326,7 @@ def _raw_coordinate_price_timeline(
         "first_evaluable_count": 0,
         "first_evaluable_session": None,
         "raw_status_counts": dict(sorted(status_counts.items())),
+        "raw_trade_status_counts": trade_status_counts,
         "raw_price_quality_counts": dict(sorted(quality_counts.items())),
         "qfq_price_quality_counts": {},
         "event_counts": {},
@@ -1169,6 +1179,8 @@ def research_stock_pg_history_timeline(
     )
     points: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {}
+    qfq_bar_status_counts: dict[str, int] = {}
+    trade_status_counts = {"ACTUAL": 0, "CONFIRMED_SUSPENSION": 0, "UNKNOWN": 0}
     qfq_quality_counts: dict[str, int] = {}
     raw_quality_counts: dict[str, int] = {}
     event_counts: dict[str, int] = {}
@@ -1180,9 +1192,13 @@ def research_stock_pg_history_timeline(
 
     def valid_qfq_bar(day: date) -> bool:
         candidate = rows_by_session.get(day)
+        trade_state, _ = trade_status_state_from_pg_row(
+            candidate, price_coordinate="FORWARD_ADJUSTED"
+        )
         return bool(
             candidate is not None
-            and candidate.get("bar_status") == "TARGET_PRESENT"
+            and candidate.get("qfq_bar_status") == "TARGET_PRESENT"
+            and trade_state == "ACTUAL"
             and candidate.get("qfq_price_quality") == "OBSERVED"
             and all(
                 candidate.get(name) is not None
@@ -1194,6 +1210,14 @@ def research_stock_pg_history_timeline(
         row = rows_by_session.get(session)
         status = row.get("bar_status") if row else "HISTORY_ROW_NOT_STORED"
         status_counts[status] = status_counts.get(status, 0) + 1
+        qfq_bar_status = row.get("qfq_bar_status") if row else "HISTORY_ROW_NOT_STORED"
+        qfq_bar_status_counts[qfq_bar_status] = (
+            qfq_bar_status_counts.get(qfq_bar_status, 0) + 1
+        )
+        trade_status_state, trade_status_reason = trade_status_state_from_pg_row(
+            row, price_coordinate="FORWARD_ADJUSTED"
+        )
+        trade_status_counts[trade_status_state] += 1
         qfq_quality = (
             str(row.get("qfq_price_quality") or "UNKNOWN") if row else "UNKNOWN"
         )
@@ -1344,6 +1368,9 @@ def research_stock_pg_history_timeline(
             "time_role": "NON_PIT_RETROSPECTIVE",
             "raw_row_present": row is not None,
             "raw_status": status,
+            "qfq_bar_status": qfq_bar_status,
+            "qfq_trade_status_state": trade_status_state,
+            "qfq_trade_status_reason": trade_status_reason,
             "qfq_price_quality": qfq_quality,
             "qfq_price_reason": row.get("qfq_price_reason")
             if row
@@ -1461,6 +1488,8 @@ def research_stock_pg_history_timeline(
         ),
         "first_evaluable_session": first_evaluable_session,
         "raw_status_counts": dict(sorted(status_counts.items())),
+        "qfq_bar_status_counts": dict(sorted(qfq_bar_status_counts.items())),
+        "qfq_trade_status_counts": trade_status_counts,
         "qfq_price_quality_counts": dict(sorted(qfq_quality_counts.items())),
         "raw_price_quality_counts": dict(sorted(raw_quality_counts.items())),
         "event_counts": dict(sorted(event_counts.items())),

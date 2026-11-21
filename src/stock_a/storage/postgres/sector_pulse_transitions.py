@@ -120,7 +120,7 @@ def _verify_source_partition(cursor: Any, day: Mapping[str, Any], label: str) ->
         int(seed[0]) != identity["raw_row_count"]
         or int(seed[1]) != identity["raw_row_count"]
         or int(seed[2]) != 1
-        or seed[3] != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
+        or seed[3] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
         or seed[4] != seed[3]
     ):
         raise SectorPulseTransitionPgError(

@@ -850,6 +850,44 @@ def list_profile_snapshots(
     return {"status": "AVAILABLE" if snapshots else "EMPTY", "snapshots": snapshots}
 
 
+def _select_profile_revision(
+    revisions: Sequence[Mapping[str, Any]],
+    *,
+    current_profile_revision: str,
+    current_producer_version: str,
+    expected_symbol_count: int,
+    history_session_count: int | None = None,
+    requested_profile_revision: str | None = None,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """返回符合请求且已闭合的现行画像修订候选。"""
+    candidates = [
+        item
+        for item in revisions
+        if item.get("profile_revision", "").startswith(current_profile_revision + "|")
+        and item.get("producer_version") == current_producer_version
+        and (
+            history_session_count is None
+            or (
+                item.get("min_history_requested_sessions") == history_session_count
+                and item.get("max_history_requested_sessions") == history_session_count
+            )
+        )
+        and (
+            requested_profile_revision is None
+            or item.get("profile_revision") == requested_profile_revision
+        )
+    ]
+    complete = [
+        item
+        for item in candidates
+        if int(item.get("stored_rows") or 0) == expected_symbol_count
+        and int(item.get("distinct_source_symbols") or 0) == expected_symbol_count
+        and item.get("min_history_requested_sessions")
+        == item.get("max_history_requested_sessions")
+    ]
+    return candidates, complete
+
+
 def read_source_profile_observability(
     config: Mapping[str, Any],
     *,
@@ -858,6 +896,8 @@ def read_source_profile_observability(
     research_cutoff: date | None = None,
     current_profile_revision: str,
     current_producer_version: str,
+    history_session_count: int | None = None,
+    requested_profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """按捕获键核验Raw分母、画像版本、代码集合及字段质量。"""
     cutoff = research_cutoff or target_session
@@ -871,6 +911,17 @@ def read_source_profile_observability(
         or re.fullmatch(PROFILE_REVISION_PATTERN, current_profile_revision) is None
         or not isinstance(current_producer_version, str)
         or not current_producer_version
+        or history_session_count is not None
+        and (
+            type(history_session_count) is not int
+            or not 1 <= history_session_count <= 250
+        )
+        or requested_profile_revision is not None
+        and (
+            not isinstance(requested_profile_revision, str)
+            or re.fullmatch(PROFILE_REVISION_PATTERN, requested_profile_revision)
+            is None
+        )
     ):
         raise PriceProfilePgError(
             "PROFILE_OBSERVATION_KEY_INVALID",
@@ -1008,18 +1059,22 @@ def read_source_profile_observability(
             ):
                 revision[name] = revision[name] or []
 
-        matching_current = [
-            item
-            for item in revisions
-            if item["profile_revision"].startswith(current_profile_revision + "|")
-            and item["producer_version"] == current_producer_version
-        ]
+        candidate_current, matching_current = _select_profile_revision(
+            revisions,
+            current_profile_revision=current_profile_revision,
+            current_producer_version=current_producer_version,
+            expected_symbol_count=raw_rows,
+            history_session_count=history_session_count,
+            requested_profile_revision=requested_profile_revision,
+        )
         selected = matching_current[0] if len(matching_current) == 1 else None
         selection_rule = (
-            "UNIQUE_CURRENT_ALGORITHM_AND_INPUT_REVISION"
+            "UNIQUE_COMPLETE_CURRENT_ALGORITHM_AND_INPUT_REVISION"
             if len(matching_current) == 1
-            else "AMBIGUOUS_CURRENT_INPUT_REVISIONS"
+            else "AMBIGUOUS_COMPLETE_CURRENT_INPUT_REVISIONS"
             if len(matching_current) > 1
+            else "REQUESTED_CURRENT_VERSION_INCOMPLETE"
+            if candidate_current
             else "NO_MATCHING_CURRENT_VERSION"
             if revisions
             else "NO_STORED_PROFILE_REVISION"
@@ -1130,6 +1185,8 @@ def read_source_profile_observability(
     status = (
         "AMBIGUOUS_STORED_REVISIONS"
         if len(matching_current) > 1
+        else "INCOMPLETE"
+        if candidate_current and selected is None
         else "NOT_COMPUTED"
         if selected is None
         else "PG_SOURCE_PROFILE_STORED"
@@ -1147,6 +1204,8 @@ def read_source_profile_observability(
             else None,
             "candidate_revision_count": len(revisions),
             "current_version_match_count": len(matching_current),
+            "requested_history_session_count": history_session_count,
+            "requested_profile_revision": requested_profile_revision,
         },
         "revision_candidates": revisions,
         "selected_revision": selected,

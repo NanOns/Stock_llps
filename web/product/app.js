@@ -8,6 +8,7 @@ import {
   displayStockCode,
   displayStockName,
   displayStockTitle,
+  selectProfileScopeFromRecentJobs,
 } from "./state.js";
 import { renderD1MaterialMarket, setD1MaterialStatus } from "./market.js";
 import { renderD1Boards, renderD1Members } from "./sectors.js";
@@ -241,13 +242,20 @@ function pulseHistoryIdentityText(session) {
     "NOT_COMPUTED";
   return `来源捕获 ${identity.source_capture_id} · PULSE Profile ${pulseProfile} · 成交参与 Profile ${participationProfile}`;
 }
+function sectorPulseFollowupCoordinateLabel(coordinate) {
+  if (coordinate === "FORWARD_ADJUSTED")
+    return "BaoStock前复权QFQ（adjustflag=2）";
+  if (coordinate === "RAW_UNADJUSTED")
+    return "BaoStock未复权RAW（adjustflag=3）";
+  return `价格坐标 ${coordinate || "UNKNOWN"}`;
+}
 function renderPulseHistory(result) {
   const root = $("pulseHistory");
   root.replaceChildren(node("h3", "板块 PULSE 多会话演变"));
   root.append(
     node(
       "p",
-      "按官方相邻会话顺序读取最多七日的已存事实。当前成员快照回看为 NON_PIT；PULSE三态和价格描述不代表正式 Rotation 或未来预测。",
+      "按官方相邻会话顺序读取最多七日的已存事实。后继收益使用 BaoStock 前复权 QFQ（adjustflag=2）；历史价格与当前成员快照均为 NON_PIT 后验描述，不代表正式 Rotation 或事前预测。",
       "muted",
     ),
   );
@@ -305,7 +313,11 @@ function renderPulseHistory(result) {
         node("p", pulseHistoryTransitionText(session.transition)),
         node("p", pulseHistoryMarketText(session.market)),
       );
-      const outcomes = (session.followups || []).map((outcome) => {
+      const followups = session.followups || [];
+      const followupCoordinate = followups.find(
+        (outcome) => outcome.price_coordinate,
+      )?.price_coordinate;
+      const outcomes = followups.map((outcome) => {
         const coverage = `固定 ${outcome.fixed_member_denominator ?? "UNKNOWN"} · 有效 ${outcome.observed_member_count ?? "UNKNOWN"} · UNKNOWN ${outcome.unknown_member_count ?? "UNKNOWN"}`;
         if (outcome.status === "OBSERVED")
           return `T+${outcome.horizon} ${outcome.target_session} 等权收盘 ${outcome.return_percent_4dp ?? "UNKNOWN"}%（${coverage}）`;
@@ -319,7 +331,7 @@ function renderPulseHistory(result) {
         node(
           "p",
           outcomes.length
-            ? `固定T0成员篮后继（RAW_UNADJUSTED）：${outcomes.join("；")}`
+            ? `固定T0成员篮后继（${sectorPulseFollowupCoordinateLabel(followupCoordinate)}；NON_PIT后验描述）：${outcomes.join("；")}`
             : "固定T0成员篮后继：NOT_COMPUTED。",
         ),
         node(
@@ -1923,7 +1935,6 @@ async function init() {
     } while (offset !== null);
     if (versions.length !== total) throw new Error("来源日期目录未完整读取");
     state.versions = versions;
-    void loadProfileDirectory();
     const dates = [...new Set(versions.map((v) => v.session_date))]
       .sort()
       .reverse();
@@ -1974,6 +1985,29 @@ function loadProfileDirectory() {
       return false;
     });
   return state.profilesReady;
+}
+
+async function resolveCompletedProfileScope(targetSession, sourceCaptureId) {
+  const profilesReady = await loadProfileDirectory();
+  if (!profilesReady) return null;
+  const candidates = state.profiles.filter(
+    (item) =>
+      item.complete === true &&
+      item.target_session === targetSession &&
+      Number(item.source_capture_id) === Number(sourceCaptureId) &&
+      item.price_coordinate === "FORWARD_ADJUSTED",
+  );
+  try {
+    const capabilities = await api("/api/product/data-jobs/capabilities");
+    return selectProfileScopeFromRecentJobs(
+      candidates,
+      capabilities.recent_jobs,
+      targetSession,
+      sourceCaptureId,
+    );
+  } catch {
+    return null;
+  }
 }
 
 function profileDirectoryRetryButton() {
@@ -2075,8 +2109,26 @@ async function selectDate(target_session) {
   if (activePage === "focus")
     message("focusAutoStatus", "正在读取交易日来源上下文…");
   try {
+    const requestedProfile = await resolveCompletedProfileScope(
+      target_session,
+      source_capture_id,
+    );
+    if (token !== state.contextRequest || state.selected !== selected) return;
+    const contextQuery = new URLSearchParams({
+      target_session,
+      source_capture_id,
+      price_coordinate: "FORWARD_ADJUSTED",
+    });
+    if (requestedProfile) {
+      contextQuery.set(
+        "history_session_count",
+        String(requestedProfile.history_session_count),
+      );
+      if (typeof requestedProfile.profile_revision === "string")
+        contextQuery.set("profile_revision", requestedProfile.profile_revision);
+    }
     const c = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session, source_capture_id, price_coordinate: "FORWARD_ADJUSTED" })}`,
+      `/api/preview/sector-change-context?${contextQuery}`,
       undefined,
       controller.signal,
     );
@@ -2124,7 +2176,6 @@ async function selectDate(target_session) {
       research_cutoff: c.research_cutoff,
       contextReady: true,
     });
-    if (activePage === "focus") void loadExtra("focus");
     const snapshotText = [industry, concept]
       .filter(Boolean)
       .map(
@@ -2144,6 +2195,17 @@ async function selectDate(target_session) {
       snapshotText,
       c,
     );
+    if (activePage === "focus") {
+      void selected.profileResolution.then(() => {
+        if (
+          token === state.contextRequest &&
+          state.selected === selected &&
+          activePage === "focus"
+        ) {
+          void loadExtra("focus");
+        }
+      });
+    }
     void loadD0Overview(selected);
     if (state.d0BoardView === "PULSE") void loadD0PulseDirectoryPage();
   } catch (error) {
@@ -2190,6 +2252,8 @@ async function resolveProfileForDate(
     );
     const profile = matches.length === 1 ? matches[0] : null;
     c.profile_revision = profile?.profile_revision || null;
+    c.stock_history_session_count = profile?.history_session_count ?? null;
+    c.pg_history_session_count = profile?.history_session_count ?? null;
     c.profile_status = profile
       ? "AVAILABLE"
       : revision
@@ -3723,6 +3787,13 @@ async function loadFocusAuto(context, offset = 0) {
     message("focusAutoStatus", "正在读取交易日来源上下文…");
     return;
   }
+  if (context.profileResolution) await context.profileResolution;
+  if (
+    token !== state.focusAutoRequest ||
+    state.selected !== context ||
+    activePage !== "focus"
+  )
+    return;
   if (state.focusAutoBoard?.target_session !== context?.target_session)
     state.focusAutoBoard = null;
   const boardFilter = $("focusAutoBoardFilter");
@@ -3777,6 +3848,15 @@ async function loadFocusAuto(context, offset = 0) {
       context.d1_history_session_count >= 1 &&
       context.d1_history_session_count <= 75
         ? { d1_history_session_count: context.d1_history_session_count }
+        : {}),
+      ...(Number.isInteger(context.stock_history_session_count) &&
+      context.stock_history_session_count >= 1 &&
+      context.stock_history_session_count <= 250 &&
+      typeof context.profile_revision === "string"
+        ? {
+            history_session_count: context.stock_history_session_count,
+            profile_revision: context.profile_revision,
+          }
         : {}),
       watch_group: state.focusAutoGroup,
       ...(state.focusAutoBoard
@@ -4796,6 +4876,8 @@ $("d0BoardNext").addEventListener("click", () => {
 
 async function loadD0Overview(c) {
   const token = ++state.d0Request;
+  if (c?.profileResolution) await c.profileResolution;
+  if (token !== state.d0Request || state.selected !== c) return;
   const before = uniquePriceVersion(c.previous_session);
   if (!before || !c.source_capture_id) {
     state.d0Result = null;
@@ -4840,6 +4922,15 @@ async function loadD0Overview(c) {
         c.d1_history_session_count >= 1 &&
         c.d1_history_session_count <= 75
           ? { d1_history_session_count: c.d1_history_session_count }
+          : {}),
+        ...(Number.isInteger(c.stock_history_session_count) &&
+        c.stock_history_session_count >= 1 &&
+        c.stock_history_session_count <= 250 &&
+        typeof c.profile_revision === "string"
+          ? {
+              history_session_count: c.stock_history_session_count,
+              profile_revision: c.profile_revision,
+            }
           : {}),
         offset: state.d0Offset,
         limit: 30,
@@ -5007,6 +5098,13 @@ async function openD0Board(board, offset = 0) {
   $("memberTools").style.display = "none";
   state.d0BoardOffset = offset;
   const token = ++state.d0BoardRequest;
+  if (c.profileResolution) await c.profileResolution;
+  if (
+    token !== state.d0BoardRequest ||
+    state.selected !== c ||
+    state.d0Board !== board
+  )
+    return;
   message("boardTitle", displayBoardName(board));
   message(
     "boardMeta",
@@ -5059,6 +5157,15 @@ async function openD0Board(board, offset = 0) {
         c.d1_history_session_count <= 75
           ? { d1_history_session_count: c.d1_history_session_count }
           : {}),
+        ...(Number.isInteger(c.stock_history_session_count) &&
+        c.stock_history_session_count >= 1 &&
+        c.stock_history_session_count <= 250 &&
+        typeof c.profile_revision === "string"
+          ? {
+              history_session_count: c.stock_history_session_count,
+              profile_revision: c.profile_revision,
+            }
+          : {}),
         board_kind: board.board_kind,
         board_native_id: board.board_native_id,
         offset: 0,
@@ -5080,8 +5187,14 @@ async function openD0Board(board, offset = 0) {
         : c.stock_history_session_count || c.source_history_session_count || 1,
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,
-      ...(typeof c.profile_revision === "string"
-        ? { profile_revision: c.profile_revision }
+      ...(Number.isInteger(c.stock_history_session_count) &&
+      c.stock_history_session_count >= 1 &&
+      c.stock_history_session_count <= 250 &&
+      typeof c.profile_revision === "string"
+        ? {
+            history_session_count: c.stock_history_session_count,
+            profile_revision: c.profile_revision,
+          }
         : {}),
       board_kind: board.board_kind,
       board_native_id: board.board_native_id,
@@ -5219,7 +5332,7 @@ async function openD0Board(board, offset = 0) {
       })
       .join(" · ");
     const pulseFollowupLine = pulseFollowupSummary
-      ? `PULSE后继收盘观察（${pulseFollowup.research_mode ?? "NON_PIT_RETROSPECTIVE"}；${pulseFollowup.price_coordinate ?? "RAW_UNADJUSTED"}；描述性回看，不是事前胜率）${pulseFollowupSummary}`
+      ? `PULSE后继收盘观察（${pulseFollowup.research_mode ?? "NON_PIT_RETROSPECTIVE"}；${sectorPulseFollowupCoordinateLabel(pulseFollowup.price_coordinate)}；历史NON_PIT描述性回看，不是事前胜率）${pulseFollowupSummary}`
       : `PULSE后继BaoStock价格观察 ${pulseFollowup?.status ?? "NOT_COMPUTED"} · ${(pulseFollowup?.reason_codes ?? ["PULSE_FOLLOWUP_NOT_AVAILABLE"]).join("、")}`;
     const pulseFollowupComparison =
       result.sector_pulse_followup_comparison?.[board.board_kind];
@@ -5431,6 +5544,15 @@ async function toggleBoardComparison(board) {
       d1_history_session_count: context.d1_history_session_count,
       industry_snapshot_id: context.industry_snapshot_id,
       concept_snapshot_id: context.concept_snapshot_id,
+      ...(Number.isInteger(context.stock_history_session_count) &&
+      context.stock_history_session_count >= 1 &&
+      context.stock_history_session_count <= 250 &&
+      typeof context.profile_revision === "string"
+        ? {
+            history_session_count: context.stock_history_session_count,
+            profile_revision: context.profile_revision,
+          }
+        : {}),
       board_a: {
         board_kind: selected[0].board_kind,
         board_native_id: selected[0].board_native_id,
@@ -5723,10 +5845,26 @@ async function loadProfileChanges() {
     );
     return;
   }
+  const afterProfiles = state.profiles.filter(
+    (item) =>
+      item.complete &&
+      item.target_session === context.target_session &&
+      item.source_capture_id === context.source_capture_id &&
+      item.profile_revision === context.profile_revision,
+  );
+  const afterProfile = afterProfiles.length === 1 ? afterProfiles[0] : null;
+  if (!afterProfile || !Number.isInteger(afterProfile.history_session_count)) {
+    message("profileChangeSummary", "NOT_COMPARABLE");
+    message(
+      "profileChangeList",
+      "目标日没有唯一完整的Profile/N版本；不能推断相邻画像变化。",
+    );
+    return;
+  }
   let beforeRevision;
   try {
     const beforeContext = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: previousDate, source_capture_id: beforeRaw.source_capture_id, price_coordinate: "FORWARD_ADJUSTED" })}`,
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: previousDate, source_capture_id: beforeRaw.source_capture_id, price_coordinate: "FORWARD_ADJUSTED", history_session_count: String(afterProfile.history_session_count) })}`,
       undefined,
       controller.signal,
     );
@@ -5746,16 +5884,8 @@ async function loadProfileChanges() {
         item.source_capture_id === beforeRaw.source_capture_id &&
         item.profile_revision === beforeRevision,
     );
-    const afterProfiles = state.profiles.filter(
-      (item) =>
-        item.complete &&
-        item.target_session === context.target_session &&
-        item.source_capture_id === context.source_capture_id &&
-        item.profile_revision === context.profile_revision,
-    );
     const beforeProfile =
       beforeProfiles.length === 1 ? beforeProfiles[0] : null;
-    const afterProfile = afterProfiles.length === 1 ? afterProfiles[0] : null;
     if (!beforeProfile || !afterProfile) {
       message("profileChangeSummary", "NOT_COMPARABLE");
       message(
@@ -7417,6 +7547,9 @@ async function loadExtra(page) {
     return;
   }
   message(id, "正在读取所选范围…");
+  if (page === "focus" && c.profileResolution) await c.profileResolution;
+  if (token !== extraRequest || state.selected !== c || activePage !== page)
+    return;
   if (page === "focus") {
     ++cohortRequest;
     ++focusStockRequest;
@@ -7475,7 +7608,7 @@ async function loadExtra(page) {
         ["来源分母", data.denominator.N_source],
         [
           "来源读取覆盖",
-          `目标日有价 ${data.source_cohort.target_present_count} · 缺价 ${data.source_cohort.target_missing_count} · 读取失败 ${data.source_cohort.read_failed_count} · 价格行 ${data.source_cohort.raw_row_count}`,
+          `目标日有价 ${data.source_cohort.target_present_count} · 缺价 ${data.source_cohort.target_missing_count} · 读取失败 ${data.source_cohort.read_failed_count} · 价格行 ${data.source_cohort.price_row_count}`,
         ],
         ["可评价分母", data.denominator.N_eligible],
         ["UNKNOWN", data.denominator.UNKNOWN],
