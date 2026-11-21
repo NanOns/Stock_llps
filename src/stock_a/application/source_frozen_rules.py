@@ -48,6 +48,22 @@ class SourceFrozenRulesError(ValueError):
         super().__init__(message)
 
 
+def _configured_history_session_limit(config: Mapping[str, Any]) -> int:
+    try:
+        limit = config["source_policy"]["baostock_primary"]["request_budget"][
+            "max_history_session_count"
+        ]
+    except (KeyError, TypeError) as error:
+        raise SourceFrozenRulesError(
+            "SOURCE_RULE_SCOPE_INVALID", "缺少BaoStock历史会话预算"
+        ) from error
+    if type(limit) is not int or not 1 <= limit <= 250:
+        raise SourceFrozenRulesError(
+            "SOURCE_RULE_SCOPE_INVALID", "BaoStock历史会话预算超出运行配置合同"
+        )
+    return limit
+
+
 def _rule_fact(state: Any, reasons: Any) -> dict[str, Any]:
     if state not in {"TRUE", "FALSE", "UNKNOWN"}:
         raise SourceFrozenRulesError(
@@ -170,6 +186,7 @@ def persist_source_computable_rules_from_saved(
     include_diagnostics: bool = True,
 ) -> dict[str, Any]:
     """只组合已保存的D0/Seed/D1输入与既有QFQ诊断，不采集或重算基础事实。"""
+    history_session_limit = _configured_history_session_limit(config)
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
@@ -179,7 +196,7 @@ def persist_source_computable_rules_from_saved(
         or not isinstance(profile_revision, str)
         or not profile_revision
         or type(history_session_count) is not int
-        or not 1 <= history_session_count <= 75
+        or not 1 <= history_session_count <= history_session_limit
         or type(include_diagnostics) is not bool
     ):
         raise SourceFrozenRulesError(

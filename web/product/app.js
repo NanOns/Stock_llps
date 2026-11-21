@@ -6417,7 +6417,9 @@ async function openStock(symbol, row = {}) {
           value && typeof value === "object" && "value" in value
             ? value.value
             : value;
-        const val = (name) => scalar(o?.[name]);
+        const completePeriod =
+          kind === "day" || item.coverage_status === "COMPLETE";
+        const val = (name) => (completePeriod ? scalar(o?.[name]) : null);
         const quality =
           kind === "day"
             ? qfq
@@ -7135,13 +7137,6 @@ function formatFepPercent(value) {
 function renderFepLaneBaseline(root, result, lane) {
   root.replaceChildren();
   root.append(node("h4", `FEP 条件统计（描述性）· ${lane}`));
-  root.append(
-    node(
-      "p",
-      "SOURCE_STOCK · RAW_CLOSE_RETURN · NON_PIT_EXPLORATORY · RAW_UNADJUSTED · DESCRIPTIVE_ONLY。这里只读已存PG统计，不输出预测概率、模型支持或Priority资格。",
-      "muted",
-    ),
-  );
   if (result?.status !== "AVAILABLE" || !Array.isArray(result.rows)) {
     root.append(
       node(
@@ -7153,6 +7148,27 @@ function renderFepLaneBaseline(root, result, lane) {
   }
 
   const rows = result.rows;
+  const rowCoordinates = new Set(
+    rows.map((row) => row.price_coordinate).filter(Boolean),
+  );
+  const priceCoordinate = result.price_coordinate;
+  const coordinateMatchesRows =
+    priceCoordinate &&
+    [...rowCoordinates].every((coordinate) => coordinate === priceCoordinate);
+  const coordinateLabel = !coordinateMatchesRows
+    ? "价格坐标不一致或未知"
+    : priceCoordinate === "FORWARD_ADJUSTED"
+      ? "BaoStock 前复权 QFQ，后验 NON_PIT"
+      : priceCoordinate === "RAW_UNADJUSTED"
+        ? "BaoStock 未复权 RAW"
+        : `价格坐标 ${priceCoordinate}`;
+  root.append(
+    node(
+      "p",
+      `SOURCE_STOCK · RAW_CLOSE_RETURN · NON_PIT_EXPLORATORY · ${coordinateLabel} · DESCRIPTIVE_ONLY。这里只读已存 PG 统计，不输出预测概率、模型支持或 Priority 资格。`,
+      "muted",
+    ),
+  );
   const equalDate = rows.find(
     (row) =>
       row.summary_scope === "EQUAL_DATE" &&

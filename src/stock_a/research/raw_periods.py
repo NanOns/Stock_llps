@@ -439,7 +439,7 @@ def _aggregate_period(
     last = valid_rows[-1] if valid_rows else None
     high_row = max(valid_rows, key=lambda row: row.high) if valid_rows else None
     low_row = min(valid_rows, key=lambda row: row.low) if valid_rows else None
-    expose_prices = calendar_closed
+    expose_prices = calendar_closed and coverage_status == "COMPLETE"
     return RawPeriodBar(
         kind=kind,
         price_coordinate=price_coordinate,
