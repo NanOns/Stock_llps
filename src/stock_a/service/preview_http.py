@@ -68,6 +68,7 @@ from stock_a.application.runtime_config import (
 )
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.research.entry_context.errors import ResearchEntryError
+from stock_a.research.entry_context.sessions import load_period_calendar
 from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_source_version_context,
@@ -6311,8 +6312,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
                         "周期返回的BaoStock捕获与请求不一致",
                     )
-                calendar_payload, _metadata, _year_revision, calendar_sessions = (
+                calendar_payload, _metadata, _year_revision, _ = (
                     research_entry._load_calendar(target)
+                )
+                calendar_sessions, coverage_start, coverage_end = load_period_calendar(
+                    target
                 )
                 period_bars = build_source_symbol_raw_periods(
                     target_session=target,
@@ -6320,6 +6324,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     calendar_sessions=calendar_sessions,
                     history_rows=history["history_rows"],
                     price_coordinate=price_coordinate,
+                    calendar_coverage_start=coverage_start,
+                    calendar_coverage_end=coverage_end,
                 )
                 qfq_period_bars = (
                     period_bars
@@ -6333,6 +6339,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             for row in history["history_rows"]
                         ),
                         price_coordinate="FORWARD_ADJUSTED",
+                        calendar_coverage_start=coverage_start,
+                        calendar_coverage_end=coverage_end,
                     )
                 )
                 history_summary = summarize_raw_history_rows(

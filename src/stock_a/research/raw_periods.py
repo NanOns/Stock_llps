@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from calendar import monthrange
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
@@ -350,6 +351,8 @@ def _aggregate_period(
     key: str,
     ordinal: int,
     expected_sessions: Sequence[date],
+    calendar_coverage_start: date,
+    calendar_coverage_end: date,
     window_start: date,
     target_session: date,
     rows_by_session: Mapping[date, RawDailyBar],
@@ -377,7 +380,19 @@ def _aggregate_period(
         and not row.valid_price_bar
         for row in daily_rows
     )
-    calendar_closed = expected_sessions[-1] <= target_session
+    period_day = expected_sessions[0]
+    if kind == "WEEK":
+        period_start = period_day - timedelta(days=period_day.weekday())
+        period_end = period_start + timedelta(days=6)
+    else:
+        period_start = period_day.replace(day=1)
+        period_end = period_day.replace(
+            day=monthrange(period_day.year, period_day.month)[1]
+        )
+    calendar_covered = (
+        calendar_coverage_start <= period_start and calendar_coverage_end >= period_end
+    )
+    calendar_closed = calendar_covered and expected_sessions[-1] <= target_session
     truncated_count = sum(day < window_start for day in expected_sessions)
     blocking_reasons: list[str] = []
     reasons: list[str] = []
@@ -400,7 +415,10 @@ def _aggregate_period(
         for reason in reasons
         if reason != "CONFIRMED_SUSPENSION_SKIPPED_FROM_PERIOD_OHLC"
     )
-    if not calendar_closed:
+    if not calendar_covered:
+        coverage_status = "PARTIAL"
+        reasons.append("CALENDAR_COVERAGE_UNPROVEN")
+    elif not calendar_closed:
         coverage_status = "UNFINISHED"
         reasons.append("CALENDAR_PERIOD_NOT_CLOSED_AS_OF_TARGET")
     elif (
@@ -492,6 +510,8 @@ def build_source_symbol_raw_periods(
     calendar_sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
     price_coordinate: str,
+    calendar_coverage_start: date | None = None,
+    calendar_coverage_end: date | None = None,
 ) -> dict[str, tuple[RawPeriodBar, ...]]:
     """按显式价格坐标聚合BaoStock日线；缺Bar不合成、不推断停牌。"""
     if (
@@ -509,8 +529,20 @@ def build_source_symbol_raw_periods(
         )
         or session_dates[-1] != target_session
         or target_session not in calendar_sessions
+        or (
+            calendar_coverage_start is not None
+            and type(calendar_coverage_start) is not date
+        )
+        or (
+            calendar_coverage_end is not None
+            and type(calendar_coverage_end) is not date
+        )
     ):
         raise ContractError("Raw周期窗口必须绑定递增官方会话与目标日")
+    coverage_start = calendar_coverage_start or calendar_sessions[0]
+    coverage_end = calendar_coverage_end or calendar_sessions[-1]
+    if coverage_start > calendar_sessions[0] or coverage_end < calendar_sessions[-1]:
+        raise ContractError("Raw周期日历覆盖边界不能排除已提供的会话")
     eligible_sessions = tuple(day for day in calendar_sessions if day <= target_session)
     if len(eligible_sessions) < len(session_dates) or tuple(
         eligible_sessions[-len(session_dates) :]
@@ -566,6 +598,8 @@ def build_source_symbol_raw_periods(
                     key=key,
                     ordinal=ordinals[key],
                     expected_sessions=expected,
+                    calendar_coverage_start=coverage_start,
+                    calendar_coverage_end=coverage_end,
                     window_start=session_dates[0],
                     target_session=target_session,
                     rows_by_session=daily,
@@ -737,6 +771,24 @@ def evaluate_raw_period_trend(
         for period in periods
         if period.calendar_closed and period.calendar_end_session <= target_session
     )
+    latest_closed_ordinal = max(
+        (period.calendar_ordinal for period in closed_periods), default=-1
+    )
+    if any(
+        "CALENDAR_COVERAGE_UNPROVEN" in period.reason_codes
+        and period.calendar_ordinal > latest_closed_ordinal
+        and period.calendar_end_session <= target_session
+        for period in periods
+    ):
+        return _unknown_trend(
+            kind,
+            rule_id,
+            minimum,
+            0,
+            "CALENDAR_COVERAGE_UNPROVEN",
+            price_coordinate=price_coordinate,
+            source_capture_id=source_capture_id,
+        )
     trailing_complete: list[RawPeriodBar] = []
     for period in reversed(closed_periods):
         if period.coverage_status != "COMPLETE" or period.close is None:

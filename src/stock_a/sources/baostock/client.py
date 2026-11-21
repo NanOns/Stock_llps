@@ -589,6 +589,9 @@ def query_daily_rows(
                     logout_result = sdk.logout()
                 logout_code = _code(logout_result)
                 logout_message = _error_message(logout_result)
+                if logout_code != "0" and status == "RESPONSE_RECEIVED":
+                    status = "LOGOUT_FAILED"
+                    reason = "BaoStock登出失败；查询结果按来源清理失败披露"
             except Exception as error:  # 登出失败仅作为来源清理披露。
                 logout_code = "EXCEPTION"
                 logout_message = _message(error)
@@ -602,7 +605,12 @@ def query_daily_rows(
 
     completed_at = _timestamp()
     verified_capture = None
-    if status == "RESPONSE_RECEIVED" and login_code == "0" and query_code == "0":
+    if (
+        status == "RESPONSE_RECEIVED"
+        and login_code == "0"
+        and query_code == "0"
+        and logout_code == "0"
+    ):
         verified_capture = _issue_verified_daily_capture(
             symbol=source_code,
             target_session=target_session,
@@ -1265,11 +1273,11 @@ def query_daily_range_rows(
     if (
         not isinstance(symbols, tuple)
         or not symbols
-        or len(set(symbols)) != len(symbols)
         or any(
             not isinstance(symbol, str) or _SYMBOL_PATTERN.fullmatch(symbol) is None
             for symbol in symbols
         )
+        or len(set(symbols)) != len(symbols)
     ):
         raise ContractError("BaoStock日线范围查询必须显式提供不重复沪深/北交所代码")
     if not isinstance(start_date, str) or not isinstance(end_date, str):

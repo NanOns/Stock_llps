@@ -549,6 +549,8 @@ def persist_fep_baseline_rows(
         )
         stored = cursor.fetchall()
         stored_by_key = {business_key(tuple(row)): tuple(row) for row in stored}
+        if len(stored_by_key) != len(stored):
+            raise ResearchFactConflict("FEP已存范围存在重复业务键；事务已回滚")
         restated = 0
         for key, expected in expected_by_key.items():
             actual = stored_by_key.get(key)

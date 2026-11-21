@@ -10,10 +10,11 @@ from typing import Any
 from stock_a.domain import exact_number
 from stock_a.research.entry_context.sessions import _parse_target
 from stock_a.research.entry_history.history_timeline import (
-    _timeline_qfq_ohlc,
+    _timeline_actual_qfq_ohlc,
     _timeline_raw_ohlc,
     post_signal_price_facts,
 )
+from stock_a.sources.baostock.identity import normalize_baostock_symbol
 
 
 def exploratory_raw_path(
@@ -57,6 +58,19 @@ def exploratory_raw_path(
             else None,
             "price_coordinate": price_coordinate,
             "time_role": "NON_PIT_RETROSPECTIVE",
+            "maturity": "NOT_COMPUTED",
+            "due": len(session_vector) == horizon + 1,
+            "endpoint": {
+                "qfq_close_relative_change": {
+                    "value": None,
+                    "quality": "UNKNOWN",
+                    "reason": code,
+                }
+            },
+            "points": [],
+            "path_quality": "UNKNOWN",
+            "path_reasons": [code],
+            "path_values": None,
             "database_write": False,
         }
 
@@ -90,6 +104,14 @@ def exploratory_raw_path(
             "SOURCE_CAPTURE_MISMATCH",
             "价格路径行没有绑定同一个paired source_capture_id。",
         )
+    symbols = [
+        normalize_baostock_symbol(row.get("source_symbol")) for row in by_date.values()
+    ]
+    if any(symbol is None for symbol in symbols) or len(set(symbols)) > 1:
+        return not_computed(
+            "SOURCE_SYMBOL_MISMATCH",
+            "价格路径行缺少来源代码或混合了不同证券。",
+        )
     if any(
         row.get("price_coordinate") not in (None, price_coordinate)
         for row in by_date.values()
@@ -100,7 +122,10 @@ def exploratory_raw_path(
         )
 
     birth = by_date.get(session_vector[0])
-    if birth is None or _timeline_qfq_ohlc(birth)["close"]["quality"] != "OBSERVED":
+    if (
+        birth is None
+        or _timeline_actual_qfq_ohlc(birth)["close"]["quality"] != "OBSERVED"
+    ):
         return not_computed(
             "QFQ_T0_CLOSE_UNAVAILABLE",
             "路径T0没有可观察QFQ收盘价；不回退未复权收盘。",
@@ -128,7 +153,7 @@ def exploratory_raw_path(
         maturity = "ENDPOINT_UNKNOWN"
 
     complete = len(session_vector) == horizon + 1 and all(
-        _timeline_qfq_ohlc(by_date.get(session))["quality"] == "OBSERVED"
+        _timeline_actual_qfq_ohlc(by_date.get(session))["quality"] == "OBSERVED"
         for session in session_vector
     )
     path_reasons = []
@@ -136,7 +161,7 @@ def exploratory_raw_path(
         path_reasons.append("WINDOW_NOT_AVAILABLE")
     for session in session_vector:
         row = by_date.get(session)
-        qfq = _timeline_qfq_ohlc(row)
+        qfq = _timeline_actual_qfq_ohlc(row)
         if qfq["quality"] != "OBSERVED":
             path_reasons.append(
                 f"{session.isoformat()}:{qfq['reason'] or 'QFQ_PRICE_UNKNOWN'}"

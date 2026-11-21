@@ -72,8 +72,14 @@ def _valid_response(
     rows = snapshot.get("rows")
     if (
         not isinstance(fields, list)
+        or any(not isinstance(field, str) or not field for field in fields)
+        or len(set(fields)) != len(fields)
         or not required_fields.issubset(set(fields))
         or not isinstance(rows, list)
+        or any(
+            not isinstance(row, Mapping) or not required_fields.issubset(row)
+            for row in rows
+        )
         or snapshot.get("rows_seen") != len(rows)
     ):
         return False

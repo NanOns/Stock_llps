@@ -131,6 +131,8 @@ def calculate_d0_first_day_damage(
                 "OFFICIAL_SESSION_BAR_MISSING",
                 sessions=window,
                 missing=(session,),
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
             )
         trade_state, trade_reason = trade_status_state_from_pg_row(
             row, price_coordinate="FORWARD_ADJUSTED"
@@ -140,6 +142,8 @@ def calculate_d0_first_day_damage(
                 trade_reason or "TRADE_STATUS_UNKNOWN",
                 sessions=window,
                 missing=(session,),
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
             )
         if row.get("qfq_price_quality") != "OBSERVED":
             reason_code = row.get("qfq_price_reason") or "QFQ_PRICE_QUALITY_UNKNOWN"
@@ -218,10 +222,10 @@ _REASONS = {
     "OFFICIAL_WINDOW_LEFT_TRUNCATED": "目标日前不足20个连续官方会话。",
     "SOURCE_CAPTURE_IDENTITY_MISMATCH": "历史行与目标来源代码、日期或paired capture不一致。",
     "PRICE_COORDINATE_MISMATCH": "官方会话窗口内的价格坐标不是QFQ。",
-    "OFFICIAL_SESSION_BAR_MISSING": "严格官方窗口至少一个会话缺少有效RAW日线。",
+    "OFFICIAL_SESSION_BAR_MISSING": "严格官方窗口至少一个会话缺少有效QFQ日线。",
     "QFQ_PRICE_QUALITY_UNKNOWN": "官方会话QFQ价格质量未知。",
     "INVALID_PRICE_CLOSE": "官方会话收盘价缺失、非有限或非正数。",
-    "INVALID_PRICE_OHLC": "官方会话原始OHLC缺失、非法或不满足价格范围关系。",
+    "INVALID_PRICE_OHLC": "官方会话QFQ OHLC缺失、非法或不满足价格范围关系。",
 }
 
 

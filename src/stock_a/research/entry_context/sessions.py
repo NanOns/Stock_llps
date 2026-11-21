@@ -225,3 +225,17 @@ def _load_calendar(
     metadata = (*metadata[:-1], {**metadata[-1], "coverage_context": coverage_context})
     revisions = "+".join(f"{item['year']}:{item['revision']}" for item in metadata)
     return target_item[1], metadata, revisions, sessions
+
+
+def load_period_calendar(target: date) -> tuple[tuple[date, ...], date, date]:
+    """提供周期边界所需的完整年度覆盖，包括可用的下一年度日历。"""
+    _payload, metadata, _revisions, sessions = _load_calendar(target)
+    coverage_start = date.fromisoformat(metadata[0]["coverage"][0])
+    coverage_end = date.fromisoformat(metadata[-1]["coverage"][1])
+    next_year = target.year + 1
+    resource_name = f"cn_equity_sessions_{next_year}.json"
+    if files("stock_a.research.calendars").joinpath(resource_name).is_file():
+        payload, next_sessions = _calendar_payload(resource_name, next_year)
+        sessions = (*sessions, *next_sessions)
+        coverage_end = date.fromisoformat(payload["valid_through"])
+    return sessions, coverage_start, coverage_end

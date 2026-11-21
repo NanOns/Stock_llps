@@ -2845,6 +2845,8 @@ def read_baostock_price_history_batch(
             """SELECT count(*)::bigint
                FROM stock.source_raw_daily d
                JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
+               JOIN stock.source_baostock_unit_contracts u
+                 ON u.unit_contract_version=d.unit_contract_version
                JOIN stock.source_capture_requests rr
                  ON rr.capture_id=d.source_capture_id AND rr.source_code=d.source_code
                 AND rr.adjustment_flag='3'
@@ -2856,10 +2858,7 @@ def read_baostock_price_history_batch(
                  AND c.provider='BAOSTOCK' AND c.range_end_session<=%s
                  AND c.price_coordinates @> ARRAY[
                      'RAW_UNADJUSTED','FORWARD_ADJUSTED'
-                 ]::text[]
-                 AND d.price_quality IS NOT NULL AND d.qfq_price_quality IS NOT NULL
-                 AND rr.request_status IN ('COMPLETED','NO_DATA')
-                 AND qr.request_status IN ('COMPLETED','NO_DATA')""",
+                 ]::text[]""",
             (
                 source_capture_id,
                 list(symbols),

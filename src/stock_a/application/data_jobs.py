@@ -3567,6 +3567,7 @@ def _prepare_reset_source_inputs(
     from zoneinfo import ZoneInfo
 
     from stock_a.application.baostock_daily_jobs import (
+        BaoStockDailyJobError,
         fetch_baostock_price_window,
     )
     from stock_a.sources.baostock.client import (
@@ -3890,12 +3891,29 @@ def _prepare_reset_source_inputs(
     max_login_batches = int(budget["max_login_batches"])
     identity_login_batches = int(identity.get("login_attempted") is True)
     identity_api_calls = 2
+    probe_symbols = tuple(
+        symbol
+        for symbol in universe
+        if symbol in active_universe_at_target
+        and target_trade_status_by_symbol.get(symbol) == "1"
+    )[: min(3, max_api_calls)]
+    if not probe_symbols:
+        raise DataJobError(
+            "RESET_BAOSTOCK_PRICE_PROBE_UNAVAILABLE",
+            "清理前没有可用于双坐标行情验证的目标日交易证券；现有业务事实保持不变。",
+            status=503,
+        )
+    probe_login_batches = 2
     required_price_login_batches = 2 * (
         (len(universe) + max_api_calls - 1) // max_api_calls
     )
     planned_price_api_calls = 2 * len(universe)
-    planned_total_api_calls = identity_api_calls + planned_price_api_calls
-    planned_total_login_batches = identity_login_batches + required_price_login_batches
+    planned_total_api_calls = (
+        identity_api_calls + 2 * len(probe_symbols) + planned_price_api_calls
+    )
+    planned_total_login_batches = (
+        identity_login_batches + probe_login_batches + required_price_login_batches
+    )
     effective_total_api_budget = max_login_batches * max_api_calls
     if (
         identity_login_batches != 1
@@ -3907,22 +3925,61 @@ def _prepare_reset_source_inputs(
             "身份目录后完整RAW/QFQ捕获超出runtime请求预算，尚未清理原业务事实。",
             status=409,
         )
-    preflight_login_batches = 0
+    try:
+        probe = fetch_baostock_price_window(
+            probe_symbols,
+            (sessions[-1],),
+            cutoff=cutoff,
+            units=documented_units,
+            max_api_calls_per_batch=max_api_calls,
+            max_login_batches=probe_login_batches,
+            query_timeout_seconds=float(budget["query_timeout_seconds"]),
+            max_history_session_count=int(budget["max_history_session_count"]),
+            max_retry_attempts=0,
+            retry_backoff_seconds=0,
+        )
+    except BaoStockDailyJobError as error:
+        raise DataJobError(
+            "RESET_BAOSTOCK_PRICE_PREFLIGHT_FAILED",
+            "清理前BaoStock双坐标行情验证异常；现有业务事实保持不变。",
+            status=503,
+        ) from error
+    valid_probe = any(
+        record.raw_observation is not None
+        and record.qfq_observation is not None
+        and all(
+            getattr(observation, field).quality == "OBSERVED"
+            for observation in (record.raw_observation, record.qfq_observation)
+            for field in ("open", "high", "low", "close", "volume", "amount")
+        )
+        for record in probe.get("records", ())
+    )
+    if (
+        probe.get("status") != "COMPLETED"
+        or probe.get("source_network_called") is not True
+        or not valid_probe
+    ):
+        raise DataJobError(
+            "RESET_BAOSTOCK_PRICE_PREFLIGHT_FAILED",
+            "清理前未能验证BaoStock目标日RAW/QFQ价格和量额字段；现有业务事实保持不变。",
+            status=503,
+        )
+    preflight_login_batches = int(probe.get("login_budget_batches", 0))
     price_preflight = {
-        "mode": "IDENTITY_ONLY",
-        "status": "IDENTITY_AND_BUDGET_COMPLETE",
-        "completion_status": "IDENTITY_AND_BUDGET_COMPLETE",
+        "mode": "IDENTITY_AND_PRICE_PROBE",
+        "status": "IDENTITY_AND_PRICE_PROBE_COMPLETE",
+        "completion_status": "IDENTITY_AND_PRICE_PROBE_COMPLETE",
         "identity_requests_performed": True,
-        "price_requests_performed": False,
+        "price_requests_performed": True,
         "source_network_called": True,
         "requested_symbols": len(universe),
         "target_sessions": [session.isoformat() for session in sessions],
-        "price_api_calls": 0,
+        "price_api_calls": int(probe.get("api_calls", 0)),
         "planned_price_api_calls": planned_price_api_calls,
         "identity_api_calls": identity_api_calls,
         "planned_total_api_calls": planned_total_api_calls,
         "identity_login_batches": identity_login_batches,
-        "price_login_batches": 0,
+        "price_login_batches": preflight_login_batches,
         "planned_initial_price_login_batches": required_price_login_batches,
         "planned_total_login_batches": planned_total_login_batches,
         "max_login_batches": max_login_batches,
@@ -3930,7 +3987,7 @@ def _prepare_reset_source_inputs(
         "effective_total_api_budget": effective_total_api_budget,
         "effective_price_retry_attempts": 0,
         "full_capture_deferred_until_after_clear": True,
-        "source_requests_repeated_after_clear": False,
+        "source_requests_repeated_after_clear": True,
     }
     try:
         remote_config = dict(config)
@@ -4646,10 +4703,13 @@ def _execute_baostock_source_stage(
         preflight_logins = int(prepared.get("preflight_login_batches", 0))
         identity_preflight_valid = (
             isinstance(preflight, Mapping)
-            and preflight.get("mode") == "IDENTITY_ONLY"
-            and preflight.get("completion_status") == "IDENTITY_AND_BUDGET_COMPLETE"
+            and preflight.get("mode") == "IDENTITY_AND_PRICE_PROBE"
+            and preflight.get("completion_status")
+            == "IDENTITY_AND_PRICE_PROBE_COMPLETE"
             and preflight.get("source_network_called") is True
             and preflight.get("identity_requests_performed") is True
+            and preflight.get("price_requests_performed") is True
+            and preflight_logins > 0
         )
         persisted_resume_valid = (
             isinstance(preflight, Mapping)
@@ -4658,18 +4718,18 @@ def _execute_baostock_source_stage(
             == "PERSISTED_CAPTURE_AND_ARCHIVE_COMPLETE"
             and preflight.get("source_network_called") is False
             and preflight.get("identity_requests_performed") is False
+            and preflight.get("price_requests_performed") is False
             and preflight.get("capture_reused") is True
+            and preflight_logins == 0
         )
         if (
             not isinstance(preflight, Mapping)
             or not (identity_preflight_valid or persisted_resume_valid)
-            or preflight.get("price_requests_performed") is not False
             or preflight.get("full_capture_deferred_until_after_clear") is not True
             or preflight.get("target_sessions")
             != [session.isoformat() for session in sessions]
             or tuple(prepared.get("price_preflight_sessions", ())) != sessions
             or tuple(prepared.get("price_preflight_symbols", ())) != tuple(universe)
-            or preflight_logins != 0
         ):
             raise DataJobError(
                 "RESET_BAOSTOCK_IDENTITY_PREFLIGHT_INCOMPLETE",
@@ -4979,7 +5039,10 @@ def _execute_baostock_source_stage(
             batch_completed_at=batch_completed,
         )
         if count_login_batches:
-            login_used += int(outcome.get("login_batches", 0) or 0)
+            login_used += int(
+                outcome.get("login_budget_batches", outcome.get("login_batches", 0))
+                or 0
+            )
         batch_results.append(
             {
                 "source_symbols": list(symbols),
@@ -5016,16 +5079,10 @@ def _execute_baostock_source_stage(
             for symbol in universe
             if symbol not in request_complete_symbols[coordinate]
             and (
-                int(
-                    persisted_attempts[coordinate]
-                    .get(symbol, {})
-                    .get("attempt_count", 0)
-                    or 0
-                )
-                == 0
+                persisted_attempts[coordinate].get(symbol, {}).get("status")
+                != "PERMANENT_FAILURE"
                 or (
-                    raw_response_journal is not None
-                    and coordinate == "RAW_UNADJUSTED"
+                    coordinate == "RAW_UNADJUSTED"
                     and symbol in raw_archive_repair_symbols
                 )
             )

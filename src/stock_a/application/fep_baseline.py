@@ -578,6 +578,26 @@ def prepare_fep_baseline(
         rule_ids=rule_ids,
         horizons=horizons,
     )
+    return _prepare_fep_from_contexts(
+        contexts=contexts,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        rule_ids=rule_ids,
+        horizons=horizons,
+        lanes=lanes,
+    )
+
+
+def _prepare_fep_from_contexts(
+    *,
+    contexts: list[dict[str, Any]],
+    research_cutoff: date,
+    source_capture_id: int,
+    rule_ids: tuple[str, ...],
+    horizons: tuple[int, ...],
+    lanes: tuple[str, ...],
+) -> dict[str, Any]:
+    """按已读取的同一事实快照计算FEP，供常规生产及受控纠错复用。"""
     if not contexts:
         return {
             "status": "NOT_COMPUTED",

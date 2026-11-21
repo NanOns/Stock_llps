@@ -303,12 +303,16 @@ def plan_baostock_capture_batches(
                 raise BaoStockDailyJobError(
                     "BATCH_SYMBOLS_INVALID", "BaoStock每会话来源代码池必须是序列"
                 )
-            unique = set(raw_symbols)
             if any(
                 not isinstance(symbol, str)
                 or normalize_baostock_symbol(symbol) != symbol
-                for symbol in unique
+                for symbol in raw_symbols
             ):
+                raise BaoStockDailyJobError(
+                    "BATCH_SYMBOLS_INVALID", "BaoStock来源代码必须规范且不重复"
+                )
+            unique = set(raw_symbols)
+            if len(unique) != len(raw_symbols):
                 raise BaoStockDailyJobError(
                     "BATCH_SYMBOLS_INVALID", "BaoStock来源代码必须规范且不重复"
                 )
@@ -696,69 +700,15 @@ def fetch_baostock_price_window(
                             symbols_to_query.append(symbol)
                             continue
                         if archived.get("complete") is False:
-                            raw_fields = archived.get("raw_response_fields")
-                            raw_values = archived.get("raw_row_values")
-                            replayed_rows: list[dict[str, str]] = []
-                            replay_valid = (
-                                isinstance(raw_fields, list)
-                                and len(raw_fields) == len(set(raw_fields))
-                                and required_fields.issubset(raw_fields)
-                                and isinstance(raw_values, list)
-                                and len(raw_values) <= len(target_sessions)
-                            )
-                            seen_replayed_sessions: set[str] = set()
-                            if replay_valid:
-                                for values in raw_values:
-                                    if (
-                                        not isinstance(values, list)
-                                        or len(values) != len(raw_fields)
-                                        or any(
-                                            not isinstance(value, str)
-                                            for value in values
-                                        )
-                                    ):
-                                        replay_valid = False
-                                        break
-                                    row = dict(zip(raw_fields, values, strict=True))
-                                    row_session = row.get("date")
-                                    try:
-                                        parsed_session = date.fromisoformat(row_session)
-                                    except (TypeError, ValueError):
-                                        replay_valid = False
-                                        break
-                                    if (
-                                        parsed_session.isoformat() != row_session
-                                        or parsed_session not in target_sessions
-                                        or parsed_session > cutoff
-                                        or normalize_baostock_symbol(row.get("code"))
-                                        != symbol
-                                        or row.get("adjustflag") != adjustflag
-                                        or row_session in seen_replayed_sessions
-                                    ):
-                                        replay_valid = False
-                                        break
-                                    seen_replayed_sessions.add(row_session)
-                                    replayed_rows.append(row)
-                            if replay_valid:
-                                archived = {
-                                    **archived,
-                                    "status": "RESPONSE_RECEIVED",
-                                    "complete": True,
-                                    "response_fields": list(raw_fields),
-                                    "rows": replayed_rows,
-                                    "local_error": None,
-                                    "replayed_after_raw_archive": True,
+                            archive_warnings.append(
+                                {
+                                    "code": "RAW_RESPONSE_ARCHIVE_INCOMPLETE",
+                                    "source_symbol": symbol,
+                                    "adjustflag": adjustflag,
                                 }
-                            else:
-                                archive_warnings.append(
-                                    {
-                                        "code": "RAW_RESPONSE_ARCHIVE_REPLAY_INVALID",
-                                        "source_symbol": symbol,
-                                        "adjustflag": adjustflag,
-                                    }
-                                )
-                                symbols_to_query.append(symbol)
-                                continue
+                            )
+                            symbols_to_query.append(symbol)
+                            continue
                         archived_responses[symbol] = archived
                         archived_symbols[coordinate].add(symbol)
                         attempted_symbols[coordinate].add(symbol)
@@ -1361,7 +1311,7 @@ def run_manual_baostock_daily_capture(
         end_date=sessions[-1].isoformat(),
         timeout_seconds=timeout,
         max_rows_per_symbol=min(_MAX_ROWS_PER_SYMBOL, len(sessions)),
-        max_queries_per_target_session=max_queries,
+        max_api_calls=max_queries,
         target_session_count=len(sessions),
         transport=transport,
     )

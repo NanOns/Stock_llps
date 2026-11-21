@@ -113,7 +113,7 @@ def _decode_d0_scenarios(
             and row[11] == expected_source_count
             and row[9] <= target_session
             and row[14] == "NON_PIT_RETROSPECTIVE"
-            and row[15] == "RAW_UNADJUSTED"
+            and row[15] == "FORWARD_ADJUSTED"
             and reduced_state == row[1]
         )
         reason_codes = []
@@ -123,7 +123,7 @@ def _decode_d0_scenarios(
             reason_codes.append("D0_SCENARIO_SOURCE_DENOMINATOR_MISMATCH")
         if row[9] > target_session:
             reason_codes.append("D0_SCENARIO_WINDOW_AFTER_TARGET")
-        if row[14] != "NON_PIT_RETROSPECTIVE" or row[15] != "RAW_UNADJUSTED":
+        if row[14] != "NON_PIT_RETROSPECTIVE" or row[15] != "FORWARD_ADJUSTED":
             reason_codes.append("D0_SCENARIO_SCOPE_MISMATCH")
         if reduced_state != row[1]:
             reason_codes.append("D0_SCENARIO_STATE_CONFLICT")
@@ -568,7 +568,7 @@ def read_source_launch_watch_evidence(
                         "denominator": str(frozen_line_denominator),
                     },
                     "source": frozen_line_source,
-                    "price_coordinate": "RAW_UNADJUSTED",
+                    "price_coordinate": "FORWARD_ADJUSTED",
                     "scope": "NON_PIT_EXPLORATORY",
                 }
             rule_by_symbol[symbol][rule_id] = fact
@@ -977,7 +977,7 @@ def read_source_seed_t1_outcomes(
     source_symbols: Sequence[str],
     successor_sessions: Sequence[date],
 ) -> dict[str, dict[str, Any]]:
-    """按当前页读取已存Seed条件、Raw收盘与共享T+1 typed结果。"""
+    """按当前页读取已存Seed条件、QFQ收盘与共享T+1 typed结果。"""
     from stock_a.domain.tri_state import reduce_seed_with_safety
     from stock_a.storage.postgres import source_raw
     from stock_a.storage.postgres.research_facts import PATH_VERSION
@@ -1015,8 +1015,9 @@ def read_source_seed_t1_outcomes(
             """SELECT target_session,capture_id,provider,normalized_count,
                       parser_contract,source_time_quality,source_clock_role,
                       source_available_at,price_coordinates
-               FROM source_captures WHERE capture_id=%s""",
-            (source_capture_id,),
+               FROM source_captures WHERE capture_id=%s
+                 AND range_start_session<=%s AND range_end_session>=%s""",
+            (source_capture_id, target_session, target_session),
         )
         t0_capture = cursor.fetchone()
         cursor.execute(
@@ -1054,13 +1055,16 @@ def read_source_seed_t1_outcomes(
         endpoint_capture_status = "NOT_DUE" if next_session is None else "UNKNOWN"
         if next_session is not None:
             cursor.execute(
-                """SELECT capture_id,normalized_count,provider,parser_contract,
-                          source_time_quality,source_clock_role,source_available_at,
-                          price_coordinates
-                   FROM source_captures
-                   WHERE target_session=%s AND capture_id=%s
-                   ORDER BY capture_id""",
-                (next_session, source_capture_id),
+                """SELECT c.capture_id,
+                          (SELECT count(*) FROM source_raw_daily d
+                           WHERE d.source_capture_id=c.capture_id AND d.session_date=%s),
+                          c.provider,c.parser_contract,c.source_time_quality,
+                          c.source_clock_role,c.source_available_at,c.price_coordinates
+                   FROM source_captures c
+                   WHERE c.range_start_session<=%s AND c.range_end_session>=%s
+                     AND c.capture_id=%s
+                   ORDER BY c.capture_id""",
+                (next_session, next_session, next_session, source_capture_id),
             )
             endpoint_captures = cursor.fetchall()
             if len(endpoint_captures) == 1:
@@ -1181,19 +1185,23 @@ def read_source_seed_t1_outcomes(
                           s.s1_state, s.s1_reasons, s.s2_state, s.s2_reasons,
                           s.safety_state, s.safety_reasons, s.research_mode,
                           s.price_coordinate, s.calendar_revision,
-                          r0.price_quality, r0.raw_close, r0.price_reason,
-                          r1.price_quality, r1.raw_close, r1.price_reason,
+                          r0.qfq_price_quality, r0.qfq_close, r0.qfq_price_reason,
+                          r1.qfq_price_quality, r1.qfq_close, r1.qfq_price_reason,
                           r1.source_capture_id, p.endpoint_session, p.maturity,
                           p.endpoint_quality, p.endpoint_reason,
                           p.endpoint_numerator, p.endpoint_denominator,
                           p.path_quality, p.path_reasons,
                           p.price_coordinate, p.scope,
-                          CASE WHEN r0.raw_close > 0 AND r1.raw_close IS NOT NULL
+                          CASE WHEN r0.qfq_close > 0 AND r1.qfq_close IS NOT NULL
                                     AND p.endpoint_numerator IS NOT NULL
                                     AND p.endpoint_denominator > 0
-                               THEN p.endpoint_numerator * r0.raw_close
-                                  = p.endpoint_denominator * (r1.raw_close - r0.raw_close)
-                               ELSE FALSE END AS return_matches_raw
+                               THEN p.endpoint_numerator * r0.qfq_close
+                                  = p.endpoint_denominator * (r1.qfq_close - r0.qfq_close)
+                               ELSE FALSE END AS return_matches_qfq,
+                          coalesce(r0.qfq_tradestatus_quality='OBSERVED'
+                                   AND r0.qfq_tradestatus_value='1', FALSE),
+                          coalesce(r1.qfq_tradestatus_quality='OBSERVED'
+                                   AND r1.qfq_tradestatus_value='1', FALSE)
                    FROM source_pool_seed_day_facts s
                    LEFT JOIN source_raw_daily r0
                      ON r0.session_date=s.target_session
@@ -1261,7 +1269,9 @@ def read_source_seed_t1_outcomes(
                     path_reasons,
                     path_coordinate,
                     path_scope,
-                    return_matches_raw,
+                    return_matches_qfq,
+                    t0_actual,
+                    t1_actual,
                 ) = row
                 source_seed = {
                     "state": _state(source_seed_state),
@@ -1372,7 +1382,7 @@ def read_source_seed_t1_outcomes(
                                 endpoint_reason,
                                 t0_reason,
                                 t1_reason,
-                                "T1_RAW_CLOSE_NOT_OBSERVED",
+                                "T1_QFQ_CLOSE_NOT_OBSERVED",
                             )
                             if reason
                         )
@@ -1382,16 +1392,18 @@ def read_source_seed_t1_outcomes(
                     or t1_quality != "OBSERVED"
                     or t0_close is None
                     or t1_close is None
+                    or not t0_actual
+                    or not t1_actual
                     or numerator is None
                     or denominator is None
                     or denominator <= 0
                     or endpoint_day != next_session
                     or t1_capture_id != endpoint_capture_id
-                    or return_matches_raw is not True
-                    or path_coordinate != "RAW_UNADJUSTED"
+                    or return_matches_qfq is not True
+                    or path_coordinate != "FORWARD_ADJUSTED"
                     or path_scope != "NON_PIT_EXPLORATORY"
                     or research_mode != "NON_PIT_RETROSPECTIVE"
-                    or price_coordinate != "RAW_UNADJUSTED"
+                    or price_coordinate != "FORWARD_ADJUSTED"
                 ):
                     status = "UNKNOWN"
                     status_reasons = ["T0_T1_PRICE_OR_SOURCE_IDENTITY_MISMATCH"]
@@ -1481,7 +1493,7 @@ def read_source_seed_t1_outcomes(
                 "successor_session": next_session.isoformat() if next_session else None,
                 "research_cutoff": research_cutoff.isoformat(),
                 "research_mode": "NON_PIT_RETROSPECTIVE",
-                "price_coordinate": "RAW_UNADJUSTED",
+                "price_coordinate": "FORWARD_ADJUSTED",
             }
     return result_by_symbol
 
@@ -2294,7 +2306,7 @@ def read_source_launch_watch_page(
                              AND s.research_mode='NON_PIT_RETROSPECTIVE'
                              AND d.research_mode='NON_PIT_RETROSPECTIVE'
                              AND s.price_coordinate=d.price_coordinate
-                             AND s.price_coordinate='RAW_UNADJUSTED'
+                             AND s.price_coordinate='FORWARD_ADJUSTED'
                       FROM rule_scope r CROSS JOIN seed_scope s CROSS JOIN d1_scope d)
                 ELSE FALSE END AS rules_match_seed
 ), base AS (

@@ -287,19 +287,22 @@ def normalize_daily_row(
         if value.quality == "OBSERVED" and value.value == 0:
             value = unknown(_INVALID_FIELD_REASONS[price_name])
         prices[price_name] = value
-    if all(
-        prices[name].quality == "OBSERVED" for name in ("open", "high", "low", "close")
+    known_prices = {
+        name: exact_number(value.value)
+        for name, value in prices.items()
+        if name != "preclose" and value.quality == "OBSERVED"
+    }
+    high_price = known_prices.get("high")
+    low_price = known_prices.get("low")
+    if (
+        high_price is not None
+        and any(high_price < value for value in known_prices.values())
+    ) or (
+        low_price is not None
+        and any(low_price > value for value in known_prices.values())
     ):
-        open_price, high_price, low_price, close_price = (
-            exact_number(prices[name].value)
-            for name in ("open", "high", "low", "close")
-        )
-        if (
-            high_price < max(open_price, close_price)
-            or low_price > min(open_price, close_price)
-            or high_price < low_price
-        ):
-            prices = {name: unknown("BaoStock OHLC高低价关系非法") for name in prices}
+        for name in ("open", "high", "low", "close"):
+            prices[name] = unknown("BaoStock OHLC高低价关系非法")
     volume = _field_value(
         row,
         columns,

@@ -240,7 +240,11 @@ class BaoStockRawResponseJournal:
                     request_key = record["request_key"]
                     digest = record["sha256"]
                     existing = self._records.get(request_key)
-                    if existing is not None and existing[2] != digest:
+                    if (
+                        existing is not None
+                        and self._record_success.get(request_key) is True
+                        and existing[2] != digest
+                    ):
                         raise BaoStockRawResponseJournalError(
                             "同一请求键在原始响应JSONL中对应不同成功响应"
                         )
@@ -414,16 +418,17 @@ class BaoStockRawResponseJournal:
             existing_reference = self._records.get(request_key)
             if existing_reference is not None:
                 existing = self._read_indexed_record(request_key, existing_reference)
-                if existing.get("sha256") != record.get("sha256"):
+                if existing.get("sha256") == record.get("sha256"):
+                    return {
+                        "request_key": request_key,
+                        "sha256": existing["sha256"],
+                        "request_attempt_number": existing["request_attempt_number"],
+                        "reused": True,
+                    }
+                if self._record_success.get(request_key) is True:
                     raise BaoStockRawResponseJournalError(
                         "同一请求键出现不同成功响应，拒绝覆盖原始档案"
                     )
-                return {
-                    "request_key": request_key,
-                    "sha256": existing["sha256"],
-                    "request_attempt_number": existing["request_attempt_number"],
-                    "reused": True,
-                }
             encoded = _canonical_bytes(record) + b"\n"
             try:
                 with self.path.open("ab") as handle:

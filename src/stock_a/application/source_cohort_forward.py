@@ -24,6 +24,12 @@ def _frozen_line_followup(
             "reason_code": "RULE_STATE_UNKNOWN_NO_PROVEN_T0_SIGNAL",
             "role": role,
         }
+    if facts.get("status") == "NOT_COMPUTED":
+        return {
+            "status": "NOT_COMPUTED",
+            "reason_code": facts.get("reason_code") or "SOURCE_PATH_NOT_COMPUTED",
+            "role": role,
+        }
     try:
         line = (
             Fraction(int(value["numerator"]), int(value["denominator"]))

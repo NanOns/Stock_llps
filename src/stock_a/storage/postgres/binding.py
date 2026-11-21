@@ -74,6 +74,7 @@ _MIGRATION_FILES = (
     "0060_source_switch_t0_early_observation_qfq_coordinate.sql",
     "0061_source_switch_fep_equal_date_null_capture.sql",
     "0062_r08_frozen_rule_history_budget.sql",
+    "0063_baostock_fep_equal_date_unique.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -128,6 +129,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "SOURCE_SWITCH_01_CONSUMER_03_R00_PX_FEP_D1_RULE_FOCUS_R1_20261121": frozenset(
         {62}
     ),
+    "BAOSTOCK_FEP_EQUAL_DATE_UNIQUE_R1": frozenset({63}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -323,6 +325,7 @@ _RELATIONS_BY_MIGRATION_COUNT[59] = _RELATIONS_BY_MIGRATION_COUNT[58]
 _RELATIONS_BY_MIGRATION_COUNT[60] = _RELATIONS_BY_MIGRATION_COUNT[59]
 _RELATIONS_BY_MIGRATION_COUNT[61] = _RELATIONS_BY_MIGRATION_COUNT[60]
 _RELATIONS_BY_MIGRATION_COUNT[62] = _RELATIONS_BY_MIGRATION_COUNT[61]
+_RELATIONS_BY_MIGRATION_COUNT[63] = _RELATIONS_BY_MIGRATION_COUNT[62]
 
 
 class BindingRefused(Exception):

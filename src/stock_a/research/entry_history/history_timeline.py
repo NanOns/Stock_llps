@@ -18,6 +18,7 @@ from stock_a.research.entry_history.support import (
     _source_price_bar_from_pg_row,
     trade_status_state_from_pg_row,
 )
+from stock_a.sources.baostock.identity import normalize_baostock_symbol
 
 _PRICE_RELATION_FIELDS = (
     "core.ma5",
@@ -130,6 +131,20 @@ def _timeline_qfq_ohlc(row: Mapping[str, Any] | None) -> dict[str, Any]:
     )
     reason = None if quality == "OBSERVED" else "QFQ_PRICE_QUALITY_UNKNOWN"
     return result | {"quality": quality, "reason": reason}
+
+
+def _timeline_actual_qfq_ohlc(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """收益和路径计算仅使用来源明确报告交易的QFQ价格。"""
+    state, reason = trade_status_state_from_pg_row(
+        row, price_coordinate="FORWARD_ADJUSTED"
+    )
+    if state != "ACTUAL":
+        reason = reason or "QFQ_TRADE_STATUS_NOT_ACTUAL"
+        return {
+            name: {"value": None, "quality": "UNKNOWN", "reason": reason}
+            for name in ("open", "high", "low", "close")
+        } | {"quality": "UNKNOWN", "reason": reason}
+    return _timeline_qfq_ohlc(row)
 
 
 def _timeline_raw_activity(
@@ -417,6 +432,15 @@ def post_signal_price_facts(
     by_date = {row["session_date"]: row for row in rows}
     if len(by_date) != len(rows) or any(day not in sessions for day in by_date):
         raise ResearchEntryError("POST_SIGNAL_ROWS_INVALID", "后续行情会话重复或越界")
+    symbols = {
+        normalize_baostock_symbol(row.get("source_symbol"))
+        for row in rows
+        if row.get("qfq_bar_status") == "TARGET_PRESENT"
+    }
+    if None in symbols or len(symbols) > 1:
+        raise ResearchEntryError(
+            "POST_SIGNAL_SYMBOL_MISMATCH", "后续有效行情缺少来源代码或混合不同证券"
+        )
     capture_ids = {row.get("source_capture_id") for row in rows}
     capture_id = (
         next(iter(capture_ids))
@@ -424,12 +448,12 @@ def post_signal_price_facts(
         else None
     )
     base_row = by_date.get(sessions[0])
-    base = _timeline_qfq_ohlc(base_row)
+    base = _timeline_actual_qfq_ohlc(base_row)
     base_raw = _timeline_raw_ohlc(base_row)
     points = []
     for index, session in enumerate(sessions[1:], 1):
         row = by_date.get(session)
-        ohlc = _timeline_qfq_ohlc(row)
+        ohlc = _timeline_actual_qfq_ohlc(row)
         raw_ohlc = _timeline_raw_ohlc(row)
         comparison = {
             "quality": "UNKNOWN",
