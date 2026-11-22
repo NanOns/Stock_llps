@@ -742,12 +742,6 @@ def persist_sector_source_snapshots(
                 raise TdxSectorMembersPgError(
                     "MIGRATION_0009_REQUIRED", "必须先按本批任务范围应用迁移0009"
                 )
-            cursor.execute("SELECT count(*) FROM tdx_sector_source_snapshots")
-            current_snapshot_count = int(cursor.fetchone()[0])
-            if current_snapshot_count > 8:
-                raise TdxSectorMembersPgError(
-                    "SNAPSHOT_ROW_LIMIT_EXCEEDED", "现有来源快照已超过本批8行预算"
-                )
             for snapshot in snapshots:
                 existing_id = _assert_existing_snapshot(cursor, snapshot)
                 if existing_id is not None:
@@ -759,23 +753,14 @@ def persist_sector_source_snapshots(
                 len(snapshot.catalog_rows) for snapshot in to_insert
             )
             new_member_count = sum(len(snapshot.member_rows) for snapshot in to_insert)
-            if current_snapshot_count + len(to_insert) > MAX_SNAPSHOT_INSERTS:
-                raise TdxSectorMembersPgError(
-                    "PG_INSERT_BUDGET_EXCEEDED", "本批新增来源快照将超过8行上限"
-                )
-            cursor.execute(
-                """SELECT
-    (SELECT count(*) FROM tdx_sector_catalog),
-    (SELECT count(*) FROM tdx_sector_members)"""
-            )
-            current_catalog_count, current_member_count = map(int, cursor.fetchone())
             if (
-                current_catalog_count + new_catalog_count > MAX_CATALOG_INSERTS
-                or current_member_count + new_member_count > MAX_MEMBER_INSERTS
+                len(to_insert) > MAX_SNAPSHOT_INSERTS
+                or new_catalog_count > MAX_CATALOG_INSERTS
+                or new_member_count > MAX_MEMBER_INSERTS
             ):
                 raise TdxSectorMembersPgError(
                     "PG_INSERT_BUDGET_EXCEEDED",
-                    "本批新增目录或成员将超过对应正式表行数上限",
+                    "本批新增快照、目录或成员超过单批行数上限",
                 )
             for snapshot in to_insert:
                 snapshot_ids[snapshot.source_kind] = _insert_snapshot(cursor, snapshot)
@@ -2510,7 +2495,7 @@ def _core_transition_summary(
     event_rows: list[dict[str, Any]] = []
     if include_member_page:
         for symbol, row in members.items():
-            event_kind = None
+            event_kinds = []
             for kind, (
                 field,
                 expected_status,
@@ -2525,9 +2510,8 @@ def _core_transition_summary(
                     and row.get(field) == expected_status
                     and (core_transition_kind == "ALL" or kind == core_transition_kind)
                 ):
-                    event_kind = kind
-                    break
-            if event_kind is None:
+                    event_kinds.append(kind)
+            if not event_kinds:
                 continue
 
             def endpoint(side: str, source: dict[str, Any]) -> dict[str, Any]:
@@ -2559,39 +2543,40 @@ def _core_transition_summary(
                     },
                 }
 
-            event_rows.append(
-                {
-                    "core_transition_kind": event_kind,
-                    "source_symbol": symbol,
-                    "transition": (
-                        row["price_damage_transition"]
-                        if event_kind.startswith("DAMAGE_")
-                        else row["ma_slope20_transition_status"]
-                    ),
-                    "membership": {
-                        "snapshot_id": source_snapshot["snapshot_id"],
-                        "board_kind": board["board_kind"],
-                        "board_native_id": board["board_native_id"],
-                        "membership_quality": row.get("membership_quality"),
-                        "mode": source_snapshot["research_mode"],
-                        "observed_at": source_snapshot["observed_at"],
-                    },
-                    "before": endpoint("before", before_source),
-                    "after": endpoint("after", after_source),
-                    "pair": {
-                        "compatibility": (
-                            row["price_damage_pair_compatibility"]
+            for event_kind in event_kinds:
+                event_rows.append(
+                    {
+                        "core_transition_kind": event_kind,
+                        "source_symbol": symbol,
+                        "transition": (
+                            row["price_damage_transition"]
                             if event_kind.startswith("DAMAGE_")
-                            else row["ma_slope20_pair_compatibility"]
+                            else row["ma_slope20_transition_status"]
                         ),
-                        "reason": (
-                            row["price_damage_pair_reason"]
-                            if event_kind.startswith("DAMAGE_")
-                            else row["ma_slope20_pair_reason"]
-                        ),
-                    },
-                }
-            )
+                        "membership": {
+                            "snapshot_id": source_snapshot["snapshot_id"],
+                            "board_kind": board["board_kind"],
+                            "board_native_id": board["board_native_id"],
+                            "membership_quality": row.get("membership_quality"),
+                            "mode": source_snapshot["research_mode"],
+                            "observed_at": source_snapshot["observed_at"],
+                        },
+                        "before": endpoint("before", before_source),
+                        "after": endpoint("after", after_source),
+                        "pair": {
+                            "compatibility": (
+                                row["price_damage_pair_compatibility"]
+                                if event_kind.startswith("DAMAGE_")
+                                else row["ma_slope20_pair_compatibility"]
+                            ),
+                            "reason": (
+                                row["price_damage_pair_reason"]
+                                if event_kind.startswith("DAMAGE_")
+                                else row["ma_slope20_pair_reason"]
+                            ),
+                        },
+                    }
+                )
 
         event_rows.sort(
             key=lambda item: (
@@ -3549,12 +3534,14 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
                     "revision_queries": 0,
                     "raw_queries": 0,
                 }
-            profile_capture_ids = {
-                str(row["source_capture_id"]) for row in profile_rows
-            }
-            if profile_capture_ids and profile_capture_ids != {
-                source_version["source_capture_id"]
-            }:
+            profile_capture_ids = {row["source_capture_id"] for row in profile_rows}
+            if profile_rows and (
+                any(
+                    type(value) is not int or value <= 0
+                    for value in profile_capture_ids
+                )
+                or profile_capture_ids != {source_version["source_capture_id"]}
+            ):
                 raise TdxSectorMembersPgError(
                     "PROFILE_SOURCE_IDENTITY_MISMATCH",
                     "TDX板块成员命中的Core画像source_capture_id与Raw捕获不一致",

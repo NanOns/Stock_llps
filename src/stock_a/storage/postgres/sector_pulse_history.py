@@ -319,6 +319,7 @@ WHERE p.target_session=ANY(%s) AND p.target_session<=%s
   AND p.source_capture_id=%s
   AND p.board_kind=%s AND p.board_native_id=%s
   AND c.snapshot_id=%s AND p.algorithm_contract=%s
+  AND (p.target_session<>%s OR p.profile_revision=%s)
 ORDER BY p.target_session,p.id""",
             (
                 list(history_sessions),
@@ -328,6 +329,8 @@ ORDER BY p.target_session,p.id""",
                 board_native_id,
                 snapshot_id,
                 _ALGORITHM,
+                target_session,
+                profile_revision,
             ),
         )
         pulse_columns = [column.name for column in cursor.description]

@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
+import re
 from typing import Any, Mapping
 
 from stock_a.contracts.profile_revision import (
@@ -865,14 +866,20 @@ def _profile_session_relation(
         "calendar_revision": None,
         "reason": "OFFICIAL_SESSION_ADJACENCY_NOT_PROVEN",
     }
-    if (
-        before["history_calendar_id"] != after["history_calendar_id"]
-        or before["history_calendar_revision"] != after["history_calendar_revision"]
-    ):
+    if not _profile_calendar_revisions_compatible(before, after):
         return relation
     try:
         payload, _metadata, revision, sessions = _load_calendar(after_date)
     except ResearchEntryError:
+        return relation
+    if (
+        payload.get("calendar_id") != before.get("history_calendar_id")
+        or not _snapshot_calendar_matches_revision_chain(before, revision)
+        or not _snapshot_calendar_matches_revision_chain(after, revision)
+        or not _profile_window_matches_sessions(before, sessions, before_date)
+        or not _profile_window_matches_sessions(after, sessions, after_date)
+    ):
+        relation["reason"] = "PROFILE_CALENDAR_OR_WINDOW_MISMATCH"
         return relation
     relation.update(
         {
@@ -881,9 +888,6 @@ def _profile_session_relation(
             "reason": None,
         }
     )
-    if revision != after["history_calendar_revision"]:
-        relation["reason"] = "PROFILE_CALENDAR_REVISION_MISMATCH"
-        return relation
     before_index = next(
         (
             index
@@ -909,6 +913,142 @@ def _profile_session_relation(
             else "NONCONSECUTIVE_OFFICIAL_SESSIONS"
         )
     return relation
+
+
+def _calendar_revision_map(value: Any) -> dict[int, str] | None:
+    if not isinstance(value, str) or not value:
+        return None
+    revisions: dict[int, str] = {}
+    for component in value.split("+"):
+        year, separator, revision = component.partition(":")
+        if (
+            not separator
+            or re.fullmatch(r"[0-9]{4}", year) is None
+            or not revision
+            or int(year) in revisions
+        ):
+            return None
+        revisions[int(year)] = revision
+    return revisions
+
+
+def _snapshot_calendar_window_years(
+    snapshot: Mapping[str, Any],
+) -> set[int] | None:
+    start = snapshot.get("window_start") or snapshot.get("history_window_start")
+    end = snapshot.get("window_end") or snapshot.get("history_window_end")
+    try:
+        start_date = (
+            start.date()
+            if isinstance(start, datetime)
+            else start
+            if isinstance(start, date)
+            else date.fromisoformat(str(start))
+        )
+        end_date = (
+            end.date()
+            if isinstance(end, datetime)
+            else end
+            if isinstance(end, date)
+            else date.fromisoformat(str(end))
+        )
+    except (TypeError, ValueError):
+        return None
+    if start_date > end_date:
+        return None
+    return set(range(start_date.year, end_date.year + 1))
+
+
+def _snapshot_calendar_matches_revision_chain(
+    snapshot: Mapping[str, Any], revision_chain: Any
+) -> bool:
+    snapshot_years = _snapshot_calendar_window_years(snapshot)
+    snapshot_revisions = _calendar_revision_map(
+        snapshot.get("history_calendar_revision")
+    )
+    expected_revisions = _calendar_revision_map(revision_chain)
+    return bool(
+        snapshot_years
+        and snapshot_revisions
+        and expected_revisions
+        and all(
+            year in snapshot_revisions
+            and year in expected_revisions
+            and snapshot_revisions[year] == expected_revisions[year]
+            for year in snapshot_years
+        )
+    )
+
+
+def _profile_calendar_revisions_compatible(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> bool:
+    calendar_id = before.get("history_calendar_id")
+    before_count = before.get("history_session_count")
+    after_count = after.get("history_session_count")
+    if (
+        not isinstance(calendar_id, str)
+        or not calendar_id
+        or calendar_id != after.get("history_calendar_id")
+        or type(before_count) is not int
+        or before_count <= 0
+        or before_count != after_count
+    ):
+        return False
+    before_years = _snapshot_calendar_window_years(before)
+    after_years = _snapshot_calendar_window_years(after)
+    before_revisions = _calendar_revision_map(before.get("history_calendar_revision"))
+    after_revisions = _calendar_revision_map(after.get("history_calendar_revision"))
+    if (
+        not before_years
+        or not after_years
+        or not before_revisions
+        or not after_revisions
+    ):
+        return False
+    if not before_years.issubset(before_revisions) or not after_years.issubset(
+        after_revisions
+    ):
+        return False
+    shared_years = before_years & after_years
+    return bool(shared_years) and all(
+        before_revisions[year] == after_revisions[year] for year in shared_years
+    )
+
+
+def _profile_window_matches_sessions(
+    snapshot: Mapping[str, Any],
+    sessions: Sequence[date],
+    target_session: date,
+) -> bool:
+    try:
+        start_value = snapshot.get("window_start")
+        end_value = snapshot.get("window_end")
+        start = (
+            start_value.date()
+            if isinstance(start_value, datetime)
+            else start_value
+            if isinstance(start_value, date)
+            else date.fromisoformat(str(start_value))
+        )
+        end = (
+            end_value.date()
+            if isinstance(end_value, datetime)
+            else end_value
+            if isinstance(end_value, date)
+            else date.fromisoformat(str(end_value))
+        )
+    except (TypeError, ValueError):
+        return False
+    if end != target_session:
+        return False
+    selected = tuple(day for day in sessions if start <= day <= end)
+    return bool(
+        selected
+        and selected[0] == start
+        and selected[-1] == end
+        and len(selected) == snapshot.get("history_session_count")
+    )
 
 
 def query_source_symbol_price_profile_pair(

@@ -7,8 +7,9 @@ from decimal import Decimal
 from fractions import Fraction
 from time import perf_counter
 from typing import Any, Mapping, Sequence
+from uuid import UUID
 
-from stock_a.domain import FieldValue, unknown
+from stock_a.domain import FieldValue
 from stock_a.research.core import (
     CoreObservation,
     MarketSessionCalendar,
@@ -16,7 +17,10 @@ from stock_a.research.core import (
 )
 from stock_a.research.d0_price_facts import calculate_d0_first_day_damage
 from stock_a.research.entry import ResearchEntryError, _load_calendar
-from stock_a.storage.postgres.source_raw import read_raw_daily_history_batch
+from stock_a.research.entry_history.support import _core_observation_from_pg_price_row
+from stock_a.storage.postgres.baostock_price_facts import (
+    read_baostock_price_history_batch,
+)
 
 
 class PriceSafetyFactError(ValueError):
@@ -44,7 +48,7 @@ def attach_source_d1_price_safety_facts(
     target_session: date,
     research_cutoff: date,
 ) -> dict[str, Any]:
-    """为当前显示的成员页及变化个股页一次性读取RAW事实。"""
+    """为当前显示的板块成员及变化个股页读取同捕获BaoStock QFQ事实。"""
     started = perf_counter()
     detail = result.get("detail_board")
     detail_members: list[dict[str, Any]] | None = None
@@ -122,10 +126,10 @@ def attach_source_d1_price_safety_facts(
     source = discovery.get("source")
     if not isinstance(source, Mapping):
         raise PriceSafetyFactError(
-            "PRICE_SAFETY_SOURCE_IDENTITY_MISSING", "D1未返回Raw来源版本身份。"
+            "PRICE_SAFETY_SOURCE_IDENTITY_MISSING", "D1未返回BaoStock来源版本身份。"
         )
     _validate_source_binding(
-        result=result,
+        discovery=discovery,
         source=source,
         target_session=target_session,
         research_cutoff=research_cutoff,
@@ -166,15 +170,21 @@ def attach_source_d1_price_safety_facts(
 
     symbols = displayed_symbols
 
-    batch = read_raw_daily_history_batch(
+    source_capture_id = source.get("source_capture_id")
+    batch = read_baostock_price_history_batch(
         config,
         source_symbols=symbols,
-        target_session=target_session,
-        research_cutoff=research_cutoff,
-        source_package_id=source["source_package_id"],
         sessions=history_sessions,
-        expected_source_package_id=int(source["source_package_id"]),
-        expected_target_capture_id=int(source["source_capture_id"]),
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
+        cutoff=research_cutoff,
+        limit=5000,
+    )
+    _validate_price_batch(
+        batch=batch,
+        source_capture_id=source_capture_id,
+        target_sessions=history_sessions,
+        source_symbols=symbols,
     )
     calendar = MarketSessionCalendar(
         calendar_id=str(target_calendar["calendar_id"]),
@@ -195,17 +205,22 @@ def attach_source_d1_price_safety_facts(
     ]
     facts_by_symbol: dict[str, dict[str, Any]] = {}
     for symbol in symbols:
-        rows = batch["history_rows_by_symbol"].get(symbol, [])
+        rows = [row for row in batch["rows"] if row["source_symbol"] == symbol]
         by_session = {row["session_date"]: row for row in rows}
-        observations = _core_observations(symbol, history_sessions, by_session)
+        observations = _core_observations(
+            symbol,
+            history_sessions,
+            by_session,
+            source_capture_id=source_capture_id,
+        )
         core_fields = calculate_core(observations, official_calendar=calendar)
         d0_fact = calculate_d0_first_day_damage(
             target_session=target_session,
             official_sessions=history_sessions,
             history_rows_by_session=by_session,
             source_symbol=symbol,
-            source_package_id=source["source_package_id"],
-            target_capture_id=int(source["source_capture_id"]),
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
         )
         facts_by_symbol[symbol] = _facts_payload(
             symbol=symbol,
@@ -232,11 +247,13 @@ def attach_source_d1_price_safety_facts(
     else:
         scope = "DISPLAYED_SECTOR_MEMBER_PAGE_ONLY"
     execution = {
-        "status": "COMPLETED",
+        "status": "COMPLETED"
+        if batch.get("status") == "AVAILABLE"
+        else "INCOMPLETE_SOURCE_COVERAGE",
+        "source_read_status": batch.get("status", "UNKNOWN"),
         "scope": scope,
-        "database_transaction": batch["transaction"],
-        "database_reads": batch["raw_history_batch_reads"],
-        "raw_history_selects": batch["raw_history_batch_reads"],
+        "database_reader_calls": 1,
+        "database_transactions": 1,
         "unique_source_symbols_requested": len(symbols),
         "displayed_member_rows": (
             len(detail_members or []) + len(changed_members or [])
@@ -245,14 +262,14 @@ def attach_source_d1_price_safety_facts(
             if scope == "DISPLAYED_SECTOR_MEMBER_PAGE_ONLY"
             else len(changed_members or [])
         ),
-        "raw_history_rows_read": batch["raw_history_rows_read"],
+        "qfq_history_rows_read": len(batch["rows"]),
         "official_core_input_sessions": len(history_sessions),
         "core_calculations": len(facts_by_symbol),
         "d0_first_day_damage_calculations": len(facts_by_symbol),
         "database_write_attempted": batch["database_write_attempted"],
-        "ddl_executed": batch["ddl_executed"],
-        "dml_executed": batch["dml_executed"],
-        "source_zip_opened": batch["source_zip_opened"],
+        "ddl_executed": False,
+        "dml_executed": False,
+        "source_zip_opened": False,
         "elapsed_ms": round((perf_counter() - started) * 1000, 3),
     }
     if scope == "DISPLAYED_CHANGED_STOCK_AND_SECTOR_MEMBER_PAGE_UNION":
@@ -276,38 +293,95 @@ def _page_symbols(members: list[dict[str, Any]] | None, error_code: str) -> list
 
 def _validate_source_binding(
     *,
-    result: Mapping[str, Any],
+    discovery: Mapping[str, Any],
     source: Mapping[str, Any],
     target_session: date,
     research_cutoff: date,
 ) -> None:
-    expected = {
-        "target_session": target_session.isoformat(),
-        "research_cutoff": research_cutoff.isoformat(),
-        "source_package_id": result.get("source_package_id"),
-    }
-    actual = {
-        "target_session": source.get("target_session"),
-        "research_cutoff": result.get("research_cutoff"),
-        "source_package_id": source.get("source_package_id"),
-    }
+    source_capture_id = source.get("source_capture_id")
     if (
-        actual != expected
-        or source.get("price_coordinate") != "RAW_UNADJUSTED"
+        discovery.get("target_session") != target_session.isoformat()
+        or discovery.get("research_cutoff") != research_cutoff.isoformat()
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or discovery.get("source_capture_id") != source_capture_id
+        or source.get("target_session") != target_session.isoformat()
+        or source.get("provider") != "BAOSTOCK"
+        or source.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or source.get("price_coordinates") != ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"]
+        or source.get("source_time_quality") != "NON_PIT_OBSERVED"
+        or not isinstance(source.get("source_clock_role"), str)
+        or not source.get("source_clock_role")
         or source.get("pit_status") != "NON_PIT_RETROSPECTIVE"
+        or source.get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or source.get("version_status") != "COMPLETE"
+        or source.get("qfq_coverage_status") != "COMPLETE"
         or source.get("database_write") is not False
         or source.get("ddl_executed") is not False
     ):
         raise PriceSafetyFactError(
             "PRICE_SAFETY_SOURCE_BINDING_MISMATCH",
-            "价格事实要求与当前目标日、数字来源包、捕获键及RAW坐标完全一致。",
+            "价格事实要求与当前目标日、BaoStock捕获及QFQ坐标完全一致。",
         )
+
+
+def _validate_price_batch(
+    *,
+    batch: Mapping[str, Any],
+    source_capture_id: int,
+    target_sessions: Sequence[date],
+    source_symbols: Sequence[str],
+) -> None:
+    page = batch.get("page")
+    rows = batch.get("rows")
     if (
-        source.get("source_capture_id") is None
-        or source.get("source_package_id") is None
+        batch.get("source_capture_id") != source_capture_id
+        or batch.get("status") not in {"AVAILABLE", "INCOMPLETE"}
+        or batch.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or batch.get("database_write_attempted") is not False
+        or batch.get("source_io_attempted") is not False
+        or batch.get("target_sessions")
+        != [session.isoformat() for session in target_sessions]
+        or not isinstance(page, Mapping)
+        or page.get("offset") != 0
+        or page.get("next_offset") is not None
+        or page.get("count") != page.get("total")
+        or not isinstance(rows, list)
     ):
         raise PriceSafetyFactError(
-            "PRICE_SAFETY_SOURCE_IDENTITY_INCOMPLETE", "Raw来源捕获或内容身份缺失。"
+            "PRICE_SAFETY_HISTORY_SCOPE_MISMATCH",
+            "BaoStock QFQ历史页没有完整绑定请求会话与来源捕获。",
+        )
+    allowed_symbols = set(source_symbols)
+    seen: set[tuple[str, date]] = set()
+    capture_uuids = set()
+    for row in rows:
+        session = row.get("session_date")
+        symbol = row.get("source_symbol")
+        identity = (symbol, session)
+        if (
+            type(session) is not date
+            or session not in target_sessions
+            or not isinstance(symbol, str)
+            or symbol not in allowed_symbols
+            or type(row.get("source_capture_id")) is not int
+            or row.get("source_capture_id") != source_capture_id
+            or row.get("provider") != "BAOSTOCK"
+            or row.get("price_coordinate") != "FORWARD_ADJUSTED"
+            or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
+            or not isinstance(row.get("capture_uuid"), UUID)
+            or identity in seen
+        ):
+            raise PriceSafetyFactError(
+                "PRICE_SAFETY_HISTORY_ROW_IDENTITY_MISMATCH",
+                "BaoStock QFQ历史混入错捕获、坐标、会话、代码或重复行。",
+            )
+        seen.add(identity)
+        capture_uuids.add(row["capture_uuid"])
+    if len(capture_uuids) > 1:
+        raise PriceSafetyFactError(
+            "PRICE_SAFETY_CAPTURE_UUID_MISMATCH",
+            "BaoStock QFQ历史包含多个捕获UUID。",
         )
 
 
@@ -340,51 +414,22 @@ def _core_observations(
     symbol: str,
     sessions: Sequence[date],
     rows_by_session: Mapping[date, Mapping[str, Any]],
+    *,
+    source_capture_id: int,
 ) -> list[CoreObservation]:
-    result = []
-    for session in sessions:
-        row = rows_by_session.get(session)
-        if row is None or row.get("bar_status") != "TARGET_PRESENT":
-            result.append(
-                CoreObservation(
-                    session=session,
-                    state="UNKNOWN",
-                    coordinate_id=f"RAW:TDX_SOURCE_SYMBOL:{symbol}",
-                    open=unknown("RAW_BAR_MISSING_FOR_OFFICIAL_SESSION"),
-                    high=unknown("RAW_BAR_MISSING_FOR_OFFICIAL_SESSION"),
-                    low=unknown("RAW_BAR_MISSING_FOR_OFFICIAL_SESSION"),
-                    close=unknown("RAW_BAR_MISSING_FOR_OFFICIAL_SESSION"),
-                    amount=unknown("NOT_USED_FOR_PRICE_SAFETY_FACTS"),
-                    volume=unknown("NOT_USED_FOR_PRICE_SAFETY_FACTS"),
-                )
-            )
-            continue
-        reason = row.get("price_reason") or "RAW_PRICE_QUALITY_NOT_OBSERVED"
-        quality = row.get("price_quality")
-        result.append(
-            CoreObservation(
-                session=session,
-                state="ACTUAL",
-                coordinate_id=f"RAW:TDX_SOURCE_SYMBOL:{symbol}",
-                open=_price_field(row.get("raw_open"), quality, reason),
-                high=_price_field(row.get("raw_high"), quality, reason),
-                low=_price_field(row.get("raw_low"), quality, reason),
-                close=_price_field(row.get("raw_close"), quality, reason),
-                amount=unknown("NOT_USED_FOR_PRICE_SAFETY_FACTS"),
-                volume=unknown("NOT_USED_FOR_PRICE_SAFETY_FACTS"),
-            )
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
+    )
+    return [
+        _core_observation_from_pg_price_row(
+            rows_by_session.get(session),
+            session=session,
+            source_capture_id=source_capture_id,
+            price_coordinate="FORWARD_ADJUSTED",
+            coordinate_id=coordinate_id,
         )
-    return result
-
-
-def _price_field(value: Any, quality: Any, reason: Any) -> FieldValue:
-    if quality != "OBSERVED" or value is None:
-        return unknown(str(reason or "RAW_PRICE_QUALITY_NOT_OBSERVED"))
-    if isinstance(value, bool) or not isinstance(value, (Decimal, int, Fraction)):
-        return unknown("INVALID_PRICE_FIELD_TYPE")
-    if isinstance(value, Decimal) and not value.is_finite():
-        return unknown("INVALID_PRICE_FIELD_VALUE")
-    return FieldValue(value)
+        for session in sessions
+    ]
 
 
 def _facts_payload(
@@ -399,8 +444,8 @@ def _facts_payload(
     core_fields: Mapping[str, FieldValue],
     d0_fact: Any,
 ) -> dict[str, Any]:
-    raw_history = [
-        _raw_session_evidence(session, rows_by_session.get(session))
+    qfq_history = [
+        _qfq_session_evidence(session, rows_by_session.get(session))
         for session in history_sessions
     ]
     current_row = rows_by_session.get(history_sessions[-1])
@@ -414,29 +459,30 @@ def _facts_payload(
     core_reason = {
         "TRUE": "Core价格损伤公式成立：收盘价严格低于prior_low20减半个ATR20，且ret1为负。",
         "FALSE": "Core价格损伤公式已计算，但严格价格阈值与负ret1条件未同时成立。",
-    }.get(core_state) or "Core价格损伤依赖质量不足，原因见reason_code及目标RAW质量。"
+    }.get(core_state) or "Core价格损伤依赖质量不足，原因见reason_code及目标QFQ质量。"
     core_window = {
-        "role": "CORE_PRICE_DAMAGE_RAW_SESSION_WINDOW",
+        "role": "CORE_PRICE_DAMAGE_QFQ_SESSION_WINDOW",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "start_session": history_sessions[0].isoformat(),
         "end_session": history_sessions[-1].isoformat(),
         "official_session_count": len(history_sessions),
         "observed_bar_count": sum(
-            row.get("bar_status") == "TARGET_PRESENT"
-            and row.get("price_quality") == "OBSERVED"
+            row.get("qfq_bar_status") == "TARGET_PRESENT"
+            and row.get("qfq_price_quality") == "OBSERVED"
             for row in rows_by_session.values()
         ),
         "missing_sessions": [
             session.isoformat()
             for session in history_sessions
             if session not in rows_by_session
-            or rows_by_session[session].get("bar_status") != "TARGET_PRESENT"
+            or rows_by_session[session].get("qfq_bar_status") != "TARGET_PRESENT"
         ],
         "official_calendar": {
             "calendar_id": official_calendar["calendar_id"],
             "target_calendar_revision": official_calendar["calendar_revision"],
             "window_calendars": window_calendar,
         },
-        "raw_session_evidence": raw_history,
+        "qfq_session_evidence": qfq_history,
     }
     d0_window = {
         "role": "D0_SESSION_R2_STRICT_20_OFFICIAL_SESSIONS_INCLUDING_TARGET",
@@ -451,8 +497,8 @@ def _facts_payload(
         "observed_bar_count": sum(
             bool(
                 rows_by_session.get(session)
-                and rows_by_session[session].get("bar_status") == "TARGET_PRESENT"
-                and rows_by_session[session].get("price_quality") == "OBSERVED"
+                and rows_by_session[session].get("qfq_bar_status") == "TARGET_PRESENT"
+                and rows_by_session[session].get("qfq_price_quality") == "OBSERVED"
             )
             for session in d0_fact.official_sessions
         ),
@@ -464,40 +510,40 @@ def _facts_payload(
             "target_calendar_revision": official_calendar["calendar_revision"],
             "window_calendars": window_calendar,
         },
-        "raw_session_evidence": [
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "qfq_session_evidence": [
             item
-            for item in raw_history
+            for item in qfq_history
             if item["session_date"]
             in {session.isoformat() for session in d0_fact.official_sessions}
         ],
     }
-    raw_source = {
+    qfq_source = {
         "source_symbol": symbol,
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "target_session": source["target_session"],
         "research_cutoff": research_cutoff.isoformat(),
-        "target_source_capture_id": int(source["source_capture_id"]),
-        "source_package_id": source["source_package_id"],
-        "price_coordinate": "RAW_UNADJUSTED",
-        "target_raw_bar_status": current_row.get("bar_status")
+        "source_capture_id": source["source_capture_id"],
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "target_qfq_bar_status": current_row.get("qfq_bar_status")
         if current_row
-        else "NO_RAW_ROW",
-        "target_raw_price_quality": current_row.get("price_quality")
+        else "NO_QFQ_ROW",
+        "target_qfq_price_quality": current_row.get("qfq_price_quality")
         if current_row
         else "UNKNOWN",
-        "target_raw_price_reason": current_row.get("price_reason")
-        or current_row.get("bar_reason")
+        "target_qfq_price_reason": current_row.get("qfq_price_reason")
+        or current_row.get("qfq_bar_reason")
         if current_row
-        else "TARGET_RAW_ROW_MISSING",
+        else "TARGET_QFQ_ROW_MISSING",
         "history_capture_ids": sorted(
             {row["source_capture_id"] for row in rows_by_session.values()}
         ),
     }
     return {
         "scope": "SOURCE_SYMBOL_NON_PIT_PRICE_FACTS_ONLY",
-        "price_coordinate": "RAW_UNADJUSTED",
-        "source": raw_source,
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "source": qfq_source,
         "core.price_damage": {
             "state": core_state,
             "quality": "OBSERVED" if core_state != "UNKNOWN" else "UNKNOWN",
@@ -513,8 +559,8 @@ def _facts_payload(
                 )
             },
             "target_close": _fraction_payload(
-                _decimal_fraction(current_row.get("raw_close"))
-                if current_row and current_row.get("price_quality") == "OBSERVED"
+                _decimal_fraction(current_row.get("qfq_close"))
+                if current_row and current_row.get("qfq_price_quality") == "OBSERVED"
                 else None
             ),
         },
@@ -531,25 +577,27 @@ def _facts_payload(
     }
 
 
-def _raw_session_evidence(
+def _qfq_session_evidence(
     session: date, row: Mapping[str, Any] | None
 ) -> dict[str, Any]:
     if row is None:
         return {
             "session_date": session.isoformat(),
-            "status": "MISSING_RAW_ROW",
-            "capture_id": None,
-            "bar_status": "NO_RAW_ROW",
-            "price_quality": "UNKNOWN",
-            "price_reason": "RAW_BAR_MISSING_FOR_OFFICIAL_SESSION",
+            "status": "MISSING_QFQ_ROW",
+            "source_capture_id": None,
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "qfq_bar_status": "NO_QFQ_ROW",
+            "qfq_price_quality": "UNKNOWN",
+            "qfq_price_reason": "QFQ_BAR_MISSING_FOR_OFFICIAL_SESSION",
         }
     return {
         "session_date": session.isoformat(),
-        "status": "RAW_ROW_READ",
-        "capture_id": row["source_capture_id"],
-        "bar_status": row["bar_status"],
-        "price_quality": row["price_quality"],
-        "price_reason": row["price_reason"],
+        "status": "QFQ_ROW_READ",
+        "source_capture_id": row["source_capture_id"],
+        "price_coordinate": row["qfq_price_coordinate"],
+        "qfq_bar_status": row["qfq_bar_status"],
+        "qfq_price_quality": row["qfq_price_quality"],
+        "qfq_price_reason": row["qfq_price_reason"],
     }
 
 
@@ -602,11 +650,11 @@ def _no_page_execution(started: float, status: str) -> dict[str, Any]:
         "status": status,
         "scope": "DISPLAYED_SECTOR_MEMBER_PAGE_ONLY",
         "database_transaction": "NOT_OPENED",
-        "database_reads": 0,
-        "raw_history_selects": 0,
+        "database_reader_calls": 0,
+        "qfq_history_batches": 0,
         "unique_source_symbols_requested": 0,
         "displayed_member_rows": 0,
-        "raw_history_rows_read": 0,
+        "qfq_history_rows_read": 0,
         "core_calculations": 0,
         "d0_first_day_damage_calculations": 0,
         "database_write_attempted": False,

@@ -430,8 +430,14 @@ def _validate_write_scope(
         "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
         "count(DISTINCT profile_revision)::bigint FROM source_pool_seed_day_facts "
         "WHERE target_session=%s AND source_capture_id=%s "
-        "AND price_coordinate='FORWARD_ADJUSTED' AND profile_revision=%s",
-        (target_session, source_capture_id, profile_revision),
+        "AND price_coordinate='FORWARD_ADJUSTED' AND profile_revision=%s "
+        "AND producer_version=%s",
+        (
+            target_session,
+            source_capture_id,
+            profile_revision,
+            _SEED_PRODUCER_VERSION,
+        ),
     )
     seed_count, seed_symbols, seed_revisions = cursor.fetchone()
     if (int(seed_count), int(seed_symbols), int(seed_revisions)) != (
@@ -899,8 +905,15 @@ def read_source_sector_pulse_day(
                     f"SELECT count(*)::bigint FROM {_TABLE} p "
                     "JOIN tdx_sector_catalog c ON c.id=p.catalog_id "
                     "WHERE p.source_capture_id=%s AND c.snapshot_id=%s "
-                    "AND p.board_kind=%s AND p.algorithm_contract=%s",
-                    (source_capture_id, snapshot_id, kind, _ALGORITHM),
+                    "AND p.target_session=%s AND p.board_kind=%s "
+                    "AND p.algorithm_contract=%s",
+                    (
+                        source_capture_id,
+                        snapshot_id,
+                        target_session,
+                        kind,
+                        _ALGORITHM,
+                    ),
                 )
                 has_other_revision = int(cursor.fetchone()[0]) > 0
                 result_by_kind[kind] = {

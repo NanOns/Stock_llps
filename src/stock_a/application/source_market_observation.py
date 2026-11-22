@@ -257,7 +257,6 @@ def read_market_observation_sessions(
                 target_session=session,
                 research_cutoff=research_cutoff,
                 source_capture_id=source_capture_id,
-                price_coordinate=price_coordinate,
                 profile_revision=profile_revision,
                 profile_contract=profile_contract,
                 history_session_count=history_session_count,
@@ -318,7 +317,6 @@ def read_market_observation_sessions(
                 target_session=session,
                 research_cutoff=research_cutoff,
                 source_capture_id=source_capture_id,
-                price_coordinate=price_coordinate,
             )
         except SourceMarketContextError as error:
             if not allow_missing_market or error.category != "NOT_EVALUABLE":
@@ -892,7 +890,6 @@ def attach_board_strengths(
                     target_session=day["session"],
                     research_cutoff=research_cutoff,
                     source_capture_id=source_capture_id,
-                    price_coordinate=price_coordinate,
                     profile_revision=profile_revision,
                     changed_only=False,
                     sort_by="delta20",
@@ -960,18 +957,18 @@ def read_observation_d1(
             target.isoformat(), history_session_count
         )
         result[target] = discover_source_d1_support_changes(
-            config,
-            config_path,
-            target,
-            research_cutoff,
-            history,
-            revision,
-            source_capture_id,
-            event_window_start,
-            0,
-            1,
-            include_symbol_details=True,
+            config=config,
+            config_path=config_path,
+            target=target,
+            cutoff=research_cutoff,
+            sessions=history,
+            calendar_revision=revision,
+            source_capture_id=source_capture_id,
             price_coordinate=price_coordinate,
+            event_window_start=event_window_start,
+            offset=0,
+            limit=1,
+            include_symbol_details=True,
         )
     return result
 
@@ -2454,7 +2451,6 @@ def read_observation_board_details(
         target_session=day["session"],
         research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
-        price_coordinate=price_coordinate,
         profile_revision=profile_revision,
         changed_only=False,
         sort_by="delta20",

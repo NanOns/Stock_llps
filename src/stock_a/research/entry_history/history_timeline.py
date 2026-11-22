@@ -30,6 +30,69 @@ _PRICE_RELATION_FIELDS = (
 _PRICE_RELATION_VALUES = frozenset({"BELOW", "EQUAL", "ABOVE"})
 
 
+def _timeline_valid_qfq_bar(row: Mapping[str, Any] | None) -> bool:
+    trade_state, _reason = trade_status_state_from_pg_row(
+        row, price_coordinate="FORWARD_ADJUSTED"
+    )
+    return bool(
+        row is not None
+        and row.get("qfq_bar_status") == "TARGET_PRESENT"
+        and trade_state == "ACTUAL"
+        and row.get("qfq_price_quality") == "OBSERVED"
+        and all(
+            row.get(name) is not None
+            for name in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
+        )
+    )
+
+
+def _timeline_actual_qfq_window(
+    sessions: Sequence[date],
+    rows_by_session: Mapping[date, Mapping[str, Any]],
+    *,
+    end_index: int,
+    required: int,
+) -> dict[str, Any]:
+    """从端点回取N根实际QFQ成交Bar，只跳过已确认停牌。"""
+    selected: list[date] = []
+    scanned = 0
+    skipped_suspensions = 0
+    unknown_gap_count = 0
+    if end_index >= 0:
+        for day in reversed(sessions[: end_index + 1]):
+            scanned += 1
+            row = rows_by_session.get(day)
+            if _timeline_valid_qfq_bar(row):
+                selected.append(day)
+                if len(selected) == required:
+                    break
+                continue
+            trade_state, _reason = trade_status_state_from_pg_row(
+                row, price_coordinate="FORWARD_ADJUSTED"
+            )
+            if trade_state == "CONFIRMED_SUSPENSION":
+                skipped_suspensions += 1
+                continue
+            unknown_gap_count += 1
+            break
+    enough_bars = len(selected) == required
+    return {
+        "official_session_count": scanned,
+        "valid_bar_count": len(selected),
+        "required_valid_bar_count": required,
+        "start_session": selected[-1].isoformat() if selected else None,
+        "end_session": selected[0].isoformat() if selected else None,
+        "confirmed_suspensions_skipped": skipped_suspensions,
+        "unknown_gap_count": unknown_gap_count,
+        "quality": "OBSERVED" if enough_bars else "UNKNOWN",
+        "reason": None
+        if enough_bars
+        else "UNKNOWN_GAP_IN_ACTUAL_BAR_WINDOW"
+        if unknown_gap_count
+        else "INSUFFICIENT_ACTUAL_QFQ_BARS",
+    }
+
+
 def _timeline_relation(
     close_field: Mapping[str, Any], ma20_field: Mapping[str, Any]
 ) -> tuple[str | None, str | None]:
@@ -801,15 +864,17 @@ def _timeline_relation_evidence(
         required_count = window.get("required_valid_bar_count")
         if (
             required_count != required
-            or window_count != required
+            or not isinstance(window_count, int)
+            or window_count < required
             or valid_count != required
+            or window.get("unknown_gap_count", 0) != 0
         ):
             issues.append(
                 {
                     "code": "CORE_WINDOW_INCOMPLETE",
                     "message": (
-                        f"{field_id}實際窗口為{valid_count}/{required_count}個有效Bar、"
-                        f"{window_count}個官方會話；需要完整{required}會話"
+                        f"{field_id}实际窗口为{valid_count}/{required_count}根有效QFQ成交Bar，"
+                        f"覆盖{window_count}个官方会话；需要完整{required}根实际Bar"
                     ),
                 }
             )
@@ -1271,20 +1336,7 @@ def research_stock_pg_history_timeline(
     price_field_ids = (*ma_field_ids, "core.atr20", "core.prior_high20")
 
     def valid_qfq_bar(day: date) -> bool:
-        candidate = rows_by_session.get(day)
-        trade_state, _ = trade_status_state_from_pg_row(
-            candidate, price_coordinate="FORWARD_ADJUSTED"
-        )
-        return bool(
-            candidate is not None
-            and candidate.get("qfq_bar_status") == "TARGET_PRESENT"
-            and trade_state == "ACTUAL"
-            and candidate.get("qfq_price_quality") == "OBSERVED"
-            and all(
-                candidate.get(name) is not None
-                for name in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
-            )
-        )
+        return _timeline_valid_qfq_bar(rows_by_session.get(day))
 
     for index, session in enumerate(sessions):
         row = rows_by_session.get(session)
@@ -1430,16 +1482,18 @@ def research_stock_pg_history_timeline(
             unknown_reason = None
             if first_evaluable_session is None:
                 first_evaluable_session = session.isoformat()
-        ma_windows = {}
-        for field_id, required in zip(ma_field_ids, (5, 10, 20, 60), strict=True):
-            window_sessions = sessions[max(0, index - required + 1) : index + 1]
-            ma_windows[field_id] = {
-                "official_session_count": len(window_sessions),
-                "valid_bar_count": sum(valid_qfq_bar(day) for day in window_sessions),
-                "required_valid_bar_count": required,
-            }
-        atr20_sessions = sessions[max(0, index - 20) : index + 1]
-        prior_window = sessions[max(0, index - 20) : index]
+        ma_windows = {
+            field_id: _timeline_actual_qfq_window(
+                sessions, rows_by_session, end_index=index, required=required
+            )
+            for field_id, required in zip(ma_field_ids, (5, 10, 20, 60), strict=True)
+        }
+        atr20_window = _timeline_actual_qfq_window(
+            sessions, rows_by_session, end_index=index, required=21
+        )
+        prior_window = _timeline_actual_qfq_window(
+            sessions, rows_by_session, end_index=index - 1, required=20
+        )
         point = {
             "session_date": session.isoformat(),
             "source_symbol": normalized,
@@ -1495,24 +1549,11 @@ def research_stock_pg_history_timeline(
             "close_vs_ma20": relation,
             "relation_unknown_reason": unknown_reason,
             "ma20_window": {
-                "official_session_count": len(sessions[max(0, index - 19) : index + 1]),
-                "valid_bar_count": sum(
-                    valid_qfq_bar(day)
-                    for day in sessions[max(0, index - 19) : index + 1]
-                ),
-                "required_valid_bar_count": 20,
+                **ma_windows["core.ma20"],
             },
             "moving_average_windows": ma_windows,
-            "atr20_window": {
-                "official_session_count": len(atr20_sessions),
-                "valid_bar_count": sum(valid_qfq_bar(day) for day in atr20_sessions),
-                "required_valid_bar_count": 21,
-            },
-            "prior_high20_window": {
-                "official_session_count": len(prior_window),
-                "valid_bar_count": sum(valid_qfq_bar(day) for day in prior_window),
-                "required_valid_bar_count": 20,
-            },
+            "atr20_window": atr20_window,
+            "prior_high20_window": prior_window,
             "prior_high20_excludes_target_session": True,
             "coordinate_id": coordinate_id,
             "producer": "stock_a.research.core:calculate_core",

@@ -949,6 +949,7 @@ def _download_candidate(
         if archive is not None:
             archive_raw = archive
             archive_size_bytes = len(archive)
+            methods["zhb.zip"] = "GET_REPORT_FILE_0X06B9"
             try:
                 tdxzs, archive_member_crc32 = _extract_tdxzs(archive)
             except TdxRemoteSectorError as error:
@@ -962,7 +963,6 @@ def _download_candidate(
                     method="GET_REPORT_FILE_0X06B9_ZHB_ZIP_MEMBER",
                     archive_size_bytes=archive_size_bytes,
                 )
-                methods["zhb.zip"] = "GET_REPORT_FILE_0X06B9"
                 methods["tdxzs.cfg"] = "GET_REPORT_FILE_0X06B9_ZHB_ZIP_MEMBER"
 
         infoharbor, infoharbor_size = session.get_block_file_raw("infoharbor_block.dat")
@@ -1301,28 +1301,38 @@ def validate_remote_sector_files(remote: RemoteSectorFiles) -> None:
                 "REMOTE_ARCHIVE_EVIDENCE_INVALID", "zhb.zip归档证据缺少完整原始字节"
             )
     else:
-        if (
-            len(remote.archive_raw) > MAX_REMOTE_ZHB_BYTES
-            or remote.archive_size_bytes != len(remote.archive_raw)
-            or "tdxzs.cfg" not in remote.files
-            or remote.files["tdxzs.cfg"].source_archive_size_bytes
-            != remote.archive_size_bytes
+        if len(
+            remote.archive_raw
+        ) > MAX_REMOTE_ZHB_BYTES or remote.archive_size_bytes != len(
+            remote.archive_raw
         ):
             raise TdxRemoteSectorError(
                 "REMOTE_ARCHIVE_EVIDENCE_INVALID",
-                "zhb.zip大小或tdxzs.cfg原件不匹配",
+                "zhb.zip原始字节或大小记录不匹配",
             )
-        extracted, crc = _extract_tdxzs(remote.archive_raw)
-        directory = remote.files["tdxzs.cfg"]
-        if (
-            extracted != directory.raw
-            or crc != remote.archive_member_crc32
-            or directory.size_bytes != len(extracted)
-        ):
-            raise TdxRemoteSectorError(
-                "REMOTE_ARCHIVE_EVIDENCE_INVALID",
-                "zhb.zip完整字节与tdxzs.cfg原件不匹配",
-            )
+        directory = remote.files.get("tdxzs.cfg")
+        if directory is None:
+            if remote.archive_member_crc32 is not None:
+                raise TdxRemoteSectorError(
+                    "REMOTE_ARCHIVE_EVIDENCE_INVALID",
+                    "未提取tdxzs.cfg时不应存在成员CRC证据",
+                )
+        else:
+            if directory.source_archive_size_bytes != remote.archive_size_bytes:
+                raise TdxRemoteSectorError(
+                    "REMOTE_ARCHIVE_EVIDENCE_INVALID",
+                    "tdxzs.cfg成员与zhb.zip大小记录不一致",
+                )
+            extracted, crc = _extract_tdxzs(remote.archive_raw)
+            if (
+                extracted != directory.raw
+                or crc != remote.archive_member_crc32
+                or directory.size_bytes != len(extracted)
+            ):
+                raise TdxRemoteSectorError(
+                    "REMOTE_ARCHIVE_EVIDENCE_INVALID",
+                    "zhb.zip完整字节与tdxzs.cfg原件不匹配",
+                )
 
     verified_files = {
         name: item.size_bytes for name, item in sorted(remote.files.items())

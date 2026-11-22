@@ -43,6 +43,10 @@ _D0_CHANGE_TRANSITIONS = {
     "UNKNOWN_TO_FALSE",
     "UNKNOWN_TO_UNKNOWN",
 }
+_D0_CHANGE_TRANSITIONS_WITH_MISSING_ENDPOINTS = _D0_CHANGE_TRANSITIONS | {
+    "BEFORE_ONLY",
+    "AFTER_ONLY",
+}
 _SOURCE_SYMBOL_PATTERN = re.compile(r"(?:SH|SZ|BJ)\.[0-9]{6}")
 _SOURCE_SYMBOL_SEARCH_PATTERN = re.compile(r"[A-Za-z0-9.]{1,9}\Z")
 
@@ -385,6 +389,7 @@ def _d0_launch_new_linkage(
     source_keys = changes.get("source_key_set")
     selection = changes.get("selection")
     transition_counts = changes.get("transition_counts")
+    missing_endpoint_counts = changes.get("missing_endpoint_counts")
     change_rows = changes.get("results")
     before = changes.get("before")
     after = changes.get("after")
@@ -399,12 +404,14 @@ def _d0_launch_new_linkage(
         or selection.get("matched_count") != source_keys.get("source_union_count")
         or selection.get("page_count") != source_keys.get("source_union_count")
         or not isinstance(transition_counts, Mapping)
+        or not isinstance(missing_endpoint_counts, Mapping)
         or not isinstance(change_rows, list)
         or not isinstance(before, Mapping)
         or not isinstance(after, Mapping)
         or not isinstance(before.get("source_pool"), Mapping)
         or not isinstance(after.get("source_pool"), Mapping)
         or set(transition_counts) != _D0_CHANGE_TRANSITIONS
+        or set(missing_endpoint_counts) != {"BEFORE_ONLY", "AFTER_ONLY"}
         or len(change_rows) != source_keys.get("source_union_count")
         or not isinstance(before.get("source_version"), Mapping)
         or not isinstance(after.get("source_version"), Mapping)
@@ -412,12 +419,15 @@ def _d0_launch_new_linkage(
         != after["source_version"].get("source_capture_id")
         or before["source_version"].get("price_coordinate") != "FORWARD_ADJUSTED"
         or after["source_version"].get("price_coordinate") != "FORWARD_ADJUSTED"
-        or before["source_version"].get("time_role") != "NON_PIT_RETROSPECTIVE"
-        or after["source_version"].get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or before.get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or after.get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or before.get("pit_status") != "NON_PIT_RETROSPECTIVE"
+        or after.get("pit_status") != "NON_PIT_RETROSPECTIVE"
         or changes.get("source_capture_id")
         != after["source_version"].get("source_capture_id")
         or changes.get("price_coordinate") != "FORWARD_ADJUSTED"
         or changes.get("time_role") != "NON_PIT_RETROSPECTIVE"
+        or changes.get("pit_status") != "NON_PIT_RETROSPECTIVE"
         or before.get("official_calendar") != after.get("official_calendar")
         or before.get("session_contract") != after.get("session_contract")
         or before.get("algorithm_contract") != after.get("algorithm_contract")
@@ -432,8 +442,33 @@ def _d0_launch_new_linkage(
         or type(source_keys.get("before_count")) is not int
         or type(source_keys.get("after_count")) is not int
         or type(source_keys.get("source_union_count")) is not int
+        or type(source_keys.get("before_only_count")) is not int
+        or type(source_keys.get("after_only_count")) is not int
+        or any(
+            type(value) is not int or value < 0 for value in transition_counts.values()
+        )
+        or any(
+            type(value) is not int or value < 0
+            for value in missing_endpoint_counts.values()
+        )
+        or any(
+            value < 0
+            for value in (
+                source_keys["before_count"],
+                source_keys["after_count"],
+                source_keys["source_union_count"],
+                source_keys["before_only_count"],
+                source_keys["after_only_count"],
+            )
+        )
         or source_keys["before_count"] != before["source_pool"].get("source_count")
         or source_keys["after_count"] != after["source_pool"].get("source_count")
+        or source_keys["before_count"]
+        != expected_comparable + source_keys["before_only_count"]
+        or source_keys["after_count"]
+        != expected_comparable + source_keys["after_only_count"]
+        or source_keys["before_only_count"] != missing_endpoint_counts["BEFORE_ONLY"]
+        or source_keys["after_only_count"] != missing_endpoint_counts["AFTER_ONLY"]
         or source_keys["before_count"]
         + source_keys["after_count"]
         - expected_comparable
@@ -445,6 +480,7 @@ def _d0_launch_new_linkage(
         )
 
     observed_counts: Counter[str] = Counter()
+    seen_change_keys: set[tuple[str, str]] = set()
     new_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for item in change_rows:
         if not isinstance(item, Mapping):
@@ -459,12 +495,30 @@ def _d0_launch_new_linkage(
             or not isinstance(symbol, str)
             or _SOURCE_SYMBOL_PATTERN.fullmatch(symbol) is None
             or symbol[:2] != market
-            or transition not in transition_counts
+            or transition not in _D0_CHANGE_TRANSITIONS_WITH_MISSING_ENDPOINTS
         ):
             raise TdxSectorMembersApplicationError(
                 "D0_CHANGE_ROW_INVALID", "D0来源键或三态转移值无效"
             )
         observed_counts[transition] += 1
+        change_key = (market, symbol)
+        if change_key in seen_change_keys:
+            raise TdxSectorMembersApplicationError(
+                "D0_SOURCE_KEY_DUPLICATED", "D0完整变化池来源键重复"
+            )
+        seen_change_keys.add(change_key)
+        if transition == "BEFORE_ONLY" and (
+            not isinstance(item.get("before"), Mapping) or item.get("after") is not None
+        ):
+            raise TdxSectorMembersApplicationError(
+                "D0_CHANGE_ROW_INVALID", "BEFORE_ONLY记录必须只有前态来源行"
+            )
+        if transition == "AFTER_ONLY" and (
+            item.get("before") is not None or not isinstance(item.get("after"), Mapping)
+        ):
+            raise TdxSectorMembersApplicationError(
+                "D0_CHANGE_ROW_INVALID", "AFTER_ONLY记录必须只有目标日来源行"
+            )
         if transition == "FALSE_TO_TRUE":
             if (
                 item.get("identity_status") != "SOURCE_SYMBOL_ONLY"
@@ -485,9 +539,15 @@ def _d0_launch_new_linkage(
                     "D0_SOURCE_KEY_DUPLICATED", "D0新增启动来源键重复"
                 )
             new_by_key[key] = dict(item)
-    if any(
-        observed_counts.get(name, 0) != expected
-        for name, expected in transition_counts.items()
+    if (
+        any(
+            observed_counts.get(name, 0) != expected
+            for name, expected in transition_counts.items()
+        )
+        or observed_counts.get("BEFORE_ONLY", 0)
+        != missing_endpoint_counts["BEFORE_ONLY"]
+        or observed_counts.get("AFTER_ONLY", 0) != missing_endpoint_counts["AFTER_ONLY"]
+        or len(seen_change_keys) != source_keys["source_union_count"]
     ):
         raise TdxSectorMembersApplicationError(
             "D0_CHANGE_PARTITION_NOT_CLOSED", "完整D0变化行与九态计数不一致"

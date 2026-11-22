@@ -1,5 +1,68 @@
 /* Stock A预览页面change_list职责模块；保持原业务逻辑和交互。 */
 "use strict";
+function changeCalendarRevisionMap(value) {
+  if (typeof value !== "string" || !value) return null;
+  const revisions = new Map();
+  for (const component of value.split("+")) {
+    const match = component.match(/^(\d{4}):(.+)$/);
+    if (!match || revisions.has(Number(match[1]))) return null;
+    revisions.set(Number(match[1]), match[2]);
+  }
+  return revisions;
+}
+function changeCalendarWindowYears(snapshot) {
+  const start = snapshot?.window_start;
+  const end = snapshot?.window_end;
+  if (
+    typeof start !== "string" ||
+    typeof end !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(start) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(end) ||
+    start > end
+  )
+    return null;
+  const firstYear = Number(start.slice(0, 4));
+  const lastYear = Number(end.slice(0, 4));
+  return Array.from(
+    { length: lastYear - firstYear + 1 },
+    (_unused, index) => firstYear + index,
+  );
+}
+function changeCalendarWindowsCompatible(before, after) {
+  if (
+    !before?.history_calendar_id ||
+    before.history_calendar_id !== after?.history_calendar_id ||
+    !Number.isInteger(before.history_session_count) ||
+    before.history_session_count <= 0 ||
+    before.history_session_count !== after.history_session_count ||
+    before.window_end !== before.target_session ||
+    after.window_end !== after.target_session
+  )
+    return false;
+  const beforeYears = changeCalendarWindowYears(before);
+  const afterYears = changeCalendarWindowYears(after);
+  const beforeRevisions = changeCalendarRevisionMap(
+    before.history_calendar_revision,
+  );
+  const afterRevisions = changeCalendarRevisionMap(
+    after.history_calendar_revision,
+  );
+  if (!beforeYears || !afterYears || !beforeRevisions || !afterRevisions)
+    return false;
+  if (
+    beforeYears.some((year) => !beforeRevisions.has(year)) ||
+    afterYears.some((year) => !afterRevisions.has(year))
+  )
+    return false;
+  const afterYearSet = new Set(afterYears);
+  const sharedYears = beforeYears.filter((year) => afterYearSet.has(year));
+  return (
+    sharedYears.length > 0 &&
+    sharedYears.every(
+      (year) => beforeRevisions.get(year) === afterRevisions.get(year),
+    )
+  );
+}
 function scheduleChangeRefresh(delay) {
   if (changeRefreshTimer !== null) window.clearTimeout(changeRefreshTimer);
   changeRefreshTimer = window.setTimeout(() => {
@@ -205,10 +268,10 @@ async function runChanges(requestId) {
       !snapshotMatches(data.before_snapshot, beforeSnapshot) ||
       !snapshotMatches(data.after_snapshot, afterSnapshot) ||
       data.price_coordinate !== "FORWARD_ADJUSTED" ||
-      data.before_snapshot.history_calendar_id !==
-        data.after_snapshot.history_calendar_id ||
-      data.before_snapshot.history_calendar_revision !==
-        data.after_snapshot.history_calendar_revision ||
+      !changeCalendarWindowsCompatible(
+        data.before_snapshot,
+        data.after_snapshot,
+      ) ||
       data.bias20_atr_state_filter?.before !==
         expectedBias20AtrStateFilter.before ||
       data.bias20_atr_state_filter?.after !==

@@ -20,8 +20,17 @@ def _usable_close(
         return None, f"{label}_QFQ_ROW_MISSING"
     if row.get("session_date") != expected_session:
         return None, f"{label}_SESSION_MISMATCH"
-    if row.get("bar_status") != "TARGET_PRESENT":
-        return None, f"{label}_BAR_NOT_PRESENT"
+    if row.get("qfq_bar_status") != "TARGET_PRESENT":
+        return None, f"{label}_QFQ_BAR_NOT_PRESENT"
+    if row.get("qfq_tradestatus_quality") != "OBSERVED":
+        return None, f"{label}_QFQ_TRADE_STATUS_UNKNOWN"
+    trade_status = row.get("qfq_tradestatus_value")
+    if type(trade_status) not in (str, int):
+        return None, f"{label}_QFQ_TRADE_STATUS_INVALID"
+    if str(trade_status) == "0":
+        return None, f"{label}_CONFIRMED_SUSPENSION"
+    if str(trade_status) != "1":
+        return None, f"{label}_QFQ_TRADE_STATUS_INVALID"
     if row.get("qfq_price_quality") != "OBSERVED":
         return None, f"{label}_QFQ_PRICE_NOT_OBSERVED"
     if row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED":

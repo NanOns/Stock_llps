@@ -158,7 +158,22 @@ def discover_source_d1_support_changes(
             source_query_total = 1 if source_symbol is not None else page["total_count"]
         if source_pool_total is None:
             source_pool_total = page["version_row_count"]
-        target_rows = page["rows"]
+        target_rows = list(page["rows"])
+        target_page_symbols = [row.get("source_symbol") for row in target_rows]
+        candidate_symbols = [candidate["source_symbol"] for candidate in candidates]
+        if (
+            len(target_page_symbols) != len(set(target_page_symbols))
+            or target_page_symbols != candidate_symbols
+            or any(
+                row.get("session_date") != target
+                or row.get("source_capture_id") != source_capture_id
+                for row in target_rows
+            )
+        ):
+            raise PgResearchBindingError(
+                "D1_SUPPORT_DISCOVERY_TARGET_PAGE_INVALID",
+                "来源页目标日行必须与候选代码逐一对应",
+            )
         for candidate in candidates:
             symbol = candidate["source_symbol"]
             rows = candidate["history_rows"]
@@ -190,7 +205,6 @@ def discover_source_d1_support_changes(
                     "D1_SUPPORT_DISCOVERY_TARGET_ROW_INVALID",
                     "目标日完整来源池中的代码没有唯一Raw行",
                 )
-            target_rows.extend(target_matches)
             seen_symbols.add(symbol)
             last_symbol = symbol
 

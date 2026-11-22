@@ -1392,6 +1392,85 @@ def _bias20_atr_state_reason_expression(side: str) -> str:
     END"""
 
 
+def _history_calendar_compatible_sql(
+    before_calendar_id: str,
+    before_revision: str,
+    before_window_start: str,
+    before_window_end: str,
+    after_calendar_id: str,
+    after_revision: str,
+    after_window_start: str,
+    after_window_end: str,
+) -> str:
+    """按窗口覆盖年份核对共同的官方日历修订，而非比较整条修订链。"""
+    before_years = (
+        f"EXTRACT(YEAR FROM {before_window_start})::integer",
+        f"EXTRACT(YEAR FROM {before_window_end})::integer",
+    )
+    after_years = (
+        f"EXTRACT(YEAR FROM {after_window_start})::integer",
+        f"EXTRACT(YEAR FROM {after_window_end})::integer",
+    )
+    before_parts = f"unnest(string_to_array({before_revision}, '+'))"
+    after_parts = f"unnest(string_to_array({after_revision}, '+'))"
+    return f"""COALESCE((
+        {before_calendar_id} IS NOT NULL
+        AND {before_calendar_id}={after_calendar_id}
+        AND {before_window_start} IS NOT NULL
+        AND {before_window_end} IS NOT NULL
+        AND {after_window_start} IS NOT NULL
+        AND {after_window_end} IS NOT NULL
+        AND {before_window_start}<={before_window_end}
+        AND {after_window_start}<={after_window_end}
+        AND {before_revision} ~ '^[0-9]{{4}}:[^+]+(\\+[0-9]{{4}}:[^+]+)*$'
+        AND {after_revision} ~ '^[0-9]{{4}}:[^+]+(\\+[0-9]{{4}}:[^+]+)*$'
+        AND {before_years[0]}<={before_years[1]}
+        AND {after_years[0]}<={after_years[1]}
+        AND GREATEST({before_years[0]}, {after_years[0]})
+            <= LEAST({before_years[1]}, {after_years[1]})
+        AND NOT EXISTS (
+            SELECT 1 FROM {before_parts} AS before_component(value)
+            GROUP BY split_part(before_component.value, ':', 1)
+            HAVING count(*)>1
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM {after_parts} AS after_component(value)
+            GROUP BY split_part(after_component.value, ':', 1)
+            HAVING count(*)>1
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM generate_series({before_years[0]}, {before_years[1]}) AS required_year(year)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {before_parts} AS before_component(value)
+                WHERE split_part(before_component.value, ':', 1)
+                      = required_year.year::text
+            )
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM generate_series({after_years[0]}, {after_years[1]}) AS required_year(year)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {after_parts} AS after_component(value)
+                WHERE split_part(after_component.value, ':', 1)
+                      = required_year.year::text
+            )
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM {before_parts} AS before_component(value)
+            JOIN {after_parts} AS after_component(value)
+              ON split_part(before_component.value, ':', 1)
+                 = split_part(after_component.value, ':', 1)
+            WHERE split_part(before_component.value, ':', 1)
+                      BETWEEN GREATEST({before_years[0]}, {after_years[0]})::text
+                          AND LEAST({before_years[1]}, {after_years[1]})::text
+              AND substring(before_component.value FROM 6)
+                  IS DISTINCT FROM substring(after_component.value FROM 6)
+        )
+    ), FALSE)"""
+
+
 _BIAS20_ATR_PAIR_COMPATIBILITY_SQL = """CASE
     WHEN NOT before_present OR NOT after_present THEN 'SINGLE_SIDE'::text
     WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
@@ -1403,7 +1482,7 @@ _BIAS20_ATR_PAIR_COMPATIBILITY_SQL = """CASE
 END"""
 
 
-_BIAS20_ATR_PAIR_REASON_SQL = """CASE
+_BIAS20_ATR_PAIR_REASON_SQL = f"""CASE
     WHEN NOT before_present THEN 'BEFORE_PROFILE_ABSENT'
     WHEN NOT after_present THEN 'AFTER_PROFILE_ABSENT'
     WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
@@ -1430,8 +1509,18 @@ _BIAS20_ATR_PAIR_REASON_SQL = """CASE
       THEN 'CORE_CALCULATION_SCOPE_MISMATCH:' ||
            COALESCE(before_calculation_scope, 'UNKNOWN') || '->' ||
            COALESCE(after_calculation_scope, 'UNKNOWN')
-    WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
-      OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
+    WHEN NOT {
+    _history_calendar_compatible_sql(
+        "before_history_calendar_id",
+        "before_history_calendar_revision",
+        "before_window_start",
+        "before_window_end",
+        "after_history_calendar_id",
+        "after_history_calendar_revision",
+        "after_window_start",
+        "after_window_end",
+    )
+}
       THEN 'HISTORY_CALENDAR_MISMATCH'
     WHEN before_window_count IS DISTINCT FROM after_window_count
       THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'
@@ -1666,8 +1755,18 @@ WITH old_rows AS (
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
                AND o.price_coordinate=n.price_coordinate
-               AND o.history_calendar_id=n.history_calendar_id
-               AND o.history_calendar_revision=n.history_calendar_revision
+               AND {
+    _history_calendar_compatible_sql(
+        "o.history_calendar_id",
+        "o.history_calendar_revision",
+        "o.history_window_start",
+        "o.history_window_end",
+        "n.history_calendar_id",
+        "n.history_calendar_revision",
+        "n.history_window_start",
+        "n.history_window_end",
+    )
+}
                AND o.history_requested_session_count=n.history_requested_session_count,
                FALSE
            ) AS core_compatible,
@@ -1677,8 +1776,18 @@ WITH old_rows AS (
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
                AND o.price_coordinate=n.price_coordinate
-               AND o.history_calendar_id=n.history_calendar_id
-               AND o.history_calendar_revision=n.history_calendar_revision
+               AND {
+    _history_calendar_compatible_sql(
+        "o.history_calendar_id",
+        "o.history_calendar_revision",
+        "o.history_window_start",
+        "o.history_window_end",
+        "n.history_calendar_id",
+        "n.history_calendar_revision",
+        "n.history_window_start",
+        "n.history_window_end",
+    )
+}
                AND o.history_requested_session_count=n.history_requested_session_count
                AND cardinality(o.profile_field_ids)=11
                AND cardinality(n.profile_field_ids)=11
@@ -1973,8 +2082,18 @@ WITH old_rows AS (
              WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'::text
-             WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
-               OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
+             WHEN NOT {
+    _history_calendar_compatible_sql(
+        "before_history_calendar_id",
+        "before_history_calendar_revision",
+        "before_window_start",
+        "before_window_end",
+        "after_history_calendar_id",
+        "after_history_calendar_revision",
+        "after_window_start",
+        "after_window_end",
+    )
+}
                THEN 'HISTORY_CALENDAR_MISMATCH'::text
              WHEN before_window_count IS DISTINCT FROM after_window_count
                THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'::text
@@ -2113,8 +2232,18 @@ WITH old_rows AS (
              WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'::text
-             WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
-               OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
+             WHEN NOT {
+    _history_calendar_compatible_sql(
+        "before_history_calendar_id",
+        "before_history_calendar_revision",
+        "before_window_start",
+        "before_window_end",
+        "after_history_calendar_id",
+        "after_history_calendar_revision",
+        "after_window_start",
+        "after_window_end",
+    )
+}
                THEN 'HISTORY_CALENDAR_MISMATCH'::text
              WHEN before_window_count IS DISTINCT FROM after_window_count
                THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'::text
@@ -2209,15 +2338,29 @@ WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
 WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
   OR after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
   THEN 'PRICE_COORDINATE_NOT_FORWARD_ADJUSTED'
-WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
-  OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
+WHEN NOT {
+            _history_calendar_compatible_sql(
+                "before_history_calendar_id",
+                "before_history_calendar_revision",
+                "before_window_start",
+                "before_window_end",
+                "after_history_calendar_id",
+                "after_history_calendar_revision",
+                "after_window_start",
+                "after_window_end",
+            )
+        }
   THEN 'HISTORY_CALENDAR_MISMATCH'
 WHEN before_window_count IS DISTINCT FROM after_window_count
   THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'
 WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'
 WHEN {before}='UNKNOWN' OR {after}='UNKNOWN' THEN concat_ws('; ',
-  CASE WHEN {before}='UNKNOWN' THEN 'BEFORE:' || COALESCE(before_{position}_relation_reason, 'UNKNOWN_REASON_NOT_PROVIDED') END,
-  CASE WHEN {after}='UNKNOWN' THEN 'AFTER:' || COALESCE(after_{position}_relation_reason, 'UNKNOWN_REASON_NOT_PROVIDED') END)
+  CASE WHEN {before}='UNKNOWN' THEN 'BEFORE:' || COALESCE(before_{
+            position
+        }_relation_reason, 'UNKNOWN_REASON_NOT_PROVIDED') END,
+  CASE WHEN {after}='UNKNOWN' THEN 'AFTER:' || COALESCE(after_{
+            position
+        }_relation_reason, 'UNKNOWN_REASON_NOT_PROVIDED') END)
 ELSE NULL END"""
         transition = f"""CASE
 WHEN NOT before_present AND after_present THEN 'ONLY_AFTER'

@@ -454,11 +454,7 @@ def _read_source_context(
         cursor.execute(
             """SELECT session_date,count(*)::integer,
                       count(DISTINCT source_symbol)::integer,
-                      array_agg(source_symbol ORDER BY source_symbol),
-                      count(*) FILTER (WHERE price_quality='OBSERVED')::integer,
-                      count(*) FILTER (
-                          WHERE qfq_price_quality='OBSERVED'
-                      )::integer
+                      array_agg(source_symbol ORDER BY source_symbol)
                FROM source_raw_daily
                WHERE source_capture_id=%s AND session_date=ANY(%s::date[])
                GROUP BY session_date""",
@@ -473,8 +469,6 @@ def _read_source_context(
             raw is None
             or int(raw[0]) != len(expected_symbols)
             or int(raw[1]) != len(expected_symbols)
-            or int(raw[3]) != int(raw[0])
-            or int(raw[4]) != int(raw[0])
             or set(raw[2]) != expected_symbols
         ):
             reasons.append(
@@ -673,7 +667,6 @@ def _read_ranked_relation_metrics(
                JOIN raw_counts ON raw_counts.session_date=ss.session_date
                JOIN source_raw_daily raw ON raw.session_date=ss.session_date
                  AND raw.source_capture_id=ss.capture_id
-                 AND raw.qfq_price_quality IS NOT NULL
                  AND raw.source_symbol=m.source_symbol
                LEFT JOIN source_pool_seed_day_facts s
                  ON s.target_session=ss.session_date

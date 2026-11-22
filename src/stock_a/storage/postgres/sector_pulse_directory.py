@@ -481,7 +481,7 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
         profile_revision=profile_revision,
         snapshot_ids=snapshot_ids,
         expected_board_counts={
-            kind: partitions[kind]["actual_board_count"]
+            kind: partitions.get(kind, {}).get("actual_board_count", 0)
             for kind in ("INDUSTRY", "CONCEPT")
         },
         calendar_id=calendar_id,

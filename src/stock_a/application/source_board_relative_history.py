@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any, Mapping
 
 from stock_a.application.source_t0_early_observation import _metric_position
+from stock_a.application.source_pool_seed import SOURCE_POOL_SEED_PRODUCER_VERSION
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.storage.postgres.source_board_relative_history import (
     read_source_board_relative_history_inputs,
@@ -25,6 +26,7 @@ def read_source_board_relative_history(
     research_cutoff: date,
     source_capture_id: int,
     source_symbol: str,
+    membership_snapshot_id: int,
     board_kind: str,
     board_native_id: str,
 ) -> dict[str, Any]:
@@ -35,6 +37,8 @@ def read_source_board_relative_history(
         or target_session > research_cutoff
         or type(source_capture_id) is not int
         or source_capture_id <= 0
+        or type(membership_snapshot_id) is not int
+        or membership_snapshot_id <= 0
         or not isinstance(source_symbol, str)
         or len(source_symbol) != 9
         or source_symbol[:3] not in {"SH.", "SZ."}
@@ -66,10 +70,13 @@ def read_source_board_relative_history(
     inputs = read_source_board_relative_history_inputs(
         config,
         target_session=target_session,
+        research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
         source_symbol=source_symbol,
+        membership_snapshot_id=membership_snapshot_id,
         board_kind=board_kind,
         board_native_id=board_native_id,
+        producer_version=SOURCE_POOL_SEED_PRODUCER_VERSION,
         sessions=sessions,
     )
     base = {

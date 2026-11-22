@@ -363,7 +363,6 @@ def prepare_source_sector_change_inputs(
                     target_session=target_session,
                     research_cutoff=research_cutoff,
                     source_capture_id=source_capture_id,
-                    price_coordinate=price_coordinate,
                     profile_revision=profile_revision,
                     changed_only=False,
                     sort_by="delta20",

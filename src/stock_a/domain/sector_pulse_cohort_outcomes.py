@@ -57,7 +57,7 @@ def _transition_for_pulse(
         or row.get("transition_contract") != _TRANSITION_CONTRACT
         or row.get("calculation_status") != "COMPLETE"
         or row.get("research_mode") != "NON_PIT_RETROSPECTIVE"
-        or row.get("price_coordinate") != "RAW_UNADJUSTED"
+        or row.get("price_coordinate") != "FORWARD_ADJUSTED"
         or row.get("formal_rotation_state") != "NOT_EVALUATED"
         or row.get("calendar_id") != calendar_id
         or row.get("calendar_revision") != calendar_revision

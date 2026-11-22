@@ -484,13 +484,10 @@ def run_source_sector_pulse_transition_day(
     calendar_identity = {
         key: calendar[key] for key in ("calendar_id", "calendar_revision")
     }
-    if any(
-        previous_calendar.get(key) != calendar_identity[key]
-        for key in calendar_identity
-    ):
+    if previous_calendar.get("calendar_id") != calendar_identity["calendar_id"]:
         raise SourceSectorPulseError(
-            "SECTOR_PULSE_TRANSITION_CALENDAR_REVISION_MISMATCH",
-            "相邻两端必须使用同一版本化官方日历",
+            "SECTOR_PULSE_TRANSITION_CALENDAR_ID_MISMATCH",
+            "相邻两端必须使用同一官方日历合同",
         )
 
     snapshots = {

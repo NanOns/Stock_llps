@@ -2596,14 +2596,18 @@ def read_source_board_comparison(
             )
             cursor.execute(
                 "SELECT source_symbol,transition,after_state "
-                f"FROM source_d0_launch_day_facts WHERE {d0_predicate}",
+                f"FROM source_d0_launch_day_facts WHERE {d0_predicate} "
+                "AND after_state IS NOT NULL",
                 d0_params,
             )
             rows = cursor.fetchall()
             d0_by_symbol = {row[0]: (row[1], row[2]) for row in rows}
+            d0_target_symbols = {row[0] for row in rows}
             d0_status = (
                 "AVAILABLE"
-                if len(d0_by_symbol) == source_symbol_count
+                if len(rows) == source_symbol_count
+                and len(d0_by_symbol) == source_symbol_count
+                and d0_target_symbols == source_symbols
                 else "INCOMPLETE"
             )
 

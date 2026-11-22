@@ -1000,6 +1000,28 @@ def read_source_sector_pulse_followups(
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
     )
+    pulse_ids: list[int] = []
+    for kind in _KINDS:
+        facts = pulse_day.get("by_kind", {}).get(kind, {}).get("facts", {})
+        if not isinstance(facts, Mapping) or not facts:
+            raise SectorPulseFollowupPgError(
+                "PULSE_FOLLOWUP_PULSE_ID_INVALID",
+                f"T0 {kind} PULSE缺少精确父事实",
+            )
+        for pulse in facts.values():
+            pulse_id = (
+                pulse.get("pulse_fact_id") if isinstance(pulse, Mapping) else None
+            )
+            if type(pulse_id) is not int or pulse_id <= 0:
+                raise SectorPulseFollowupPgError(
+                    "PULSE_FOLLOWUP_PULSE_ID_INVALID",
+                    f"T0 {kind} PULSE父事实ID无效",
+                )
+            pulse_ids.append(pulse_id)
+    if len(pulse_ids) != len(set(pulse_ids)):
+        raise SectorPulseFollowupPgError(
+            "PULSE_FOLLOWUP_PULSE_ID_INVALID", "T0 PULSE父事实ID重复"
+        )
     saved_by_board: dict[str, dict[int, dict[str, Any]]] = {kind: {} for kind in _KINDS}
     ambiguous_results: set[tuple[str, str, int]] = set()
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
@@ -1013,12 +1035,15 @@ def read_source_sector_pulse_followups(
        c.board_kind, c.board_native_id, c.board_name, p.member_count, p.catalog_id
 FROM {_TABLE} f JOIN {_PULSE_TABLE} p ON p.id=f.pulse_fact_id
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
-WHERE p.source_capture_id=%s AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.id=ANY(%s::bigint[])
+  AND p.source_capture_id=%s AND p.profile_revision=%s
   AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s::bigint[])
   AND f.followup_contract=%s AND f.calendar_id=%s AND f.calendar_revision=%s
   AND f.target_session<=%s
 ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
             (
+                t0_session,
+                pulse_ids,
                 capture_id,
                 profile_revision,
                 _PULSE_ALGORITHM,

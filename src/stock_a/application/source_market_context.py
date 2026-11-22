@@ -340,7 +340,7 @@ def compute_source_market_context(
         calendar=calendar,
         pg_result={
             "status": "AVAILABLE",
-            "transaction": "REPEATABLE READ READ ONLY",
+            "transaction": "各Reader分别使用REPEATABLE READ READ ONLY；未共享跨调用快照",
             "source_capture_id": source_capture_id,
             "price_coordinate": "FORWARD_ADJUSTED",
             "source_symbols": source_symbols,
@@ -529,7 +529,7 @@ def read_source_market_context(
         "history_row_count": 0,
         "calculation_history_row_count": day["history_row_count"],
         "storage_status": "SAVED",
-        "transaction": "REPEATABLE READ READ ONLY",
+        "transaction": "各Reader分别使用REPEATABLE READ READ ONLY；未共享跨调用快照",
         "source_io_attempted": False,
         "database_write_attempted": False,
         "ddl_executed": False,

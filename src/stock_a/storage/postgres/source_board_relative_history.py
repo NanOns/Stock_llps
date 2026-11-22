@@ -6,6 +6,9 @@ from datetime import date
 from typing import Any, Mapping, Sequence
 
 from stock_a.research.source_market_breadth import SOURCE_MARKET_BREADTH_CONTRACT
+from stock_a.storage.postgres.baostock_price_facts import (
+    read_baostock_capture_roster,
+)
 from stock_a.storage.postgres import source_raw
 
 
@@ -22,18 +25,25 @@ def read_source_board_relative_history_inputs(
     config: Mapping[str, Any],
     *,
     target_session: date,
+    research_cutoff: date,
     source_capture_id: int,
     source_symbol: str,
+    membership_snapshot_id: int,
     board_kind: str,
     board_native_id: str,
+    producer_version: str,
     sessions: Sequence[date],
 ) -> dict[str, Any]:
     """读取固定成员快照内最多七个官方会话的RPS与来源上下文。"""
     session_days = tuple(sessions)
     if (
         type(target_session) is not date
+        or type(research_cutoff) is not date
+        or target_session > research_cutoff
         or type(source_capture_id) is not int
         or source_capture_id <= 0
+        or type(membership_snapshot_id) is not int
+        or membership_snapshot_id <= 0
         or not isinstance(source_symbol, str)
         or len(source_symbol) != 9
         or source_symbol[:3] not in {"SH.", "SZ."}
@@ -42,9 +52,12 @@ def read_source_board_relative_history_inputs(
         or board_kind not in {"INDUSTRY", "CONCEPT"}
         or not isinstance(board_native_id, str)
         or not board_native_id
+        or not isinstance(producer_version, str)
+        or not producer_version
         or len(session_days) < 1
         or len(session_days) > 7
         or any(type(item) is not date for item in session_days)
+        or any(item > research_cutoff for item in session_days)
         or tuple(sorted(set(session_days))) != session_days
     ):
         raise SourceBoardRelativeHistoryPgError("板内RPS历史读取键无效")
@@ -56,22 +69,82 @@ def read_source_board_relative_history_inputs(
             "T0日期须位于单股板内历史窗口首位或紧随一个官方前态"
         )
 
-    source_versions: dict[date, dict[str, Any]] = {}
-    for session in session_days:
-        source = source_raw.read_source_version_context(
-            config,
-            target_session=session,
-            source_capture_id=source_capture_id,
-        )
-        source_versions[session] = source
-    first_version = source_versions[target_session]
+    capture = read_baostock_capture_roster(
+        config,
+        source_capture_id=source_capture_id,
+        cutoff=research_cutoff,
+    )
+    if capture.get("status") != "AVAILABLE":
+        return {
+            "status": capture.get("status", "INCOMPLETE"),
+            "reason": "所选BaoStock捕获目录没有闭合",
+            "days": [],
+            "execution": _execution(len(session_days)),
+        }
+    capture_start = capture.get("range_start_session")
+    capture_end = capture.get("range_end_session")
+    capture_symbols = {
+        row.get("source_symbol"): row for row in capture.get("symbols", [])
+    }
+    symbol_capture = capture_symbols.get(source_symbol)
+    qfq_request = (
+        symbol_capture.get("coordinates", {}).get("FORWARD_ADJUSTED")
+        if isinstance(symbol_capture, Mapping)
+        else None
+    )
+    qfq_start = (
+        qfq_request.get("eligible_start_session")
+        if isinstance(qfq_request, Mapping)
+        else None
+    )
+    qfq_end = (
+        qfq_request.get("eligible_end_session")
+        if isinstance(qfq_request, Mapping)
+        else None
+    )
+    qfq_completed = (
+        qfq_request.get("completed_through_session")
+        if isinstance(qfq_request, Mapping)
+        else None
+    )
     if (
-        first_version.get("status") != "AVAILABLE"
-        or first_version.get("source_capture_id") != source_capture_id
+        capture.get("provider") != "BAOSTOCK"
+        or capture.get("source_capture_id") != source_capture_id
+        or capture.get("source_time_quality") != "NON_PIT_OBSERVED"
+        or set(capture.get("price_coordinates") or ())
+        != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        or not isinstance(capture_start, str)
+        or capture_start > session_days[0].isoformat()
+        or not isinstance(capture_end, str)
+        or capture_end < session_days[-1].isoformat()
+        or not isinstance(symbol_capture, Mapping)
+        or symbol_capture.get("request_complete") is not True
+        or not isinstance(qfq_request, Mapping)
+        or qfq_request.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or qfq_request.get("request_status") not in {"COMPLETED", "NO_DATA"}
+        or not isinstance(qfq_start, str)
+        or qfq_start > session_days[0].isoformat()
+        or not isinstance(qfq_end, str)
+        or qfq_end < session_days[-1].isoformat()
+        or not isinstance(qfq_completed, str)
+        or qfq_completed < session_days[-1].isoformat()
     ):
-        raise SourceBoardRelativeHistoryPgError(
-            "所选T0日期的来源捕获与已存Raw事实不一致"
-        )
+        return {
+            "status": "NOT_COMPARABLE",
+            "reason": "所选证券缺少覆盖历史窗口的同捕获BaoStock QFQ请求",
+            "days": [],
+            "membership_snapshot_id": membership_snapshot_id,
+            "execution": _execution(len(session_days)),
+        }
+    source_versions = {
+        session: {
+            "status": "AVAILABLE",
+            "source_capture_id": source_capture_id,
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "capture_uuid": capture.get("capture_uuid"),
+        }
+        for session in session_days
+    }
 
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
@@ -86,6 +159,7 @@ def read_source_board_relative_history_inputs(
                WHERE target_session=%s AND source_capture_id=%s
                  AND source_symbol=%s
                  AND board_kind=%s AND board_native_id=%s
+                 AND membership_snapshot_id=%s
                ORDER BY membership_snapshot_id,catalog_id""",
             (
                 target_session,
@@ -93,6 +167,7 @@ def read_source_board_relative_history_inputs(
                 source_symbol,
                 board_kind,
                 board_native_id,
+                membership_snapshot_id,
             ),
         )
         selected_contexts = cursor.fetchall()
@@ -116,7 +191,7 @@ def read_source_board_relative_history_inputs(
             or type(catalog_id) is not int
             or membership_mode != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
             or research_mode != "NON_PIT_EXPLORATORY"
-            or price_coordinate != "RAW_UNADJUSTED"
+            or price_coordinate != "FORWARD_ADJUSTED"
         ):
             return {
                 "status": "NOT_COMPARABLE",
@@ -205,8 +280,9 @@ def read_source_board_relative_history_inputs(
                    FROM source_pool_seed_day_facts
                    WHERE target_session=%s AND source_capture_id=%s
                      AND source_symbol=%s
+                     AND producer_version=%s
                    ORDER BY profile_revision,producer_contract,producer_version""",
-                (session, capture_id, source_symbol),
+                (session, capture_id, source_symbol, producer_version),
             )
             scope_rows = cursor.fetchall()
             if len(scope_rows) == 1:
@@ -514,7 +590,7 @@ def read_source_board_relative_history_inputs(
 
 def _execution(session_count: int) -> dict[str, Any]:
     return {
-        "transaction": "REPEATABLE READ READ ONLY；来源版本与每日板内RPS分别使用既有Reader",
+        "transaction": "只读；BaoStock捕获目录与每日板内RPS由现役Reader读取",
         "database_write_attempted": False,
         "ddl_executed": False,
         "dml_executed": False,
