@@ -4419,7 +4419,7 @@ function renderSourceObservationSegment(item, context) {
       detail.append(
         node(
           "p",
-          `原登记 #${item.enrollment_id} 的 T0→Forward · 截至 ${item.forward_as_of || context.research_cutoff} · ${item.forward_classification || "RETROSPECTIVE_DESCRIPTIVE_NON_PIT"} · RAW_UNADJUSTED`,
+          `原登记 #${item.enrollment_id} 的 T0→Forward · 截至 ${item.forward_as_of || context.research_cutoff} · ${item.forward_classification || "RETROSPECTIVE_DESCRIPTIVE_NON_PIT"} · FORWARD_ADJUSTED`,
         ),
       );
       const paths = node("ul");

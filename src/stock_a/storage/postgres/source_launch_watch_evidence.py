@@ -967,6 +967,14 @@ def read_source_launch_watch_evidence(
     }
 
 
+def _seed_endpoint_capture_clocks(
+    endpoint_capture: Sequence[Any] | None, *, status: str
+) -> tuple[str, str]:
+    if status != "AVAILABLE" or not endpoint_capture:
+        return "UNKNOWN", "UNKNOWN"
+    return str(endpoint_capture[4]), str(endpoint_capture[5])
+
+
 def read_source_seed_t1_outcomes(
     config: Mapping[str, Any],
     *,
@@ -1410,6 +1418,11 @@ def read_source_seed_t1_outcomes(
                 else:
                     status = "OBSERVED"
                     status_reasons = []
+                endpoint_source_time_quality, endpoint_source_clock_role = (
+                    _seed_endpoint_capture_clocks(
+                        endpoint_capture, status=endpoint_capture_status
+                    )
+                )
                 result_by_symbol[symbol] = {
                     "status": status,
                     "reason_codes": status_reasons,
@@ -1443,18 +1456,8 @@ def read_source_seed_t1_outcomes(
                         "quality": t1_quality or "UNKNOWN",
                         "close": str(t1_close) if t1_close is not None else None,
                         "reason": t1_reason,
-                        "source_time_quality": (
-                            endpoint_capture[4]
-                            if endpoint_capture_status == "AVAILABLE"
-                            and endpoint_capture
-                            else "UNKNOWN"
-                        ),
-                        "source_clock_role": (
-                            endpoint_capture[5]
-                            if endpoint_capture_status == "AVAILABLE"
-                            and endpoint_capture
-                            else "UNKNOWN"
-                        ),
+                        "source_time_quality": endpoint_source_time_quality,
+                        "source_clock_role": endpoint_source_clock_role,
                     },
                     "endpoint": {
                         "status": endpoint_quality or "NOT_COMPUTED",
