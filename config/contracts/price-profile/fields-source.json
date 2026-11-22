@@ -515,6 +515,225 @@
       }
     },
     {
+      "order": 81,
+      "definition": {
+        "field_id": "raw.turn",
+        "producer_symbol": "stock_a.sources.baostock.daily:normalize_daily_row",
+        "value_type": "decimal",
+        "unit": "percent",
+        "expression_ref": "BAOSTOCK_ADJUSTFLAG_3_RAW_UNADJUSTED",
+        "input_fields": [
+          "identity.source_symbol",
+          "identity.session"
+        ],
+        "window_contract": "NONE",
+        "coordinate_role": "RAW_UNADJUSTED",
+        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+        "value_schema": {
+          "type": "decimal",
+          "nullable_only_with_quality": true,
+          "reject_bool_for_number": true,
+          "finite_numeric_only": true
+        },
+        "business_key": [
+          "source_symbol",
+          "session_date",
+          "source_capture_id"
+        ],
+        "context_dependencies": [
+          "context.target_session",
+          "context.source_cutoff",
+          "context.source_capture_id"
+        ],
+        "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
+      }
+    },
+    {
+      "order": 82,
+      "definition": {
+        "field_id": "adjusted.preclose",
+        "producer_symbol": "stock_a.sources.baostock.daily:normalize_daily_row",
+        "value_type": "decimal",
+        "unit": "CNY",
+        "expression_ref": "BAOSTOCK_ADJUSTFLAG_2_FORWARD_ADJUSTED",
+        "input_fields": [
+          "identity.source_symbol",
+          "identity.session",
+          "coordinate.id"
+        ],
+        "window_contract": "NONE",
+        "coordinate_role": "FORWARD_ADJUSTED",
+        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+        "value_schema": {
+          "type": "decimal",
+          "nullable_only_with_quality": true,
+          "reject_bool_for_number": true,
+          "finite_numeric_only": true
+        },
+        "business_key": [
+          "source_symbol",
+          "session_date",
+          "source_capture_id",
+          "price_coordinate"
+        ],
+        "context_dependencies": [
+          "context.target_session",
+          "context.source_cutoff",
+          "context.source_capture_id",
+          "context.price_coordinate"
+        ],
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+      }
+    },
+    {
+      "order": 83,
+      "definition": {
+        "field_id": "adjusted.amount",
+        "producer_symbol": "stock_a.sources.baostock.daily:normalize_daily_row",
+        "value_type": "decimal",
+        "unit": "CNY",
+        "expression_ref": "BAOSTOCK_ADJUSTFLAG_2_FORWARD_ADJUSTED",
+        "input_fields": [
+          "identity.source_symbol",
+          "identity.session",
+          "coordinate.id"
+        ],
+        "window_contract": "NONE",
+        "coordinate_role": "FORWARD_ADJUSTED",
+        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+        "value_schema": {
+          "type": "decimal",
+          "nullable_only_with_quality": true,
+          "reject_bool_for_number": true,
+          "finite_numeric_only": true
+        },
+        "business_key": [
+          "source_symbol",
+          "session_date",
+          "source_capture_id",
+          "price_coordinate"
+        ],
+        "context_dependencies": [
+          "context.target_session",
+          "context.source_cutoff",
+          "context.source_capture_id",
+          "context.price_coordinate"
+        ],
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+      }
+    },
+    {
+      "order": 84,
+      "definition": {
+        "field_id": "adjusted.volume",
+        "producer_symbol": "stock_a.sources.baostock.daily:normalize_daily_row",
+        "value_type": "decimal",
+        "unit": "shares",
+        "expression_ref": "BAOSTOCK_ADJUSTFLAG_2_FORWARD_ADJUSTED",
+        "input_fields": [
+          "identity.source_symbol",
+          "identity.session",
+          "coordinate.id"
+        ],
+        "window_contract": "NONE",
+        "coordinate_role": "FORWARD_ADJUSTED",
+        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+        "value_schema": {
+          "type": "decimal",
+          "nullable_only_with_quality": true,
+          "reject_bool_for_number": true,
+          "finite_numeric_only": true
+        },
+        "business_key": [
+          "source_symbol",
+          "session_date",
+          "source_capture_id",
+          "price_coordinate"
+        ],
+        "context_dependencies": [
+          "context.target_session",
+          "context.source_cutoff",
+          "context.source_capture_id",
+          "context.price_coordinate"
+        ],
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+      }
+    },
+    {
+      "order": 85,
+      "definition": {
+        "field_id": "adjusted.turn",
+        "producer_symbol": "stock_a.sources.baostock.daily:normalize_daily_row",
+        "value_type": "decimal",
+        "unit": "percent",
+        "expression_ref": "BAOSTOCK_ADJUSTFLAG_2_FORWARD_ADJUSTED",
+        "input_fields": [
+          "identity.source_symbol",
+          "identity.session",
+          "coordinate.id"
+        ],
+        "window_contract": "NONE",
+        "coordinate_role": "FORWARD_ADJUSTED",
+        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+        "value_schema": {
+          "type": "decimal",
+          "nullable_only_with_quality": true,
+          "reject_bool_for_number": true,
+          "finite_numeric_only": true
+        },
+        "business_key": [
+          "source_symbol",
+          "session_date",
+          "source_capture_id",
+          "price_coordinate"
+        ],
+        "context_dependencies": [
+          "context.target_session",
+          "context.source_cutoff",
+          "context.source_capture_id",
+          "context.price_coordinate"
+        ],
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+      }
+    },
+    {
+      "order": 86,
+      "definition": {
+        "field_id": "adjusted.session_state",
+        "producer_symbol": "stock_a.sources.baostock.daily:normalize_daily_row",
+        "value_type": "enum",
+        "unit": "state",
+        "expression_ref": "BAOSTOCK_QFQ_TRADESTATUS_AND_IST",
+        "input_fields": [
+          "identity.source_symbol",
+          "identity.session",
+          "coordinate.id"
+        ],
+        "window_contract": "NONE",
+        "coordinate_role": "FORWARD_ADJUSTED",
+        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+        "value_schema": {
+          "type": "enum",
+          "nullable_only_with_quality": true,
+          "reject_bool_for_number": true,
+          "finite_numeric_only": true
+        },
+        "business_key": [
+          "source_symbol",
+          "session_date",
+          "source_capture_id",
+          "price_coordinate"
+        ],
+        "context_dependencies": [
+          "context.target_session",
+          "context.source_cutoff",
+          "context.source_capture_id",
+          "context.price_coordinate"
+        ],
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+      }
+    },
+    {
       "order": 76,
       "definition": {
         "field_id": "period.closed_week",

@@ -515,7 +515,7 @@ def _validate_facts(
             _SYMBOL.fullmatch(item.source_symbol) is None
             or item.market not in {"SH", "SZ"}
             or item.source_symbol[:2] != item.market
-            or item.board not in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
+            or item.board not in {"MAIN_BOARD", "GEM"}
             or item.structure_type not in _STRUCTURE_TYPE_SET
             or item.generation_state not in {"GENERATED", "NOT_GENERATED", "UNKNOWN"}
             or item.history_row_count < 1
@@ -678,6 +678,7 @@ def _verify_raw_source(
         FROM source_raw_daily
         WHERE source_capture_id=%s
           AND session_date IN ({placeholders})
+          AND board IN ('MAIN_BOARD', 'GEM')
         GROUP BY session_date ORDER BY session_date
         """,
         (facts.source_capture_id, *sessions),
@@ -713,6 +714,7 @@ def _verify_raw_source(
         SELECT session_date, source_symbol FROM source_raw_daily
         WHERE source_capture_id=%s
           AND session_date IN ({placeholders})
+          AND board IN ('MAIN_BOARD', 'GEM')
         ORDER BY session_date, source_symbol
         """,
         (facts.source_capture_id, *sessions),

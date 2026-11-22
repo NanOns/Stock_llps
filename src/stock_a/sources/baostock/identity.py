@@ -45,12 +45,17 @@ def classify_baostock_board(source_symbol: object) -> tuple[str, str] | None:
 
 
 def eligible_research_board(symbol: object) -> str | None:
-    """本任务来源研究范围包括沪深主板、创业板和科创板。"""
+    """正式研究范围包括沪深主板和创业板（保留ST）；科创板与北交所仅作底层来源检索。"""
     classification = classify_baostock_board(symbol)
     if classification is None:
         return None
     _market, board = classification
-    return board if board in {"MAIN_BOARD", "GEM", "STAR_BOARD"} else None
+    return board if board in {"MAIN_BOARD", "GEM"} else None
+
+
+def is_formal_research_board(board: object) -> bool:
+    """判断板别是否属于正式研究范围（沪深主板或创业板）。"""
+    return board in {"MAIN_BOARD", "GEM"}
 
 
 def _board_label(symbol: str) -> str | None:

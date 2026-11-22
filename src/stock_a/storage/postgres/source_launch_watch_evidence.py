@@ -2037,7 +2037,7 @@ def read_source_launch_watch_page(
         invalid_fields.append("页大小")
     if d1_history_session_count is not None and (
         type(d1_history_session_count) is not int
-        or not 1 <= d1_history_session_count <= 75
+        or not 1 <= d1_history_session_count <= 250
     ):
         invalid_fields.append("D1历史会话数")
     if selected_history_session_count is not None and (
@@ -2093,6 +2093,7 @@ def read_source_launch_watch_page(
     WHERE r.session_date=p.target_session
       AND r.source_capture_id=p.source_capture_id
       AND r.source_capture_id=p.target_capture_id
+      AND r.board IN ('MAIN_BOARD', 'GEM')
 ), d0_scope_candidates AS MATERIALIZED (
     SELECT d.producer_version, d.algorithm_contract, d.session_contract,
            d.calendar_revision, count(*)::bigint AS fact_count,
@@ -2826,7 +2827,7 @@ def read_source_launch_watch_board_rps_comparisons(
         or any(not seed_scope.get(name) for name in scope_fields)
         or seed_scope.get("producer_version") != _SEED_PRODUCER_VERSION
         or type(seed_scope.get("history_session_count")) is not int
-        or not 1 <= seed_scope["history_session_count"] <= 75
+        or not 1 <= seed_scope["history_session_count"] <= 250
     ):
         raise ValueError("多板块板内RPS对比输入无效")
 

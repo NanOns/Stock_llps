@@ -36,6 +36,7 @@ _STAGE_TABLES = {
         "stock.tdx_sector_members",
     ),
     "CORE_PROFILE": ("stock.source_symbol_price_profiles",),
+    "PRICE_LIMITS": ("stock.source_price_limit_day_facts",),
     "MARKET_BREADTH": (
         "stock.source_market_breadth_days",
         "stock.source_market_breadth_symbols",
@@ -66,11 +67,16 @@ _STAGE_TABLES = {
         "stock.source_sector_pulse_cohort_group_facts",
         "stock.source_sector_pulse_cohort_reason_facts",
     ),
+    "FORWARD_PATH": ("stock.source_forward_path_facts",),
+    "COHORT_STATS": ("stock.source_cohort_group_stats",),
+    "FEP_BASELINE": ("stock.source_fep_baseline_facts",),
+    "OBSERVATION_SEGMENTS": ("stock.source_research_observation_segment_days",),
 }
 _STAGE_ORDER = {
     "BUSINESS_RESET": 1,
     "SOURCE_BAOSTOCK_PRICES": 1,
     "SOURCE_SECTOR_MEMBERS": 2,
+    "PRICE_LIMITS": 2,
     "MARKET_BREADTH": 3,
     "CORE_PROFILE": 4,
     "MARKET_PARTICIPATION": 5,
@@ -81,6 +87,10 @@ _STAGE_ORDER = {
     "SECTOR_PULSE": 9,
     "SECTOR_TRANSITION": 10,
     "SECTOR_FOLLOWUP": 11,
+    "FORWARD_PATH": 12,
+    "COHORT_STATS": 13,
+    "FEP_BASELINE": 14,
+    "OBSERVATION_SEGMENTS": 15,
 }
 _RAW_JOB_SCOPE = "STOCK_A_R08_BIZ08_DATA_JOB_RAW_IMPORT_R1"
 
@@ -88,6 +98,7 @@ _MODULES = {
     "BAOSTOCK_PRICES": ("SOURCE", "BaoStock股票日线价格", True, True),
     "TDX_SECTOR_MEMBERS": ("SOURCE", "行业与GN概念成员来源", True, True),
     "CORE_PROFILE": ("BASE", "Core / Profile", True, True),
+    "PRICE_LIMITS": ("BASE", "涨跌停限价", True, True),
     "MARKET_BREADTH": ("BASE", "市场宽度", True, True),
     "MARKET_PARTICIPATION": ("BASE", "成交参与", True, True),
     "D0": ("RESEARCH", "D0 / Seed研究", True, True),
@@ -96,29 +107,12 @@ _MODULES = {
     "SECTOR_PULSE": ("RESEARCH", "行业 / GN概念PULSE", True, True),
     "SECTOR_TRANSITION": ("RESEARCH", "行业 / GN概念相邻变化", True, True),
     "SECTOR_FOLLOWUP": ("RESEARCH", "板块跨日跟踪", True, True),
+    "FORWARD_PATH": ("RESEARCH", "Forward路径", True, True),
+    "COHORT_STATS": ("RESEARCH", "Cohort分组统计", True, True),
+    "FEP_BASELINE": ("RESEARCH", "FEP条件基线", True, True),
+    "OBSERVATION_SEGMENTS": ("RESEARCH", "观察持续分段", True, True),
 }
-_UNCOORDINATED_RESEARCH_CONSUMERS = (
-    (
-        "source_cohort_group_stats",
-        "Cohort分组统计",
-        "当前菜单协调器没有该现役生产者，清理后Cohort统计读取会保留未计算状态。",
-    ),
-    (
-        "source_fep_baseline_facts",
-        "FEP条件基线",
-        "当前菜单协调器没有该现役生产者，清理后FEP基线读取会保留未计算状态。",
-    ),
-    (
-        "source_forward_path_facts",
-        "Forward路径",
-        "当前菜单协调器没有该现役生产者，清理后Forward路径读取会保留未计算状态。",
-    ),
-    (
-        "source_research_observation_segment_days",
-        "观察持续分段",
-        "当前菜单协调器没有该现役生产者，清理后观察分段读取会保留未计算状态。",
-    ),
-)
+_UNCOORDINATED_RESEARCH_CONSUMERS: tuple[tuple[str, str, str], ...] = ()
 _CLEANUP_OPERATIONS = {"CLEAR_DERIVED", "CLEAR_AND_REGENERATE"}
 _OPERATIONS = {
     "FILL_MISSING",
@@ -820,6 +814,7 @@ def build_data_job_plan(
                 if module
                 in {
                     "CORE_PROFILE",
+                    "PRICE_LIMITS",
                     "MARKET_BREADTH",
                     "MARKET_PARTICIPATION",
                     "SECTOR_PULSE",
@@ -828,6 +823,10 @@ def build_data_job_plan(
                     "FOCUS_FORMAL",
                     "D0",
                     "D1",
+                    "FORWARD_PATH",
+                    "COHORT_STATS",
+                    "FEP_BASELINE",
+                    "OBSERVATION_SEGMENTS",
                 }
                 else 5
             )
@@ -1471,6 +1470,14 @@ def build_data_job_plan(
                 target_session=target,
                 business_table=table,
             )
+    for day in module_output_sessions.get("PRICE_LIMITS", ()):
+        _unit(
+            units,
+            stage="PRICE_LIMITS",
+            target_session=date.fromisoformat(day) if isinstance(day, str) else day,
+            business_table="stock.source_price_limit_day_facts",
+            status="NOT_STARTED",
+        )
     for day in market_sessions:
         status = (
             "NOT_COMPUTED" if day.isoformat() in market_insufficient else "NOT_STARTED"
@@ -2643,6 +2650,73 @@ class DataJobCoordinator:
                         if day in insufficient
                         else "研究截止内尚无到期后继会话；不读取截止后的行情。",
                     )
+        if "FORWARD_PATH" in request["selected_modules"]:
+            official_through_cutoff = _load_calendar(
+                date.fromisoformat(plan["research_cutoff"])
+            )[3]
+            cutoff_date = date.fromisoformat(plan["research_cutoff"])
+            eligible_cutoff = tuple(
+                s for s in official_through_cutoff if s <= cutoff_date
+            )
+            for day_text in plan.get("module_output_sessions", {}).get(
+                "FORWARD_PATH", ()
+            ):
+                day_date = date.fromisoformat(day_text)
+                idx = (
+                    eligible_cutoff.index(day_date)
+                    if day_date in eligible_cutoff
+                    else -1
+                )
+                due_horizons = [
+                    h
+                    for h in (1, 3, 5, 10, 20)
+                    if idx >= 0 and idx + h < len(eligible_cutoff)
+                ]
+                status = "NOT_STARTED" if due_horizons else "NOT_DUE"
+                _unit(
+                    plan["stage_units"],
+                    stage="FORWARD_PATH",
+                    target_session=day_date,
+                    business_table="stock.source_forward_path_facts",
+                    status=status,
+                    error_code=None if due_horizons else "FORWARD_PATH_NOT_DUE",
+                    error_message=None
+                    if due_horizons
+                    else "研究截止内尚无到期Forward后继会话。",
+                )
+        if "COHORT_STATS" in request["selected_modules"]:
+            for day_text in plan.get("module_output_sessions", {}).get(
+                "COHORT_STATS", ()
+            ):
+                _unit(
+                    plan["stage_units"],
+                    stage="COHORT_STATS",
+                    target_session=date.fromisoformat(day_text),
+                    business_table="stock.source_cohort_group_stats",
+                    status="NOT_STARTED",
+                )
+        if "FEP_BASELINE" in request["selected_modules"]:
+            fep_days = plan.get("module_output_sessions", {}).get("FEP_BASELINE", ())
+            if fep_days:
+                _unit(
+                    plan["stage_units"],
+                    stage="FEP_BASELINE",
+                    target_session=date.fromisoformat(fep_days[-1]),
+                    business_table="stock.source_fep_baseline_facts",
+                    status="NOT_STARTED",
+                )
+        if "OBSERVATION_SEGMENTS" in request["selected_modules"]:
+            seg_days = plan.get("module_output_sessions", {}).get(
+                "OBSERVATION_SEGMENTS", ()
+            )
+            if seg_days:
+                _unit(
+                    plan["stage_units"],
+                    stage="OBSERVATION_SEGMENTS",
+                    target_session=date.fromisoformat(seg_days[-1]),
+                    business_table="stock.source_research_observation_segment_days",
+                    status="NOT_STARTED",
+                )
         if "SECTOR_TRANSITION" in request["selected_modules"]:
             sector_source_will_generate = (
                 "TDX_SECTOR_MEMBERS" in request["source_modules"]
@@ -5513,6 +5587,79 @@ def _execute_shared_production_chain(
         return
 
     cutoff = date.fromisoformat(plan["research_cutoff"])
+    if "PRICE_LIMITS" in base_modules:
+        from stock_a.research.price_limits import PRICE_LIMIT_CONTRACT_VERSION
+        from stock_a.storage.postgres.price_limits import (
+            persist_source_price_limits_for_session,
+        )
+
+        limit_days = tuple(
+            date.fromisoformat(day)
+            for day in plan.get("module_output_sessions", {}).get("PRICE_LIMITS", ())
+        )
+        for day in limit_days:
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "PRICE_LIMITS"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                report = persist_source_price_limits_for_session(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                )
+                for unit in day_units:
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=report["calendar_revision"],
+                        producer_version=PRICE_LIMIT_CONTRACT_VERSION,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows != report["row_count"]:
+                        raise DataJobError(
+                            "PRICE_LIMITS_READBACK_MISMATCH",
+                            f"涨跌停限价({day})独立PG读回行数({actual_rows})与预期({report['row_count']})不一致。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="PRICE_LIMITS",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=report["row_count"],
+                        inserted_rows=report["row_count"],
+                        quality_status="COMPLETE_RAW_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=False,
+                        producer_version=PRICE_LIMIT_CONTRACT_VERSION,
+                        calendar_revision=report["calendar_revision"],
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="PRICE_LIMITS",
+                    error=error,
+                    message_prefix="涨跌停限价生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"涨跌停限价({day})未闭合：{str(error)[:300]}",
+                    )
+                )
     # 市场宽度先绑定paired capture的QFQ历史坐标，保留既有B_fixed_source分类公式。
     if "MARKET_BREADTH" in base_modules:
         from stock_a.application.source_market_context import (
@@ -6287,7 +6434,7 @@ def _execute_shared_production_chain(
             config,
             target_session=day,
             source_capture_id=source_capture_id,
-            expected_source_count=source_version["capture_expected_row_count"],
+            expected_source_count=source_version["research_expected_row_count"],
             profile_revision=expected_revision,
         )
         revision = seed_scope.get("profile_revision")
@@ -6295,7 +6442,7 @@ def _execute_shared_production_chain(
             not isinstance(revision, str)
             or not revision
             or seed_scope.get("source_count")
-            != source_version["capture_expected_row_count"]
+            != source_version["research_expected_row_count"]
             or seed_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
             or seed_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
         ):
@@ -7225,6 +7372,300 @@ def _execute_shared_production_chain(
                     (
                         str(getattr(error, "code", type(error).__name__)),
                         f"T0早期观察({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FORWARD_PATH" in research_modules:
+        from stock_a.application.source_research_day import (
+            persist_source_t1_forward_from_saved,
+        )
+        from stock_a.research.entry_context.sessions import _load_calendar
+        from stock_a.storage.postgres.research_facts import PATH_VERSION
+
+        _, _, cal_revision, cal_sessions = _load_calendar(cutoff)
+        for day_text in plan.get("module_output_sessions", {}).get("FORWARD_PATH", ()):
+            day = date.fromisoformat(day_text)
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "FORWARD_PATH"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                idx = cal_sessions.index(day)
+                due_horizons = [
+                    h
+                    for h in (1, 3, 5, 10, 20)
+                    if idx + h < len(cal_sessions) and cal_sessions[idx + h] <= cutoff
+                ]
+                total_inserted = 0
+                for h in due_horizons:
+                    res = persist_source_t1_forward_from_saved(
+                        config,
+                        target_session=day,
+                        research_cutoff=cutoff,
+                        source_capture_id=source_capture_id,
+                        horizon=h,
+                    )
+                    total_inserted += int(res.get("inserted_paths", 0) or 0)
+                for unit in day_units:
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=cal_revision,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows <= 0:
+                        raise DataJobError(
+                            "FORWARD_PATH_READBACK_EMPTY",
+                            f"Forward路径({day_text})独立读回为空。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="FORWARD_PATH",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=actual_rows,
+                        inserted_rows=total_inserted,
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=total_inserted == 0,
+                        producer_version=PATH_VERSION,
+                        calendar_revision=cal_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="FORWARD_PATH",
+                    error=error,
+                    message_prefix="Forward路径生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"Forward路径({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "COHORT_STATS" in research_modules:
+        from stock_a.application.source_cohort_stats import persist_cohort_stats
+        from stock_a.research.entry_context.sessions import _load_calendar
+        from stock_a.storage.postgres.research_facts import RULE_VERSION
+
+        _, _, cal_revision, _ = _load_calendar(cutoff)
+        for day_text in plan.get("module_output_sessions", {}).get("COHORT_STATS", ()):
+            day = date.fromisoformat(day_text)
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "COHORT_STATS"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                res = persist_cohort_stats(
+                    config,
+                    target=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                )
+                for unit in day_units:
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=cal_revision,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows < int(res.get("groups", 0)):
+                        raise DataJobError(
+                            "COHORT_STATS_READBACK_MISMATCH",
+                            f"Cohort分组统计({day_text})独立读回行数不足。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="COHORT_STATS",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=actual_rows,
+                        inserted_rows=int(res.get("groups", 0)),
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=False,
+                        producer_version=RULE_VERSION,
+                        calendar_revision=cal_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="COHORT_STATS",
+                    error=error,
+                    message_prefix="Cohort分组统计生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"Cohort分组统计({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FEP_BASELINE" in research_modules:
+        from stock_a.application.fep_baseline import produce_fep_baseline
+        from stock_a.research.entry_context.sessions import _load_calendar
+        from stock_a.storage.postgres.research_facts import RULE_VERSION
+
+        _, _, cal_revision, _ = _load_calendar(cutoff)
+        fep_units = [
+            unit
+            for unit in plan.get("stage_units", ())
+            if unit.get("stage_code") == "FEP_BASELINE"
+            and unit.get("status") == "NOT_STARTED"
+        ]
+        if fep_units:
+            begin_callback(job_id=job_id, units=fep_units)
+            try:
+                res = produce_fep_baseline(
+                    config,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                    rule_ids=(
+                        "STOCK_SEED",
+                        "STOCK_WARM",
+                        "STOCK_CONFIRMED",
+                        "STOCK_D0_LAUNCH_CONFIRM",
+                        "STOCK_D0_RECOVERY",
+                        "STOCK_D0_STRONG_PULLBACK",
+                        "STOCK_D0_TREND_CONTINUE",
+                    ),
+                    horizons=(1, 3, 5),
+                )
+                for unit in fep_units:
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=unit["target_session"],
+                        source_capture_id=source_capture_id,
+                        calendar_revision=cal_revision,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows <= 0:
+                        raise DataJobError(
+                            "FEP_BASELINE_READBACK_EMPTY",
+                            "FEP条件基线独立读回为空。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="FEP_BASELINE",
+                        target_session=unit["target_session"],
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=actual_rows,
+                        inserted_rows=int(res.get("inserted_rows", 0) or 0),
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=int(res.get("inserted_rows", 0) or 0) == 0,
+                        producer_version=RULE_VERSION,
+                        calendar_revision=cal_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    fep_units,
+                    stage_code="FEP_BASELINE",
+                    error=error,
+                    message_prefix="FEP条件基线生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"FEP条件基线未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "OBSERVATION_SEGMENTS" in research_modules:
+        from stock_a.application.source_observation_segments import (
+            produce_source_observation_segments,
+        )
+        from stock_a.research.entry_context.sessions import _load_calendar
+        from stock_a.storage.postgres.research_facts import RULE_VERSION
+
+        _, _, cal_revision, _ = _load_calendar(cutoff)
+        seg_units = [
+            unit
+            for unit in plan.get("stage_units", ())
+            if unit.get("stage_code") == "OBSERVATION_SEGMENTS"
+            and unit.get("status") == "NOT_STARTED"
+        ]
+        if seg_units:
+            begin_callback(job_id=job_id, units=seg_units)
+            try:
+                res = produce_source_observation_segments(
+                    config,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                )
+                for unit in seg_units:
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=unit["target_session"],
+                        source_capture_id=source_capture_id,
+                        calendar_revision=cal_revision,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows < int(res.get("segment_days", 0) or 0):
+                        raise DataJobError(
+                            "OBSERVATION_SEGMENTS_READBACK_MISMATCH",
+                            "观察持续分段独立读回行数不足。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="OBSERVATION_SEGMENTS",
+                        target_session=unit["target_session"],
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=actual_rows,
+                        inserted_rows=int(res.get("segment_days", 0) or 0),
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=False,
+                        producer_version=RULE_VERSION,
+                        calendar_revision=cal_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    seg_units,
+                    stage_code="OBSERVATION_SEGMENTS",
+                    error=error,
+                    message_prefix="观察持续分段生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"观察持续分段未闭合：{str(error)[:300]}",
                     )
                 )
 

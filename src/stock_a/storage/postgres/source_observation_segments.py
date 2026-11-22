@@ -554,7 +554,7 @@ def persist_source_observation_segments(
             if first_session <= session <= research_cutoff
         )
         contexts = _read_rule_day_contexts(
-            cursor, sessions=sessions, package=source_capture_id
+            cursor, sessions=sessions, source_capture_id=source_capture_id
         )
         facts = _fact_groups(
             cursor,

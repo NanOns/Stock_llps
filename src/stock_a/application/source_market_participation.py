@@ -110,6 +110,9 @@ def calculate_market_participation(
     observed: list[Fraction] = []
     unknown_reasons: Counter[str] = Counter()
 
+    profile_rows = [
+        row for row in profile_rows if row.get("board") in {"MAIN_BOARD", "GEM"}
+    ]
     for row in profile_rows:
         symbol = row.get("source_symbol")
         if not isinstance(symbol, str) or _SOURCE_SYMBOL.fullmatch(symbol) is None:
@@ -131,7 +134,7 @@ def calculate_market_participation(
         board = row.get("board")
         if (
             row.get("market") != market_code
-            or board not in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
+            or board not in {"MAIN_BOARD", "GEM"}
             or (board == "GEM" and market_code != "SZ")
         ):
             raise SourceMarketParticipationError(

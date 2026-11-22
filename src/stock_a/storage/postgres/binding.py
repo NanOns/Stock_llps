@@ -75,6 +75,8 @@ _MIGRATION_FILES = (
     "0061_source_switch_fep_equal_date_null_capture.sql",
     "0062_r08_frozen_rule_history_budget.sql",
     "0063_baostock_fep_equal_date_unique.sql",
+    "0064_r01_close_01_scope_limits_dynamic_n.sql",
+    "0065_r01_close_01_data_jobs_stage_modules.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -130,6 +132,7 @@ _TASK_SCOPE_MIGRATIONS = {
         {62}
     ),
     "BAOSTOCK_FEP_EQUAL_DATE_UNIQUE_R1": frozenset({63}),
+    "R01_CLOSE_01_REAL_PG_CONSUMER_REPAIR_R1_20261122": frozenset({64, 65}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -326,6 +329,10 @@ _RELATIONS_BY_MIGRATION_COUNT[60] = _RELATIONS_BY_MIGRATION_COUNT[59]
 _RELATIONS_BY_MIGRATION_COUNT[61] = _RELATIONS_BY_MIGRATION_COUNT[60]
 _RELATIONS_BY_MIGRATION_COUNT[62] = _RELATIONS_BY_MIGRATION_COUNT[61]
 _RELATIONS_BY_MIGRATION_COUNT[63] = _RELATIONS_BY_MIGRATION_COUNT[62]
+_RELATIONS_BY_MIGRATION_COUNT[64] = _RELATIONS_BY_MIGRATION_COUNT[63] | {
+    "source_price_limit_day_facts",
+}
+_RELATIONS_BY_MIGRATION_COUNT[65] = _RELATIONS_BY_MIGRATION_COUNT[64]
 
 
 class BindingRefused(Exception):

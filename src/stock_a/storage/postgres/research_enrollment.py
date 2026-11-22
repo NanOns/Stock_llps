@@ -83,6 +83,8 @@ def _read_rule_day_contexts(
                   c.source_time_quality,c.source_clock_role,
                   count(r.id)::bigint AS raw_count,
                   count(DISTINCT r.source_symbol)::bigint AS raw_symbols,
+                  count(r.id) FILTER (WHERE r.board IN ('MAIN_BOARD', 'GEM'))::bigint
+                      AS research_raw_count,
                   count(q.source_code)::bigint AS expected_count,
                   count(q.source_code) FILTER (WHERE q.complete)::bigint
                       AS complete_requests
@@ -198,6 +200,7 @@ def _read_rule_day_contexts(
             source_clock_role,
             raw_count,
             raw_symbols,
+            research_raw_count,
             expected_count,
             complete_requests,
         ) = captures[0]
@@ -207,7 +210,7 @@ def _read_rule_day_contexts(
             source_time_quality=source_time_quality,
             source_clock_role=source_clock_role,
             normalized_count=raw_count,
-            source_count=raw_count,
+            source_count=research_raw_count,
         )
         profile_scopes = by_table["profiles"][session]
         seed_scopes = by_table["seeds"][session]
@@ -272,9 +275,9 @@ def _read_rule_day_contexts(
         inputs_complete = (
             profile_capture == seed_capture == d1_capture == capture
             and profile_count == profile_symbols == raw_count
-            and seed_count == seed_symbols == raw_count
-            and d1_count == raw_count * 5
-            and d1_symbols == raw_count
+            and seed_count == seed_symbols == research_raw_count
+            and d1_count == research_raw_count * 5
+            and d1_symbols == research_raw_count
             and structure_count == 5
             and requested_count == history_count
             and 0 <= minimum_stored_count <= maximum_stored_count <= requested_count
@@ -358,8 +361,8 @@ def _read_rule_day_contexts(
             and event_window_start == d1_start
             and rule_calendar_revision == history_calendar_revision
             and scope == SCOPE
-            and rule_count == raw_count * len(required_rules)
-            and rule_symbols == raw_count
+            and rule_count == research_raw_count * len(required_rules)
+            and rule_symbols == research_raw_count
             and rule_id_count == len(required_rules)
             and frozenset(stored_rule_ids) == required_rules
             and d1_end == session

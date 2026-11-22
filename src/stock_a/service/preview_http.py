@@ -919,6 +919,22 @@ def _baostock_source_context(
         raw_version.get("coverage_status") == "COMPLETE"
         and qfq_version.get("coverage_status") == "COMPLETE"
     )
+    from stock_a.sources.baostock.identity import eligible_research_board
+
+    roster = read_baostock_capture_roster(
+        config,
+        source_capture_id=source_capture_id,
+        cutoff=research_cutoff,
+    )
+    target_iso = target_session.isoformat()
+    research_expected_row_count = sum(
+        1
+        for item in roster.get("symbols", [])
+        if eligible_research_board(item.get("source_symbol")) is not None
+        and item.get("eligible_start_session")
+        and item.get("eligible_end_session")
+        and item["eligible_start_session"] <= target_iso <= item["eligible_end_session"]
+    )
     return {
         "status": "AVAILABLE",
         "coverage_status": "COMPLETE" if complete else "INCOMPLETE",
@@ -928,6 +944,7 @@ def _baostock_source_context(
         "price_coordinate": price_coordinate,
         "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
         "source_capture_expected_row_count": raw_version.get("expected_row_count"),
+        "research_expected_row_count": research_expected_row_count,
         "raw_price_row_count": raw_version.get("row_count"),
         "qfq_price_row_count": qfq_version.get("row_count"),
         "raw_coverage_status": raw_version.get("coverage_status"),
@@ -1713,7 +1730,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 source_capture_id=source_capture_id,
                 before_capture_id=before_source["source_capture_id"],
                 target_capture_id=after_source["source_capture_id"],
-                expected_source_count=after_source["capture_expected_row_count"],
+                expected_source_count=after_source["research_expected_row_count"],
                 watch_group=watch_group,
                 offset=offset,
                 limit=limit,
@@ -1751,7 +1768,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             config,
             target_session=target_session,
             source_capture_id=after_source["source_capture_id"],
-            expected_source_count=after_source["capture_expected_row_count"],
+            expected_source_count=after_source["research_expected_row_count"],
             source_symbols=sorted(page_symbols),
             profile_history_session_count=history_session_count,
             profile_revision=profile_revision,
@@ -1777,7 +1794,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 config,
                 target_session=target_session,
                 source_capture_id=after_source["source_capture_id"],
-                expected_source_count=after_source["capture_expected_row_count"],
+                expected_source_count=after_source["research_expected_row_count"],
                 source_symbols=page_symbols,
                 d1_history_session_count=d1_history_session_count,
                 selected_history_session_count=history_session_count,
@@ -1845,7 +1862,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     source_capture_id=source_capture_id,
                     before_capture_id=before_source["source_capture_id"],
                     target_capture_id=after_source["source_capture_id"],
-                    expected_source_count=after_source["capture_expected_row_count"],
+                    expected_source_count=after_source["research_expected_row_count"],
                     industry_snapshot_id=industry_snapshot_id,
                     concept_snapshot_id=concept_snapshot_id,
                 )
@@ -2422,7 +2439,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             target_session=target_session,
             research_cutoff=research_cutoff,
             source_capture_id=after_source["source_capture_id"],
-            expected_source_count=after_source["capture_expected_row_count"],
+            expected_source_count=after_source["research_expected_row_count"],
             source_symbols=page_symbols,
             successor_sessions=successor_sessions,
         )
@@ -7489,75 +7506,112 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "official_listing_population": "UNKNOWN_NOT_CONNECTED",
                 "selected_or_excluded": "NOT_EVALUATED",
             }
-            result["source_seed"] = query_source_stock_seed_context(
+            from stock_a.storage.postgres.price_limits import (
+                read_stock_price_limit_fact,
+            )
+
+            result["price_limit"] = read_stock_price_limit_fact(
                 self.preview_server.state.config,
                 target_session=target,
-                source_capture_id=source_context["source_capture_id"],
                 source_symbol=symbol,
-                profile_revision=profile_revision,
-                expected_source_count=source_context[
-                    "source_capture_expected_row_count"
-                ],
-                source_time_quality=source_context["source_time_quality"],
-                source_clock_role=source_context["source_clock_role"],
-                source_available_at=source_context["source_available_at"],
+                source_capture_id=source_context["source_capture_id"],
+                calendar_revision=calendar_revision,
             )
-            if post_path == "/api/preview/stock":
-                from stock_a.storage.postgres.source_launch_watch_evidence import (
-                    read_source_launch_watch_evidence,
-                )
+            from stock_a.sources.baostock.identity import eligible_research_board
 
-                saved_evidence = read_source_launch_watch_evidence(
+            if eligible_research_board(symbol) is None:
+                result["source_seed"] = {
+                    "status": "OUT_OF_FORMAL_RESEARCH_SCOPE",
+                    "source_symbol": symbol,
+                    "reason": "OUT_OF_FORMAL_RESEARCH_MARKET_OR_BOARD",
+                    "message": "该证券属于科创板或非正式研究板别，仅保留底层来源检索与基础价格画像。",
+                }
+                if post_path == "/api/preview/stock":
+                    result["seed_t1_outcome"] = {
+                        "status": "NOT_IN_FORMAL_RESEARCH_UNIVERSE",
+                        "reason": "OUT_OF_FORMAL_RESEARCH_MARKET_OR_BOARD",
+                    }
+                    result["formal_d0_admission"] = {
+                        "status": "NOT_IN_FORMAL_RESEARCH_UNIVERSE",
+                        "reason": "OUT_OF_FORMAL_RESEARCH_MARKET_OR_BOARD",
+                    }
+                    result["t0_observation"] = {
+                        "status": "NOT_IN_FORMAL_RESEARCH_UNIVERSE",
+                        "reason": "OUT_OF_FORMAL_RESEARCH_MARKET_OR_BOARD",
+                        "formal_d0_admission": result["formal_d0_admission"],
+                    }
+            else:
+                result["source_seed"] = query_source_stock_seed_context(
                     self.preview_server.state.config,
                     target_session=target,
                     source_capture_id=source_context["source_capture_id"],
-                    expected_source_count=source_context[
-                        "source_capture_expected_row_count"
-                    ],
-                    source_symbols=(symbol,),
-                    d1_history_session_count=d1_history_session_count,
-                    single_symbol_only=True,
-                    expected_before_session=sessions[-2] if len(sessions) > 1 else None,
-                    selected_profile_revision=profile_revision,
-                    selected_history_session_count=session_count,
-                    membership_snapshot_ids=membership_snapshot_ids,
+                    source_symbol=symbol,
+                    profile_revision=profile_revision,
+                    expected_source_count=source_context["research_expected_row_count"],
+                    source_time_quality=source_context["source_time_quality"],
+                    source_clock_role=source_context["source_clock_role"],
+                    source_available_at=source_context["source_available_at"],
                 )
-                single_evidence = saved_evidence["by_symbol"][symbol]
-                d0_transition_status = single_evidence.get("d0", {}).get(
-                    "status", "UNKNOWN"
-                )
-                calendar_sessions = _official_calendar(research_cutoff)["sessions"]
-                if target not in calendar_sessions:
-                    raise PreviewHttpError(
-                        409,
-                        "STOCK_SEED_T1_TARGET_CALENDAR_UNAVAILABLE",
-                        "目标会话不在当前官方日历范围内，不能读取个股后继结果",
+                if post_path == "/api/preview/stock":
+                    from stock_a.storage.postgres.source_launch_watch_evidence import (
+                        read_source_launch_watch_evidence,
                     )
-                successor_sessions = tuple(
-                    day for day in calendar_sessions if target < day <= research_cutoff
-                )
-                horizon_due_sessions = tuple(
-                    day for day in calendar_sessions if day > target
-                )[:20]
-                from stock_a.storage.postgres.source_launch_watch_evidence import (
-                    read_source_seed_t1_outcomes,
-                )
 
-                seed_t1_outcome = read_source_seed_t1_outcomes(
-                    self.preview_server.state.config,
-                    target_session=target,
-                    research_cutoff=research_cutoff,
-                    source_capture_id=source_context["source_capture_id"],
-                    expected_source_count=source_context[
-                        "source_capture_expected_row_count"
-                    ],
-                    source_symbols=(symbol,),
-                    successor_sessions=successor_sessions,
-                )[symbol]
-                seed_t1_outcome["d0_transition_status"] = d0_transition_status
-                seed_t1_outcome["rule_status"] = single_evidence["rules"]["status"]
-                seed_t1_outcome["d1_status"] = single_evidence["d1"]["status"]
-                result["seed_t1_outcome"] = seed_t1_outcome
+                    saved_evidence = read_source_launch_watch_evidence(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        source_capture_id=source_context["source_capture_id"],
+                        expected_source_count=source_context[
+                            "research_expected_row_count"
+                        ],
+                        source_symbols=(symbol,),
+                        d1_history_session_count=d1_history_session_count,
+                        single_symbol_only=True,
+                        expected_before_session=sessions[-2]
+                        if len(sessions) > 1
+                        else None,
+                        selected_profile_revision=profile_revision,
+                        selected_history_session_count=session_count,
+                        membership_snapshot_ids=membership_snapshot_ids,
+                    )
+                    single_evidence = saved_evidence["by_symbol"][symbol]
+                    d0_transition_status = single_evidence.get("d0", {}).get(
+                        "status", "UNKNOWN"
+                    )
+                    calendar_sessions = _official_calendar(research_cutoff)["sessions"]
+                    if target not in calendar_sessions:
+                        raise PreviewHttpError(
+                            409,
+                            "STOCK_SEED_T1_TARGET_CALENDAR_UNAVAILABLE",
+                            "目标会话不在当前官方日历范围内，不能读取个股后继结果",
+                        )
+                    successor_sessions = tuple(
+                        day
+                        for day in calendar_sessions
+                        if target < day <= research_cutoff
+                    )
+                    horizon_due_sessions = tuple(
+                        day for day in calendar_sessions if day > target
+                    )[:20]
+                    from stock_a.storage.postgres.source_launch_watch_evidence import (
+                        read_source_seed_t1_outcomes,
+                    )
+
+                    seed_t1_outcome = read_source_seed_t1_outcomes(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        research_cutoff=research_cutoff,
+                        source_capture_id=source_context["source_capture_id"],
+                        expected_source_count=source_context[
+                            "research_expected_row_count"
+                        ],
+                        source_symbols=(symbol,),
+                        successor_sessions=successor_sessions,
+                    )[symbol]
+                    seed_t1_outcome["d0_transition_status"] = d0_transition_status
+                    seed_t1_outcome["rule_status"] = single_evidence["rules"]["status"]
+                    seed_t1_outcome["d1_status"] = single_evidence["d1"]["status"]
+                    result["seed_t1_outcome"] = seed_t1_outcome
                 result["stored_research_evidence"] = single_evidence
                 result["stored_research_evidence_execution"] = saved_evidence[
                     "execution"
@@ -7732,9 +7786,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     config,
                     target_session=target,
                     source_capture_id=source_context["source_capture_id"],
-                    expected_source_count=source_context[
-                        "source_capture_expected_row_count"
-                    ],
+                    expected_source_count=source_context["research_expected_row_count"],
                     source_symbols=[symbol],
                     profile_history_session_count=session_count,
                     profile_revision=profile_revision,

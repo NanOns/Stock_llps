@@ -100,6 +100,13 @@ _MODULE_PROGRESS_TABLES = {
             "stock.source_sector_pulse_cohort_reason_facts",
         }
     ),
+    "PRICE_LIMITS": frozenset({"stock.source_price_limit_day_facts"}),
+    "FORWARD_PATH": frozenset({"stock.source_forward_path_facts"}),
+    "COHORT_STATS": frozenset({"stock.source_cohort_group_stats"}),
+    "FEP_BASELINE": frozenset({"stock.source_fep_baseline_facts"}),
+    "OBSERVATION_SEGMENTS": frozenset(
+        {"stock.source_research_observation_segment_days"}
+    ),
 }
 
 _CLEANUP_MODULES = {
@@ -221,6 +228,46 @@ _CLEANUP_MODULES = {
         ),
         "algorithm_column": "followup_contract",
         "algorithm_label": "板块跨日后继合同版本",
+    },
+    "PRICE_LIMITS": {
+        "parent_table": "stock.source_price_limit_day_facts",
+        "child_table": None,
+        "cleanup_tables": ("stock.source_price_limit_day_facts",),
+        "progress_tables": ("stock.source_price_limit_day_facts",),
+        "algorithm_column": "contract_version",
+        "algorithm_label": "涨跌停限价合同版本",
+    },
+    "FORWARD_PATH": {
+        "parent_table": "stock.source_forward_path_facts",
+        "child_table": None,
+        "cleanup_tables": ("stock.source_forward_path_facts",),
+        "progress_tables": ("stock.source_forward_path_facts",),
+        "algorithm_column": "path_rule_version",
+        "algorithm_label": "Forward路径版本",
+    },
+    "COHORT_STATS": {
+        "parent_table": "stock.source_cohort_group_stats",
+        "child_table": None,
+        "cleanup_tables": ("stock.source_cohort_group_stats",),
+        "progress_tables": ("stock.source_cohort_group_stats",),
+        "algorithm_column": "rule_version",
+        "algorithm_label": "Cohort分组统计规则版本",
+    },
+    "FEP_BASELINE": {
+        "parent_table": "stock.source_fep_baseline_facts",
+        "child_table": None,
+        "cleanup_tables": ("stock.source_fep_baseline_facts",),
+        "progress_tables": ("stock.source_fep_baseline_facts",),
+        "algorithm_column": "rule_version",
+        "algorithm_label": "FEP基线规则版本",
+    },
+    "OBSERVATION_SEGMENTS": {
+        "parent_table": "stock.source_research_observation_segment_days",
+        "child_table": None,
+        "cleanup_tables": ("stock.source_research_observation_segment_days",),
+        "progress_tables": ("stock.source_research_observation_segment_days",),
+        "algorithm_column": "rule_version",
+        "algorithm_label": "观察持续分段规则版本",
     },
     "MARKET_PARTICIPATION": {
         "parent_table": "stock.source_market_participation_days",
@@ -1314,6 +1361,133 @@ def _cleanup_version_rows(
             for row in cursor.fetchall()
         ]
 
+    if module_code == "PRICE_LIMITS":
+        cursor.execute(
+            """SELECT target_session,source_capture_id,contract_version,calendar_revision,count(*)
+               FROM stock.source_price_limit_day_facts
+               WHERE target_session=ANY(%s) AND target_session<=%s
+               GROUP BY target_session,source_capture_id,contract_version,calendar_revision
+               ORDER BY target_session,source_capture_id,contract_version,calendar_revision""",
+            (list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"source_capture_id": int(row[1])},
+                "algorithm_version": str(row[2]),
+                "parent_rows": int(row[4]),
+                "child_rows": 0,
+                "version_key": {
+                    "source_capture_id": int(row[1]),
+                    "contract_version": str(row[2]),
+                    "calendar_revision": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
+    if module_code == "FORWARD_PATH":
+        cursor.execute(
+            """SELECT target_session,source_capture_id,path_rule_version,calendar_revision,count(*)
+               FROM stock.source_forward_path_facts
+               WHERE target_session=ANY(%s) AND target_session<=%s
+               GROUP BY target_session,source_capture_id,path_rule_version,calendar_revision
+               ORDER BY target_session,source_capture_id,path_rule_version,calendar_revision""",
+            (list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"source_capture_id": int(row[1])},
+                "algorithm_version": str(row[2]),
+                "parent_rows": int(row[4]),
+                "child_rows": 0,
+                "version_key": {
+                    "source_capture_id": int(row[1]),
+                    "path_rule_version": str(row[2]),
+                    "calendar_revision": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
+    if module_code == "COHORT_STATS":
+        cursor.execute(
+            """SELECT target_session,source_capture_id,rule_version,calendar_revision,count(*)
+               FROM stock.source_cohort_group_stats
+               WHERE target_session=ANY(%s) AND target_session<=%s
+                 AND research_cutoff<=%s
+               GROUP BY target_session,source_capture_id,rule_version,calendar_revision
+               ORDER BY target_session,source_capture_id,rule_version,calendar_revision""",
+            (list(target_sessions), cutoff, cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"source_capture_id": int(row[1])},
+                "algorithm_version": str(row[2]),
+                "parent_rows": int(row[4]),
+                "child_rows": 0,
+                "version_key": {
+                    "source_capture_id": int(row[1]),
+                    "rule_version": str(row[2]),
+                    "calendar_revision": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
+    if module_code == "FEP_BASELINE":
+        cursor.execute(
+            """SELECT COALESCE(target_session, period_end_session) AS sess,
+                      source_capture_id,rule_version,calendar_revision,count(*)
+               FROM stock.source_fep_baseline_facts
+               WHERE COALESCE(target_session, period_end_session)=ANY(%s)
+                 AND research_cutoff<=%s AND source_capture_id IS NOT NULL
+               GROUP BY 1,2,3,4 ORDER BY 1,2,3,4""",
+            (list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"source_capture_id": int(row[1])},
+                "algorithm_version": str(row[2]),
+                "parent_rows": int(row[4]),
+                "child_rows": 0,
+                "version_key": {
+                    "source_capture_id": int(row[1]),
+                    "rule_version": str(row[2]),
+                    "calendar_revision": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
+    if module_code == "OBSERVATION_SEGMENTS":
+        cursor.execute(
+            """SELECT t0_session,source_capture_id,rule_version,calendar_revision,count(*)
+               FROM stock.source_research_observation_segment_days
+               WHERE t0_session=ANY(%s) AND t0_session<=%s
+               GROUP BY t0_session,source_capture_id,rule_version,calendar_revision
+               ORDER BY t0_session,source_capture_id,rule_version,calendar_revision""",
+            (list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"source_capture_id": int(row[1])},
+                "algorithm_version": str(row[2]),
+                "parent_rows": int(row[4]),
+                "child_rows": 0,
+                "version_key": {
+                    "source_capture_id": int(row[1]),
+                    "rule_version": str(row[2]),
+                    "calendar_revision": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
     if module_code == "SECTOR_FOLLOWUP":
         cursor.execute(
             """WITH scopes AS (
@@ -2074,6 +2248,89 @@ def clear_derived_module(
                 deleted_by_session[target_session.isoformat()][
                     "stock.source_sector_pulse_adjacent_transitions"
                 ] += cursor.rowcount
+            elif module_code == "PRICE_LIMITS":
+                cursor.execute(
+                    """DELETE FROM stock.source_price_limit_day_facts
+                       WHERE target_session=%s AND source_capture_id=%s
+                         AND contract_version=%s AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["source_capture_id"],
+                        key["contract_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_price_limit_day_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_price_limit_day_facts"
+                ] += cursor.rowcount
+            elif module_code == "FORWARD_PATH":
+                cursor.execute(
+                    """DELETE FROM stock.source_forward_path_facts
+                       WHERE target_session=%s AND source_capture_id=%s
+                         AND path_rule_version=%s AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["source_capture_id"],
+                        key["path_rule_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_forward_path_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_forward_path_facts"
+                ] += cursor.rowcount
+            elif module_code == "COHORT_STATS":
+                cursor.execute(
+                    """DELETE FROM stock.source_cohort_group_stats
+                       WHERE target_session=%s AND source_capture_id=%s
+                         AND rule_version=%s AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["source_capture_id"],
+                        key["rule_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_cohort_group_stats"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_cohort_group_stats"
+                ] += cursor.rowcount
+            elif module_code == "FEP_BASELINE":
+                cursor.execute(
+                    """DELETE FROM stock.source_fep_baseline_facts
+                       WHERE COALESCE(target_session, period_end_session)=%s
+                         AND source_capture_id=%s AND rule_version=%s
+                         AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["source_capture_id"],
+                        key["rule_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_fep_baseline_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_fep_baseline_facts"
+                ] += cursor.rowcount
+            elif module_code == "OBSERVATION_SEGMENTS":
+                cursor.execute(
+                    """DELETE FROM stock.source_research_observation_segment_days
+                       WHERE t0_session=%s AND source_capture_id=%s
+                         AND rule_version=%s AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["source_capture_id"],
+                        key["rule_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_research_observation_segment_days"] += (
+                    cursor.rowcount
+                )
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_research_observation_segment_days"
+                ] += cursor.rowcount
             elif module_code == "SECTOR_FOLLOWUP":
                 cursor.execute(
                     """DELETE FROM stock.source_sector_pulse_followup_facts f
@@ -2563,6 +2820,42 @@ def read_business_table_count(
                 d1_history_session_count,
                 calendar_revision,
             ),
+        ),
+        "stock.source_price_limit_day_facts": (
+            """SELECT count(*) FROM stock.source_price_limit_day_facts
+               WHERE target_session=%s AND source_capture_id=%s
+                 AND contract_version=%s AND calendar_revision=%s""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+            ),
+        ),
+        "stock.source_forward_path_facts": (
+            """SELECT count(*) FROM stock.source_forward_path_facts
+               WHERE target_session=%s AND source_capture_id=%s""",
+            lambda: (target_session, source_capture_id),
+        ),
+        "stock.source_cohort_group_stats": (
+            """SELECT count(*) FROM stock.source_cohort_group_stats
+               WHERE target_session=%s AND source_capture_id=%s
+                 AND research_cutoff=%s""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                research_cutoff,
+            ),
+        ),
+        "stock.source_fep_baseline_facts": (
+            """SELECT count(*) FROM stock.source_fep_baseline_facts
+               WHERE research_cutoff=%s AND source_capture_id=%s""",
+            lambda: (research_cutoff, source_capture_id),
+        ),
+        "stock.source_research_observation_segment_days": (
+            """SELECT count(*) FROM stock.source_research_observation_segment_days
+               WHERE t0_session<=%s AND source_capture_id=%s""",
+            lambda: (research_cutoff, source_capture_id),
         ),
         "stock.source_market_breadth_days": (
             """SELECT count(*) FROM stock.source_market_breadth_days
@@ -3632,6 +3925,42 @@ def mark_progress_cleared(
                JOIN stock.source_sector_pulse_cohort_group_facts g
                  ON g.id=r.cohort_group_fact_id
                WHERE g.t0_session=%s AND g.t0_session<=%s""",
+        ),
+        "stock.source_price_limit_day_facts": (
+            """SELECT count(*) FROM stock.source_price_limit_day_facts
+               WHERE target_session=%s AND source_capture_id=%s
+                 AND contract_version=%s AND calendar_revision=%s""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+            ),
+        ),
+        "stock.source_forward_path_facts": (
+            """SELECT count(*) FROM stock.source_forward_path_facts
+               WHERE target_session=%s AND source_capture_id=%s""",
+            lambda: (target_session, source_capture_id),
+        ),
+        "stock.source_cohort_group_stats": (
+            """SELECT count(*) FROM stock.source_cohort_group_stats
+               WHERE target_session=%s AND source_capture_id=%s
+                 AND research_cutoff=%s""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                research_cutoff,
+            ),
+        ),
+        "stock.source_fep_baseline_facts": (
+            """SELECT count(*) FROM stock.source_fep_baseline_facts
+               WHERE research_cutoff=%s AND source_capture_id=%s""",
+            lambda: (research_cutoff, source_capture_id),
+        ),
+        "stock.source_research_observation_segment_days": (
+            """SELECT count(*) FROM stock.source_research_observation_segment_days
+               WHERE t0_session<=%s AND source_capture_id=%s""",
+            lambda: (research_cutoff, source_capture_id),
         ),
         "stock.source_market_breadth_days": (
             "SELECT count(*) FROM stock.source_market_breadth_days WHERE target_session=%s AND target_session<=%s",

@@ -763,13 +763,14 @@ def read_retrospective_rotation(
                 )
                 for day in sessions
             )
+        raw_page_count = int(page.get("page_count", len(page["candidates"])))
         if page["next_offset"] is None:
-            if offset + len(page["candidates"]) != page["total_count"]:
+            if offset + raw_page_count != page["total_count"]:
                 raise TdxSectorMembersPgError(
                     "ROTATION_SOURCE_PARTITION_MISMATCH", "Rotation来源池分页没有闭合"
                 )
             break
-        if page["next_offset"] != offset + len(page["candidates"]):
+        if page["next_offset"] != offset + raw_page_count:
             raise TdxSectorMembersPgError(
                 "ROTATION_PAGE_INVALID", "Rotation来源池分页游标不连续"
             )

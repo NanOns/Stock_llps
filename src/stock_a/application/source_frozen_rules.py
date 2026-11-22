@@ -330,7 +330,7 @@ def persist_source_computable_rules_from_saved(
                 target_session=target_session,
                 research_cutoff=research_cutoff,
                 source_capture_id=source_capture_id,
-                expected_source_count=source_version["capture_expected_row_count"],
+                expected_source_count=source_version["research_expected_row_count"],
                 snapshot_ids=snapshot_ids,
             )
         except T0EarlyObservationPgError as error:

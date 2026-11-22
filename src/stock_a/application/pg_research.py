@@ -177,6 +177,17 @@ def read_source_version_context(
                 "PG_RESEARCH_PRICE_REFERENCE_MISMATCH",
                 "读取的目标价格行与paired捕获身份不一致。",
             )
+    from stock_a.sources.baostock.identity import eligible_research_board
+
+    target_iso = target_session.isoformat()
+    research_expected_rows = sum(
+        1
+        for item in roster.get("symbols", [])
+        if eligible_research_board(item.get("source_symbol")) is not None
+        and item.get("eligible_start_session")
+        and item.get("eligible_end_session")
+        and item["eligible_start_session"] <= target_iso <= item["eligible_end_session"]
+    )
     complete = (
         raw.get("coverage_status") == "COMPLETE"
         and qfq.get("coverage_status") == "COMPLETE"
@@ -198,6 +209,7 @@ def read_source_version_context(
         "raw_row_count": raw_rows,
         "qfq_row_count": qfq.get("row_count"),
         "capture_expected_row_count": expected_rows,
+        "research_expected_row_count": research_expected_rows,
         "raw_coverage_status": raw.get("coverage_status"),
         "qfq_coverage_status": qfq.get("coverage_status"),
         "version_status": "COMPLETE" if complete else "INCOMPLETE",

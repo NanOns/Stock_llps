@@ -409,6 +409,13 @@ def read_source_sector_pulse_followup_inputs(
                 "T0 PULSE没有绑定完整且一致的Raw来源分区",
             )
         cursor.execute(
+            """SELECT count(*)::bigint FROM source_raw_daily
+               WHERE session_date=%s AND source_capture_id=%s
+                 AND board IN ('MAIN_BOARD', 'GEM')""",
+            (t0_session, source_capture_id),
+        )
+        research_expected_count = int(cursor.fetchone()[0])
+        cursor.execute(
             """SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint,
        count(DISTINCT profile_revision)::bigint, min(producer_version), max(producer_version)
 FROM source_pool_seed_day_facts
@@ -425,8 +432,8 @@ WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
             cursor.fetchone()
         )
         if (
-            int(seed_count) != int(identity["source_pool_count"])
-            or int(seed_symbols) != int(identity["source_pool_count"])
+            int(seed_count) != research_expected_count
+            or int(seed_symbols) != research_expected_count
             or int(revision_count) != 1
             or producer_min != _SEED_PRODUCER_VERSION
             or producer_max != producer_min

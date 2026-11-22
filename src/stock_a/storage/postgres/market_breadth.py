@@ -209,6 +209,7 @@ def _persist_market_breadth_once(
         cursor.execute(
             """SELECT source_symbol,source_capture_id FROM stock.source_raw_daily
                WHERE session_date=%s AND source_capture_id=%s
+                 AND board IN ('MAIN_BOARD', 'GEM')
                  AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL
                ORDER BY source_symbol""",
             (target_session, capture_id),

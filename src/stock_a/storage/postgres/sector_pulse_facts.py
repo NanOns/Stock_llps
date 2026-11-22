@@ -419,6 +419,14 @@ def _validate_write_scope(
             "SECTOR_PULSE_RAW_PARTITION_OPEN", "目标Raw来源池分区已变化或未完整闭合"
         )
     cursor.execute(
+        "SELECT count(*)::bigint FROM source_raw_daily "
+        "WHERE session_date=%s AND source_capture_id=%s "
+        "AND board IN ('MAIN_BOARD', 'GEM') "
+        "AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL",
+        (target_session, source_capture_id),
+    )
+    research_expected_count = int(cursor.fetchone()[0])
+    cursor.execute(
         "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
         "count(DISTINCT profile_revision)::bigint FROM source_pool_seed_day_facts "
         "WHERE target_session=%s AND source_capture_id=%s "
@@ -427,8 +435,8 @@ def _validate_write_scope(
     )
     seed_count, seed_symbols, seed_revisions = cursor.fetchone()
     if (int(seed_count), int(seed_symbols), int(seed_revisions)) != (
-        expected_count,
-        expected_count,
+        research_expected_count,
+        research_expected_count,
         1,
     ):
         raise SectorPulsePgError(
@@ -807,6 +815,13 @@ def read_source_sector_pulse_day(
             seed_scope_predicate += " AND profile_revision=%s"
             seed_scope_parameters = (*seed_scope_parameters, profile_revision)
         cursor.execute(
+            "SELECT count(*)::bigint FROM source_raw_daily "
+            "WHERE session_date=%s AND source_capture_id=%s "
+            "AND board IN ('MAIN_BOARD', 'GEM')",
+            (target_session, source_capture_id),
+        )
+        research_expected_count = int(cursor.fetchone()[0])
+        cursor.execute(
             "SELECT profile_revision, count(*)::bigint, count(DISTINCT source_symbol)::bigint "
             "FROM source_pool_seed_day_facts WHERE "
             f"{seed_scope_predicate} GROUP BY profile_revision ORDER BY profile_revision",
@@ -814,8 +829,8 @@ def read_source_sector_pulse_day(
         )
         seed_versions = cursor.fetchall()
         if len(seed_versions) != 1 or (
-            int(seed_versions[0][1]) != source_pool_count
-            or int(seed_versions[0][2]) != source_pool_count
+            int(seed_versions[0][1]) != research_expected_count
+            or int(seed_versions[0][2]) != research_expected_count
         ):
             reason = (
                 "SOURCE_PROFILE_REVISION_AMBIGUOUS"
@@ -1017,6 +1032,13 @@ def read_source_sector_pulse_for_boards(
         _,
     ):
         cursor.execute(
+            "SELECT count(*)::bigint FROM source_raw_daily "
+            "WHERE session_date=%s AND source_capture_id=%s "
+            "AND board IN ('MAIN_BOARD', 'GEM')",
+            (target_session, source_capture_id),
+        )
+        research_expected_count = int(cursor.fetchone()[0])
+        cursor.execute(
             "SELECT profile_revision,count(*)::bigint,count(DISTINCT source_symbol)::bigint "
             "FROM source_pool_seed_day_facts WHERE target_session=%s "
             "AND source_capture_id=%s AND price_coordinate='FORWARD_ADJUSTED' "
@@ -1026,8 +1048,8 @@ def read_source_sector_pulse_for_boards(
         seed_scopes = cursor.fetchall()
         if (
             len(seed_scopes) != 1
-            or int(seed_scopes[0][1]) != source_pool_count
-            or int(seed_scopes[0][2]) != source_pool_count
+            or int(seed_scopes[0][1]) != research_expected_count
+            or int(seed_scopes[0][2]) != research_expected_count
         ):
             reason = (
                 "SOURCE_PROFILE_REVISION_AMBIGUOUS"

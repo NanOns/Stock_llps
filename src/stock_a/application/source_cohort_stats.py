@@ -12,7 +12,7 @@ from stock_a.storage.postgres.research_facts import (
 from stock_a.storage.postgres.source_raw import _transaction
 
 
-def persist_cohort_stats(config, *, target, research_cutoff, source_package_id):
+def persist_cohort_stats(config, *, target, research_cutoff, source_capture_id):
     """在单事务内读取完整规则并保存六组typed统计；不读取来源文件。"""
     if target > research_cutoff:
         raise ValueError("目标日不得晚于研究截止日")
@@ -22,12 +22,12 @@ def persist_cohort_stats(config, *, target, research_cutoff, source_package_id):
     with _transaction(config, write=True, statement_timeout_ms=30000) as (_, cursor, _):
         cursor.execute(
             """SELECT rule_id,profile_revision,history_session_count,d1_history_session_count,
-                      event_window_start,count(*),count(DISTINCT source_symbol),
-                      count(DISTINCT source_capture_id),min(source_capture_id)
-               FROM source_rule_evaluations WHERE target_session=%s AND source_package_id=%s
+                      event_window_start,count(*),count(DISTINCT source_symbol)
+               FROM source_rule_evaluations
+               WHERE target_session=%s AND source_capture_id=%s
                  AND rule_version=%s AND calendar_revision=%s
                GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5""",
-            (target, source_package_id, RULE_VERSION, revision),
+            (target, source_capture_id, RULE_VERSION, revision),
         )
         keys = cursor.fetchall()
         if not keys:
@@ -41,31 +41,30 @@ def persist_cohort_stats(config, *, target, research_cutoff, source_package_id):
             window,
             count,
             distinct,
-            captures,
-            capture,
         ) in keys:
-            if count != distinct or captures != 1:
-                raise ValueError("规则来源捕获或代码不唯一")
+            if count != distinct:
+                raise ValueError("规则代码不唯一")
             cursor.execute(
                 """SELECT count(*),count(DISTINCT source_symbol) FROM source_raw_daily
-                   WHERE session_date=%s AND source_package_id=%s AND source_capture_id=%s""",
-                (target, source_package_id, capture),
+                   WHERE session_date=%s AND source_capture_id=%s
+                     AND board IN ('MAIN_BOARD', 'GEM')""",
+                (target, source_capture_id),
             )
             if cursor.fetchone() != (count, count):
-                raise ValueError("规则分母与来源捕获分母不一致")
+                raise ValueError("规则分母与来源研究范围分母不一致")
             cursor.execute(
                 """SELECT count(*) FROM source_rule_evaluations r
                    LEFT JOIN source_raw_daily d ON d.session_date=r.target_session
-                     AND d.source_package_id=r.source_package_id
-                     AND d.source_capture_id=r.source_capture_id AND d.source_symbol=r.source_symbol
-                   WHERE r.target_session=%s AND r.source_package_id=%s AND r.source_capture_id=%s
+                     AND d.source_capture_id=r.source_capture_id
+                     AND d.source_symbol=r.source_symbol
+                     AND d.board IN ('MAIN_BOARD', 'GEM')
+                   WHERE r.target_session=%s AND r.source_capture_id=%s
                      AND r.rule_id=%s AND r.rule_version=%s AND r.profile_revision=%s
                      AND r.history_session_count=%s AND r.d1_history_session_count=%s
                      AND r.event_window_start=%s AND r.calendar_revision=%s AND d.source_symbol IS NULL""",
                 (
                     target,
-                    source_package_id,
-                    capture,
+                    source_capture_id,
                     rule,
                     RULE_VERSION,
                     profile,
@@ -83,7 +82,7 @@ def persist_cohort_stats(config, *, target, research_cutoff, source_package_id):
                 rows = _read_research_rows_cursor(
                     cursor,
                     target=target,
-                    source_package_id=source_package_id,
+                    source_capture_id=source_capture_id,
                     profile_revision=profile,
                     history_session_count=history,
                     d1_history_session_count=d1_history,
@@ -112,10 +111,21 @@ def persist_cohort_stats(config, *, target, research_cutoff, source_package_id):
                             ([item[0] for item in items], [item[1] for item in items])
                         )
                     cursor.execute(
-                        """INSERT INTO source_cohort_group_stats VALUES (
-                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        """INSERT INTO source_cohort_group_stats (
+                            target_session, research_cutoff, source_capture_id,
+                            rule_id, rule_version, profile_revision,
+                            history_session_count, d1_history_session_count,
+                            event_window_start, calendar_revision, path_rule_version,
+                            horizon, state, weighting,
+                            source_pool_count, member_count, evaluable_count, positive_count,
+                            median_numerator, median_denominator,
+                            maturity_codes, maturity_counts,
+                            path_quality_codes, path_quality_counts,
+                            reason_codes, reason_counts
+                           ) VALUES (
+                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT (target_session,research_cutoff,source_package_id,source_capture_id,
+                           ON CONFLICT (target_session,research_cutoff,source_capture_id,
                             rule_id,rule_version,profile_revision,history_session_count,d1_history_session_count,
                             event_window_start,calendar_revision,path_rule_version,horizon,state,weighting)
                            DO UPDATE SET source_pool_count=EXCLUDED.source_pool_count,
@@ -147,8 +157,7 @@ def persist_cohort_stats(config, *, target, research_cutoff, source_package_id):
                         (
                             target,
                             research_cutoff,
-                            source_package_id,
-                            capture,
+                            source_capture_id,
                             rule,
                             RULE_VERSION,
                             profile,

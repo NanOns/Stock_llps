@@ -14,13 +14,13 @@ def produce_source_observation_segments(
     config: Mapping[str, Any],
     *,
     research_cutoff: date,
-    source_package_id: int,
+    source_capture_id: int,
     rule_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """只从已存登记和规则事实生产逐官方会话typed观察段。"""
     return _persist_source_observation_segments(
         config,
         research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
         rule_ids=rule_ids,
     )

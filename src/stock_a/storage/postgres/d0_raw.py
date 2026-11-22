@@ -121,13 +121,16 @@ def _read_source_version(
             "目标会话的RAW/QFQ来源请求或证券有效窗口没有闭合。",
         )
     cursor.execute(
-        """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint
+        """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint,
+                  count(*) FILTER (WHERE board IN ('MAIN_BOARD', 'GEM'))::bigint
            FROM stock.source_raw_daily
            WHERE source_capture_id=%s AND session_date=%s
              AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL""",
         (source_capture_id, target_session),
     )
-    stored_rows, stored_symbols = (int(value) for value in cursor.fetchone())
+    stored_rows, stored_symbols, research_expected_rows = (
+        int(value) for value in cursor.fetchone()
+    )
     if stored_rows != eligible_count or stored_symbols != eligible_count:
         raise D0RawPgError(
             "D0_SOURCE_CAPTURE_ROWS_INCOMPLETE",
@@ -144,6 +147,7 @@ def _read_source_version(
         "parser_contract": parser_contract,
         "unit_contract_version": unit_contract_version,
         "capture_expected_row_count": eligible_count,
+        "research_expected_row_count": research_expected_rows,
         "capture_normalized_row_count": normalized_count,
         "requested_symbol_count": requested_symbol_count,
         "capture_read_started_at": capture_read_started_at,
@@ -195,7 +199,7 @@ def _validate_target_rows(
         for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED")
     }
     if (
-        len(target_rows) != source_version["capture_expected_row_count"]
+        len(target_rows) != source_version["research_expected_row_count"]
         or len(symbols) != len(set(symbols))
         or tuple(sorted(symbols)) != symbols
         or any(_SYMBOL.fullmatch(symbol) is None for symbol in symbols)
@@ -240,6 +244,7 @@ def _read_target_rows(
                   observed_completed_at,source_clock_role,source_available_at
            FROM stock.source_raw_daily
            WHERE session_date=%s AND source_capture_id=%s
+             AND board IN ('MAIN_BOARD', 'GEM')
              AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL
            ORDER BY source_symbol""",
         (target_session, source_capture_id),

@@ -95,23 +95,27 @@ def persist_source_t1_forward_from_saved(
     target_session: date,
     research_cutoff: date,
     source_capture_id: int,
+    horizon: int = 1,
     history_session_count: int | None = None,
     profile_revision: str | None = None,
 ) -> dict[str, Any]:
-    """复用已存Raw、Seed和价格路径算法，生产单一T+1 typed范围。"""
+    """复用已存Raw、Seed和价格路径算法，生产指定期限（默认T+1）typed范围。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
         or type(source_capture_id) is not int
         or source_capture_id <= 0
+        or type(horizon) is not int
+        or horizon not in (1, 3, 5, 10, 20)
         or history_session_count is not None
         and (type(history_session_count) is not int or history_session_count < 1)
         or profile_revision is not None
         and (not isinstance(profile_revision, str) or not profile_revision)
     ):
         raise SourceResearchDayError(
-            "T1_FORWARD_SCOPE_INVALID", "T+1目标、研究截止或paired capture无效"
+            "T1_FORWARD_SCOPE_INVALID",
+            "Forward目标、期限、研究截止或paired capture无效",
         )
     target_calendar, _, _, target_calendar_sessions = _load_calendar(target_session)
     _, _, _, cutoff_calendar_sessions = _load_calendar(research_cutoff)
@@ -124,9 +128,10 @@ def persist_source_t1_forward_from_saved(
             "T1_FORWARD_CALENDAR_INVALID", "T+1范围不在已核验的官方日历内"
         )
     target_index = cutoff_calendar_sessions.index(target_session)
-    if target_index + 1 >= len(cutoff_calendar_sessions):
+    if target_index + horizon >= len(cutoff_calendar_sessions):
         return {
             "status": "NOT_DUE",
+            "horizon": horizon,
             "target_session": target_session.isoformat(),
             "research_cutoff": research_cutoff.isoformat(),
             "source_capture_id": source_capture_id,
@@ -136,10 +141,11 @@ def persist_source_t1_forward_from_saved(
             "raw_recalculated": False,
             "seed_recalculated": False,
         }
-    endpoint_session = cutoff_calendar_sessions[target_index + 1]
+    endpoint_session = cutoff_calendar_sessions[target_index + horizon]
     if endpoint_session > research_cutoff:
         return {
             "status": "NOT_DUE",
+            "horizon": horizon,
             "target_session": target_session.isoformat(),
             "endpoint_session": endpoint_session.isoformat(),
             "research_cutoff": research_cutoff.isoformat(),
@@ -192,7 +198,7 @@ def persist_source_t1_forward_from_saved(
         config,
         target_session=target_session,
         source_capture_id=source["source_capture_id"],
-        expected_source_count=source["capture_expected_row_count"],
+        expected_source_count=source["research_expected_row_count"],
         profile_revision=profile_revision,
         history_session_count=history_session_count,
     )
@@ -202,7 +208,9 @@ def persist_source_t1_forward_from_saved(
         )
 
     symbols = seed_scope["source_symbols"]
-    sessions = (target_session, endpoint_session)
+    sessions = tuple(
+        cutoff_calendar_sessions[target_index : target_index + horizon + 1]
+    )
     rows_by_symbol: dict[str, list[Mapping[str, Any]]] = {
         symbol: [] for symbol in symbols
     }
@@ -288,7 +296,7 @@ def persist_source_t1_forward_from_saved(
         outcomes[symbol] = exploratory_raw_path(
             sessions,
             rows_by_symbol[symbol],
-            1,
+            horizon,
             target_session=endpoint_session,
             source_capture_id=source_capture_id,
             price_coordinate="FORWARD_ADJUSTED",
@@ -301,7 +309,7 @@ def persist_source_t1_forward_from_saved(
         session_versions=session_versions,
         outcomes=outcomes,
         source_capture_id=source_capture_id,
-        horizon=1,
+        horizon=horizon,
     )
     write_result = write_forward_path_rows(
         config,
@@ -323,31 +331,32 @@ def persist_source_t1_forward_from_saved(
             "T+1写入事务已提交，但独立PG读回未通过；请核对精确T0范围后恢复",
             database_write_attempted=True,
         ) from error
-    try:
-        from stock_a.storage.postgres.source_s2_t1_cohort import (
-            read_source_s2_t1_cohort_scope,
-        )
+    if horizon == 1:
+        try:
+            from stock_a.storage.postgres.source_s2_t1_cohort import (
+                read_source_s2_t1_cohort_scope,
+            )
 
-        cohort_readback = read_source_s2_t1_cohort_scope(
-            config,
-            target_session=target_session,
-            endpoint_session=endpoint_session,
-            research_cutoff=research_cutoff,
-            source_capture_id=source_capture_id,
-            endpoint_source_capture_id=source_capture_id,
-            expected_rows=expected_cohort_rows,
-        )
-        if (
-            cohort_readback.get("status") != "AVAILABLE"
-            or cohort_readback.get("rows_read_back") != 12
-        ):
-            raise ValueError("S2/T+1统计读回未闭合")
-    except Exception as error:
-        raise SourceResearchDayError(
-            "S2_T1_COHORT_READBACK_FAILED",
-            "T+1事务已提交，但S2三态分组统计未能在异事务完整读回",
-            database_write_attempted=True,
-        ) from error
+            cohort_readback = read_source_s2_t1_cohort_scope(
+                config,
+                target_session=target_session,
+                endpoint_session=endpoint_session,
+                research_cutoff=research_cutoff,
+                source_capture_id=source_capture_id,
+                endpoint_source_capture_id=source_capture_id,
+                expected_rows=expected_cohort_rows,
+            )
+            if (
+                cohort_readback.get("status") != "AVAILABLE"
+                or cohort_readback.get("rows_read_back") != 12
+            ):
+                raise ValueError("S2/T+1统计读回未闭合")
+        except Exception as error:
+            raise SourceResearchDayError(
+                "S2_T1_COHORT_READBACK_FAILED",
+                "T+1事务已提交，但S2三态分组统计未能在异事务完整读回",
+                database_write_attempted=True,
+            ) from error
     changed = bool(
         write_result["inserted_paths"] or write_result["s2_t1_cohort_stats_inserted"]
     )
@@ -694,6 +703,14 @@ def _persist_static_research_day(
     _validate_static_history_count(history_session_count)
     profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
     calendar = _official_calendar(target_session)
+    source_ctx = read_source_version_context(
+        config,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        source_capture_id=source_capture_id,
+        price_coordinate="FORWARD_ADJUSTED",
+    )
+    data_universe_expected_count = source_ctx["capture_expected_row_count"]
     catalog = source_symbol_price_profile_snapshots(
         config, max_target_session=research_cutoff
     )
@@ -703,7 +720,7 @@ def _persist_static_research_day(
             snapshot["target_session"] != target_session.isoformat()
             or snapshot["source_capture_id"] != source_capture_id
             or not snapshot["complete"]
-            or snapshot["source_symbol_count"] != expected_source_count
+            or snapshot["source_symbol_count"] != data_universe_expected_count
             or snapshot["price_coordinate"] != "FORWARD_ADJUSTED"
             or snapshot["history_calendar_id"] != calendar["calendar_id"]
             or (
@@ -964,7 +981,7 @@ def _prepare_d1_facts(
             raise SourceResearchDayError(
                 "D1_SOURCE_KEY_INVALID", "D1来源代码与市场不匹配"
             )
-        if board not in {"MAIN_BOARD", "GEM", "STAR_BOARD"}:
+        if board not in {"MAIN_BOARD", "GEM"}:
             raise SourceResearchDayError("D1_BOARD_INVALID", "D1来源板别无效")
         history_rows = structure_row.get("history_row_count")
         if type(history_rows) is not int or history_rows < 1:

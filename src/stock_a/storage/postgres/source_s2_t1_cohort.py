@@ -488,12 +488,13 @@ def _capture_session_count(
     cursor.execute(
         """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint,
                   count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint,
-                  count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint
+                  count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint,
+                  count(*) FILTER (WHERE board IN ('MAIN_BOARD', 'GEM'))::bigint
            FROM source_raw_daily
            WHERE session_date=%s AND source_capture_id=%s AND session_date<=%s""",
         (session, source_capture_id, research_cutoff),
     )
-    row_count, symbol_count, raw_count, qfq_count = (
+    row_count, symbol_count, raw_count, qfq_count, research_count = (
         int(value or 0) for value in cursor.fetchone()
     )
     if (
@@ -505,7 +506,7 @@ def _capture_session_count(
         or qfq_count != row_count
     ):
         return None
-    return expected_count
+    return research_count
 
 
 def _read_exact_scope(

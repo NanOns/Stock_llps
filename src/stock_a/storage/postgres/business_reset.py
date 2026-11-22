@@ -51,6 +51,7 @@ _BASE_BUSINESS_FACT_TABLES = frozenset(
         "source_market_participation_days",
         "source_market_participation_unknown_reasons",
         "source_pool_seed_day_facts",
+        "source_price_limit_day_facts",
         "source_raw_daily",
         "source_research_enrollments",
         "source_research_events",

@@ -32,6 +32,7 @@ const STAGE_LABELS = {
   SOURCE_BAOSTOCK: "BaoStock股票价格",
   SOURCE_SECTOR_MEMBERS: "行业 / GN成员来源",
   CORE_PROFILE: "Core / Profile",
+  PRICE_LIMITS: "涨跌停限价",
   STATIC_RESEARCH: "静态研究",
   D0_D1: "D0 / D1",
   MARKET_BREADTH: "市场宽度",
@@ -41,6 +42,10 @@ const STAGE_LABELS = {
   SECTOR_PULSE: "行业 / 概念 PULSE",
   SECTOR_TRANSITION: "行业 / 概念相邻变化",
   SECTOR_FOLLOWUP: "板块跨日跟踪",
+  FORWARD_PATH: "Forward路径",
+  COHORT_STATS: "Cohort分组统计",
+  FEP_BASELINE: "FEP条件基线",
+  OBSERVATION_SEGMENTS: "观察持续分段",
 };
 
 const LAYER_LABELS = {
@@ -50,7 +55,12 @@ const LAYER_LABELS = {
 };
 const CURRENT_MODULE_CODES = {
   SOURCE: new Set(["BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"]),
-  BASE: new Set(["CORE_PROFILE", "MARKET_BREADTH", "MARKET_PARTICIPATION"]),
+  BASE: new Set([
+    "CORE_PROFILE",
+    "PRICE_LIMITS",
+    "MARKET_BREADTH",
+    "MARKET_PARTICIPATION",
+  ]),
   RESEARCH: new Set([
     "D0",
     "D1",
@@ -58,6 +68,10 @@ const CURRENT_MODULE_CODES = {
     "SECTOR_PULSE",
     "SECTOR_TRANSITION",
     "SECTOR_FOLLOWUP",
+    "FORWARD_PATH",
+    "COHORT_STATS",
+    "FEP_BASELINE",
+    "OBSERVATION_SEGMENTS",
   ]),
 };
 

@@ -1260,12 +1260,35 @@ def _read_baostock_d1_candidate_page(
             "D1_STRUCTURE_SOURCE_POOL_NOT_CLOSED",
             "目标日BaoStock QFQ总体未闭合。",
         )
-    target_rows = target_page.get("rows", ())
+    from stock_a.sources.baostock.identity import eligible_research_board
+
+    target_rows = [
+        row
+        for row in target_page.get("rows", ())
+        if eligible_research_board(row.get("source_symbol")) is not None
+    ]
     symbols = tuple(row["source_symbol"] for row in target_rows)
-    if not symbols or len(set(symbols)) != len(symbols):
+    if len(set(symbols)) != len(symbols):
         raise PgResearchBindingError(
-            "D1_STRUCTURE_TARGET_PAGE_INVALID", "目标日BaoStock证券页为空或重复。"
+            "D1_STRUCTURE_TARGET_PAGE_INVALID", "目标日BaoStock证券页存在重复代码。"
         )
+    if not symbols:
+        return {
+            "status": "AVAILABLE",
+            "target_session": target_session.isoformat(),
+            "source_capture_id": source_capture_id,
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "version_status": target_page["version_status"],
+            "partition_closed": target_page["partition_closed"],
+            "total_count": target_page["total_count"],
+            "version_row_count": target_page["version_row_count"],
+            "version_expected_row_count": target_page["version_expected_row_count"],
+            "offset": target_page["offset"],
+            "page_count": target_page["page_count"],
+            "next_offset": target_page["next_offset"],
+            "candidates": [],
+            "rows": [],
+        }
     rows_by_symbol: dict[str, list[Mapping[str, Any]]] = {
         symbol: [] for symbol in symbols
     }
@@ -1550,7 +1573,7 @@ def discover_source_d1_structures(
                 expected_raw_row_count=page["version_row_count"],
             )
             source_context_read_count += 1
-            source_pool_total = page["version_row_count"]
+            source_pool_total = source_context.get("research_expected_row_count")
         context = source_context
         if (
             page["version_status"] != "CLOSED"
@@ -1795,7 +1818,8 @@ def discover_source_d1_structures(
                 selected_detail = detail
 
         source_page_count += 1
-        expected_next = source_offset + len(candidates)
+        raw_page_count = int(page.get("page_count", len(candidates)))
+        expected_next = source_offset + raw_page_count
         if page["next_offset"] is None:
             if expected_next != page["total_count"]:
                 raise PgResearchBindingError(
@@ -1803,7 +1827,7 @@ def discover_source_d1_structures(
                 )
             break
         if (
-            not candidates
+            raw_page_count <= 0
             or page["next_offset"] != expected_next
             or page["next_offset"] >= page["total_count"]
         ):
@@ -1816,7 +1840,7 @@ def discover_source_d1_structures(
         source_context is None
         or source_pool_total is None
         or len(seen_symbols) != source_pool_total
-        or len(seen_symbols) != source_context["raw_row_count"]
+        or len(seen_symbols) != source_context["research_expected_row_count"]
     ):
         raise PgResearchBindingError(
             "D1_STRUCTURE_POOL_INCOMPLETE", "目标日来源池未完全评价"

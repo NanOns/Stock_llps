@@ -57,6 +57,7 @@ def read_source_pool_rps(
         symbols: list[str] = []
         page_offset = 0
         total = None
+        raw_seen = 0
         while True:
             page = read_baostock_price_page(
                 config,
@@ -81,16 +82,26 @@ def read_source_pool_rps(
                 total = int(page["total_count"])
             elif int(page["total_count"]) != total:
                 raise ValueError("RPS端点分页期间分母发生变化")
+            from stock_a.sources.baostock.identity import eligible_research_board
+
+            page_rows = page.get("rows", ())
+            raw_seen += len(page_rows)
             symbols.extend(
                 str(row["source_symbol"])
-                for row in page.get("rows", ())
+                for row in page_rows
                 if isinstance(row, Mapping)
+                and eligible_research_board(row.get("source_symbol")) is not None
             )
             next_offset = page.get("next_offset")
             if next_offset is None:
                 break
             page_offset = int(next_offset)
-        if total is None or len(symbols) != total or len(set(symbols)) != total:
+        if (
+            total is None
+            or raw_seen != total
+            or not symbols
+            or len(set(symbols)) != len(symbols)
+        ):
             raise ValueError("RPS端点代码总体与分页分母不闭合")
         endpoint_members[offset] = tuple(sorted(symbols))
 

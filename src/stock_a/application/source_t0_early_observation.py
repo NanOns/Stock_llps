@@ -232,7 +232,7 @@ def persist_source_t0_early_observations_from_saved(
         target_session=target_session,
         research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
-        expected_source_count=source_version["capture_expected_row_count"],
+        expected_source_count=source_version["research_expected_row_count"],
         snapshot_ids=snapshot_ids,
     )
     seed_scope = inputs.get("seed_scope")
@@ -243,7 +243,7 @@ def persist_source_t0_early_observations_from_saved(
         or seed_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
         or seed_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
         or seed_scope.get("source_count")
-        != source_version.get("capture_expected_row_count")
+        != source_version.get("research_expected_row_count")
     ):
         raise SourceT0EarlyObservationError(
             "T0_EARLY_SEED_CAPTURE_INVALID",

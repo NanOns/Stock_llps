@@ -68,10 +68,9 @@ def research_universe_preview(
         "ALL",
         "MAIN_BOARD",
         "GEM",
-        "STAR_BOARD",
     }:
         raise ResearchEntryError(
-            "UNIVERSE_FILTER_INVALID", "board过滤只接受ALL、MAIN_BOARD、GEM或STAR_BOARD"
+            "UNIVERSE_FILTER_INVALID", "board过滤只接受ALL、MAIN_BOARD或GEM"
         )
     market_filter = market_filter.upper()
     board_filter = board_filter.upper()
@@ -127,7 +126,7 @@ def research_universe_preview(
             or any(
                 not isinstance(item.get("symbol"), str)
                 or item.get("market") not in {"SH", "SZ"}
-                or item.get("board") not in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
+                or item.get("board") not in {"MAIN_BOARD", "GEM"}
                 for item in candidates
             )
             or len({item["symbol"] for item in candidates}) != len(candidates)

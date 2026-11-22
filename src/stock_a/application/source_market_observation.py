@@ -195,7 +195,7 @@ def read_market_observation_sessions(
     allow_missing_market: bool = False,
 ) -> list[dict[str, Any]]:
     """先完整计算每个来源池，再按相邻会话和来源代码归并三态。"""
-    if not sessions or len(sessions) > 75 or tuple(sorted(set(sessions))) != sessions:
+    if not sessions or len(sessions) > 250 or tuple(sorted(set(sessions))) != sessions:
         raise ValueError("研究会话必须非空、唯一且递增")
     if sessions[-1] > research_cutoff:
         raise ValueError("研究会话不得晚于截止日")

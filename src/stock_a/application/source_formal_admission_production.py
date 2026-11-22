@@ -343,7 +343,7 @@ def run_source_formal_admission_from_saved(
             "目标日paired BaoStock双坐标来源分区未闭合，不生成准入分母",
         )
     source_capture_id = source["source_capture_id"]
-    expected_count = source["capture_expected_row_count"]
+    expected_count = source["research_expected_row_count"]
     d0 = read_source_d0_scenario_day(
         config,
         target_session=target_session,

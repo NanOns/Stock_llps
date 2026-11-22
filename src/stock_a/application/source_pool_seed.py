@@ -666,12 +666,16 @@ def compute_source_pool_seed(
             profiles = {symbol: {} for symbol in rps["facts"]}
             break
         if (
-            profile_page["source_pool_total"] != len(rps["facts"])
+            profile_page["source_pool_total"] < len(rps["facts"])
             or profile_page["history_window"]["requested_session_count"]
             != history_session_count
         ):
             raise ValueError("画像与精确来源池身份、窗口或分母不一致")
+        from stock_a.sources.baostock.identity import eligible_research_board
+
         for item in profile_page["rows"]:
+            if eligible_research_board(item["source_symbol"]) is None:
+                continue
             if item["source_symbol"] in profiles:
                 raise ValueError("画像来源代码重复")
             profiles[item["source_symbol"]] = item
@@ -720,15 +724,20 @@ def compute_source_pool_seed(
                 board="ALL",
             )
             if (
-                target_page["total_count"] != len(profiles)
+                target_page["total_count"] < len(profiles)
                 or target_page["version_status"] != "CLOSED"
                 or target_page["partition_closed"] is not True
             ):
                 raise ValueError("BaoStock QFQ来源池与画像身份不一致")
+            from stock_a.sources.baostock.identity import eligible_research_board
+
             selected_target_rows = [
                 row
                 for row in target_page["rows"]
-                if selected_symbols is None or row["source_symbol"] in selected_symbols
+                if eligible_research_board(row.get("source_symbol")) is not None
+                and (
+                    selected_symbols is None or row["source_symbol"] in selected_symbols
+                )
             ]
             page_symbols = tuple(row["source_symbol"] for row in selected_target_rows)
             histories_by_symbol = {symbol: [] for symbol in page_symbols}
@@ -968,7 +977,9 @@ def compute_source_pool_seed(
         "corporate_action_continuity": rps["corporate_action_continuity"],
         "formal_research_universe": rps["formal_research_universe"],
         "endpoint_counts": rps["endpoint_counts"],
-        "source_pool_total": len(profiles),
+        "source_pool_total": sum(
+            1 for symbol in profiles if eligible_research_board(symbol) is not None
+        ),
         "seed_evaluated_count": len(seed_facts),
         "seed_evaluation_scope": "FULL_SOURCE_POOL"
         if selected_symbols is None

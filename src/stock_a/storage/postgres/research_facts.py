@@ -325,7 +325,8 @@ def write_forward_path_rows(
     horizon, path_version, calendar_revision, endpoint_session = first[3:7]
     if (
         type(target) is not date
-        or horizon != 1
+        or type(horizon) is not int
+        or horizon not in (1, 3, 5, 10, 20)
         or path_version != PATH_VERSION
         or type(endpoint_session) is not date
         or target >= endpoint_session
@@ -372,7 +373,7 @@ def write_forward_path_rows(
 
         for label, session in (("T0", target), ("T+1", endpoint_session)):
             cursor.execute(
-                """WITH request_codes AS (
+                r"""WITH request_codes AS (
                        SELECT source_code,
                               count(*)=2 AND count(DISTINCT adjustment_flag)=2
                                 AND count(DISTINCT eligible_start_session)=1
@@ -387,9 +388,11 @@ def write_forward_path_rows(
                    ), expected(source_symbol) AS (
                        SELECT upper(source_code) FROM request_codes
                        WHERE %s BETWEEN eligible_start AND eligible_end AND complete
+                         AND upper(source_code) ~ '^(SH\.(600|601|603|605)|SZ\.(000|001|002|003|300|301))[0-9]{3}$'
                    ), stored(source_symbol) AS (
                        SELECT source_symbol FROM source_raw_daily
                        WHERE session_date=%s AND source_capture_id=%s
+                         AND board IN ('MAIN_BOARD', 'GEM')
                          AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL
                    ), delta AS (
                        (SELECT source_symbol FROM stored EXCEPT SELECT source_symbol FROM expected)
@@ -416,7 +419,7 @@ def write_forward_path_rows(
                 sorted(
                     row[0]
                     for row in cursor.execute(
-                        "SELECT source_symbol FROM source_raw_daily WHERE session_date=%s AND source_capture_id=%s ORDER BY source_symbol",
+                        "SELECT source_symbol FROM source_raw_daily WHERE session_date=%s AND source_capture_id=%s AND board IN ('MAIN_BOARD', 'GEM') ORDER BY source_symbol",
                         (session, source_capture_id),
                     ).fetchall()
                 )
@@ -488,22 +491,25 @@ def write_forward_path_rows(
         )
         if cursor.fetchone() != (len(symbols), len(symbols)):
             raise ResearchFactConflict("T+1typed结果写入后未闭合T0来源池分母")
-        from stock_a.storage.postgres.source_s2_t1_cohort import (
-            persist_source_s2_t1_cohort_in_transaction,
-        )
+        if horizon == 1:
+            from stock_a.storage.postgres.source_s2_t1_cohort import (
+                persist_source_s2_t1_cohort_in_transaction,
+            )
 
-        cohort_result = persist_source_s2_t1_cohort_in_transaction(
-            cursor,
-            target_session=target,
-            endpoint_session=endpoint_session,
-            research_cutoff=research_cutoff,
-            source_capture_id=source_capture_id,
-            endpoint_source_capture_id=endpoint_source_capture_id,
-            source_symbols=symbols,
-            path_rule_version=path_version,
-            calendar_revision=calendar_revision,
-            insert_and_compare=_insert_and_compare,
-        )
+            cohort_result = persist_source_s2_t1_cohort_in_transaction(
+                cursor,
+                target_session=target,
+                endpoint_session=endpoint_session,
+                research_cutoff=research_cutoff,
+                source_capture_id=source_capture_id,
+                endpoint_source_capture_id=endpoint_source_capture_id,
+                source_symbols=symbols,
+                path_rule_version=path_version,
+                calendar_revision=calendar_revision,
+                insert_and_compare=_insert_and_compare,
+            )
+        else:
+            cohort_result = {"inserted": 0, "expected_rows": 0}
         if inserted:
             cursor.execute(
                 "DELETE FROM source_cohort_group_stats WHERE target_session=%s AND source_capture_id=%s",
@@ -737,7 +743,8 @@ def write_computed_rule_rows(
     ):
         cursor.execute(
             "SELECT source_symbol,source_capture_id FROM source_raw_daily "
-            "WHERE session_date=%s AND source_capture_id=%s ORDER BY source_symbol",
+            "WHERE session_date=%s AND source_capture_id=%s "
+            "AND board IN ('MAIN_BOARD', 'GEM') ORDER BY source_symbol",
             (target, source_capture_id),
         )
         raw_rows = cursor.fetchall()

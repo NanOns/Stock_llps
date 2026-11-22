@@ -148,11 +148,14 @@ def compute_source_market_context(
     roster_by_symbol = {
         item["source_symbol"]: item for item in roster.get("symbols", [])
     }
+    from stock_a.sources.baostock.identity import eligible_research_board
+
     source_symbols = tuple(
         sorted(
             symbol
             for symbol, item in roster_by_symbol.items()
-            if item.get("eligible_start_session")
+            if eligible_research_board(symbol) is not None
+            and item.get("eligible_start_session")
             and item.get("eligible_end_session")
             and item["eligible_start_session"]
             <= target_session.isoformat()
@@ -584,16 +587,22 @@ def source_market_context_payload(
         "classification": "UNKNOWN",
         "reason": "尚无与该来源范围绑定的合法PRIMARY_MARKET参考序列。",
     }
-    pressure_axis = {
-        "status": "UNKNOWN",
-        "classification": "UNKNOWN",
-        "reason": "没有已验证的日期有效涨跌停制度事实，不能确定可判定分母和覆盖。",
-    }
+    from stock_a.storage.postgres.price_limits import read_market_pressure_summary
+
+    pressure_axis = read_market_pressure_summary(
+        config,
+        target_session=market.target_session,
+        source_capture_id=cohort.source_capture_id,
+        calendar_revision=market.calendar["calendar_revision"],
+    )
+    pressure_classification = pressure_axis.get("classification", "UNKNOWN")
+    if pressure_axis.get("status") != "OBSERVED":
+        pressure_classification = None
     composite = market_environment_label(
         None,
         breadth_classification,
         participation_classification,
-        None,
+        pressure_classification,
     )
     composite["reason"] = (
         "按冻结有序规则枚举未知轴的所有合法补全；仅当所有补全标签唯一时才报告综合标签。"
