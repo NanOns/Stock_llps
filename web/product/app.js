@@ -4460,10 +4460,13 @@ function renderSourceObservationSegment(item, context) {
         );
       } else {
         try {
+          const targetCaptureId = String(
+            item.anchor_capture_id ?? item.source_capture_id,
+          );
           const fepResults = await Promise.all(
             [1, 3, 5].map(async (horizon) => {
               const query = new URLSearchParams({
-                source_capture_id: String(item.source_capture_id),
+                source_capture_id: targetCaptureId,
                 rule: item.rule_id,
                 horizon: String(horizon),
                 lane: fepLane,
@@ -4480,8 +4483,7 @@ function renderSourceObservationSegment(item, context) {
               (fact) =>
                 fact.target_session === item.t0_session &&
                 fact.rule_id === item.rule_id &&
-                String(fact.source_capture_id) ===
-                  String(item.anchor_capture_id) &&
+                String(fact.source_capture_id) === targetCaptureId &&
                 fact.profile_revision === item.profile_revision &&
                 fact.history_session_count === item.history_session_count &&
                 fact.d1_history_session_count ===
@@ -7772,9 +7774,9 @@ async function loadExtra(page) {
             : "目录中未保存",
         ],
         [
-          "来源捕获 / 质量",
+          "来源坐标 / QFQ覆盖",
           version
-            ? `${version.capture_read_started_at} → ${version.capture_validated_at} · ${version.source_time_quality} · ${version.source_clock_role}`
+            ? `${(version.price_coordinates || [version.price_coordinate]).filter(Boolean).join(" + ")} · QFQ ${version.qfq_row_count ?? "UNKNOWN"}/${version.qfq_expected_row_count ?? "UNKNOWN"} · ${version.version_status || "UNKNOWN"}`
             : "UNKNOWN",
         ],
         ["画像修订数", profileCount],

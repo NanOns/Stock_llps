@@ -3156,12 +3156,11 @@ def create_or_resume_job(
                     """UPDATE stock.data_job_progress
                        SET status='NOT_STARTED',completed_units=0,expected_rows=NULL,
                            verified_rows=NULL,inserted_rows=0,updated_rows=0,deleted_rows=0,
-
                            profile_revision=NULL,producer_version=NULL,
                            profile_history_session_count=NULL,d1_history_session_count=NULL,
                            calendar_revision=NULL,industry_snapshot_id=NULL,concept_snapshot_id=NULL,
                            quality_status=NULL,error_code=NULL,error_message=NULL,
-                           updated_at=clock_timestamp(),completed_at=NULL
+                           verified_at=NULL,updated_at=clock_timestamp(),completed_at=NULL
                        WHERE job_id=%s
                          AND status IN ('FAILED','INTERRUPTED','BLOCKED','INCOMPLETE')""",
                     (existing_id,),

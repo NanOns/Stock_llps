@@ -20,6 +20,7 @@ _FIELD_MAP = {
     "high": "high",
     "low": "low",
     "close": "close",
+    "preclose": "preclose",
     "volume": "volume",
     "amount": "amount",
     "turn": "turn",
