@@ -12,6 +12,27 @@ from stock_a.research.entry_history.history_preview import (
 from stock_a.research.entry_context.sessions import _load_calendar
 
 
+def _qfq_history_window_counts(
+    rows_by_session: Mapping[date, Mapping[str, Any]],
+    expected_sessions: Sequence[date],
+) -> tuple[int, int, int]:
+    def observed(row: Mapping[str, Any] | None) -> bool:
+        return bool(
+            row
+            and row.get("qfq_bar_status") == "TARGET_PRESENT"
+            and row.get("qfq_price_quality") == "OBSERVED"
+        )
+
+    stored_qfq_bars = sum(observed(row) for row in rows_by_session.values())
+    ma20_valid = sum(
+        observed(rows_by_session.get(day)) for day in expected_sessions[-20:]
+    )
+    atr20_valid = sum(
+        observed(rows_by_session.get(day)) for day in expected_sessions[-21:]
+    )
+    return stored_qfq_bars, ma20_valid, atr20_valid
+
+
 def research_universe_pg_history_preview(
     *,
     target_session: str,
@@ -121,22 +142,8 @@ def research_universe_pg_history_preview(
                 _calendar_sessions,
             ) = _load_calendar(date.fromisoformat(target_session))
             stored_count = len(row_dates)
-            valid_count = sum(
-                row.get("qfq_bar_status") == "TARGET_PRESENT"
-                and row.get("qfq_price_quality") == "OBSERVED"
-                for row in candidate["history_rows"]
-            )
-            ma20_valid_count = sum(
-                day in row_dates
-                and row_dates[day].get("qfq_bar_status") == "TARGET_PRESENT"
-                and row_dates[day].get("qfq_price_quality") == "OBSERVED"
-                for day in expected[-20:]
-            )
-            atr20_valid_count = sum(
-                day in row_dates
-                and row_dates[day].get("qfq_bar_status") == "TARGET_PRESENT"
-                and row_dates[day].get("qfq_price_quality") == "OBSERVED"
-                for day in expected[-21:]
+            valid_count, ma20_valid_count, atr20_valid_count = (
+                _qfq_history_window_counts(row_dates, expected)
             )
             results.append(
                 {

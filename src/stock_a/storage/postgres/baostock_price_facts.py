@@ -3420,6 +3420,14 @@ def read_baostock_price_detail(
     }
 
 
+def _basic_name_content_matches(
+    existing_row: Sequence[Any], expected_item: Mapping[str, Any]
+) -> bool:
+    return len(existing_row) > 2 and existing_row[2] == expected_item.get(
+        "display_name"
+    )
+
+
 def persist_baostock_basic_names(
     config: Mapping[str, Any],
     *,
@@ -3515,8 +3523,9 @@ def persist_baostock_basic_names(
                 len(existing_by_symbol) == len(expected_by_symbol)
                 and set(existing_by_symbol) == set(expected_by_symbol)
                 and all(
-                    existing_by_symbol[symbol][2]
-                    == expected_by_symbol[symbol]["display_name"]
+                    _basic_name_content_matches(
+                        existing_by_symbol[symbol], expected_by_symbol[symbol]
+                    )
                     and existing_by_symbol[symbol][1]
                     == expected_by_symbol[symbol]["market"]
                     and existing_by_symbol[symbol][3]
