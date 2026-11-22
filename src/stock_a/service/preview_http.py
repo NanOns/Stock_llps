@@ -920,6 +920,9 @@ def _baostock_source_context(
         and qfq_version.get("coverage_status") == "COMPLETE"
     )
     from stock_a.sources.baostock.identity import eligible_research_board
+    from stock_a.storage.postgres.baostock_price_facts import (
+        read_baostock_capture_roster,
+    )
 
     roster = read_baostock_capture_roster(
         config,

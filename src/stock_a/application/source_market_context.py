@@ -550,6 +550,7 @@ def source_market_context_payload(
     market: SourceMarketContextRead,
     *,
     market_participation: Mapping[str, Any] | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """输出市场宽度摘要，不暴露逐来源代码计算明细。"""
     calculation = market.calculation
@@ -589,8 +590,17 @@ def source_market_context_payload(
     }
     from stock_a.storage.postgres.price_limits import read_market_pressure_summary
 
+    effective_config = (
+        config
+        if config is not None
+        else json.loads(
+            Path("G:/codex work/Stock A/config/runtime.defaults.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    )
     pressure_axis = read_market_pressure_summary(
-        config,
+        effective_config,
         target_session=market.target_session,
         source_capture_id=cohort.source_capture_id,
         calendar_revision=market.calendar["calendar_revision"],
