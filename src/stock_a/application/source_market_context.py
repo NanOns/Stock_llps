@@ -59,6 +59,7 @@ class SourceMarketContextRead:
     source_version: Mapping[str, Any]
     cohort: SourceCohortIdentity
     calculation: SourceMarketBreadthResult
+    pressure_axis: Mapping[str, Any] | None = None
 
 
 def fraction_payload(value: Fraction | None) -> dict[str, Any] | None:
@@ -535,6 +536,14 @@ def read_source_market_context(
         "revision_chain": revisions,
         "sessions": sessions,
     }
+    from stock_a.storage.postgres.price_limits import read_market_pressure_summary
+
+    pressure_axis = read_market_pressure_summary(
+        config,
+        target_session=target_session,
+        source_capture_id=cohort.source_capture_id,
+        calendar_revision=calendar["calendar_revision"],
+    )
     return SourceMarketContextRead(
         target_session,
         research_cutoff,
@@ -543,6 +552,7 @@ def read_source_market_context(
         source_version,
         cohort,
         calculation,
+        pressure_axis=pressure_axis,
     )
 
 
@@ -550,7 +560,7 @@ def source_market_context_payload(
     market: SourceMarketContextRead,
     *,
     market_participation: Mapping[str, Any] | None = None,
-    config: Mapping[str, Any] | None = None,
+    pressure_axis: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """输出市场宽度摘要，不暴露逐来源代码计算明细。"""
     calculation = market.calculation
@@ -588,28 +598,20 @@ def source_market_context_payload(
         "classification": "UNKNOWN",
         "reason": "尚无与该来源范围绑定的合法PRIMARY_MARKET参考序列。",
     }
-    import json as _json
-    from pathlib import Path as _Path
-
-    from stock_a.storage.postgres.price_limits import read_market_pressure_summary
-
-    effective_config = (
-        config
-        if config is not None
-        else _json.loads(
-            _Path("G:/codex work/Stock A/config/runtime.defaults.json").read_text(
-                encoding="utf-8"
-            )
-        )
+    resolved_pressure = dict(
+        pressure_axis
+        if pressure_axis is not None
+        else (getattr(market, "pressure_axis", None) or {})
     )
-    pressure_axis = read_market_pressure_summary(
-        effective_config,
-        target_session=market.target_session,
-        source_capture_id=cohort.source_capture_id,
-        calendar_revision=market.calendar["calendar_revision"],
-    )
-    pressure_classification = pressure_axis.get("classification", "UNKNOWN")
-    if pressure_axis.get("status") != "OBSERVED":
+    if not resolved_pressure:
+        resolved_pressure = {
+            "status": "NOT_COMPUTED",
+            "classification": "UNKNOWN",
+            "reason": "目标会话尚未生成已保存的涨跌停限价事实。",
+        }
+    pressure_axis_payload = resolved_pressure
+    pressure_classification = pressure_axis_payload.get("classification", "UNKNOWN")
+    if pressure_axis_payload.get("status") != "OBSERVED":
         pressure_classification = None
     composite = market_environment_label(
         None,
@@ -684,7 +686,7 @@ def source_market_context_payload(
             },
             "participation": participation_axis,
             "trend": trend_axis,
-            "pressure": pressure_axis,
+            "pressure": pressure_axis_payload,
             "composite": composite,
         },
         "denominator": {
