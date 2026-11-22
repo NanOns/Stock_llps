@@ -57,6 +57,14 @@ function coordinateOhlc(point, coordinate = state.timeline?.price_coordinate) {
   if (coordinate === "FORWARD_ADJUSTED") return point?.qfq_ohlc || null;
   return null;
 }
+function coordinateBarStatus(
+  point,
+  coordinate = state.timeline?.price_coordinate,
+) {
+  return coordinate === "RAW_UNADJUSTED"
+    ? point?.raw_status
+    : point?.qfq_bar_status;
+}
 function dayOhlc(point, coordinate = state.timeline?.price_coordinate) {
   const fields = coordinateOhlc(point, coordinate);
   return validOhlc(fields, fields?.quality);
@@ -102,7 +110,7 @@ function pointDetail(point) {
       `${coordinate || "UNKNOWN"} OHLC`,
       values
         ? `O ${values.open.exact} · H ${values.high.exact} · L ${values.low.exact} · C ${values.close.exact}`
-        : `不出蜡烛 · ${text(fields.reason || point.price_reason || point.raw_status)}`,
+        : `不出蜡烛 · ${text(fields.reason || point.price_reason || coordinateBarStatus(point, coordinate))}`,
     ],
     [
       "价格质量",
@@ -303,7 +311,7 @@ function renderCandlestickChart(data) {
       reason:
         coordinateOhlc(point, data.price_coordinate)?.reason ||
         point.price_reason ||
-        point.raw_status,
+        coordinateBarStatus(point, data.price_coordinate),
     }));
     notice.textContent = `实际官方会话 ${items.length} 个；有效${data.price_coordinate}蜡烛 ${items.filter((item) => item.ohlc).length} 个。缺Bar、读取失败、未保存价格行、坏值均保留原会话位置且不补价；橙线仅连接连续可观测Core MA20。`;
   } else {
@@ -565,7 +573,7 @@ async function setChartMode(mode) {
     await loadRawPeriods(
       version,
       binding.symbol,
-      {},
+      binding,
       () =>
         state.timeline !== null &&
         rawPeriodCacheKey(
@@ -631,7 +639,7 @@ function renderTimeline(data, errorMessage = "") {
     cell(tr, point.session_date);
     cell(
       tr,
-      `${text(point.raw_status)} · ${text(priceOhlc?.quality || point.price_quality)}${priceOhlc?.reason || point.price_reason ? ` · ${priceOhlc?.reason || point.price_reason}` : ""}`,
+      `${text(coordinateBarStatus(point, data.price_coordinate))} · ${text(priceOhlc?.quality || point.price_quality)}${priceOhlc?.reason || point.price_reason ? ` · ${priceOhlc?.reason || point.price_reason}` : ""}`,
     );
     cell(tr, priceOhlcText);
     cell(tr, timelineField(priceOhlc?.close));

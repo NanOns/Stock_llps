@@ -119,12 +119,18 @@ function renderPriceStructureObservation(point) {
   $("priceStructureIdentity").textContent =
     `${point.session_date} · ${state.timeline?.symbol || "—"} · ${coordinate} / ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · 来源捕获ID ${point.source_capture_id || "UNKNOWN"}`;
   const ohlc = dayOhlc(point);
+  const coordinateBarStatus =
+    coordinate === "RAW_UNADJUSTED" ? point.raw_status : point.qfq_bar_status;
+  const coordinateOhlcReason =
+    coordinate === "RAW_UNADJUSTED"
+      ? point.raw_ohlc?.reason
+      : point.qfq_ohlc?.reason;
   const summaries = [
     [
       `${coordinate} OHLC与收盘`,
       ohlc
         ? `O ${ohlc.open.exact} · H ${ohlc.high.exact} · L ${ohlc.low.exact} · C ${ohlc.close.exact}`
-        : `NOT_COMPUTED · 无${coordinate} OHLC · ${text(point.qfq_ohlc?.reason || point.raw_ohlc?.reason || point.price_reason || point.raw_status)}`,
+        : `NOT_COMPUTED · 无${coordinate} OHLC · ${text(coordinateOhlcReason || point.price_reason || coordinateBarStatus)}`,
     ],
     [
       "MA5 / 10 / 20 / 60排列",
@@ -355,6 +361,7 @@ function renderMa20DirectionHistory(history) {
     tableRow(rows, ["等待历史轨迹查询。", "", "", "", "", ""]);
     return;
   }
+  const binding = history.binding || {};
   if (history.status === "NOT_COMPUTED") {
     identity.textContent = `${binding.target_session || "—"} · ${binding.source_symbol || "—"} · ${binding.price_coordinate || "UNKNOWN"} · 来源捕获ID ${binding.source_capture_id || "UNKNOWN"}`;
     summary.textContent = `NOT_COMPUTED：MA20逐会话方向只在FORWARD_ADJUSTED坐标计算。${history.reason_code || ""}`;
@@ -363,7 +370,6 @@ function renderMa20DirectionHistory(history) {
   }
   const windowKey = $("ma20DirectionWindow").value;
   const windowData = history.windows?.[windowKey];
-  const binding = history.binding || {};
   if (!windowData) {
     summary.textContent = "MA20逐会话方向响应缺少所选窗口。";
     tableRow(rows, ["窗口不可用。", "", "", "", "", ""]);

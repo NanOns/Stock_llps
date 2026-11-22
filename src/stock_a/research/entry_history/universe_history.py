@@ -61,7 +61,7 @@ def research_universe_pg_history_preview(
                 ),
                 None,
             )
-            target_status = (target_row or {}).get("bar_status")
+            target_status = (target_row or {}).get("qfq_bar_status")
             target_status = {
                 "TARGET_PRESENT": "BAOSTOCK_TARGET_BAR_PRESENT",
                 "TARGET_MISSING": "BAOSTOCK_TARGET_BAR_MISSING",
@@ -122,20 +122,20 @@ def research_universe_pg_history_preview(
             ) = _load_calendar(date.fromisoformat(target_session))
             stored_count = len(row_dates)
             valid_count = sum(
-                row.get("bar_status") == "TARGET_PRESENT"
-                and row.get("price_quality") == "OBSERVED"
+                row.get("qfq_bar_status") == "TARGET_PRESENT"
+                and row.get("qfq_price_quality") == "OBSERVED"
                 for row in candidate["history_rows"]
             )
             ma20_valid_count = sum(
                 day in row_dates
-                and row_dates[day].get("bar_status") == "TARGET_PRESENT"
-                and row_dates[day].get("price_quality") == "OBSERVED"
+                and row_dates[day].get("qfq_bar_status") == "TARGET_PRESENT"
+                and row_dates[day].get("qfq_price_quality") == "OBSERVED"
                 for day in expected[-20:]
             )
             atr20_valid_count = sum(
                 day in row_dates
-                and row_dates[day].get("bar_status") == "TARGET_PRESENT"
-                and row_dates[day].get("price_quality") == "OBSERVED"
+                and row_dates[day].get("qfq_bar_status") == "TARGET_PRESENT"
+                and row_dates[day].get("qfq_price_quality") == "OBSERVED"
                 for day in expected[-21:]
             )
             results.append(

@@ -239,7 +239,7 @@ def _records_for_page(
             "history_records_status": result["history_records_status"],
             "history_actual_price_bar_count": int(window.get("real_bar_count", 0)),
             "target_bar_status": result["target_bar_status"],
-            "target_price_quality": target_row["price_quality"],
+            "target_price_quality": target_row["qfq_price_quality"],
             "ma20_window_valid_bar_count": int(result["ma20_window_valid_bar_count"]),
             "ma20_window_expected_bar_count": int(
                 result["ma20_window_expected_bar_count"]
@@ -979,7 +979,7 @@ def query_source_symbol_price_profile_relation_screen(
         result["session_relation"] = _profile_session_relation(
             result["before_snapshot"], result["after_snapshot"]
         )
-        result["research_mode"] = "SOURCE_SYMBOL_NON_PIT_RAW_PRICE_RELATION_SCREEN"
+        result["research_mode"] = "SOURCE_SYMBOL_NON_PIT_QFQ_PRICE_RELATION_SCREEN"
         result["formal_listing_universe"] = "UNKNOWN_NOT_CONNECTED"
         return result
     except (RawSourcePgError, PriceProfilePgError) as error:

@@ -516,7 +516,8 @@ def read_baostock_capture_roster(
             or type(range_start) is not date
             or type(range_end) is not date
             or range_start > range_end
-            or tuple(coordinates or ()) != (RAW_COORDINATE, QFQ_COORDINATE)
+            or len(tuple(coordinates or ())) != 2
+            or set(coordinates or ()) != {RAW_COORDINATE, QFQ_COORDINATE}
             or type(requested_symbol_count) is not int
             or requested_symbol_count <= 0
             or not isinstance(unit_contract_version, str)
@@ -604,8 +605,18 @@ def read_baostock_capture_roster(
                 "eligible_end_session": raw["eligible_end_session"] if raw else None,
                 "eligible_windows_match": windows_match,
                 "request_complete": windows_match
-                and _attempts_complete(raw["request_status"])
-                and _attempts_complete(qfq["request_status"]),
+                and all(
+                    _attempts_complete(request["request_status"])
+                    and (
+                        request["request_status"] == "NO_DATA"
+                        or (
+                            request["completed_through_session"] is not None
+                            and request["completed_through_session"]
+                            >= request["eligible_end_session"]
+                        )
+                    )
+                    for request in (raw, qfq)
+                ),
                 "coordinates": coordinates_for_code,
             }
         )
@@ -613,16 +624,18 @@ def read_baostock_capture_roster(
         raise BaoStockPriceFactsError(
             "CAPTURE_ROSTER_COUNT_INVALID", "已存BaoStock请求证券数超过捕获总体"
         )
+    registration_complete = len(symbols) == requested_symbol_count
     return {
-        "status": "AVAILABLE" if symbols else "EMPTY",
+        "status": "AVAILABLE" if registration_complete else "INCOMPLETE",
         "source_capture_id": int(capture_id),
         "capture_uuid": str(capture_uuid),
         "provider": provider,
         "range_start_session": range_start.isoformat(),
         "range_end_session": range_end.isoformat(),
-        "price_coordinates": list(coordinates),
+        "price_coordinates": [RAW_COORDINATE, QFQ_COORDINATE],
         "parser_contract": parser_contract,
         "requested_symbol_count": requested_symbol_count,
+        "registration_complete": registration_complete,
         "source_capture_unit_contract_version": unit_contract_version,
         "normalized_row_count": int(normalized_count),
         "captured_at_start": read_started_at.isoformat(),
@@ -1045,7 +1058,7 @@ def _coordinate_schema(
         fields = (
             _get(observation, "returned_fields") if observation is not None else None
         )
-    if fields is None:
+    if fields is None and coordinate == QFQ_COORDINATE:
         observation = _get(record, "qfq_observation")
         fields = (
             _get(observation, "returned_fields") if observation is not None else None
@@ -1257,7 +1270,13 @@ def _qfq_payload(
     response_fields: tuple[str, ...] | None,
 ) -> dict[str, Any]:
     observation = _get(record, "qfq_observation")
-    qfq = observation or _get(record, "qfq_ohlc")
+    legacy_ohlc = _get(record, "qfq_ohlc")
+    if observation is None and legacy_ohlc is not None:
+        raise BaoStockPriceFactsError(
+            "QFQ_RESPONSE_IDENTITY_REQUIRED",
+            "QFQ价格行必须绑定adjustflag=2响应身份；不能仅凭旧式OHLC对象创建观察值",
+        )
+    qfq = observation
     if qfq is None:
         reason = (
             "QFQ_BAR_NOT_RETURNED" if request_complete else "QFQ_REQUEST_NOT_COMPLETED"
@@ -2310,16 +2329,17 @@ def persist_baostock_price_batch(
             (source_capture_id,),
         )
         normalized_count = int(cursor.fetchone()[0])
+        facts_changed = _price_facts_changed(raw_rows_inserted, raw_rows_updated)
         cursor.execute(
             """UPDATE stock.source_captures
                SET normalized_count=%s,
                    validated_at=CASE
-                       WHEN normalized_count IS DISTINCT FROM %s
+                       WHEN normalized_count IS DISTINCT FROM %s OR %s
                        THEN GREATEST(read_started_at,clock_timestamp())
                        ELSE validated_at
                    END
                WHERE capture_id=%s AND provider='BAOSTOCK'""",
-            (normalized_count, normalized_count, source_capture_id),
+            (normalized_count, normalized_count, facts_changed, source_capture_id),
         )
         if cursor.rowcount != 1:
             raise BaoStockPriceFactsError(
@@ -2599,6 +2619,12 @@ def _price_row_payload(row: Mapping[str, Any], price_coordinate: str) -> dict[st
             "selected_high": row[f"{prefix}_high"],
             "selected_low": row[f"{prefix}_low"],
             "selected_close": row[f"{prefix}_close"],
+            "selected_bar_status": (
+                row["bar_status"] if raw_selected else row["qfq_bar_status"]
+            ),
+            "selected_bar_reason": (
+                row["bar_reason"] if raw_selected else row["qfq_bar_reason"]
+            ),
             "selected_price_quality": (
                 row["price_quality"] if raw_selected else row["qfq_price_quality"]
             ),
@@ -2625,6 +2651,10 @@ def _price_row_payload(row: Mapping[str, Any], price_coordinate: str) -> dict[st
         }
     )
     return result
+
+
+def _price_facts_changed(inserted_rows: int, updated_rows: int) -> bool:
+    return inserted_rows > 0 or updated_rows > 0
 
 
 def _read_price_rows(
@@ -2766,8 +2796,17 @@ def read_baostock_price_history(
         price_coordinate=price_coordinate,
     )
     rows_by_session = {row["session_date"].isoformat(): row for row in rows}
+    missing_sessions = [
+        session.isoformat()
+        for session in target_sessions
+        if session.isoformat() not in rows_by_session
+    ]
     return {
-        "status": "AVAILABLE" if rows else "NOT_COMPUTED",
+        "status": "NOT_COMPUTED"
+        if not rows
+        else "INCOMPLETE"
+        if missing_sessions
+        else "AVAILABLE",
         "source_symbol": normalized_symbol,
         "source_capture_id": source_capture_id,
         "price_coordinate": price_coordinate,
@@ -2779,11 +2818,7 @@ def read_baostock_price_history(
         "window_direction": "STARTS_AT_TARGET"
         if starts_at_target
         else "ENDS_AT_TARGET",
-        "missing_sessions": [
-            session.isoformat()
-            for session in target_sessions
-            if session.isoformat() not in rows_by_session
-        ],
+        "missing_sessions": missing_sessions,
         "database_write_attempted": False,
         "source_io_attempted": False,
     }
@@ -2842,6 +2877,49 @@ def read_baostock_price_history_batch(
         _scope,
     ):
         cursor.execute(
+            """SELECT requested_symbol_count
+               FROM stock.source_captures
+               WHERE capture_id=%s AND provider='BAOSTOCK'
+                 AND range_end_session<=%s""",
+            (source_capture_id, cutoff),
+        )
+        capture = cursor.fetchone()
+        if capture is None:
+            coverage = [
+                {
+                    "session_date": session.isoformat(),
+                    "source_capture_id": source_capture_id,
+                    "price_coordinate": price_coordinate,
+                    "expected_symbol_count": None,
+                    "completed_request_count": 0,
+                    "unregistered_symbol_count": len(symbols),
+                    "row_count": 0,
+                    "symbol_count": 0,
+                    "quality_row_count": 0,
+                    "observed_value_row_count": 0,
+                    "coverage_status": "NOT_COMPUTED",
+                }
+                for session in target_sessions
+            ]
+            return {
+                "status": "NOT_COMPUTED",
+                "source_capture_id": source_capture_id,
+                "price_coordinate": price_coordinate,
+                "target_sessions": [item.isoformat() for item in target_sessions],
+                "cutoff": cutoff.isoformat(),
+                "rows": [],
+                "coverage": coverage,
+                "page": {
+                    "offset": offset,
+                    "limit": limit,
+                    "count": 0,
+                    "total": 0,
+                    "next_offset": None,
+                },
+                "database_write_attempted": False,
+                "source_io_attempted": False,
+            }
+        cursor.execute(
             """SELECT count(*)::bigint
                FROM stock.source_raw_daily d
                JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
@@ -2891,25 +2969,46 @@ def read_baostock_price_history_batch(
         ]
         cursor.execute(
             """WITH request_codes AS (
-                   SELECT capture_id,source_code,
-                          count(*)=2 AND count(DISTINCT adjustment_flag)=2
-                            AND count(DISTINCT eligible_start_session)=1
-                            AND count(DISTINCT eligible_end_session)=1
-                            AND bool_and(request_status IN ('COMPLETED','NO_DATA')
-                              AND (request_status='NO_DATA'
-                                   OR completed_through_session>=range_end_session)) AS complete,
-                          min(eligible_start_session) AS eligible_start,
-                          max(eligible_end_session) AS eligible_end
-                   FROM stock.source_capture_requests
-                   WHERE capture_id=%s AND source_code=ANY(%s::text[])
-                     AND range_end_session<=%s
-                   GROUP BY capture_id,source_code
+                   SELECT requested.source_code,
+                          count(request.capture_id)::bigint AS request_count,
+                          count(DISTINCT request.adjustment_flag)::bigint
+                              AS coordinate_count,
+                          count(DISTINCT request.eligible_start_session)::bigint
+                              AS start_count,
+                          count(DISTINCT request.eligible_end_session)::bigint
+                              AS end_count,
+                          bool_and(
+                              request.request_status IN ('COMPLETED','NO_DATA')
+                              AND (request.request_status='NO_DATA'
+                                   OR request.completed_through_session>=request.range_end_session)
+                          ) AS complete,
+                          min(request.eligible_start_session) AS eligible_start,
+                          max(request.eligible_end_session) AS eligible_end
+                   FROM unnest(%s::text[]) AS requested(source_code)
+                   LEFT JOIN stock.source_capture_requests request
+                     ON request.capture_id=%s
+                    AND request.source_code=requested.source_code
+                    AND request.range_end_session<=%s
+                   GROUP BY requested.source_code
                ), eligible AS (
-                   SELECT d.session_date, count(*)::bigint AS expected_symbols,
-                          count(*) FILTER (WHERE r.complete)::bigint AS completed_requests
+                   SELECT d.session_date,
+                          count(*) FILTER (
+                              WHERE r.request_count=2 AND r.coordinate_count=2
+                                AND r.start_count=1 AND r.end_count=1
+                                AND d.session_date BETWEEN r.eligible_start AND r.eligible_end
+                          )::bigint AS expected_symbols,
+                          count(*) FILTER (
+                              WHERE r.request_count=2 AND r.coordinate_count=2
+                                AND r.start_count=1 AND r.end_count=1
+                                AND d.session_date BETWEEN r.eligible_start AND r.eligible_end
+                                AND r.complete
+                          )::bigint AS completed_requests,
+                          count(*) FILTER (
+                              WHERE r.request_count<>2 OR r.coordinate_count<>2
+                                OR r.start_count<>1 OR r.end_count<>1
+                          )::bigint AS unregistered_symbols
                    FROM (SELECT unnest(%s::date[]) AS session_date) d
                    CROSS JOIN request_codes r
-                   WHERE d.session_date BETWEEN r.eligible_start AND r.eligible_end
                    GROUP BY d.session_date
                ), stored AS (
                    SELECT session_date,count(*)::bigint AS row_count,
@@ -2923,15 +3022,16 @@ def read_baostock_price_history_batch(
                      AND session_date=ANY(%s::date[]) AND session_date<=%s
                    GROUP BY session_date
                )
-               SELECT e.session_date,e.expected_symbols,e.completed_requests,
+                SELECT e.session_date,e.expected_symbols,e.completed_requests,
+                       e.unregistered_symbols,
                       coalesce(s.row_count,0),coalesce(s.symbol_count,0),
                       coalesce(s.raw_quality_rows,0),coalesce(s.raw_observed_rows,0),
                       coalesce(s.qfq_quality_rows,0),coalesce(s.qfq_observed_rows,0)
                FROM eligible e LEFT JOIN stored s USING (session_date)
                ORDER BY e.session_date""",
             (
-                source_capture_id,
                 list(source_codes),
+                source_capture_id,
                 cutoff,
                 list(target_sessions),
                 source_capture_id,
@@ -2946,6 +3046,7 @@ def read_baostock_price_history_batch(
                 session,
                 expected,
                 completed,
+                unregistered,
                 row_count,
                 symbol_count,
                 raw_quality,
@@ -2953,10 +3054,15 @@ def read_baostock_price_history_batch(
                 qfq_quality,
                 qfq_observed,
             ) = row
+            quality_count = int(
+                raw_quality if price_coordinate == RAW_COORDINATE else qfq_quality
+            )
             complete_rows = (
-                int(expected) == int(completed)
+                int(unregistered) == 0
+                and int(expected) == int(completed)
                 and int(row_count) == int(expected)
                 and int(symbol_count) == int(row_count)
+                and quality_count == int(row_count)
             )
             coverage.append(
                 {
@@ -2965,13 +3071,10 @@ def read_baostock_price_history_batch(
                     "price_coordinate": price_coordinate,
                     "expected_symbol_count": int(expected),
                     "completed_request_count": int(completed),
+                    "unregistered_symbol_count": int(unregistered),
                     "row_count": int(row_count),
                     "symbol_count": int(symbol_count),
-                    "quality_row_count": int(
-                        raw_quality
-                        if price_coordinate == RAW_COORDINATE
-                        else qfq_quality
-                    ),
+                    "quality_row_count": quality_count,
                     "observed_value_row_count": int(
                         raw_observed
                         if price_coordinate == RAW_COORDINATE
@@ -2982,7 +3085,9 @@ def read_baostock_price_history_batch(
             )
     next_offset = offset + len(rows) if offset + len(rows) < total else None
     return {
-        "status": "AVAILABLE",
+        "status": "AVAILABLE"
+        if all(item["coverage_status"] == "COMPLETE" for item in coverage)
+        else "INCOMPLETE",
         "source_capture_id": source_capture_id,
         "price_coordinate": price_coordinate,
         "target_sessions": [item.isoformat() for item in target_sessions],
@@ -3087,13 +3192,16 @@ def read_baostock_price_page(
     ):
         where_market = "(%s='ALL' OR d.market=%s)"
         where_board = "(%s='ALL' OR d.board=%s)"
+        status_column = (
+            "bar_status" if price_coordinate == RAW_COORDINATE else "qfq_bar_status"
+        )
         cursor.execute(
-            """SELECT d.bar_status,count(*)::bigint
+            f"""SELECT d.{status_column},count(*)::bigint
                FROM stock.source_raw_daily d
                WHERE d.source_capture_id=%s AND d.session_date=%s
                  AND (%s='ALL' OR d.market=%s)
                  AND (%s='ALL' OR d.board=%s)
-               GROUP BY d.bar_status ORDER BY d.bar_status""",
+                GROUP BY d.{status_column} ORDER BY d.{status_column}""",
             (capture_id, target_session, market, market, board, board),
         )
         status_counts = {status: int(count) for status, count in cursor.fetchall()}
@@ -3407,7 +3515,9 @@ def persist_baostock_basic_names(
                 len(existing_by_symbol) == len(expected_by_symbol)
                 and set(existing_by_symbol) == set(expected_by_symbol)
                 and all(
-                    existing_by_symbol[symbol][1]
+                    existing_by_symbol[symbol][2]
+                    == expected_by_symbol[symbol]["display_name"]
+                    and existing_by_symbol[symbol][1]
                     == expected_by_symbol[symbol]["market"]
                     and existing_by_symbol[symbol][3]
                     == expected_by_symbol[symbol]["source_file"]
@@ -3680,7 +3790,8 @@ def read_baostock_price_catalog(
                    WHERE range_end_session<=%s
                    GROUP BY capture_id,source_code
                ), price_sessions AS (
-                   SELECT DISTINCT d.session_date,d.source_capture_id
+                SELECT DISTINCT d.session_date,d.source_capture_id,
+                       c.requested_symbol_count
                    FROM stock.source_raw_daily d
                    JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
                    WHERE d.session_date<=%s AND c.range_end_session<=%s
@@ -3693,7 +3804,11 @@ def read_baostock_price_catalog(
             + """
                ), request_coverage AS (
                    SELECT s.session_date,s.source_capture_id,
-                          count(*) FILTER (
+                           max(s.requested_symbol_count)::bigint
+                               AS capture_requested_symbol_count,
+                           count(DISTINCT r.source_code)::bigint
+                               AS registered_symbol_count,
+                           count(*) FILTER (
                               WHERE s.session_date BETWEEN r.eligible_start_session
                                                        AND r.eligible_end_session
                           )::bigint AS expected_symbol_count,
@@ -3726,8 +3841,9 @@ def read_baostock_price_catalog(
                     AND s.source_capture_id=d.source_capture_id
                    GROUP BY d.session_date,d.source_capture_id
                )
-               SELECT d.session_date,d.source_capture_id,r.requests_complete,
-                      r.expected_symbol_count,r.capture_request_response_row_count,
+                SELECT d.session_date,d.source_capture_id,r.requests_complete,
+                       r.capture_requested_symbol_count,r.registered_symbol_count,
+                       r.expected_symbol_count,r.capture_request_response_row_count,
                       d.row_count,d.symbol_count,d.raw_quality_row_count,
                       d.raw_observed_row_count,d.qfq_quality_row_count,
                       d.qfq_observed_row_count
@@ -3746,6 +3862,8 @@ def read_baostock_price_catalog(
             session,
             capture_id,
             requests_complete,
+            capture_requested,
+            registered_symbols,
             expected_symbols,
             request_response_rows,
             row_count,
@@ -3759,10 +3877,14 @@ def read_baostock_price_catalog(
         capture_id = int(capture_id)
         expected_symbols = int(expected_symbols)
         row_count = int(row_count)
+        capture_requested = int(capture_requested)
+        registered_symbols = int(registered_symbols)
         capture_ids_by_session.setdefault(session_text, set()).add(capture_id)
         rows_closed = (
             bool(requests_complete)
             and expected_symbols > 0
+            and registered_symbols == capture_requested
+            and capture_requested > 0
             and row_count == expected_symbols
             and int(symbol_count) == row_count
         )
@@ -3781,6 +3903,8 @@ def read_baostock_price_catalog(
                         else "INCOMPLETE"
                     ),
                     "requests_complete": bool(requests_complete),
+                    "capture_requested_symbol_count": capture_requested,
+                    "registered_symbol_count": registered_symbols,
                     "row_count": row_count,
                     "expected_row_count": expected_symbols,
                     "symbol_count": int(symbol_count),

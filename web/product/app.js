@@ -493,7 +493,7 @@ function enrollmentFollowupHistoryDetails(entry) {
       pathRows.append(
         node(
           "li",
-          `T+${path.horizon} ${path.due_session || "到期会话未知"} · ${forwardStatusLabels[path.status] || path.status || "UNKNOWN"} · RAW_UNADJUSTED 收盘变化 ${value} · 端点 ${path.endpoint_quality || "UNKNOWN"} · 路径 ${path.path_quality || "UNKNOWN"}${path.maturity ? ` · ${path.maturity}` : ""}${path.reason_codes?.length ? ` · ${path.reason_codes.join("、")}` : ""} · ${path.path_rule_version || "UNKNOWN_PATH_VERSION"} / 日历 ${path.calendar_revision || "UNKNOWN"}`,
+          `T+${path.horizon} ${path.due_session || "到期会话未知"} · ${forwardStatusLabels[path.status] || path.status || "UNKNOWN"} · FORWARD_ADJUSTED 收盘变化 ${value} · 端点 ${path.endpoint_quality || "UNKNOWN"} · 路径 ${path.path_quality || "UNKNOWN"}${path.maturity ? ` · ${path.maturity}` : ""}${path.reason_codes?.length ? ` · ${path.reason_codes.join("、")}` : ""} · ${path.path_rule_version || "UNKNOWN_PATH_VERSION"} / 日历 ${path.calendar_revision || "UNKNOWN"}`,
         ),
       );
     }
@@ -2388,7 +2388,7 @@ function renderPulseCohortSummary(comparison) {
   root.append(
     node(
       "p",
-      "仅统计本页T0与同类板块关系；OBSERVED收益只来自完整固定成员篮。跨日期、行业与概念不合并。NON_PIT、RAW_UNADJUSTED；不表示预测能力或正式Rotation。",
+      "仅统计本页T0与同类板块关系；OBSERVED收益只来自完整固定成员篮。跨日期、行业与概念不合并。NON_PIT、FORWARD_ADJUSTED；不表示预测能力或正式Rotation。",
       "muted",
     ),
   );
@@ -3428,11 +3428,11 @@ function seedT1SummaryText(outcome, includeContinuity = true) {
     endpoint.return_numerator != null &&
     endpoint.return_denominator != null
   ) {
-    return `${continuityPrefix}T+1 ${outcome.successor_session} · RAW_UNADJUSTED 收盘 ${outcome.t1_price.close} / T0 ${outcome.t0_price.close} · close(T+1)/close(T0)-1 = ${endpoint.return_numerator}/${endpoint.return_denominator} · ${condition} · NON_PIT`;
+    return `${continuityPrefix}T+1 ${outcome.successor_session} · FORWARD_ADJUSTED 收盘 ${outcome.t1_price.close} / T0 ${outcome.t0_price.close} · close(T+1)/close(T0)-1 = ${endpoint.return_numerator}/${endpoint.return_denominator} · ${condition} · NON_PIT`;
   }
   if (outcome.status === "NOT_DUE")
-    return `${continuityPrefix}个股T+1 NOT_DUE · ${condition} · NON_PIT / RAW_UNADJUSTED`;
-  return `${continuityPrefix}个股T+1 ${outcome.status || "UNKNOWN"}${outcome.successor_session ? ` ${outcome.successor_session}` : ""} · ${outcome.t1_price?.quality || "UNKNOWN"} ${reason} · ${condition} · NON_PIT / RAW_UNADJUSTED`;
+    return `${continuityPrefix}个股T+1 NOT_DUE · ${condition} · NON_PIT / FORWARD_ADJUSTED`;
+  return `${continuityPrefix}个股T+1 ${outcome.status || "UNKNOWN"}${outcome.successor_session ? ` ${outcome.successor_session}` : ""} · ${outcome.t1_price?.quality || "UNKNOWN"} ${reason} · ${condition} · NON_PIT / FORWARD_ADJUSTED`;
 }
 
 function seedT1ReasonText(outcome) {
@@ -3845,8 +3845,8 @@ async function loadFocusAuto(context, offset = 0) {
       industry_snapshot_id: context.industry_snapshot_id,
       concept_snapshot_id: context.concept_snapshot_id,
       ...(Number.isInteger(context.d1_history_session_count) &&
-      context.d1_history_session_count >= 1 &&
-      context.d1_history_session_count <= 75
+      context.d1_history_session_count >= 2 &&
+      context.d1_history_session_count <= 60
         ? { d1_history_session_count: context.d1_history_session_count }
         : {}),
       ...(Number.isInteger(context.stock_history_session_count) &&
@@ -4921,8 +4921,8 @@ async function loadD0Overview(c) {
         concept_snapshot_id: c.concept_snapshot_id,
         watch_group: "D0_NEW",
         ...(Number.isInteger(c.d1_history_session_count) &&
-        c.d1_history_session_count >= 1 &&
-        c.d1_history_session_count <= 75
+        c.d1_history_session_count >= 2 &&
+        c.d1_history_session_count <= 60
           ? { d1_history_session_count: c.d1_history_session_count }
           : {}),
         ...(Number.isInteger(c.stock_history_session_count) &&
@@ -6923,7 +6923,7 @@ function renderCohortEnrollmentGroups(result) {
   root.append(
     node(
       "p",
-      "每组T+N分母闭合为有价 + UNKNOWN + NOT_COMPUTED + NOT_DUE；正/非正只在有价端点中划分。中位数按精确有理数计算。T+5已到期范围最多两个独立T0，当前每次仅展示所选日期，状态为 INSUFFICIENT_INDEPENDENT_DATES。收益是SOURCE_SYMBOL_ONLY、RAW_UNADJUSTED、NON_PIT描述，不表示Focus Episode、D2、Priority、预测或策略有效性。",
+      "每组T+N分母闭合为有价 + UNKNOWN + NOT_COMPUTED + NOT_DUE；正/非正只在有价端点中划分。中位数按精确有理数计算。T+5已到期范围最多两个独立T0，当前每次仅展示所选日期，状态为 INSUFFICIENT_INDEPENDENT_DATES。收益是SOURCE_SYMBOL_ONLY、FORWARD_ADJUSTED、NON_PIT描述，不表示Focus Episode、D2、Priority、预测或策略有效性。",
       "muted",
     ),
   );
@@ -7506,7 +7506,7 @@ function renderCohortSymbolForward(result, lineFollowup) {
         touchRows.append(
           node(
             "li",
-            `T+${observation.offset ?? "?"} ${observation.session || ""} · ${observation.state || "UNKNOWN"} · RAW_UNADJUSTED close ${closeText}`,
+            `T+${observation.offset ?? "?"} ${observation.session || ""} · ${observation.state || "UNKNOWN"} · FORWARD_ADJUSTED close ${closeText}`,
           ),
         );
       }

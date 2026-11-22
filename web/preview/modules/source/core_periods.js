@@ -161,6 +161,17 @@ function rawPeriodsMatch(binding) {
     rawPeriodCacheKey(state.rawPeriodContext) === rawPeriodCacheKey(binding)
   );
 }
+function rawPeriodDailyRowMatchesIdentity(row, binding) {
+  if (!row || typeof row !== "object") return false;
+  const missingHistoryRow =
+    row.bar_status === "HISTORY_ROW_NOT_STORED" &&
+    row.bar_reason === "PG_HISTORY_SESSION_MISSING" &&
+    row.source_capture_id === null;
+  return (
+    row.price_coordinate === binding.price_coordinate &&
+    (row.source_capture_id === binding.source_capture_id || missingHistoryRow)
+  );
+}
 function clearRawPeriodState(
   message = "等待精确日期、代码、捕获与价格坐标的周期查询。",
 ) {
@@ -181,6 +192,14 @@ async function loadRawPeriods(
     price_coordinate: state.priceCoordinate,
     symbol,
   };
+  if (
+    !expectedIdentity ||
+    expectedIdentity.target_session !== binding.target_session ||
+    expectedIdentity.source_capture_id !== binding.source_capture_id ||
+    expectedIdentity.price_coordinate !== binding.price_coordinate
+  ) {
+    throw new Error("周期查询预期身份与当前个股日期、捕获或坐标不一致。");
+  }
   if (!isCurrent()) return null;
   const requestId = ++state.rawPeriodRequest;
   const cacheKey = rawPeriodCacheKey(binding);
@@ -225,10 +244,8 @@ async function loadRawPeriods(
           typeof period.time_role === "string" &&
           period.time_role === "NON_PIT_RETROSPECTIVE" &&
           Array.isArray(period.daily_rows) &&
-          period.daily_rows.every(
-            (row) =>
-              row.source_capture_id === binding.source_capture_id &&
-              row.price_coordinate === binding.price_coordinate,
+          period.daily_rows.every((row) =>
+            rawPeriodDailyRowMatchesIdentity(row, binding),
           ),
       )
     )
@@ -327,7 +344,11 @@ if (priceCoordinateSelect) {
     void loadRawPeriods(
       version,
       symbol,
-      { source_capture_id: version.source_capture_id },
+      {
+        target_session: version.target_session,
+        source_capture_id: version.source_capture_id,
+        price_coordinate: state.priceCoordinate,
+      },
       () =>
         selectedVersion()?.source_capture_id === version.source_capture_id &&
         state.priceCoordinate === priceCoordinateSelect.value,

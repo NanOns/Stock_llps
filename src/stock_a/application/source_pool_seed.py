@@ -893,6 +893,12 @@ def compute_source_pool_seed(
                     "qfq_close": str(current_close.value)
                     if current_close and current_close.quality == "OBSERVED"
                     else None,
+                    "qfq_price_quality": current_close.quality
+                    if current_close
+                    else "UNKNOWN_DATA",
+                    "qfq_price_reason": current_close.reason
+                    if current_close
+                    else "QFQ_TARGET_PRICE_UNAVAILABLE",
                     "fields": {
                         key: preview["core"]["fields"][key]
                         for key in ("core.ret1", "core.ret5", "core.ret20", "core.ma20")
@@ -1496,10 +1502,11 @@ def _board_native(pool, symbols, peer_members, board_id, *, peer_cache=None):
             ma = field(s, "core.ma20")
             if (
                 quote_state(s) == "TRUE"
-                and native.get("close") is not None
+                and native.get("qfq_close") is not None
+                and native.get("qfq_price_quality") == "OBSERVED"
                 and ma is not None
             ):
-                ma_pairs.append(Fraction(native["close"]) > ma)
+                ma_pairs.append(Fraction(native["qfq_close"]) > ma)
         qualified = quote_ok and len(ma_pairs) >= 5 and 5 * len(ma_pairs) >= 4 * n
         out["ma20_width"] = {
             "known": len(ma_pairs),

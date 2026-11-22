@@ -463,7 +463,7 @@ function renderComparisonResults() {
       appendText(
         facts,
         "span",
-        `前复权收盘 ${comparisonFieldText(close)} · ${text(point.raw_status)} · 原因 ${text(closeReason)}`,
+        `前复权收盘 ${comparisonFieldText(close)} · ${text(point.qfq_bar_status)} · 原因 ${text(closeReason)}`,
       );
       appendText(
         facts,

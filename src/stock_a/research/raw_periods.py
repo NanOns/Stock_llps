@@ -307,16 +307,38 @@ def _aggregate_raw_activity(
     calendar_closed: bool,
     window_truncated_session_count: int,
 ) -> tuple[Fraction | None, str, str | None, str | None]:
-    unit_statuses = {getattr(row, unit_status_field) for row in rows}
+    activity_rows = tuple(
+        row for row in rows if row.trade_status_state != "CONFIRMED_SUSPENSION"
+    )
+    if rows and not activity_rows:
+        return (
+            None,
+            "NOT_APPLICABLE",
+            "ALL_SESSIONS_CONFIRMED_SUSPENSION",
+            expected_unit,
+        )
+    if any(row.trade_status_state != "ACTUAL" for row in activity_rows):
+        reasons = tuple(
+            dict.fromkeys(
+                row.trade_status_reason
+                or row.bar_reason
+                or row.price_reason
+                or "TRADE_STATUS_UNKNOWN"
+                for row in activity_rows
+                if row.trade_status_state != "ACTUAL"
+            )
+        )
+        return None, "UNKNOWN", "|".join(reasons), "UNKNOWN"
+    unit_statuses = {getattr(row, unit_status_field) for row in activity_rows}
     unit_status = expected_unit if unit_statuses == {expected_unit} else "UNKNOWN"
     if not calendar_closed:
         return None, "NOT_COMPUTED", "CALENDAR_PERIOD_NOT_CLOSED", unit_status
     if window_truncated_session_count:
         return None, "UNKNOWN", "WINDOW_START_TRUNCATED", unit_status
-    values = [getattr(row, field) for row in rows]
-    qualities = [getattr(row, f"{field}_quality") for row in rows]
+    values = [getattr(row, field) for row in activity_rows]
+    qualities = [getattr(row, f"{field}_quality") for row in activity_rows]
     if (
-        rows
+        activity_rows
         and unit_status == expected_unit
         and all(quality == "OBSERVED" for quality in qualities)
         and all(value is not None and value >= 0 for value in values)
@@ -325,7 +347,7 @@ def _aggregate_raw_activity(
     reasons = list(
         dict.fromkeys(
             getattr(row, f"{field}_reason")
-            for row in rows
+            for row in activity_rows
             if getattr(row, f"{field}_reason")
         )
     )

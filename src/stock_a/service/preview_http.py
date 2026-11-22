@@ -769,10 +769,16 @@ def _raw_public_fields(
             "price_reason": _json_value(price_reason),
             "amount_quality": _json_value(row.get("amount_quality")),
             "amount_reason": _json_value(row.get("amount_reason")),
+            "raw_amount_quality": _json_value(row.get("raw_amount_quality")),
+            "raw_amount_reason": _json_value(row.get("raw_amount_reason")),
             "volume_quality": _json_value(row.get("volume_quality")),
             "volume_reason": _json_value(row.get("volume_reason")),
+            "raw_volume_quality": _json_value(row.get("raw_volume_quality")),
+            "raw_volume_reason": _json_value(row.get("raw_volume_reason")),
             "turn_quality": _json_value(row.get("turn_quality")),
             "turn_reason": _json_value(row.get("turn_reason")),
+            "amount_unit_status": row.get("amount_unit_status"),
+            "volume_unit_status": row.get("volume_unit_status"),
         },
         "source": {
             "provider": "BAOSTOCK",
@@ -781,6 +787,9 @@ def _raw_public_fields(
                 row.get("captured_at", row.get("capture_read_started_at"))
             ),
             "capture_clock_role": row.get("capture_clock_role"),
+            "source_clock_role": row.get(
+                "source_clock_role", row.get("capture_clock_role")
+            ),
             "source_time_quality": row.get("source_time_quality"),
             "source_available_at": _json_value(row.get("source_available_at")),
             "unit_contract_version": row.get("unit_contract_version"),
@@ -805,20 +814,28 @@ def _raw_public_fields(
 def _page_public_fields(
     page: Mapping[str, Any], *, price_coordinate: str
 ) -> dict[str, Any]:
-    price_prefix = "raw_" if price_coordinate == "RAW_UNADJUSTED" else "qfq_"
+    raw_selected = price_coordinate == "RAW_UNADJUSTED"
     candidates = [
         {
             "source_symbol": row["source_symbol"],
             "market": row["market"],
             "board": row["board"],
-            "bar_status": row["bar_status"],
-            "price_quality": row.get(f"{price_prefix}price_quality"),
-            "price_reason": row.get(f"{price_prefix}price_reason"),
+            "bar_status": row.get("bar_status")
+            if raw_selected
+            else row.get("qfq_bar_status"),
+            "price_quality": row.get("price_quality")
+            if raw_selected
+            else row.get("qfq_price_quality"),
+            "price_reason": row.get("price_reason")
+            if raw_selected
+            else row.get("qfq_price_reason"),
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "source_object_status": row.get(
                 "source_object_status", "BAOSTOCK_SOURCE_SYMBOL_OBSERVED"
             ),
-            "target_bar_status": row.get("target_bar_status"),
+            "target_bar_status": row.get("bar_status")
+            if raw_selected
+            else row.get("qfq_bar_status"),
             "stable_security_id_status": row.get(
                 "stable_security_id_status", "STABLE_SECURITY_ID_UNVERIFIED"
             ),
@@ -3131,11 +3148,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             )
         d1_history_session_count = (
             _positive_int(
-                body["d1_history_session_count"], "d1_history_session_count", 75
+                body["d1_history_session_count"], "d1_history_session_count", 60
             )
             if "d1_history_session_count" in body
             else None
         )
+        if d1_history_session_count is not None and d1_history_session_count < 2:
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_D1_WINDOW_INVALID",
+                "D1历史窗口须为2至60个官方会话",
+            )
         history_session_count = (
             _positive_int(body["history_session_count"], "history_session_count", 250)
             if "history_session_count" in body
@@ -3356,8 +3379,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         d1_history_session_count = _d1_material_int(
             body["d1_history_session_count"],
             "d1_history_session_count",
-            1,
-            _MAX_OFFSET,
+            2,
+            60,
         )
         snapshots = {}
         for field in ("industry_snapshot_id", "concept_snapshot_id"):

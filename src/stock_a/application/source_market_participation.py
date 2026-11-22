@@ -385,7 +385,12 @@ def produce_market_participation(
     result = calculate_market_participation(market, rows)
     result["research_cutoff"] = market.research_cutoff
     persisted = persist_market_participation(config, result)
-    readback = read_market_participation(config, market=market)
+    readback = read_market_participation(
+        config,
+        market=market,
+        profile_revision=result["profile_revision"],
+        producer_version=result["producer_version"],
+    )
     expected_fraction = (
         None
         if result["median_numerator"] is None

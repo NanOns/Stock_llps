@@ -1444,13 +1444,13 @@ def read_source_seed_t1_outcomes(
                         "close": str(t1_close) if t1_close is not None else None,
                         "reason": t1_reason,
                         "source_time_quality": (
-                            endpoint_capture[3]
+                            endpoint_capture[4]
                             if endpoint_capture_status == "AVAILABLE"
                             and endpoint_capture
                             else "UNKNOWN"
                         ),
                         "source_clock_role": (
-                            endpoint_capture[4]
+                            endpoint_capture[5]
                             if endpoint_capture_status == "AVAILABLE"
                             and endpoint_capture
                             else "UNKNOWN"

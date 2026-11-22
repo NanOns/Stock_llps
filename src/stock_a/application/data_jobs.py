@@ -28,6 +28,10 @@ class DataJobError(Exception):
 
 _MAX_SESSION_COUNT = 32767
 _MAX_PRICE_HISTORY_SESSIONS = 250
+_BAOSTOCK_KNOWN_SECURITY_TYPES = frozenset({"1", "2", "3", "4", "5"})
+_BAOSTOCK_SOURCE_BOARDS = frozenset(
+    {"MAIN_BOARD", "GEM", "STAR_BOARD", "BEIJING_BOARD"}
+)
 _STAGE_TABLES = {
     "SOURCE_BAOSTOCK_PRICES": ("stock.source_raw_daily",),
     "SOURCE_SECTOR_MEMBERS": (
@@ -165,15 +169,10 @@ def _request_fields(body: Any) -> dict[str, Any]:
     initialization_mode = body.get("initialization_mode", "REUSE_RAW")
     daily_mode = body.get("daily_mode", "CUSTOM")
     raw_response_journal_enabled = body.get("raw_response_journal_enabled", False)
-    if type(raw_response_journal_enabled) is not bool or (
-        raw_response_journal_enabled
-        and not (
-            mode == "INITIALIZE" and initialization_mode == "RESET_ALL_BUSINESS_FACTS"
-        )
-    ):
+    if type(raw_response_journal_enabled) is not bool or raw_response_journal_enabled:
         raise DataJobError(
             "RAW_RESPONSE_JOURNAL_SCOPE_INVALID",
-            "原始行情响应档案仅能由明确启用的RESET_ALL初始化任务使用。",
+            "现行股票来源链不生成或回放行情JSONL响应档案。",
         )
     if mode == "INITIALIZE":
         if initialization_mode not in {"REUSE_RAW", "RESET_ALL_BUSINESS_FACTS"}:
@@ -266,9 +265,9 @@ def _request_fields(body: Any) -> dict[str, Any]:
         d1_history_count = _positive_integer(
             d1_history_count, "d1_history_session_count"
         )
-        if d1_history_count < 2:
+        if d1_history_count < 2 or d1_history_count > 60:
             raise DataJobError(
-                "DATA_JOB_D1_WINDOW_INVALID", "D1历史窗口至少需要两个官方会话。"
+                "DATA_JOB_D1_WINDOW_INVALID", "D1历史窗口须为2至60个官方会话。"
             )
     if mode == "INITIALIZE" and initialization_mode == "RESET_ALL_BUSINESS_FACTS":
         if not {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}.issubset(
@@ -440,6 +439,24 @@ def _module_output_sessions(
     # FILL_MISSING候选不能按日期水位先行剔除。是否可跳过由任务完整请求键、
     # 来源包/捕获、算法/窗口身份以及实际PG表读回共同决定。
     return chosen
+
+
+def _forward_path_dependency_status(
+    due_horizons: Sequence[int], *, t1_seed_available: bool
+) -> tuple[str, str | None, str | None]:
+    if not due_horizons:
+        return (
+            "NOT_DUE",
+            "FORWARD_PATH_NOT_DUE",
+            "研究截止内尚无到期Forward后继会话。",
+        )
+    if not t1_seed_available:
+        return (
+            "NOT_COMPUTED",
+            "FORWARD_T1_SEED_UNAVAILABLE",
+            "T+1官方会话的精确Seed事实未在本任务计划或已存结果中闭合；保留未计算，可补齐依赖后重试。",
+        )
+    return "NOT_STARTED", None, None
 
 
 def _unit(
@@ -2672,17 +2689,25 @@ class DataJobCoordinator:
                     for h in (1, 3, 5, 10, 20)
                     if idx >= 0 and idx + h < len(eligible_cutoff)
                 ]
-                status = "NOT_STARTED" if due_horizons else "NOT_DUE"
+                t1_session = (
+                    eligible_cutoff[idx + 1]
+                    if idx >= 0 and idx + 1 < len(eligible_cutoff)
+                    else None
+                )
+                status, error_code, error_message = _forward_path_dependency_status(
+                    due_horizons,
+                    t1_seed_available=(
+                        t1_session is not None and seed_available(t1_session)
+                    ),
+                )
                 _unit(
                     plan["stage_units"],
                     stage="FORWARD_PATH",
                     target_session=day_date,
                     business_table="stock.source_forward_path_facts",
                     status=status,
-                    error_code=None if due_horizons else "FORWARD_PATH_NOT_DUE",
-                    error_message=None
-                    if due_horizons
-                    else "研究截止内尚无到期Forward后继会话。",
+                    error_code=error_code,
+                    error_message=error_message,
                 )
         if "COHORT_STATS" in request["selected_modules"]:
             for day_text in plan.get("module_output_sessions", {}).get(
@@ -3637,6 +3662,12 @@ def _prepare_reset_source_inputs(
     reset_already_completed: bool = False,
 ) -> dict[str, Any]:
     """清理前完成BaoStock双坐标小样本与TDX成员来源预检。"""
+    if plan.get("raw_response_journal_enabled") is True:
+        raise DataJobError(
+            "RAW_RESPONSE_JOURNAL_DISABLED",
+            "BaoStock响应体归档已停用；不得创建或回放JSONL行情文件。",
+            status=409,
+        )
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -3799,6 +3830,11 @@ def _prepare_reset_source_inputs(
         or basic.get("status") != "RESPONSE_RECEIVED"
         or basic.get("complete") is not True
         or not isinstance(basic.get("response_fields"), list)
+        or any(
+            not isinstance(field, str) or not field
+            for field in basic["response_fields"]
+        )
+        or len(set(basic["response_fields"])) != len(basic["response_fields"])
         or not {"code", "code_name", "ipoDate", "outDate", "type", "status"}.issubset(
             set(basic["response_fields"])
         )
@@ -3807,6 +3843,12 @@ def _prepare_reset_source_inputs(
         or target_list.get("status") != "RESPONSE_RECEIVED"
         or target_list.get("complete") is not True
         or not isinstance(target_list.get("response_fields"), list)
+        or any(
+            not isinstance(field, str) or not field
+            for field in target_list["response_fields"]
+        )
+        or len(set(target_list["response_fields"]))
+        != len(target_list["response_fields"])
         or not {"code", "code_name", "tradeStatus"}.issubset(
             set(target_list["response_fields"])
         )
@@ -3854,7 +3896,17 @@ def _prepare_reset_source_inputs(
             )
         symbol = normalize_baostock_symbol(row.get("code"))
         if symbol is None:
-            continue
+            raise DataJobError(
+                "RESET_BAOSTOCK_BASIC_CODE_INVALID",
+                "BaoStock基本资料含无法规范化的来源代码；不能静默缩小身份分母。",
+                status=503,
+            )
+        if row.get("type") not in _BAOSTOCK_KNOWN_SECURITY_TYPES:
+            raise DataJobError(
+                "RESET_BAOSTOCK_SECURITY_TYPE_UNKNOWN",
+                f"BaoStock基本资料证券{symbol}类型缺失或不在已登记值域；不能从来源分母静默排除。",
+                status=503,
+            )
         if symbol in basic_by_symbol:
             raise DataJobError(
                 "RESET_BAOSTOCK_BASIC_DUPLICATE",
@@ -3874,7 +3926,11 @@ def _prepare_reset_source_inputs(
             )
         symbol = normalize_baostock_symbol(row.get("code"))
         if symbol is None:
-            continue
+            raise DataJobError(
+                "RESET_BAOSTOCK_TARGET_CODE_INVALID",
+                "BaoStock目标日名录含无法规范化的来源代码；不能静默缩小身份分母。",
+                status=503,
+            )
         if symbol in target_symbols:
             raise DataJobError(
                 "RESET_BAOSTOCK_TARGET_LIST_DUPLICATE",
@@ -3891,20 +3947,37 @@ def _prepare_reset_source_inputs(
             )
         target_trade_status_by_symbol[symbol] = trade_status
 
+    missing_basic_symbols = target_symbols - set(basic_by_symbol)
+    if missing_basic_symbols:
+        raise DataJobError(
+            "RESET_BAOSTOCK_TARGET_BASIC_MISMATCH",
+            "BaoStock目标日名录中的代码缺少对应基本资料："
+            + ",".join(sorted(missing_basic_symbols)[:10]),
+            status=503,
+        )
+
     universe: list[str] = []
     basic_names: list[dict[str, str]] = []
     eligible_sessions_by_symbol: dict[str, tuple[date, ...]] = {}
     board_by_symbol: dict[str, str] = {}
     active_universe_at_target: set[str] = set()
+    unsupported_board_symbols: list[str] = []
+    source_type_stock_count = 0
+    known_nonstock_count = 0
     for symbol, row in sorted(basic_by_symbol.items()):
-        if row.get("type") != "1":
+        if row["type"] != "1":
+            known_nonstock_count += 1
             continue
+        source_type_stock_count += 1
         board_identity = classify_baostock_board(symbol)
-        if board_identity is None or board_identity[1] not in {
-            "MAIN_BOARD",
-            "GEM",
-            "STAR_BOARD",
-        }:
+        if board_identity is None:
+            raise DataJobError(
+                "RESET_BAOSTOCK_BOARD_IDENTITY_UNKNOWN",
+                f"BaoStock证券{symbol}无法分类板别；现有业务事实保持不变。",
+                status=503,
+            )
+        if board_identity[1] not in _BAOSTOCK_SOURCE_BOARDS:
+            unsupported_board_symbols.append(symbol)
             continue
         try:
             ipo_date = date.fromisoformat(row["ipoDate"])
@@ -3917,6 +3990,12 @@ def _prepare_reset_source_inputs(
                 f"BaoStock基本资料证券{symbol}的上市区间无效；现有业务事实保持不变。",
                 status=503,
             ) from error
+        if out_date is not None and ipo_date > out_date:
+            raise DataJobError(
+                "RESET_BAOSTOCK_LISTING_INTERVAL_CONFLICT",
+                f"BaoStock基本资料证券{symbol}上市日晚于退市日；现有业务事实保持不变。",
+                status=503,
+            )
         eligible = tuple(
             session
             for session in sessions
@@ -3946,13 +4025,25 @@ def _prepare_reset_source_inputs(
     board_counts: dict[str, int] = {}
     for board in board_by_symbol.values():
         board_counts[board] = board_counts.get(board, 0) + 1
+    identity_scope = {
+        "basic_rows_received": len(basic["rows"]),
+        "basic_codes_normalized": len(basic_by_symbol),
+        "target_rows_received": len(target_list["rows"]),
+        "target_codes_normalized": len(target_symbols),
+        "source_type_stock_count": source_type_stock_count,
+        "known_nonstock_count": known_nonstock_count,
+        "source_candidate_count": len(universe),
+        "unsupported_board_count": len(unsupported_board_symbols),
+        "unsupported_board_symbols": tuple(unsupported_board_symbols),
+        "board_counts": board_counts,
+    }
     target_stock_symbols = {
         symbol
         for symbol in target_symbols
         if symbol in basic_by_symbol
         and basic_by_symbol[symbol].get("type") == "1"
         and classify_baostock_board(symbol) is not None
-        and classify_baostock_board(symbol)[1] in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
+        and classify_baostock_board(symbol)[1] in _BAOSTOCK_SOURCE_BOARDS
     }
     if target_stock_symbols != active_universe_at_target:
         raise DataJobError(
@@ -4146,6 +4237,7 @@ def _prepare_reset_source_inputs(
         "target_sessions": [session.isoformat() for session in sessions],
         "source_symbols": universe,
         "board_counts": board_counts,
+        "identity_scope": identity_scope,
         "eligible_sessions_by_symbol": {
             symbol: [session.isoformat() for session in eligible]
             for symbol, eligible in sorted(eligible_sessions_by_symbol.items())
@@ -4185,6 +4277,7 @@ def _prepare_reset_source_inputs(
         "eligible_sessions_by_symbol": eligible_sessions_by_symbol,
         "board_by_symbol": board_by_symbol,
         "board_counts": board_counts,
+        "identity_scope": identity_scope,
         "basic_names": tuple(basic_names),
         "price_preflight": price_preflight,
         "capture_uuid": capture_uuid,
@@ -4510,6 +4603,11 @@ def _baostock_universe_from_identity(
         or basic.get("status") != "RESPONSE_RECEIVED"
         or basic.get("complete") is not True
         or not isinstance(basic.get("response_fields"), list)
+        or any(
+            not isinstance(field, str) or not field
+            for field in basic["response_fields"]
+        )
+        or len(set(basic["response_fields"])) != len(basic["response_fields"])
         or not {"code", "code_name", "ipoDate", "outDate", "type", "status"}.issubset(
             set(basic["response_fields"])
         )
@@ -4518,6 +4616,12 @@ def _baostock_universe_from_identity(
         or target_list.get("status") != "RESPONSE_RECEIVED"
         or target_list.get("complete") is not True
         or not isinstance(target_list.get("response_fields"), list)
+        or any(
+            not isinstance(field, str) or not field
+            for field in target_list["response_fields"]
+        )
+        or len(set(target_list["response_fields"]))
+        != len(target_list["response_fields"])
         or not {"code", "code_name"}.issubset(set(target_list["response_fields"]))
         or not isinstance(target_list.get("rows"), list)
     ):
@@ -4534,7 +4638,17 @@ def _baostock_universe_from_identity(
             )
         symbol = normalize_baostock_symbol(row.get("code"))
         if symbol is None:
-            continue
+            raise DataJobError(
+                "BAOSTOCK_BASIC_CODE_INVALID",
+                "BaoStock基本资料含无法规范化的来源代码；不能静默缩小身份分母。",
+                status=503,
+            )
+        if row.get("type") not in _BAOSTOCK_KNOWN_SECURITY_TYPES:
+            raise DataJobError(
+                "BAOSTOCK_SECURITY_TYPE_UNKNOWN",
+                f"BaoStock基本资料证券{symbol}类型缺失或不在已登记值域；不能从来源分母静默排除。",
+                status=503,
+            )
         if symbol in basic_by_symbol:
             raise DataJobError(
                 "BAOSTOCK_BASIC_DUPLICATE", "BaoStock基本资料证券代码重复。", status=503
@@ -4549,29 +4663,51 @@ def _baostock_universe_from_identity(
                 status=503,
             )
         symbol = normalize_baostock_symbol(row.get("code"))
-        if symbol is not None:
-            if symbol in target_symbols:
-                raise DataJobError(
-                    "BAOSTOCK_TARGET_LIST_DUPLICATE",
-                    "BaoStock目标日名录证券代码重复。",
-                    status=503,
-                )
-            target_symbols.add(symbol)
+        if symbol is None:
+            raise DataJobError(
+                "BAOSTOCK_TARGET_CODE_INVALID",
+                "BaoStock目标日名录含无法规范化的来源代码；不能静默缩小身份分母。",
+                status=503,
+            )
+        if symbol in target_symbols:
+            raise DataJobError(
+                "BAOSTOCK_TARGET_LIST_DUPLICATE",
+                "BaoStock目标日名录证券代码重复。",
+                status=503,
+            )
+        target_symbols.add(symbol)
+
+    missing_basic_symbols = target_symbols - set(basic_by_symbol)
+    if missing_basic_symbols:
+        raise DataJobError(
+            "BAOSTOCK_TARGET_BASIC_MISMATCH",
+            "BaoStock目标日名录中的代码缺少对应基本资料："
+            + ",".join(sorted(missing_basic_symbols)[:10]),
+            status=503,
+        )
 
     symbols: list[str] = []
     eligible: dict[str, tuple[date, ...]] = {}
     boards: dict[str, str] = {}
     names: list[dict[str, str]] = []
     active_at_target: set[str] = set()
+    unsupported_board_symbols: list[str] = []
+    source_type_stock_count = 0
+    known_nonstock_count = 0
     for symbol, row in sorted(basic_by_symbol.items()):
-        if row.get("type") != "1":
+        if row["type"] != "1":
+            known_nonstock_count += 1
             continue
+        source_type_stock_count += 1
         board_identity = classify_baostock_board(symbol)
-        if board_identity is None or board_identity[1] not in {
-            "MAIN_BOARD",
-            "GEM",
-            "STAR_BOARD",
-        }:
+        if board_identity is None:
+            raise DataJobError(
+                "BAOSTOCK_BOARD_IDENTITY_UNKNOWN",
+                f"BaoStock证券{symbol}无法分类板别；不能静默缩小来源分母。",
+                status=503,
+            )
+        if board_identity[1] not in _BAOSTOCK_SOURCE_BOARDS:
+            unsupported_board_symbols.append(symbol)
             continue
         try:
             ipo_date = date.fromisoformat(row["ipoDate"])
@@ -4584,6 +4720,12 @@ def _baostock_universe_from_identity(
                 f"BaoStock证券{symbol}上市区间日期无效。",
                 status=503,
             ) from error
+        if out_date is not None and ipo_date > out_date:
+            raise DataJobError(
+                "BAOSTOCK_LISTING_INTERVAL_CONFLICT",
+                f"BaoStock证券{symbol}上市日晚于退市日。",
+                status=503,
+            )
         window = tuple(
             day
             for day in sessions
@@ -4608,9 +4750,9 @@ def _baostock_universe_from_identity(
         symbol
         for symbol in target_symbols
         if symbol in basic_by_symbol
-        and basic_by_symbol[symbol].get("type") == "1"
+        and basic_by_symbol[symbol]["type"] == "1"
         and classify_baostock_board(symbol) is not None
-        and classify_baostock_board(symbol)[1] in {"MAIN_BOARD", "GEM", "STAR_BOARD"}
+        and classify_baostock_board(symbol)[1] in _BAOSTOCK_SOURCE_BOARDS
     }
     if not symbols or target_stock_symbols != active_at_target:
         raise DataJobError(
@@ -4628,6 +4770,18 @@ def _baostock_universe_from_identity(
         "board_counts": board_counts,
         "basic_names": tuple(names),
         "target_symbols": target_symbols,
+        "identity_scope": {
+            "basic_rows_received": len(basic["rows"]),
+            "basic_codes_normalized": len(basic_by_symbol),
+            "target_rows_received": len(target_list["rows"]),
+            "target_codes_normalized": len(target_symbols),
+            "source_type_stock_count": source_type_stock_count,
+            "known_nonstock_count": known_nonstock_count,
+            "source_candidate_count": len(symbols),
+            "unsupported_board_count": len(unsupported_board_symbols),
+            "unsupported_board_symbols": tuple(unsupported_board_symbols),
+            "board_counts": board_counts,
+        },
         "identity_snapshot": identity,
     }
 
@@ -4642,6 +4796,12 @@ def _execute_baostock_source_stage(
     begin_callback: Any,
 ) -> dict[str, Any] | None:
     """创建单一paired捕获并持久化全市场RAW/QFQ价格请求与事实。"""
+    if plan.get("raw_response_journal_enabled") is True:
+        raise DataJobError(
+            "RAW_RESPONSE_JOURNAL_DISABLED",
+            "BaoStock响应体归档已停用；不得创建或回放JSONL行情文件。",
+            status=409,
+        )
     from datetime import datetime, timezone
 
     from stock_a.application.baostock_daily_jobs import (
@@ -4768,10 +4928,12 @@ def _execute_baostock_source_stage(
             "BaoStock来源窗口超过runtime.defaults中明确登记的历史会话预算。",
             status=409,
         )
+    identity_scope: Mapping[str, Any] = {}
     if isinstance(prepared, Mapping):
         universe = tuple(prepared.get("source_symbols", ()))
         eligible_sessions_by_symbol = prepared.get("eligible_sessions_by_symbol", {})
         basic_names = tuple(prepared.get("basic_names", ()))
+        identity_scope = prepared.get("identity_scope", {})
         identity = prepared.get("identity_snapshot")
         preflight = prepared.get("price_preflight")
         preflight_logins = int(prepared.get("preflight_login_batches", 0))
@@ -4821,6 +4983,7 @@ def _execute_baostock_source_stage(
         universe = resolved["source_symbols"]
         eligible_sessions_by_symbol = resolved["eligible_sessions_by_symbol"]
         basic_names = resolved["basic_names"]
+        identity_scope = resolved["identity_scope"]
         preflight = None
         preflight_logins = 0
     if (
@@ -5289,6 +5452,7 @@ def _execute_baostock_source_stage(
     request_scope_closed = (
         final_roster.get("status") == "AVAILABLE"
         and final_roster.get("requested_symbol_count") == len(universe)
+        and final_roster.get("registration_complete") is True
         and set(final_roster_by_symbol) == set(universe)
         and all(
             item.get("eligible_windows_match") is True
@@ -5386,6 +5550,7 @@ def _execute_baostock_source_stage(
             "source_capture_id": source_capture_id,
             "capture_uuid": str(capture_uuid),
             "universe_count": len(universe),
+            "identity_scope": identity_scope,
             "batch_results": batch_results,
             "raw_response_archive_status": archive_status,
             "raw_response_archive_warnings": archive_warnings,
@@ -5403,6 +5568,7 @@ def _execute_baostock_source_stage(
         "source_capture_id": source_capture_id,
         "capture_uuid": str(capture_uuid),
         "universe_count": len(universe),
+        "identity_scope": identity_scope,
         "batch_results": batch_results,
         "raw_response_archive_status": archive_status,
         "raw_response_archive_warnings": archive_warnings,

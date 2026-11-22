@@ -238,7 +238,7 @@ export function renderD1StockDetail(stock, root = byId("stockContent")) {
   root.append(
     element(
       "p",
-      `来源池状态 ${stock.source_pool_status} · 当前归类 ${summary.group || "UNKNOWN"} · 正式资格 UNKNOWN/NOT_EVALUATED · NON_PIT · RAW_UNADJUSTED`,
+      `来源池状态 ${stock.source_pool_status} · 当前归类 ${summary.group || "UNKNOWN"} · 正式资格 UNKNOWN/NOT_EVALUATED · NON_PIT · FORWARD_ADJUSTED`,
       "rule",
     ),
     element(

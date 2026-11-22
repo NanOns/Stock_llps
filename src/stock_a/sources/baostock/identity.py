@@ -173,7 +173,7 @@ def project_identity_lifecycle(
     """按真实响应字段投影当前基本资料和指定日状态，保留后验采集边界。"""
     normalized = normalize_baostock_symbol(source_symbol)
     if normalized is None or type(target_session) is not date:
-        raise ValueError("身份投影必须绑定沪深代码和明确目标日")
+        raise ValueError("身份投影必须绑定沪深或北交所来源代码和明确目标日")
     if not _valid_response(basic_snapshot, _REQUIRED_BASIC_FIELDS):
         return IdentityLifecycleProjection(
             normalized,

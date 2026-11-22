@@ -745,12 +745,8 @@ export function mountDataJobPages(api) {
 
   function requestBodyForPage(page) {
     const body = currentPageBody(page);
-    const resetMode =
-      page === "initialize" &&
-      body.initialization_mode === "RESET_ALL_BUSINESS_FACTS";
     return {
       ...body,
-      ...(resetMode ? { raw_response_journal_enabled: true } : {}),
       ...(page === "initialize" && state.resetResumeFingerprint
         ? { reset_preview_fingerprint: state.resetResumeFingerprint }
         : {}),

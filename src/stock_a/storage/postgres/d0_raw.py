@@ -72,6 +72,7 @@ def _read_source_version(
         or type(range_start) is not date
         or type(range_end) is not date
         or not range_start <= target_session <= range_end <= research_cutoff
+        or len(tuple(coordinates or ())) != 2
         or set(coordinates or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
         or not isinstance(parser_contract, str)
         or not parser_contract.strip()
@@ -143,7 +144,7 @@ def _read_source_version(
         "provider": provider,
         "range_start_session": range_start,
         "range_end_session": range_end,
-        "price_coordinates": tuple(coordinates),
+        "price_coordinates": ("RAW_UNADJUSTED", "FORWARD_ADJUSTED"),
         "parser_contract": parser_contract,
         "unit_contract_version": unit_contract_version,
         "capture_expected_row_count": eligible_count,
@@ -320,14 +321,15 @@ def _read_history_grid(
             result[symbol][session] = None
             continue
         present_rows += 1
+        row_coordinates = tuple(row["price_coordinates"] or ())
         row["reference_quality"] = (
             row["source_capture_id"] == source_capture_id
             and row["capture_uuid"] is not None
             and row["provider"] == "BAOSTOCK"
             and row["range_end_session"] is not None
             and row["range_end_session"] <= source_version["range_end_session"]
-            and tuple(row["price_coordinates"] or ())
-            == tuple(source_version["price_coordinates"])
+            and len(row_coordinates) == 2
+            and set(row_coordinates) == set(source_version["price_coordinates"])
             and row["unit_contract_version"] == source_version["unit_contract_version"]
             and row["registered_clock_role"] == "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
             and row["source_available_at"] is None

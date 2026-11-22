@@ -119,20 +119,20 @@ _CORE_FIELD_QUERY_COLUMNS = {
 _CORE_FIELD_QUERY_COLUMNS["core.price_damage"] = "price_damage_quality"
 _PRICE_POSITION_QUERY_FIELDS = {
     "c_vs_ma20": {
-        "left_field": "raw_close",
-        "left_value_sql": "r.raw_close",
-        "left_quality_sql": "COALESCE(r.price_quality, 'UNKNOWN')",
-        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.price_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.price_reason, 'RAW_PRICE_REASON_MISSING') ELSE r.price_reason END",
+        "left_field": "qfq_close",
+        "left_value_sql": "r.qfq_close",
+        "left_quality_sql": "COALESCE(r.qfq_price_quality, 'UNKNOWN')",
+        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.qfq_price_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.qfq_price_reason, 'QFQ_PRICE_REASON_MISSING') ELSE r.qfq_price_reason END",
         "right_field": "ma20",
         "right_value_sql": "p.ma20",
         "right_quality_sql": "p.ma20_quality",
         "right_reason_sql": "p.ma20_reason",
     },
     "c_vs_prior_high20": {
-        "left_field": "raw_close",
-        "left_value_sql": "r.raw_close",
-        "left_quality_sql": "COALESCE(r.price_quality, 'UNKNOWN')",
-        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.price_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.price_reason, 'RAW_PRICE_REASON_MISSING') ELSE r.price_reason END",
+        "left_field": "qfq_close",
+        "left_value_sql": "r.qfq_close",
+        "left_quality_sql": "COALESCE(r.qfq_price_quality, 'UNKNOWN')",
+        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.qfq_price_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.qfq_price_reason, 'QFQ_PRICE_REASON_MISSING') ELSE r.qfq_price_reason END",
         "right_field": "prior_high20",
         "right_value_sql": "p.prior_high20",
         "right_quality_sql": "p.prior_high20_quality",
@@ -178,38 +178,38 @@ _BIAS20_ATR_BAND_DEFINITIONS = {
             p.bias20_atr_exact_numerator::numeric * 2
         ) BETWEEN -p.bias20_atr_exact_denominator::numeric
           AND p.bias20_atr_exact_denominator::numeric""",
-        "definition": "精确 -1/2 ≤ (RAW收盘−MA20)/ATR20 ≤ +1/2。",
+        "definition": "精确 -1/2 ≤ (QFQ收盘−QFQ MA20)/QFQ ATR20 ≤ +1/2。",
     },
     "NEAR_BELOW_ONE": {
         "label": "MA20下方0至1 ATR",
         "predicate": """p.bias20_atr_exact_numerator::numeric
             >= -p.bias20_atr_exact_denominator::numeric
             AND p.bias20_atr_exact_numerator::numeric < 0""",
-        "definition": "精确 -1 ≤ (RAW收盘−MA20)/ATR20 ＜ 0。",
+        "definition": "精确 -1 ≤ (QFQ收盘−QFQ MA20)/QFQ ATR20 ＜ 0。",
     },
     "NEAR_ABOVE_ONE": {
         "label": "MA20上方0至1 ATR",
         "predicate": """p.bias20_atr_exact_numerator::numeric > 0
             AND p.bias20_atr_exact_numerator::numeric
               <= p.bias20_atr_exact_denominator::numeric""",
-        "definition": "精确 0 ＜ (RAW收盘−MA20)/ATR20 ≤ +1。",
+        "definition": "精确 0 ＜ (QFQ收盘−QFQ MA20)/QFQ ATR20 ≤ +1。",
     },
     "FAR_BELOW_ONE": {
         "label": "MA20下方超过1 ATR",
         "predicate": """p.bias20_atr_exact_numerator::numeric
             < -p.bias20_atr_exact_denominator::numeric""",
-        "definition": "精确 (RAW收盘−MA20)/ATR20 ＜ -1。",
+        "definition": "精确 (QFQ收盘−QFQ MA20)/QFQ ATR20 ＜ -1。",
     },
     "FAR_ABOVE_ONE": {
         "label": "MA20上方超过1 ATR",
         "predicate": """p.bias20_atr_exact_numerator::numeric
             > p.bias20_atr_exact_denominator::numeric""",
-        "definition": "精确 (RAW收盘−MA20)/ATR20 ＞ +1。",
+        "definition": "精确 (QFQ收盘−QFQ MA20)/QFQ ATR20 ＞ +1。",
     },
     "UNKNOWN": {
         "label": "距离未知",
         "predicate": "BIAS20_ATR_UNKNOWN",
-        "definition": "Core质量、精确分数、RAW价格坐标或相关价格质量不可用。",
+        "definition": "QFQ Core质量、精确分数或所需QFQ字段不可用。",
     },
 }
 _BIAS20_ATR_STATE_VALUES = frozenset(
@@ -235,8 +235,9 @@ _BIAS20_ATR_UNKNOWN_SQL = """(
     OR p.atr20_quality IS DISTINCT FROM 'OBSERVED'
     OR p.atr20 IS NULL
     OR p.atr20 <= 0
-    OR r.price_quality IS DISTINCT FROM 'OBSERVED'
-    OR r.raw_close IS NULL
+    OR r.source_symbol IS NULL
+    OR r.qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+    OR r.qfq_close IS NULL
 )"""
 _BIAS20_ATR_UNKNOWN_REASON_SQL = """CASE
     WHEN p.bias20_atr_quality IS DISTINCT FROM 'OBSERVED'
@@ -255,10 +256,10 @@ _BIAS20_ATR_UNKNOWN_REASON_SQL = """CASE
       OR p.atr20 IS NULL
       OR p.atr20 <= 0
       THEN COALESCE(p.atr20_reason, 'ATR20_NOT_POSITIVE_OR_UNAVAILABLE')
-    WHEN r.price_quality IS DISTINCT FROM 'OBSERVED'
-      THEN COALESCE(r.price_reason, 'RAW_PRICE_QUALITY=' ||
-                    COALESCE(r.price_quality, 'UNKNOWN'))
-    WHEN r.raw_close IS NULL THEN 'RAW_CLOSE_UNAVAILABLE'
+    WHEN r.source_symbol IS NULL THEN 'SOURCE_PRICE_ROW_MISSING'
+    WHEN r.qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+      THEN COALESCE(r.qfq_price_reason, 'QFQ_PRICE_QUALITY_UNKNOWN')
+    WHEN r.qfq_close IS NULL THEN 'OBSERVED_QFQ_CLOSE_MISSING'
     ELSE NULL
 END"""
 
@@ -374,15 +375,15 @@ def _profile_pair_price_position_fields(position: str, *, side: str) -> dict[str
     definition = _PRICE_POSITION_QUERY_FIELDS[position]
 
     def field_expressions(field: str) -> tuple[str, str, str]:
-        if field == "raw_close":
+        if field == "qfq_close":
             return (
-                f"{side}_raw_close",
-                f"COALESCE({side}_raw_price_quality, 'UNKNOWN')",
+                f"{side}_qfq_close",
+                f"COALESCE({side}_qfq_price_quality, 'UNKNOWN')",
                 f"""CASE
 WHEN NOT {side}_raw_record_present THEN 'SOURCE_RAW_ROW_MISSING'
-WHEN {side}_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-  THEN COALESCE({side}_raw_price_reason, 'RAW_PRICE_REASON_MISSING')
-ELSE {side}_raw_price_reason END""",
+WHEN {side}_qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+  THEN COALESCE({side}_qfq_price_reason, 'QFQ_PRICE_REASON_MISSING')
+ELSE {side}_qfq_price_reason END""",
             )
         return (
             f"{side}_{field}",
@@ -1338,8 +1339,8 @@ def _bias20_atr_state_expression(side: str) -> str:
           OR {side}_atr20 IS NULL
           OR {side}_atr20 <= 0
           OR NOT {side}_raw_record_present
-          OR {side}_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-          OR {side}_raw_close IS NULL
+          OR {side}_qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_qfq_close IS NULL
           THEN 'UNKNOWN'::text
         WHEN {side}_bias20_atr_exact_numerator::numeric
              < -{side}_bias20_atr_exact_denominator::numeric
@@ -1380,11 +1381,11 @@ def _bias20_atr_state_reason_expression(side: str) -> str:
           THEN COALESCE({side}_atr20_reason,
                         'ATR20_NOT_POSITIVE_OR_UNAVAILABLE')
         WHEN NOT {side}_raw_record_present
-          THEN 'RAW_ROW_MISSING'
-        WHEN {side}_raw_price_quality IS DISTINCT FROM 'OBSERVED'
-          OR {side}_raw_close IS NULL
-          THEN 'RAW_PRICE_QUALITY_UNKNOWN:' ||
-               COALESCE({side}_raw_price_reason,
+          THEN 'SOURCE_PRICE_ROW_MISSING'
+        WHEN {side}_qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_qfq_close IS NULL
+          THEN 'QFQ_PRICE_QUALITY_UNKNOWN:' ||
+               COALESCE({side}_qfq_price_reason,
                         {side}_window_reason,
                         'NO_REASON')
         ELSE NULL::text
@@ -1754,12 +1755,12 @@ WITH old_rows AS (
            CASE WHEN before_present
                      AND before_source_pool_close_ma20_relation IS NULL
                 THEN CASE
-                    WHEN NOT before_raw_record_present THEN 'RAW_ROW_MISSING'
+                    WHEN NOT before_raw_record_present THEN 'SOURCE_PRICE_ROW_MISSING'
                     WHEN before_bar_status='TARGET_MISSING'
                       THEN 'TARGET_BAR_MISSING:' ||
                            COALESCE(before_selected_price_reason, before_window_reason, 'NO_REASON')
                     WHEN before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
-                      THEN 'RAW_PRICE_QUALITY_UNKNOWN:' ||
+                      THEN 'QFQ_PRICE_QUALITY_UNKNOWN:' ||
                            COALESCE(before_selected_price_reason, 'NO_REASON')
                     WHEN before_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                       THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
@@ -1780,12 +1781,12 @@ WITH old_rows AS (
            CASE WHEN after_present
                      AND after_source_pool_close_ma20_relation IS NULL
                 THEN CASE
-                    WHEN NOT after_raw_record_present THEN 'RAW_ROW_MISSING'
+                    WHEN NOT after_raw_record_present THEN 'SOURCE_PRICE_ROW_MISSING'
                     WHEN after_bar_status='TARGET_MISSING'
                       THEN 'TARGET_BAR_MISSING:' ||
                            COALESCE(after_selected_price_reason, after_window_reason, 'NO_REASON')
                     WHEN after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
-                      THEN 'RAW_PRICE_QUALITY_UNKNOWN:' ||
+                      THEN 'QFQ_PRICE_QUALITY_UNKNOWN:' ||
                            COALESCE(after_selected_price_reason, 'NO_REASON')
                     WHEN after_price_coordinate IS DISTINCT FROM 'FORWARD_ADJUSTED'
                       THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
@@ -1978,12 +1979,12 @@ WITH old_rows AS (
              WHEN before_window_count IS DISTINCT FROM after_window_count
                THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'::text
              WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'::text
-             WHEN NOT before_raw_record_present THEN 'BEFORE_RAW_ROW_MISSING'::text
-             WHEN NOT after_raw_record_present THEN 'AFTER_RAW_ROW_MISSING'::text
+              WHEN NOT before_raw_record_present THEN 'BEFORE_SOURCE_ROW_MISSING'::text
+              WHEN NOT after_raw_record_present THEN 'AFTER_SOURCE_ROW_MISSING'::text
              WHEN before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
-               THEN 'BEFORE_RAW_PRICE_UNKNOWN:' || COALESCE(before_selected_price_reason, 'NO_REASON')
+                THEN 'BEFORE_QFQ_PRICE_UNKNOWN:' || COALESCE(before_selected_price_reason, 'NO_REASON')
              WHEN after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
-               THEN 'AFTER_RAW_PRICE_UNKNOWN:' || COALESCE(after_selected_price_reason, 'NO_REASON')
+                THEN 'AFTER_QFQ_PRICE_UNKNOWN:' || COALESCE(after_selected_price_reason, 'NO_REASON')
              WHEN before_price_damage_quality IS NULL AND before_price_damage IS NULL
                THEN 'BEFORE_NOT_COMPUTED_FOR_REVISION'::text
              WHEN after_price_damage_quality IS NULL AND after_price_damage IS NULL
@@ -2118,12 +2119,12 @@ WITH old_rows AS (
              WHEN before_window_count IS DISTINCT FROM after_window_count
                THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'::text
              WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'::text
-             WHEN NOT before_raw_record_present THEN 'BEFORE_RAW_ROW_MISSING'::text
-             WHEN NOT after_raw_record_present THEN 'AFTER_RAW_ROW_MISSING'::text
+              WHEN NOT before_raw_record_present THEN 'BEFORE_SOURCE_ROW_MISSING'::text
+              WHEN NOT after_raw_record_present THEN 'AFTER_SOURCE_ROW_MISSING'::text
              WHEN before_selected_price_quality IS DISTINCT FROM 'OBSERVED'
-               THEN 'BEFORE_RAW_PRICE_UNKNOWN:' || COALESCE(before_selected_price_reason, 'NO_REASON')
+                THEN 'BEFORE_QFQ_PRICE_UNKNOWN:' || COALESCE(before_selected_price_reason, 'NO_REASON')
              WHEN after_selected_price_quality IS DISTINCT FROM 'OBSERVED'
-               THEN 'AFTER_RAW_PRICE_UNKNOWN:' || COALESCE(after_selected_price_reason, 'NO_REASON')
+                THEN 'AFTER_QFQ_PRICE_UNKNOWN:' || COALESCE(after_selected_price_reason, 'NO_REASON')
              WHEN before_ma_slope20_atr_quality IS NULL
                   AND before_ma_slope20_atr_exact_numerator IS NULL
                   AND before_ma_slope20_atr_exact_denominator IS NULL
@@ -4969,16 +4970,16 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                 left_field = definition["left_field"]
                 right_field = definition["right_field"]
                 left_value_key = (
-                    "target_raw_close" if left_field == "raw_close" else left_field
+                    "target_qfq_close" if left_field == "qfq_close" else left_field
                 )
                 left_quality_key = (
-                    "target_raw_price_quality"
-                    if left_field == "raw_close"
+                    "target_qfq_price_quality"
+                    if left_field == "qfq_close"
                     else f"{left_field}_quality"
                 )
                 left_reason_key = (
-                    "target_raw_price_reason"
-                    if left_field == "raw_close"
+                    "target_qfq_price_reason"
+                    if left_field == "qfq_close"
                     else f"{left_field}_reason"
                 )
                 positions[field] = {
@@ -5019,7 +5020,7 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "profile_revision": profile_revision,
         "source_pool_total": snapshot_total,
         "ratio_metadata": {
-            "basis": "TDX_NATIVE_SAME_PACKAGE_SCALE_INVARIANT",
+            "basis": "BAOSTOCK_RAW_ACTIVITY_WITH_EXACT_CAPTURE_BINDING",
             "absolute_amount_unit_status": "UNIT_UNVERIFIED",
             "absolute_volume_unit_status": "UNIT_UNVERIFIED",
         },

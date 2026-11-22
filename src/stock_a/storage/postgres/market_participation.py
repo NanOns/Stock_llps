@@ -349,10 +349,30 @@ def read_market_participation(
     config: Mapping[str, Any],
     *,
     market: Any,
+    profile_revision: str | None = None,
+    producer_version: str | None = None,
 ) -> dict[str, Any]:
     """只读指定BaoStock捕获与日历下唯一已保存成交参与结果。"""
     target_session = market.target_session
     capture_id = market.cohort.source_capture_id
+    if (
+        profile_revision is not None
+        and (not isinstance(profile_revision, str) or not profile_revision)
+    ) or (
+        producer_version is not None
+        and (not isinstance(producer_version, str) or not producer_version)
+    ):
+        raise MarketParticipationPgError(
+            "MARKET_PARTICIPATION_VERSION_INVALID", "成交参与读取版本键无效"
+        )
+    version_filter = ""
+    version_parameters: tuple[Any, ...] = ()
+    if profile_revision is not None:
+        version_filter += " AND profile_revision=%s"
+        version_parameters += (profile_revision,)
+    if producer_version is not None:
+        version_filter += " AND producer_version=%s"
+        version_parameters += (producer_version,)
     try:
         with source_raw._transaction(
             config, write=False, statement_timeout_ms=10000
@@ -360,11 +380,13 @@ def read_market_participation(
             cursor.execute(
                 f"""SELECT id, {", ".join(_DAY_COLUMNS)} FROM {_DAY_TABLE}
 WHERE target_session=%s AND source_capture_id=%s
-  AND contract_version=%s ORDER BY profile_revision, producer_version""",
+  AND contract_version=%s{version_filter}
+ORDER BY profile_revision, producer_version""",
                 (
                     target_session,
                     capture_id,
                     MARKET_PARTICIPATION_CONTRACT,
+                    *version_parameters,
                 ),
             )
             rows = cursor.fetchall()
@@ -376,7 +398,7 @@ WHERE target_session=%s AND source_capture_id=%s
             if len(rows) != 1:
                 return {
                     "status": "INCOMPLETE",
-                    "reason": "同一市场来源范围存在多个画像修订的成交参与结果。",
+                    "reason": "同一市场来源范围存在多个画像修订或生产版本的成交参与结果。",
                 }
             parent_id = int(rows[0][0])
             day = dict(zip(_DAY_COLUMNS, rows[0][1:], strict=True))

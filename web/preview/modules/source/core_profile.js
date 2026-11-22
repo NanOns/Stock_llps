@@ -125,7 +125,16 @@ async function queryStock(event) {
       ]);
     }
     try {
-      await loadRawPeriods(v, symbol, requestIsCurrent);
+      await loadRawPeriods(
+        v,
+        symbol,
+        {
+          target_session: v.target_session,
+          source_capture_id: v.source_capture_id,
+          price_coordinate: state.priceCoordinate,
+        },
+        requestIsCurrent,
+      );
     } catch (error) {
       if (!requestIsCurrent()) return;
       renderRawPeriods(null, error.message);

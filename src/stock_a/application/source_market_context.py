@@ -372,6 +372,11 @@ def compute_source_market_context(
     )
 
 
+def _price_limit_calendar_revision(research_cutoff: date) -> str:
+    """返回限价生产者按研究截止加载的完整日历修订链。"""
+    return _load_calendar(research_cutoff)[2]
+
+
 def read_source_market_context(
     config: Mapping[str, Any],
     *,
@@ -538,11 +543,12 @@ def read_source_market_context(
     }
     from stock_a.storage.postgres.price_limits import read_market_pressure_summary
 
+    pressure_calendar_revision = _price_limit_calendar_revision(research_cutoff)
     pressure_axis = read_market_pressure_summary(
         config,
         target_session=target_session,
         source_capture_id=cohort.source_capture_id,
-        calendar_revision=calendar["calendar_revision"],
+        calendar_revision=pressure_calendar_revision,
     )
     return SourceMarketContextRead(
         target_session,

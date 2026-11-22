@@ -151,6 +151,18 @@ function validateComparisonTimeline(data, selection) {
     );
   return data;
 }
+function comparisonPeriodDailyRowMatchesIdentity(row, sourceCaptureId) {
+  if (!row || typeof row !== "object") return false;
+  const missingHistoryRow =
+    row.bar_status === "HISTORY_ROW_NOT_STORED" &&
+    row.bar_reason === "PG_HISTORY_SESSION_MISSING" &&
+    row.source_capture_id === null;
+  return (
+    row.price_coordinate === "FORWARD_ADJUSTED" &&
+    (row.source_capture_id === sourceCaptureId || missingHistoryRow)
+  );
+}
+
 function validateComparisonRawPeriods(data, selection, timeline) {
   const identity = data?.snapshot_identity;
   const sourceVersion = data?.source_version;
@@ -220,8 +232,10 @@ function validateComparisonRawPeriods(data, selection, timeline) {
         !Array.isArray(period.daily_rows) ||
         period.daily_rows.some(
           (row) =>
-            row.source_capture_id !== selection.source_capture_id ||
-            row.price_coordinate !== "FORWARD_ADJUSTED",
+            !comparisonPeriodDailyRowMatchesIdentity(
+              row,
+              selection.source_capture_id,
+            ),
         )
       )
         throw new Error("闭周/月响应含错序、重复或来源身份不完整的周期行。");
@@ -510,6 +524,7 @@ function returnFromComparison() {
       const control = $(id);
       if (control) control.value = value;
     }
+    state.priceCoordinate = $("priceCoordinateSelect").value;
     Object.assign(state, returnForm.pgContext || {});
   }
   state.comparisonReturnForm = null;

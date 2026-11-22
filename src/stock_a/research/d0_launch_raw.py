@@ -241,6 +241,22 @@ def _raw_amount(
     return value, None
 
 
+def _raw_amount_for_source_row(
+    session: date,
+    row: Mapping[str, Any] | None,
+    *,
+    source_symbol: str,
+    source_capture_id: int,
+) -> tuple[Fraction | None, str | None]:
+    if row is not None and (
+        row.get("source_symbol") != source_symbol
+        or row.get("session_date") != session
+        or row.get("source_capture_id") != source_capture_id
+    ):
+        return None, "RAW_SOURCE_IDENTITY_MISMATCH"
+    return _raw_amount(session, row, source_capture_id=source_capture_id)
+
+
 def _window_payload(
     official_sessions: Sequence[date],
     rows_by_session: Mapping[date, Mapping[str, Any] | None],
@@ -418,19 +434,12 @@ def calculate_d0_launch_confirm_raw(
         amount_errors: dict[date, str | None] = {}
         for session in (*prior, current_session):
             row = checked[session][0]
-            strict_session_error = checked[session][2]
-            if strict_session_error:
-                value, error = None, strict_session_error
-            elif row is not None and (
-                row.get("source_symbol") != source_symbol
-                or row.get("session_date") != session
-                or row.get("source_capture_id") != source_capture_id
-            ):
-                value, error = None, "RAW_SOURCE_IDENTITY_MISMATCH"
-            else:
-                value, error = _raw_amount(
-                    session, row, source_capture_id=source_capture_id
-                )
+            value, error = _raw_amount_for_source_row(
+                session,
+                row,
+                source_symbol=source_symbol,
+                source_capture_id=source_capture_id,
+            )
             amount_values[session] = value
             amount_errors[session] = error
         unit_statuses = {
@@ -680,20 +689,14 @@ def calculate_d0_recovery_turn_raw(
         else None
     )
     amount_rows = checked[-21:]
-    amount_identity_errors = {
-        "RAW_SOURCE_IDENTITY_MISMATCH",
-        "OFFICIAL_SESSION_ROW_MISSING",
-        "OFFICIAL_SESSION_BAR_MISSING",
-    }
     amounts = [
-        _raw_amount(
+        _raw_amount_for_source_row(
             sessions[len(sessions) - len(amount_rows) + i],
             row,
+            source_symbol=source_symbol,
             source_capture_id=source_capture_id,
         )[0]
-        if error not in amount_identity_errors
-        else None
-        for i, (row, _, error) in enumerate(amount_rows)
+        for i, (row, _, _error) in enumerate(amount_rows)
     ]
     units = {
         row.get("amount_unit_status") if row else None for row, _, _ in amount_rows

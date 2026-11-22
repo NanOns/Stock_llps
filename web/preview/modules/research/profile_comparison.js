@@ -250,6 +250,8 @@ function formatIndexFraction(fraction) {
   return `${whole}.${decimal}`;
 }
 function comparisonPeriodCloseFraction(period) {
+  const suspendedSessionCount = period?.suspended_session_count;
+  const expectedSessionCount = period?.calendar_expected_session_count;
   if (
     !period ||
     period.price_coordinate !== "FORWARD_ADJUSTED" ||
@@ -257,11 +259,23 @@ function comparisonPeriodCloseFraction(period) {
     !Number.isSafeInteger(period.source_capture_id) ||
     period.calendar_closed !== true ||
     period.coverage_status !== "COMPLETE" ||
-    period.reason_codes?.length ||
-    period.valid_price_bar_count !== period.calendar_expected_session_count ||
-    period.stored_raw_row_count !== period.calendar_expected_session_count ||
-    period.elapsed_expected_session_count !==
-      period.calendar_expected_session_count ||
+    !Number.isSafeInteger(expectedSessionCount) ||
+    !Number.isSafeInteger(period.valid_price_bar_count) ||
+    !Number.isSafeInteger(period.stored_raw_row_count) ||
+    !Number.isSafeInteger(suspendedSessionCount) ||
+    suspendedSessionCount < 0 ||
+    period.valid_price_bar_count < 0 ||
+    (period.reason_codes || []).some(
+      (reason) => reason !== "CONFIRMED_SUSPENSION_SKIPPED_FROM_PERIOD_OHLC",
+    ) ||
+    suspendedSessionCount > 0 !==
+      (period.reason_codes || []).includes(
+        "CONFIRMED_SUSPENSION_SKIPPED_FROM_PERIOD_OHLC",
+      ) ||
+    period.valid_price_bar_count + suspendedSessionCount !==
+      expectedSessionCount ||
+    period.stored_raw_row_count !== expectedSessionCount ||
+    period.elapsed_expected_session_count !== expectedSessionCount ||
     period.window_truncated_session_count !== 0 ||
     period.target_missing_count !== 0 ||
     period.read_failed_count !== 0 ||
@@ -464,7 +478,7 @@ function renderComparisonSummary(entry) {
   appendText(
     card,
     "p",
-    `前复权收盘 ${comparisonFieldText(comparisonQfqClose(target))} · Bar ${text(target?.raw_status)} · ${text(target?.price_reason || "无价格原因")}`,
+    `前复权收盘 ${comparisonFieldText(comparisonQfqClose(target))} · Bar ${text(target?.qfq_bar_status)} · ${text(target?.price_reason || "无价格原因")}`,
   );
   appendText(
     card,

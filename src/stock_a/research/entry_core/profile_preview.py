@@ -70,6 +70,42 @@ _PROFILE_PERIOD_INPUTS = {
         ),
     },
 }
+
+
+def _qfq_target_close_field(target_bar: Any) -> FieldValue:
+    qfq_close = (
+        target_bar.get("qfq_close")
+        if isinstance(target_bar, Mapping)
+        else getattr(target_bar, "qfq_close", None)
+    )
+    if isinstance(qfq_close, FieldValue):
+        return qfq_close
+    if not isinstance(target_bar, Mapping):
+        return unknown("QFQ_TARGET_BAR_MISSING")
+    qfq_quality = target_bar.get("qfq_price_quality", "UNKNOWN")
+    qfq_reason = target_bar.get("qfq_price_reason")
+    if qfq_quality == "OBSERVED":
+        if qfq_close is None:
+            raise ResearchEntryError(
+                "QFQ_TARGET_QUALITY_VALUE_MISMATCH",
+                "QFQ收盘质量为OBSERVED但数值缺失",
+            )
+        try:
+            exact_number(qfq_close)
+        except (TypeError, ValueError, ZeroDivisionError) as error:
+            raise ResearchEntryError(
+                "QFQ_TARGET_VALUE_INVALID", "QFQ目标收盘不是精确数值"
+            ) from error
+        return FieldValue(qfq_close)
+    if qfq_quality == "NOT_APPLICABLE":
+        return FieldValue(
+            None, "NOT_APPLICABLE", qfq_reason or "QFQ_TARGET_NOT_APPLICABLE"
+        )
+    if qfq_quality in {"UNKNOWN", "UNKNOWN_DATA", None}:
+        return unknown(qfq_reason or "QFQ_TARGET_BAR_MISSING")
+    raise ResearchEntryError("QFQ_TARGET_QUALITY_INVALID", "QFQ目标收盘质量枚举无效")
+
+
 _COMPARE_FIELDS = (
     "core.ma5",
     "core.ma10",
@@ -219,16 +255,7 @@ def _build_profile_preview(
         f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
     )
     snapshot_id = source_cutoff
-    qfq_close = (
-        target_bar.get("qfq_close")
-        if isinstance(target_bar, Mapping)
-        else getattr(target_bar, "qfq_close", None)
-    )
-    target_close = (
-        qfq_close
-        if isinstance(qfq_close, FieldValue)
-        else unknown("QFQ_TARGET_BAR_MISSING")
-    )
+    target_close = _qfq_target_close_field(target_bar)
 
     components: list[dict[str, Any]] = []
     for rule_id, rule in rules.items():

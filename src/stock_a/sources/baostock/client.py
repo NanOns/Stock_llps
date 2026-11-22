@@ -815,7 +815,10 @@ def query_identity_reference(
         complete = code == "0"
         local_error = None
         row_read_started = perf_counter()
-        if code == "0":
+        if len(fields) != len(set(fields)):
+            complete = False
+            local_error = "DUPLICATE_RESPONSE_FIELDS"
+        if code == "0" and complete:
             try:
                 while True:
                     if remaining_seconds() <= 0:

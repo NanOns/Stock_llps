@@ -33,7 +33,7 @@ _PRICE_RELATION_VALUES = frozenset({"BELOW", "EQUAL", "ABOVE"})
 def _timeline_relation(
     close_field: Mapping[str, Any], ma20_field: Mapping[str, Any]
 ) -> tuple[str | None, str | None]:
-    """用现役Core输出和RAW收盘值精确判定价格相对MA20位置。"""
+    """用同一QFQ坐标的Core输出和收盘值精确判定价格相对MA20位置。"""
     for field in (close_field, ma20_field):
         if field.get("quality") != "OBSERVED":
             return None, field.get("reason") or "PRICE_FIELD_UNKNOWN"

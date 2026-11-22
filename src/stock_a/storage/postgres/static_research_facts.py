@@ -199,6 +199,12 @@ def _fraction(value: Any) -> Fraction | None:
         return None
 
 
+def _seed_qfq_target_close(native_price: Mapping[str, Any]) -> Fraction | None:
+    if native_price.get("qfq_price_quality") != "OBSERVED":
+        return None
+    return _fraction(native_price.get("qfq_close"))
+
+
 def _fraction_parts(value: Any) -> tuple[int | None, int | None]:
     result = _fraction(value)
     return (None, None) if result is None else (result.numerator, result.denominator)
@@ -498,7 +504,7 @@ def _seed_rows(
                 "core_price_damage_reason": damage.get("reason"),
             }
         )
-        close = _fraction(native.get("close"))
+        close = _seed_qfq_target_close(native)
         values.update(
             {
                 "target_actual_quote": native.get("actual_quote") is True,
