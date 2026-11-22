@@ -588,13 +588,16 @@ def source_market_context_payload(
         "classification": "UNKNOWN",
         "reason": "尚无与该来源范围绑定的合法PRIMARY_MARKET参考序列。",
     }
+    import json as _json
+    from pathlib import Path as _Path
+
     from stock_a.storage.postgres.price_limits import read_market_pressure_summary
 
     effective_config = (
         config
         if config is not None
-        else json.loads(
-            Path("G:/codex work/Stock A/config/runtime.defaults.json").read_text(
+        else _json.loads(
+            _Path("G:/codex work/Stock A/config/runtime.defaults.json").read_text(
                 encoding="utf-8"
             )
         )
