@@ -1,4 +1,4 @@
-"""TDX研究的稳定Python入口；领域实现各由下列单一研究模块负责。"""
+"""Stock A研究的稳定Python入口；领域实现各由单一研究模块负责。"""
 
 from __future__ import annotations
 

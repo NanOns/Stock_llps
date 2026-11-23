@@ -7940,6 +7940,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "counts": None,
                     }
                 else:
+                    saved_rule_scope = saved_evidence.get("rule_scope")
+                    admission_profile_revision = (
+                        profile_revision
+                        if profile_revision is not None
+                        else saved_rule_scope.get("profile_revision")
+                        if isinstance(saved_rule_scope, Mapping)
+                        else None
+                    )
+                    admission_history_session_count = None
+                    if admission_profile_revision is not None:
+                        from stock_a.contracts.profile_revision import (
+                            profile_revision_history_session_count,
+                        )
+
+                        admission_history_session_count = (
+                            profile_revision_history_session_count(
+                                admission_profile_revision
+                            )
+                        )
                     formal_admission_day = read_source_formal_admission_day(
                         config,
                         target_session=target,
@@ -7954,8 +7973,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             single_evidence.get("seed_scope") or {}
                         ).get("producer_version"),
                         source_symbols=[symbol],
-                        profile_history_session_count=session_count,
-                        profile_revision=profile_revision,
+                        profile_history_session_count=admission_history_session_count,
+                        profile_revision=admission_profile_revision,
                     )
                 formal_d0_admission = present_source_formal_admission(
                     stored_day=formal_admission_day,

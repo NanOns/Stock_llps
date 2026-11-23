@@ -703,45 +703,6 @@ def _normalized_code(value: Any) -> tuple[str, str]:
     return symbol.lower(), symbol
 
 
-def read_baostock_raw_repair_symbols(
-    config: Mapping[str, Any],
-    *,
-    source_capture_id: int,
-    cutoff: date,
-) -> tuple[str, ...]:
-    """列出成功RAW请求已返回数据、但此前价格行缺少对应RAW Bar的代码。"""
-    if (
-        type(source_capture_id) is not int
-        or source_capture_id <= 0
-        or type(cutoff) is not date
-    ):
-        raise BaoStockPriceFactsError(
-            "RAW_REPAIR_SCOPE_INVALID", "RAW档案修复必须绑定正capture与显式截止日"
-        )
-    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
-        _connection,
-        cursor,
-        _scope,
-    ):
-        cursor.execute(
-            """SELECT DISTINCT price.source_symbol
-               FROM stock.source_raw_daily price
-               JOIN stock.source_capture_requests request
-                 ON request.capture_id=price.source_capture_id
-                AND request.source_code=price.source_code
-                AND request.adjustment_flag='3'
-               WHERE price.source_capture_id=%s
-                 AND price.session_date<=%s
-                 AND request.request_status IN ('COMPLETED','NO_DATA')
-                 AND request.response_row_count>0
-                 AND price.bar_status='TARGET_MISSING'
-                 AND price.bar_reason='RAW_BAR_NOT_RETURNED'
-               ORDER BY price.source_symbol""",
-            (source_capture_id, cutoff),
-        )
-        return tuple(str(row[0]) for row in cursor.fetchall())
-
-
 def _eligible_windows(
     eligible_sessions_by_symbol: Mapping[str, Any],
     *,
@@ -2045,14 +2006,6 @@ def _merge_price_row(
     qfq_incoming_complete = _attempts_complete(qfq_attempt_status)
     raw_was_complete = prior_statuses.get(raw_key) in {"COMPLETED", "NO_DATA"}
     qfq_was_complete = prior_statuses.get(qfq_key) in {"COMPLETED", "NO_DATA"}
-    raw_bar_repaired_from_journal = (
-        raw_was_complete
-        and existing.get("bar_status") == "TARGET_MISSING"
-        and existing.get("bar_reason") == "RAW_BAR_NOT_RETURNED"
-        and incoming.get("bar_status") == "TARGET_PRESENT"
-    )
-    if raw_bar_repaired_from_journal:
-        raw_was_complete = False
     groups = (
         (_RAW_PRICE_COLUMNS, raw_incoming_complete, raw_was_complete, True),
         (_RAW_ACTIVITY_COLUMNS, raw_incoming_complete, raw_was_complete, True),

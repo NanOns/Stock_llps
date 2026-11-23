@@ -157,7 +157,6 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "daily_mode",
         "reset_confirmed",
         "reset_preview_fingerprint",
-        "raw_response_journal_enabled",
     }
     if set(body) - allowed:
         raise DataJobError("DATA_JOB_INPUT_INVALID", "任务参数包含未登记字段。")
@@ -168,12 +167,6 @@ def _request_fields(body: Any) -> dict[str, Any]:
         )
     initialization_mode = body.get("initialization_mode", "REUSE_RAW")
     daily_mode = body.get("daily_mode", "CUSTOM")
-    raw_response_journal_enabled = body.get("raw_response_journal_enabled", False)
-    if type(raw_response_journal_enabled) is not bool or raw_response_journal_enabled:
-        raise DataJobError(
-            "RAW_RESPONSE_JOURNAL_SCOPE_INVALID",
-            "现行股票来源链不生成或回放行情JSONL响应档案。",
-        )
     if mode == "INITIALIZE":
         if initialization_mode not in {"REUSE_RAW", "RESET_ALL_BUSINESS_FACTS"}:
             raise DataJobError(
@@ -339,7 +332,6 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "daily_mode": daily_mode,
         "reset_confirmed": body.get("reset_confirmed") is True,
         "reset_preview_fingerprint": body.get("reset_preview_fingerprint"),
-        "raw_response_journal_enabled": raw_response_journal_enabled,
         "has_module_selection": has_module_selection,
         "legacy_request": legacy,
     }
@@ -2001,11 +1993,11 @@ def _require_persisted_baostock_session_rows(
     actual_rows_by_session: Mapping[date, int],
     expected_rows_by_session: Mapping[date, int],
 ) -> None:
-    """要求PG来源行闭合；不以外部JSONL填补缺失的规范事实。"""
+    """要求PG来源行闭合；缺失的规范事实不能由外部文件补造。"""
     if actual_rows_by_session != expected_rows_by_session:
         raise DataJobError(
             "SOURCE_BLOCKED",
-            "PG已存BaoStock双坐标价格行与有效证券×会话总体不一致；不能从外部JSONL假恢复。",
+            "PG已存BaoStock双坐标价格行与有效证券×会话总体不一致；不能从外部文件补造。",
             status=409,
         )
 
@@ -2169,7 +2161,6 @@ class DataJobCoordinator:
             execution_authorized=self.execution_authorized,
             sector_pair=sector_pair,
         )
-        plan["raw_response_journal_enabled"] = request["raw_response_journal_enabled"]
         source_policy = self.config.get("source_policy", {})
         primary_policy = (
             source_policy.get("baostock_primary", {})
@@ -3499,8 +3490,7 @@ def _prepare_reset_resume_inputs_from_persisted_capture(
     _require_persisted_baostock_session_rows(
         actual_rows_by_session, expected_rows_by_session
     )
-    # PG中的RAW/QFQ规范行和配对捕获目录是本路径的恢复依据。外部JSONL只
-    # 是人工追查附件；不读取它来补写PG，也不因它缺失而阻断研究层续跑。
+    # PG中的RAW/QFQ规范行和配对捕获目录是本路径唯一的来源事实与恢复依据。
 
     from stock_a.application.tdx_sector_members import (
         read_tdx_sector_source_snapshot_catalog,
@@ -3576,8 +3566,8 @@ def _prepare_reset_resume_inputs_from_persisted_capture(
     max_logins = int(budget["max_login_batches"])
     preflight = {
         "mode": "PERSISTED_CAPTURE_RESUME",
-        "status": "EXISTING_CAPTURE_AND_ARCHIVE_COMPLETE",
-        "completion_status": "PERSISTED_CAPTURE_AND_ARCHIVE_COMPLETE",
+        "status": "EXISTING_CAPTURE_COMPLETE",
+        "completion_status": "PERSISTED_CAPTURE_COMPLETE",
         "identity_requests_performed": False,
         "price_requests_performed": False,
         "source_network_called": False,
@@ -3636,8 +3626,6 @@ def _prepare_reset_resume_inputs_from_persisted_capture(
         "basic_names": names,
         "price_preflight": preflight,
         "capture_uuid": capture_uuid,
-        "raw_response_journal": None,
-        "raw_response_archive_status": "NOT_REQUIRED_PG_SOURCE_COMPLETE",
         "price_preflight_symbols": universe,
         "preflight_login_batches": 0,
         "price_preflight_sessions": sessions,
@@ -3663,12 +3651,6 @@ def _prepare_reset_source_inputs(
     reset_already_completed: bool = False,
 ) -> dict[str, Any]:
     """清理前完成BaoStock双坐标小样本与TDX成员来源预检。"""
-    if plan.get("raw_response_journal_enabled") is True:
-        raise DataJobError(
-            "RAW_RESPONSE_JOURNAL_DISABLED",
-            "BaoStock响应体归档已停用；不得创建或回放JSONL行情文件。",
-            status=409,
-        )
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -3676,13 +3658,7 @@ def _prepare_reset_source_inputs(
         BaoStockDailyJobError,
         fetch_baostock_price_window,
     )
-    from stock_a.sources.baostock.client import (
-        BaostockRawResponseSinkError,
-        query_identity_reference,
-    )
-    from stock_a.application.baostock_response_journal import (
-        BaoStockRawResponseJournalError,
-    )
+    from stock_a.sources.baostock.client import query_identity_reference
     from stock_a.sources.baostock.evidence import _UNITS as documented_units
     from stock_a.sources.baostock.identity import (
         classify_baostock_board,
@@ -4202,37 +4178,6 @@ def _prepare_reset_source_inputs(
         NAMESPACE_URL,
         f"stock-a:baostock:paired-capture:{capture_digest}",
     )
-    raw_response_journal = None
-    raw_response_archive_warnings: list[dict[str, Any]] = []
-    if plan.get("raw_response_journal_enabled") is True:
-        from stock_a.application.baostock_response_journal import (
-            BaoStockRawResponseJournal,
-        )
-
-        try:
-            raw_response_journal = BaoStockRawResponseJournal(
-                job_id=job_id,
-                capture_uuid=capture_uuid,
-                cutoff=cutoff,
-                range_start_session=sessions[0],
-                range_end_session=sessions[-1],
-            )
-            if not raw_response_journal.all_requests_complete(universe):
-                raw_response_archive_warnings.append(
-                    {
-                        "code": "RAW_RESPONSE_ARCHIVE_INCOMPLETE",
-                        "message": "G盘档案不完整；PG价格事实仍按真实接口响应独立校验和保存。",
-                    }
-                )
-        except Exception as error:
-            raw_response_journal = None
-            raw_response_archive_warnings.append(
-                {
-                    "code": "RAW_RESPONSE_ARCHIVE_UNAVAILABLE",
-                    "error_type": type(error).__name__,
-                    "message": "G盘档案不可用；PG价格事实仍按真实接口响应独立校验和保存。",
-                }
-            )
     fingerprint_material = {
         "contract": "STOCK_A_RESET_BAOSTOCK_IDENTITY_PREFLIGHT_R1",
         "target_sessions": [session.isoformat() for session in sessions],
@@ -4245,9 +4190,6 @@ def _prepare_reset_source_inputs(
         },
         "identity_target_session": target_text,
         "capture_uuid": str(capture_uuid),
-        "raw_response_journal_enabled": (
-            plan.get("raw_response_journal_enabled") is True
-        ),
         "identity_api_calls": price_preflight["identity_api_calls"],
         "planned_price_api_calls": price_preflight["planned_price_api_calls"],
         "planned_total_api_calls": price_preflight["planned_total_api_calls"],
@@ -4282,8 +4224,6 @@ def _prepare_reset_source_inputs(
         "basic_names": tuple(basic_names),
         "price_preflight": price_preflight,
         "capture_uuid": capture_uuid,
-        "raw_response_journal": raw_response_journal,
-        "raw_response_archive_warnings": tuple(raw_response_archive_warnings),
         "price_preflight_symbols": tuple(universe),
         "preflight_login_batches": preflight_login_batches,
         "price_preflight_sessions": sessions,
@@ -4798,25 +4738,13 @@ def _execute_baostock_source_stage(
     begin_callback: Any,
 ) -> dict[str, Any] | None:
     """创建单一paired捕获并持久化全市场RAW/QFQ价格请求与事实。"""
-    if plan.get("raw_response_journal_enabled") is True:
-        raise DataJobError(
-            "RAW_RESPONSE_JOURNAL_DISABLED",
-            "BaoStock响应体归档已停用；不得创建或回放JSONL行情文件。",
-            status=409,
-        )
     from datetime import datetime, timezone
 
     from stock_a.application.baostock_daily_jobs import (
         BaoStockPriceWindowRecord,
         fetch_baostock_price_window,
     )
-    from stock_a.application.baostock_response_journal import (
-        BaoStockRawResponseJournalError,
-    )
-    from stock_a.sources.baostock.client import (
-        BaostockRawResponseSinkError,
-        query_identity_reference,
-    )
+    from stock_a.sources.baostock.client import query_identity_reference
     from stock_a.sources.baostock.evidence import _UNITS as documented_units
     from stock_a.storage.postgres import baostock_price_facts
     from stock_a.storage.postgres.baostock_price_facts import (
@@ -4952,8 +4880,7 @@ def _execute_baostock_source_stage(
         persisted_resume_valid = (
             isinstance(preflight, Mapping)
             and preflight.get("mode") == "PERSISTED_CAPTURE_RESUME"
-            and preflight.get("completion_status")
-            == "PERSISTED_CAPTURE_AND_ARCHIVE_COMPLETE"
+            and preflight.get("completion_status") == "PERSISTED_CAPTURE_COMPLETE"
             and preflight.get("source_network_called") is False
             and preflight.get("identity_requests_performed") is False
             and preflight.get("price_requests_performed") is False
@@ -5024,35 +4951,6 @@ def _execute_baostock_source_stage(
             "清理前预算核验的paired capture身份与正式来源阶段不一致。",
             status=409,
         )
-    raw_response_journal = None
-    raw_response_journal_warnings = list(
-        prepared.get("raw_response_archive_warnings", ())
-        if isinstance(prepared, Mapping)
-        else ()
-    )
-    if plan.get("raw_response_journal_enabled") is True:
-        from stock_a.application.baostock_response_journal import (
-            BaoStockRawResponseJournal,
-        )
-
-        candidate_journal = (
-            prepared.get("raw_response_journal")
-            if isinstance(prepared, Mapping)
-            else None
-        )
-        if isinstance(candidate_journal, BaoStockRawResponseJournal):
-            raw_response_journal = candidate_journal
-        elif (
-            not isinstance(prepared, Mapping)
-            or prepared.get("raw_response_archive_status")
-            != "NOT_REQUIRED_PG_SOURCE_COMPLETE"
-        ) and not raw_response_journal_warnings:
-            raw_response_journal_warnings.append(
-                {
-                    "code": "RAW_RESPONSE_ARCHIVE_UNAVAILABLE",
-                    "message": "G盘档案不可用；已存PG来源仍按捕获目录恢复。",
-                }
-            )
     captured_at = datetime.fromisoformat(identity["request_completed_at"])
     if captured_at.tzinfo is None or captured_at.utcoffset() is None:
         raise DataJobError(
@@ -5150,22 +5048,6 @@ def _execute_baostock_source_stage(
         }
         for coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED")
     }
-    raw_archive_repair_symbols: set[str] = set()
-    if raw_response_journal is not None:
-        raw_archive_repair_symbols = set(
-            baostock_price_facts.read_baostock_raw_repair_symbols(
-                dict(config), source_capture_id=source_capture_id, cutoff=cutoff
-            )
-        )
-        if not raw_archive_repair_symbols.issubset(set(universe)):
-            raise DataJobError(
-                "BAOSTOCK_RAW_REPAIR_UNIVERSE_MISMATCH",
-                "PG缺失RAW的证券集合超出当前BaoStock捕获总体。",
-                status=409,
-            )
-        request_complete_symbols["RAW_UNADJUSTED"].difference_update(
-            raw_archive_repair_symbols
-        )
     persisted_attempts: dict[str, dict[str, Mapping[str, Any]]] = {
         "RAW_UNADJUSTED": {},
         "FORWARD_ADJUSTED": {},
@@ -5287,27 +5169,6 @@ def _execute_baostock_source_stage(
                 "source_symbols": list(symbols),
                 "api_calls": int(outcome.get("api_calls", 0) or 0),
                 "login_batches": int(outcome.get("login_batches", 0) or 0),
-                "archive_written_requests": int(
-                    outcome.get("archive_written_requests", 0) or 0
-                ),
-                "archive_reused_requests": int(
-                    outcome.get("archive_reused_requests", 0) or 0
-                ),
-                "archive_status": (
-                    "WARNING"
-                    if raw_response_journal_warnings
-                    or outcome.get("archive_status") == "WARNING"
-                    else outcome.get(
-                        "archive_status",
-                        "AVAILABLE"
-                        if raw_response_journal is not None
-                        else "NOT_REQUESTED",
-                    )
-                ),
-                "archive_warnings": [
-                    *raw_response_journal_warnings,
-                    *list(outcome.get("archive_warnings", ())),
-                ],
                 **persisted,
             }
         )
@@ -5320,10 +5181,6 @@ def _execute_baostock_source_stage(
             and (
                 persisted_attempts[coordinate].get(symbol, {}).get("status")
                 != "PERMANENT_FAILURE"
-                or (
-                    coordinate == "RAW_UNADJUSTED"
-                    and symbol in raw_archive_repair_symbols
-                )
             )
         ]
         for offset in range(0, len(pending_symbols), max_api):
@@ -5395,46 +5252,20 @@ def _execute_baostock_source_stage(
                         "FORWARD_ADJUSTED",
                     )
                 }
-                try:
-                    outcome = fetch_baostock_price_window(
-                        symbols,
-                        sessions,
-                        cutoff=cutoff,
-                        units=documented_units,
-                        max_api_calls_per_batch=max_api,
-                        max_login_batches=remaining_logins,
-                        query_timeout_seconds=query_timeout,
-                        max_history_session_count=history_limit,
-                        max_retry_attempts=retry_attempts,
-                        retry_backoff_seconds=backoff,
-                        coordinates=(coordinate,),
-                        raw_response_journal=raw_response_journal,
-                        request_attempt_offsets=request_attempt_offsets,
-                    )
-                except (
-                    BaostockRawResponseSinkError,
-                    BaoStockRawResponseJournalError,
-                ) as error:
-                    for unit in source_units:
-                        data_job_pg.mark_progress_failed(
-                            config,
-                            job_id=job_id,
-                            stage_code="SOURCE_BAOSTOCK_PRICES",
-                            target_session=unit["target_session"],
-                            business_table=unit["business_table"],
-                            status="FAILED",
-                            error_code="BAOSTOCK_SOURCE_CAPTURE_PROCESSING_FAILED",
-                            error_message=(
-                                "BaoStock响应未通过来源处理流程，本价格批次未写PG；"
-                                f"{type(error).__name__}"
-                            ),
-                            source_capture_id=source_capture_id,
-                        )
-                    raise DataJobError(
-                        "BAOSTOCK_SOURCE_CAPTURE_PROCESSING_FAILED",
-                        "BaoStock响应未通过来源处理流程，本价格批次未写入PG。",
-                        status=503,
-                    ) from error
+                outcome = fetch_baostock_price_window(
+                    symbols,
+                    sessions,
+                    cutoff=cutoff,
+                    units=documented_units,
+                    max_api_calls_per_batch=max_api,
+                    max_login_batches=remaining_logins,
+                    query_timeout_seconds=query_timeout,
+                    max_history_session_count=history_limit,
+                    max_retry_attempts=retry_attempts,
+                    retry_backoff_seconds=backoff,
+                    coordinates=(coordinate,),
+                    request_attempt_offsets=request_attempt_offsets,
+                )
             persist_outcome(symbols, outcome)
 
     expected_by_session = {
@@ -5469,26 +5300,6 @@ def _execute_baostock_source_stage(
     )
     incomplete = not request_scope_closed
     all_session_rows_complete = True
-    archive_warnings = list(raw_response_journal_warnings)
-    archive_warnings.extend(
-        warning
-        for batch in batch_results
-        for warning in batch.get("archive_warnings", ())
-    )
-    warning_codes = sorted(
-        {
-            str(item.get("code"))
-            for item in archive_warnings
-            if isinstance(item, Mapping) and item.get("code")
-        }
-    )
-    archive_warning_message = (
-        "原始响应JSONL仅作追查附件，归档告警"
-        f"（{'、'.join(warning_codes) or 'RAW_RESPONSE_ARCHIVE_WARNING'}）；"
-        "PG行情行已按真实响应独立校验和保存。"
-        if archive_warnings
-        else None
-    )
     for unit in source_units:
         session = unit["target_session"]
         actual_rows = data_job_pg.read_business_table_count(
@@ -5512,17 +5323,9 @@ def _execute_baostock_source_stage(
                 d1_history_session_count=None,
                 expected_rows=expected_rows,
                 inserted_rows=max(0, actual_rows - int(before_counts[session] or 0)),
-                quality_status=(
-                    "COMPLETE_RAW_AND_QFQ_REQUESTS_ARCHIVE_WARNING"
-                    if archive_warnings
-                    else "COMPLETE_RAW_AND_QFQ_REQUESTS"
-                ),
+                quality_status="COMPLETE_RAW_AND_QFQ_REQUESTS",
                 no_change=actual_rows == int(before_counts[session] or 0),
                 producer_version="STOCK_A_BAOSTOCK_SOURCE_CAPTURE_R2",
-                warning_code=(
-                    "RAW_RESPONSE_ARCHIVE_WARNING" if archive_warnings else None
-                ),
-                warning_message=archive_warning_message,
             )
         else:
             data_job_pg.mark_progress_unavailable(
@@ -5539,13 +5342,6 @@ def _execute_baostock_source_stage(
                 ),
                 source_capture_id=source_capture_id,
             )
-    archive_status = (
-        "WARNING"
-        if archive_warnings
-        else "AVAILABLE"
-        if raw_response_journal is not None
-        else "NOT_REQUESTED"
-    )
     if incomplete or not all_session_rows_complete:
         return {
             "status": "INCOMPLETE",
@@ -5554,8 +5350,6 @@ def _execute_baostock_source_stage(
             "universe_count": len(universe),
             "identity_scope": identity_scope,
             "batch_results": batch_results,
-            "raw_response_archive_status": archive_status,
-            "raw_response_archive_warnings": archive_warnings,
             "names_result": names_result,
             "reason_code": "BAOSTOCK_CAPTURE_COVERAGE_INCOMPLETE",
         }
@@ -5572,8 +5366,6 @@ def _execute_baostock_source_stage(
         "universe_count": len(universe),
         "identity_scope": identity_scope,
         "batch_results": batch_results,
-        "raw_response_archive_status": archive_status,
-        "raw_response_archive_warnings": archive_warnings,
         "names_result": names_result,
     }
 

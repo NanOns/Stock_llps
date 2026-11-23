@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import date, datetime, timezone
 import importlib
 from importlib import metadata
@@ -55,17 +55,6 @@ class BaoStockIdentitySourceCapture:
     normalized_count: int
     request_started_at: datetime
     request_completed_at: datetime
-
-
-class BaostockRawResponseSinkError(RuntimeError):
-    """成功行情原始响应无法落盘时阻止查询结果进入规范化或PG写入。"""
-
-    def __init__(self, source_symbol: str, adjustflag: str):
-        self.source_symbol = source_symbol
-        self.adjustflag = adjustflag
-        super().__init__(
-            "BaoStock成功原始响应未能写入调试档案；拒绝继续使用或保存该批结果"
-        )
 
 
 def resolve_verified_baostock_capture(
@@ -1266,13 +1255,10 @@ def query_daily_range_rows(
     adjustflag: str | int = "3",
     max_api_calls: int = _MAX_API_QUERIES_PER_BATCH,
     target_session_count: int | None = None,
-    raw_response_sink: Callable[[str, str, Mapping[str, Any]], None] | None = None,
     transport: object | None = None,
 ) -> dict[str, Any]:
-    """按显式范围和坐标查询；可选地先归档成功原始响应，再交给规范化层。"""
+    """按显式范围和坐标查询，并将校验后的响应交给规范化层。"""
     adjustflag = _validate_adjustflag(adjustflag)
-    if raw_response_sink is not None and not callable(raw_response_sink):
-        raise ContractError("BaoStock原始响应归档器必须是可调用对象")
     if (
         not isinstance(symbols, tuple)
         or not symbols
@@ -1591,33 +1577,15 @@ def query_daily_range_rows(
                         "local_error": local_error,
                     }
                     rows_by_symbol[symbol] = symbol_response
-                    if (
-                        raw_response_sink is not None
-                        and symbol_response["query_error_code"] == "0"
-                        and isinstance(symbol_response["response_fields"], list)
-                        and isinstance(symbol_response["rows"], list)
-                    ):
-                        try:
-                            raw_response_sink(symbol, adjustflag, symbol_response)
-                        except BaostockRawResponseSinkError:
-                            raise
-                        except Exception as error:
-                            raise BaostockRawResponseSinkError(
-                                symbol, adjustflag
-                            ) from error
                     if not complete:
                         status = "QUERY_FAILED"
                         reason = "BaoStock日线响应字段、行键、重复日或范围校验失败"
                         break
-                except BaostockRawResponseSinkError:
-                    raise
                 except Exception as error:
                     status = "QUERY_FAILED"
                     error_type = type(error).__name__
                     reason = "BaoStock日线查询异常；异常文本已省略"
                     break
-    except BaostockRawResponseSinkError:
-        raise
     except Exception as error:
         status = "SOURCE_UNAVAILABLE"
         error_type = type(error).__name__

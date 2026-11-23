@@ -11,10 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from stock_a.domain import ContractError, FieldValue
-from stock_a.sources.baostock.client import (
-    BaostockRawResponseSinkError,
-    query_daily_range_rows,
-)
+from stock_a.sources.baostock.client import query_daily_range_rows
 from stock_a.sources.baostock.daily import (
     BaoDailyObservation,
     BaoUnitContract,
@@ -400,7 +397,6 @@ def fetch_baostock_price_window(
     retry_backoff_seconds: float,
     coordinates: Sequence[str] | None = None,
     transport: object | None = None,
-    raw_response_journal: Any | None = None,
     request_attempt_offsets: Mapping[str, Mapping[str, int]] | None = None,
 ) -> dict[str, Any]:
     """按显式证券和官方会话读取并配对BaoStock未复权/前复权价格。"""
@@ -590,12 +586,6 @@ def fetch_baostock_price_window(
     attempted_symbols: dict[str, set[str]] = {
         coordinate: set() for _, coordinate in coordinate_specs
     }
-    archived_symbols: dict[str, set[str]] = {
-        coordinate: set() for _, coordinate in coordinate_specs
-    }
-    archive_written_requests = 0
-    archive_reused_requests = 0
-    archive_warnings: list[dict[str, Any]] = []
     coordinate_stats: dict[str, dict[str, Any]] = {
         coordinate: {
             "adjustflag": flag,
@@ -659,60 +649,7 @@ def fetch_baostock_price_window(
                 batch_symbols = tuple(
                     pending_symbols[offset : offset + max_api_calls_per_batch]
                 )
-                archived_responses: dict[str, Mapping[str, Any]] = {}
-                symbols_to_query = []
-                for symbol in batch_symbols:
-                    archived = None
-                    if raw_response_journal is not None:
-                        try:
-                            archived = raw_response_journal.read_response(
-                                source_symbol=symbol, adjustment_flag=adjustflag
-                            )
-                        except Exception as error:
-                            archive_warnings.append(
-                                {
-                                    "code": "RAW_RESPONSE_ARCHIVE_READ_FAILED",
-                                    "source_symbol": symbol,
-                                    "adjustflag": adjustflag,
-                                    "error_type": type(error).__name__,
-                                }
-                            )
-                    if archived is None:
-                        symbols_to_query.append(symbol)
-                    else:
-                        if (
-                            not isinstance(archived, Mapping)
-                            or archived.get("journal_reused") is not True
-                            or archived.get("status")
-                            not in {"RESPONSE_RECEIVED", "QUERY_FAILED"}
-                            or type(archived.get("complete")) is not bool
-                            or archived.get("query_error_code") != "0"
-                            or archived.get("adjustflag") != adjustflag
-                            or archived.get("coordinate") != coordinate
-                        ):
-                            archive_warnings.append(
-                                {
-                                    "code": "RAW_RESPONSE_ARCHIVE_RECORD_INVALID",
-                                    "source_symbol": symbol,
-                                    "adjustflag": adjustflag,
-                                }
-                            )
-                            symbols_to_query.append(symbol)
-                            continue
-                        if archived.get("complete") is False:
-                            archive_warnings.append(
-                                {
-                                    "code": "RAW_RESPONSE_ARCHIVE_INCOMPLETE",
-                                    "source_symbol": symbol,
-                                    "adjustflag": adjustflag,
-                                }
-                            )
-                            symbols_to_query.append(symbol)
-                            continue
-                        archived_responses[symbol] = archived
-                        archived_symbols[coordinate].add(symbol)
-                        attempted_symbols[coordinate].add(symbol)
-                        archive_reused_requests += 1
+                symbols_to_query = list(batch_symbols)
 
                 network_response: Mapping[str, Any] = {}
                 network_responses: Mapping[str, Any] = {}
@@ -721,44 +658,6 @@ def fetch_baostock_price_window(
                     if login_budget_batches >= max_login_batches:
                         break
                     login_budget_batches += 1
-                    receipts: list[Mapping[str, Any]] = []
-
-                    def archive_raw_response(
-                        symbol: str,
-                        response_adjustflag: str,
-                        raw_response: Mapping[str, Any],
-                    ) -> None:
-                        if raw_response_journal is None:
-                            return
-                        if response_adjustflag != adjustflag:
-                            raise BaoStockDailyJobError(
-                                "RAW_RESPONSE_JOURNAL_COORDINATE_INVALID",
-                                "BaoStock原始响应回调坐标与请求不一致。",
-                            )
-                        attempt_number = (
-                            request_attempts[coordinate][symbol]["attempt_count"] + 1
-                        )
-                        try:
-                            receipt = raw_response_journal.archive_response(
-                                source_symbol=symbol,
-                                adjustment_flag=adjustflag,
-                                response=raw_response,
-                                request_attempt_number=attempt_number,
-                            )
-                        except Exception as error:
-                            # 外部JSONL是追查附件。归档失败不能抹掉本次已收到的
-                            # 行情响应；调用方仍须将真实响应校验并持久化至PG。
-                            archive_warnings.append(
-                                {
-                                    "code": "RAW_RESPONSE_ARCHIVE_WRITE_FAILED",
-                                    "source_symbol": symbol,
-                                    "adjustflag": adjustflag,
-                                    "error_type": type(error).__name__,
-                                }
-                            )
-                            return
-                        receipts.append(receipt)
-
                     try:
                         network_response = query_daily_range_rows(
                             symbols=tuple(symbols_to_query),
@@ -770,14 +669,7 @@ def fetch_baostock_price_window(
                             max_api_calls=max_api_calls_per_batch,
                             target_session_count=len(target_sessions),
                             transport=transport,
-                            raw_response_sink=(
-                                archive_raw_response
-                                if raw_response_journal is not None
-                                else None
-                            ),
                         )
-                    except BaostockRawResponseSinkError:
-                        raise
                     except Exception as error:
                         login_batch_count_unknown += 1
                         api_call_count_unknown_batches += 1
@@ -846,16 +738,10 @@ def fetch_baostock_price_window(
                     remote_responses = network_response.get("responses")
                     if isinstance(remote_responses, Mapping):
                         network_responses = remote_responses
-                    for receipt in receipts:
-                        archive_written_requests += int(
-                            not receipt.get("reused", False)
-                        )
-                        archive_reused_requests += int(bool(receipt.get("reused")))
-                response_map = {**archived_responses, **network_responses}
+                response_map = network_responses
                 batch_errors: list[dict[str, Any]] = []
                 for symbol in batch_symbols:
-                    is_archived = symbol in archived_responses
-                    if not is_archived and symbol not in remote_attempted:
+                    if symbol not in remote_attempted:
                         if symbol in network_responses:
                             batch_errors.append(
                                 {
@@ -869,36 +755,20 @@ def fetch_baostock_price_window(
                         continue
                     symbol_response = response_map.get(symbol)
                     request_attempt = request_attempts[coordinate][symbol]
-                    if is_archived:
-                        request_attempt["attempt_count"] = max(
-                            request_attempt["attempt_count"],
-                            int(symbol_response["request_attempt_number"]),
-                        )
-                        request_attempt["request_started_at"] = symbol_response.get(
-                            "request_started_at"
-                        )
-                        request_attempt["request_completed_at"] = symbol_response.get(
+                    request_attempt["attempt_count"] += 1
+                    if isinstance(symbol_response, Mapping):
+                        request_started_at = symbol_response.get("request_started_at")
+                        request_completed_at = symbol_response.get(
                             "request_completed_at"
                         )
-                    else:
-                        request_attempt["attempt_count"] += 1
-                        if isinstance(symbol_response, Mapping):
-                            request_started_at = symbol_response.get(
-                                "request_started_at"
+                        if request_attempt["request_started_at"] is None and isinstance(
+                            request_started_at, str
+                        ):
+                            request_attempt["request_started_at"] = request_started_at
+                        if isinstance(request_completed_at, str):
+                            request_attempt["request_completed_at"] = (
+                                request_completed_at
                             )
-                            request_completed_at = symbol_response.get(
-                                "request_completed_at"
-                            )
-                            if request_attempt[
-                                "request_started_at"
-                            ] is None and isinstance(request_started_at, str):
-                                request_attempt["request_started_at"] = (
-                                    request_started_at
-                                )
-                            if isinstance(request_completed_at, str):
-                                request_attempt["request_completed_at"] = (
-                                    request_completed_at
-                                )
                     if isinstance(symbol_response, Mapping):
                         response_rows = symbol_response.get("rows")
                         request_attempt["response_row_count"] = (
@@ -1192,14 +1062,6 @@ def fetch_baostock_price_window(
         "api_calls": api_calls,
         "retry_count": retry_api_calls,
         "retry_passes_used": retry_passes_used,
-        "archive_written_requests": archive_written_requests,
-        "archive_reused_requests": archive_reused_requests,
-        "archive_status": "WARNING"
-        if archive_warnings
-        else "AVAILABLE"
-        if raw_response_journal is not None
-        else "NOT_REQUESTED",
-        "archive_warnings": tuple(archive_warnings),
         "records": tuple(records),
         "record_count": len(records),
         "paired_record_count": pair_count,

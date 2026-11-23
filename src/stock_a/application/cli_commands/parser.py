@@ -60,74 +60,14 @@ class ChineseParser(argparse.ArgumentParser):
         raise SystemExit(_EXIT_ARGUMENT)
 
 
-def _add_research_arguments(
-    command: argparse.ArgumentParser, *, include_vipdata: bool = False
-) -> None:
-    command.add_argument(
-        "--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD"
-    )
-    command.add_argument(
-        "--unit-version", required=True, help="本次研究使用的显式TDX单位合同版本"
-    )
-    command.add_argument(
-        "--amount-to-cny", help="可选：金额到人民币元的研究倍率；省略则金额单位保持未知"
-    )
-    command.add_argument(
-        "--volume-to-shares",
-        type=int,
-        help="可选：数量到股的研究倍率；省略则数量单位保持未知",
-    )
-    command.add_argument(
-        "--max-bytes",
-        type=int,
-        default=16777216,
-        help="单文件最多读取字节数，默认16777216",
-    )
-    command.add_argument(
-        "--max-records",
-        type=int,
-        default=200000,
-        help="单文件最多读取记录数，默认200000",
-    )
-    command.add_argument(
-        "--chunk-records", type=int, default=256, help="单次读取块记录数，默认256"
-    )
-    command.add_argument(
-        "--max-seconds", default="30", help="单文件最大读取秒数，默认30"
-    )
-    if include_vipdata:
-        command.add_argument(
-            "--vipdata-package",
-            help="显式选择G:/codex_tmp内已下载的VIPDATA ZIP；只读并逐次核验原件完整性",
-        )
-        command.add_argument(
-            "--max-vipdata-validation-seconds",
-            type=float,
-            default=300.0,
-            help="本次ZIP原件及目录校验总秒数上限，默认300",
-        )
-        command.add_argument(
-            "--max-vipdata-extract-bytes",
-            type=int,
-            default=536870912,
-            help="当前单页临时解压字节上限，默认536870912",
-        )
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = ChineseParser(
         prog="stock-a",
-        description="Stock A中文诊断与TDX只读来源检查",
+        description="Stock A中文诊断与只读来源检查",
     )
     commands = parser.add_subparsers(dest="command", parser_class=ChineseParser)
     from stock_a.application.cli_commands.parser_registration.diagnostics import (
         register_commands as register_diagnostics,
-    )
-    from stock_a.application.cli_commands.parser_registration.inspection import (
-        register_commands as register_inspection,
-    )
-    from stock_a.application.cli_commands.parser_registration.research import (
-        register_commands as register_research,
     )
     from stock_a.application.cli_commands.parser_registration.source import (
         register_commands as register_source,
@@ -137,8 +77,6 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     register_diagnostics(commands)
-    register_inspection(commands)
-    register_research(commands)
     register_source(commands)
     register_analysis(commands)
     return parser

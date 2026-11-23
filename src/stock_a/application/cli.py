@@ -14,9 +14,6 @@ from stock_a.application.cli_commands.research.d0_raw import _run_source_d0_raw
 from stock_a.application.cli_commands.research.fep_baseline import (
     _run_source_fep_baseline,
 )
-from stock_a.application.cli_commands.research.research_commands import (
-    _run_research,
-)
 from stock_a.application.cli_commands.source.sector_members import (
     _run_source_tdx_sector_members,
 )
@@ -24,9 +21,6 @@ from stock_a.application.cli_commands.source.source_diagnostics import (
     _run_doctor,
     _run_pg_bind,
     _run_pg_identity,
-)
-from stock_a.application.cli_commands.source.day_inspect import (
-    _run_source_inspect,
 )
 
 
@@ -53,12 +47,6 @@ def main(argv: list[str] | None = None) -> int:
             return _run_pg_identity(args)
         if args.command == "pg-bind":
             return _run_pg_bind(args)
-        if args.command == "source-inspect":
-            return _run_source_inspect(args)
-        if args.command == "research-stock":
-            return _run_research(args, compare=False)
-        if args.command == "research-compare":
-            return _run_research(args, compare=True)
         if args.command == "source-tdx-sector-members":
             return _run_source_tdx_sector_members(args)
         if args.command == "source-d0-raw":
