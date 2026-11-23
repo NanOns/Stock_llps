@@ -134,7 +134,6 @@ _TASK_SCOPE_MIGRATIONS = {
     ),
     "BAOSTOCK_FEP_EQUAL_DATE_UNIQUE_R1": frozenset({63}),
     "R01_CLOSE_01_REAL_PG_CONSUMER_REPAIR_R1_20261122": frozenset({64, 65}),
-    "R07_R08_KEY_QUALITY_CODE_01_20261123": frozenset({66}),
 }
 _BASE_TABLES = {
     "installation_identity",
