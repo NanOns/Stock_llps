@@ -151,8 +151,8 @@ def evaluate_daily_price_limit(
             market=market,
             board=board,
             target_session=target_session,
-            rule_id="UNKNOWN_IPO_SPECIAL_PHASE",
-            reason="IPO_FIRST_5_SESSIONS_UNRULED_OUT",
+            rule_id="LEFT_CENSORED_HISTORY_UNKNOWN",
+            reason="IPO_DATE_NOT_STORED_AND_HISTORY_WINDOW_INSUFFICIENT",
         )
     preclose = _to_decimal(raw_preclose)
     if preclose is None:

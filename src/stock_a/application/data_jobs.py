@@ -1019,6 +1019,26 @@ def build_data_job_plan(
         required_raw_sessions.update(
             module_output_sessions.get("MARKET_PARTICIPATION", ())
         )
+    # 派生模块仍需从PG已存Raw输入绑定唯一paired capture；仅显式选择来源层
+    # 时才允许发起来源请求。Forward还需加入截止内实际到期的端点会话。
+    for module in (
+        "PRICE_LIMITS",
+        "FORWARD_PATH",
+        "COHORT_STATS",
+        "FEP_BASELINE",
+        "OBSERVATION_SEGMENTS",
+    ):
+        required_raw_sessions.update(module_output_sessions.get(module, ()))
+    if "FORWARD_PATH" in selected_research_modules:
+        official_through_cutoff = tuple(
+            session for session in all_sessions if session <= cutoff
+        )
+        for target_day in module_output_sessions.get("FORWARD_PATH", ()):
+            target_index = official_through_cutoff.index(target_day)
+            for horizon in (1, 3, 5, 10, 20):
+                endpoint_index = target_index + horizon
+                if endpoint_index < len(official_through_cutoff):
+                    required_raw_sessions.add(official_through_cutoff[endpoint_index])
     raw_window = tuple(sorted(required_raw_sessions))
     if operation == "CLEAR_DERIVED":
         raw_window = ()
@@ -7531,16 +7551,21 @@ def _execute_shared_production_chain(
                     config,
                     research_cutoff=cutoff,
                     source_capture_id=source_capture_id,
+                    # 仅使用已闭合到完整来源总体的现役规则键；对象级诊断不混入Cohort/FEP分母。
                     rule_ids=(
-                        "STOCK_SEED",
-                        "STOCK_WARM",
-                        "STOCK_CONFIRMED",
-                        "STOCK_D0_LAUNCH_CONFIRM",
-                        "STOCK_D0_RECOVERY",
-                        "STOCK_D0_STRONG_PULLBACK",
-                        "STOCK_D0_TREND_CONTINUE",
+                        "LAUNCH_CONFIRM",
+                        "RECOVERY_TURN",
+                        "s1",
+                        "s2",
+                        "seed",
                     ),
                     horizons=(1, 3, 5),
+                )
+                write_result = res.get("write", {})
+                inserted_rows = (
+                    int(write_result.get("inserted_row_count", 0) or 0)
+                    if isinstance(write_result, Mapping)
+                    else 0
                 )
                 for unit in fep_units:
                     actual_rows = data_job_pg.read_business_table_count(
@@ -7551,10 +7576,21 @@ def _execute_shared_production_chain(
                         calendar_revision=cal_revision,
                         research_cutoff=cutoff,
                     )
+                    verified_rows = (
+                        write_result.get("verified_row_count")
+                        if isinstance(write_result, Mapping)
+                        else None
+                    )
                     if actual_rows <= 0:
                         raise DataJobError(
                             "FEP_BASELINE_READBACK_EMPTY",
                             "FEP条件基线独立读回为空。",
+                            status=409,
+                        )
+                    if type(verified_rows) is int and actual_rows != verified_rows:
+                        raise DataJobError(
+                            "FEP_BASELINE_READBACK_MISMATCH",
+                            f"FEP条件基线独立读回({actual_rows})与事务内核验({verified_rows})不一致。",
                             status=409,
                         )
                     progress_callback(
@@ -7566,9 +7602,9 @@ def _execute_shared_production_chain(
                         profile_history_session_count=None,
                         d1_history_session_count=None,
                         expected_rows=actual_rows,
-                        inserted_rows=int(res.get("inserted_rows", 0) or 0),
+                        inserted_rows=inserted_rows,
                         quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
-                        no_change=int(res.get("inserted_rows", 0) or 0) == 0,
+                        no_change=inserted_rows == 0,
                         producer_version=RULE_VERSION,
                         calendar_revision=cal_revision,
                     )

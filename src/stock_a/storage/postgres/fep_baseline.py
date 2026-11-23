@@ -258,6 +258,7 @@ def read_fep_source_contexts(
             cursor.execute(
                 """SELECT source_symbol FROM source_raw_daily
                    WHERE session_date=%s AND source_capture_id=%s
+                     AND board IN ('MAIN_BOARD','GEM')
                    ORDER BY source_symbol""",
                 (target, capture),
             )
@@ -522,13 +523,26 @@ def persist_fep_baseline_rows(
         f"VALUES ({','.join(['%s'] * len(_COLUMNS))}) ON CONFLICT DO NOTHING"
     )
     rules = sorted({row[5] for row in values})
-    capture_ids = sorted({row[1] for row in values if row[1] is not None})
+    summary_scope_index = _COLUMNS.index("summary_scope")
+    capture_ids = sorted(
+        {
+            row[1]
+            for row in values
+            if row[summary_scope_index] == "T0" and row[1] is not None
+        }
+    )
     cutoffs = sorted({row[0] for row in values})
     horizons = sorted({row[17] for row in values})
     lanes = sorted({row[16] for row in values})
     if (
         len(capture_ids) != 1
-        or any(row[1] != capture_ids[0] for row in values)
+        or any(
+            row[1] != capture_ids[0]
+            if row[summary_scope_index] == "T0"
+            else row[1] is not None
+            for row in values
+        )
+        or any(row[summary_scope_index] not in {"T0", "EQUAL_DATE"} for row in values)
         or len(cutoffs) != 1
     ):
         raise ValueError("单次FEP写入必须绑定唯一截止与BaoStock来源捕获")
@@ -563,7 +577,8 @@ def persist_fep_baseline_rows(
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
                 WHERE research_cutoff=%s
-                  AND source_capture_id=%s
+                  AND (source_capture_id=%s
+                       OR (source_capture_id IS NULL AND summary_scope='EQUAL_DATE'))
                   AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
                 ORDER BY summary_scope,target_session,period_start_session,
                          rule_id,lane,horizon,condition_code,group_code,metric_code""",
@@ -606,7 +621,8 @@ def persist_fep_baseline_rows(
             cursor.execute(
                 f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
                     WHERE research_cutoff=%s
-                      AND source_capture_id=%s
+                      AND (source_capture_id=%s
+                           OR (source_capture_id IS NULL AND summary_scope='EQUAL_DATE'))
                       AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
                     ORDER BY summary_scope,target_session,period_start_session,
                              rule_id,lane,horizon,condition_code,group_code,metric_code""",
@@ -1006,7 +1022,8 @@ def read_fep_baseline(
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
                 WHERE research_cutoff=%s
-                  AND source_capture_id=%s
+                  AND (source_capture_id=%s
+                       OR (source_capture_id IS NULL AND summary_scope='EQUAL_DATE'))
                   AND rule_id=%s AND horizon=%s AND lane=ANY(%s)
                 ORDER BY lane,summary_scope,target_session,condition_code,group_code,metric_code""",
             (research_cutoff, source_capture_id, rule_id, horizon, list(query_lanes)),
@@ -1036,7 +1053,7 @@ def read_fep_baseline(
             row
             for row in stored_rows
             if row[index["summary_scope"]] == "EQUAL_DATE"
-            and row[index["source_capture_id"]] == source_capture_id
+            and row[index["source_capture_id"]] is None
             and row[index["period_start_session"]] == period_start
             and row[index["period_end_session"]] == period_end
             and tuple(row[index[name]] for name in context_columns) in t0_contexts

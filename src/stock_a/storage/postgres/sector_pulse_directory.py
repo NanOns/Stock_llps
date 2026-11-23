@@ -109,8 +109,8 @@ WHERE target_session=%s AND source_capture_id=%s
         )
         seed = cursor.fetchone()
         if (
-            int(seed[0]) != source_pool_count
-            or int(seed[1]) != source_pool_count
+            int(seed[0]) <= 0
+            or int(seed[0]) != int(seed[1])
             or int(seed[2]) != 1
             or seed[3] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
             or seed[4] != seed[3]
@@ -119,6 +119,7 @@ WHERE target_session=%s AND source_capture_id=%s
                 "SECTOR_PULSE_DIRECTORY_SEED_SCOPE_INCOMPLETE",
                 "当前日期精确Seed/Profile全集未闭合",
             )
+        seed_profile_count = int(seed[0])
 
         cursor.execute(
             """SELECT snapshot_id,board_kind,count(*)::int
@@ -498,6 +499,8 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
         "target_session": target_session.isoformat(),
         "source_capture_id": source_capture_id,
         "profile_revision": profile_revision,
+        "source_pool_count": source_pool_count,
+        "seed_profile_count": seed_profile_count,
         "snapshot_ids": dict(snapshot_ids),
         "total_board_count": pulse_total,
         "filtered_total": filtered_total,

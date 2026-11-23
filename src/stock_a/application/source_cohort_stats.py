@@ -11,6 +11,8 @@ from stock_a.storage.postgres.research_facts import (
 )
 from stock_a.storage.postgres.source_raw import _transaction
 
+_COHORT_RULE_IDS = ("LAUNCH_CONFIRM", "RECOVERY_TURN", "s1", "s2", "seed")
+
 
 def persist_cohort_stats(config, *, target, research_cutoff, source_capture_id):
     """在单事务内读取完整规则并保存六组typed统计；不读取来源文件。"""
@@ -26,8 +28,9 @@ def persist_cohort_stats(config, *, target, research_cutoff, source_capture_id):
                FROM source_rule_evaluations
                WHERE target_session=%s AND source_capture_id=%s
                  AND rule_version=%s AND calendar_revision=%s
+                 AND rule_id=ANY(%s)
                GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5""",
-            (target, source_capture_id, RULE_VERSION, revision),
+            (target, source_capture_id, RULE_VERSION, revision, list(_COHORT_RULE_IDS)),
         )
         keys = cursor.fetchall()
         if not keys:

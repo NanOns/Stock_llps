@@ -133,6 +133,9 @@ function marketClassText(value) {
       EXPANDING: "成交扩张（EXPANDING）",
       NORMAL: "成交常态（NORMAL）",
       THIN: "成交偏薄（THIN）",
+      HIGH: "高压（HIGH）",
+      ELEVATED: "压力偏高（ELEVATED）",
+      LOW: "压力低（LOW）",
       UNKNOWN: "未知（UNKNOWN）",
     }[value] ||
     value ||
@@ -2104,8 +2107,7 @@ async function selectDate(target_session) {
   );
   message("overviewBoards", "正在读取 D0 来源级新增启动。");
   message("overviewStocks", "正在读取 D0 来源级新增启动。");
-  if (["market", "diagnostics"].includes(activePage))
-    void loadExtra(activePage);
+  if (activePage === "diagnostics") void loadExtra(activePage);
   if (activePage === "focus")
     message("focusAutoStatus", "正在读取交易日来源上下文…");
   try {
@@ -2206,6 +2208,8 @@ async function selectDate(target_session) {
         }
       });
     }
+    if (["market", "diagnostics"].includes(activePage))
+      void loadExtra(activePage);
     void loadD0Overview(selected);
     if (state.d0BoardView === "PULSE") void loadD0PulseDirectoryPage();
   } catch (error) {
@@ -2726,7 +2730,7 @@ function renderD0Boards() {
     state.d0Result?.membership_status,
   );
   const summary = pulseOnly
-    ? `${state.selected?.target_session || ""} · 已存 PULSE ${pulseDirectory.total_board_count ?? boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · PULSE TRUE/FALSE/UNKNOWN ${pulseDirectory.pulse_state_counts?.TRUE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.FALSE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.UNKNOWN ?? "UNKNOWN"} · T+1 OBSERVED/UNKNOWN/NOT_DUE ${pulseDirectory.t1_status_counts?.OBSERVED ?? 0}/${pulseDirectory.t1_status_counts?.UNKNOWN ?? 0}/${pulseDirectory.t1_status_counts?.NOT_DUE ?? 0} · NON_PIT`
+    ? `${state.selected?.target_session || ""} · 已存 PULSE ${pulseDirectory.total_board_count ?? boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · 行情来源池 ${format(pulseDirectory.source_pool_count)} / Seed正式研究范围 ${format(pulseDirectory.seed_profile_count)} · PULSE TRUE/FALSE/UNKNOWN ${pulseDirectory.pulse_state_counts?.TRUE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.FALSE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.UNKNOWN ?? "UNKNOWN"} · T+1 OBSERVED/UNKNOWN/NOT_DUE ${pulseDirectory.t1_status_counts?.OBSERVED ?? 0}/${pulseDirectory.t1_status_counts?.UNKNOWN ?? 0}/${pulseDirectory.t1_status_counts?.NOT_DUE ?? 0} · NON_PIT`
     : `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · 首页精选 ${state.d0Result.board_selection?.home_featured_count ?? Math.min(boards.length, 15)} · 筛选 ${filtered.length}${orderText} · ${membershipQuality} · 成员关系可重叠 · NON_PIT${missingText}`;
   message(
     "d0BoardSummary",
@@ -7557,7 +7561,7 @@ async function loadExtra(page) {
       : page === "market"
         ? "marketResult"
         : "diagnosticResult";
-  if (!c) {
+  if (!c?.contextReady) {
     if (page === "focus") {
       ++cohortRequest;
       ++focusStockRequest;
@@ -7696,7 +7700,9 @@ async function loadExtra(page) {
         ],
         [
           "压力轴",
-          `${data.market_axes?.pressure?.status || "UNKNOWN"} · ${data.market_axes?.pressure?.reason || "缺少日期有效限价制度事实。"}`,
+          data.market_axes?.pressure?.status === "OBSERVED"
+            ? `${marketClassText(data.market_axes.pressure.classification)} · 跌停 ${data.market_axes.pressure.limit_down_count}/${data.market_axes.pressure.assessable_count}（${data.market_axes.pressure.exact?.fraction || "UNKNOWN"}）· 覆盖 ${data.market_axes.pressure.coverage?.fraction || "UNKNOWN"} · 总体 ${data.market_axes.pressure.research_pool_count} · 停牌 ${data.market_axes.pressure.suspended_count} · UNKNOWN ${data.market_axes.pressure.unknown_count}`
+            : `${marketStatusText(data.market_axes?.pressure?.status)} · ${data.market_axes?.pressure?.reason || "缺少日期有效限价制度事实。"}`,
         ],
         [
           "综合研究环境",

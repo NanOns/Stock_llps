@@ -2849,7 +2849,9 @@ def read_business_table_count(
         ),
         "stock.source_fep_baseline_facts": (
             """SELECT count(*) FROM stock.source_fep_baseline_facts
-               WHERE research_cutoff=%s AND source_capture_id=%s""",
+               WHERE research_cutoff=%s
+                 AND (source_capture_id=%s
+                      OR (source_capture_id IS NULL AND summary_scope='EQUAL_DATE'))""",
             lambda: (research_cutoff, source_capture_id),
         ),
         "stock.source_research_observation_segment_days": (

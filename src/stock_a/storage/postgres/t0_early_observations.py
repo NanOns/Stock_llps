@@ -222,6 +222,7 @@ def read_source_t0_early_observation_inputs(
     WHERE d.target_session=%s AND d.source_capture_id=%s
       AND d.target_capture_id=%s
       AND d.producer_version=%s
+      AND d.calendar_revision=%s
     GROUP BY d.source_symbol
 )
 SELECT p.enrollment_id,p.enrollment_kind,p.reason_code,
@@ -266,6 +267,7 @@ ORDER BY p.enrollment_id,m.board_kind,m.board_native_id COLLATE "C" """,
                 source_capture_id,
                 source_capture_id,
                 _D0_LAUNCH_PRODUCER_VERSION,
+                seed_scope["calendar_revision"],
                 *(seed_scope[name] for name in _SEED_SCOPE_FIELDS),
             ),
         )
