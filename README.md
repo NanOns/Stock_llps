@@ -68,7 +68,7 @@ stock-a source-research-day --formal-admission-from-saved --persist `
 
 PG默认G盘配置尚不代表Windows服务已经应用。旧E盘数据不自动迁移、复制、覆盖或切换；物理位置独立核验与业务数据库身份分别记录，用户确认但未独立核验的状态不得冒充实测通过。当前具备分质量日线解码、字段/窗口摘要和基础画像纯求值入口；开发服务启动方式见下文。纯函数调用显式注入单位/规则，规则JSON数字用Decimal解码，不在导入期读配置；模块导入根为src/，不依赖旧仓。
 
-本地Git准入钩子保存在.git/hooks，不进入Git或运行包；换机须恢复准入。远端按用户指定配置，不沿用旧仓远端。
+本机Git钩子启动器位于`.git/hooks`；唯一守卫源码为`devtools/stock_a_git_guard.py`并受版本控制，换机后须安装本机启动器并确认`core.hooksPath`。守卫不进入运行包。远端按用户指定配置，不沿用旧仓远端。
 
 来源事实、画像和实际研究结果按类型字段存PG；不生成逐日业务文件，不把源包/二进制/整对象JSON塞进PG。清空隔离测试临时目录不能破坏已入库历史查询；用户原始TDX来源仍保持只读。
 
@@ -83,31 +83,7 @@ stock-a --help
 stock-a doctor
 ```
 
-`doctor`读取唯一登记的`config/runtime.defaults.json`，输出包/配置/来源根/数据库身份的结构诊断，不连接PG或来源。当前配置登记了`D:/new_tdx`来源根，且`deployment_applied`标记为`true`；这些配置值不证明来源阶段0或PG实际部署就绪。业务能力以只读诊断的实际结果为准，doctor输出不授权业务启动。
-
-单文件检查必须显式指定绝对路径、单位与有限预算。金额倍率示例使用0.5元/原始单位，数量倍率示例使用100股/原始单位；调用者须根据真实合同确定数值：
-
-```powershell
-stock-a source-inspect 'G:\已绑定来源根\日线文件.day' `
-  --unit-version SOURCE-UNIT-R1 --amount-to-cny 0.5 --volume-to-shares 100 `
-  --max-bytes 33554432 --max-records 1048576 --chunk-records 256 --max-seconds 30
-```
-
-来源根只从已验证运行配置读取，不能以命令行临时根替代。当前配置登记了`D:/new_tdx`；实际文件可读性、来源权威及数据能力须由阶段0核验，配置存在不代表来源准入。成功摘要采用JSON写stdout，错误JSON写stderr；退出码0为命令完成、2为参数/合同错误、3为配置或来源不可用、4为系统拒绝访问、5为工程错误。所有消息为中文，稳定错误码保留原生标识。
-
-通达信官网盘后完整ZIP只由显式来源命令触发，其他诊断和研究命令不隐式联网或下载：
-
-```powershell
-stock-a source-vipdata --target-session YYYY-MM-DD --mode inspect
-stock-a source-vipdata --target-session YYYY-MM-DD --mode download-verify
-stock-a source-vipdata --target-session YYYY-MM-DD --mode download-verify `
-  --consume-symbol SH.六位代码 --unit-version SOURCE-UNIT-R1 `
-  --amount-to-cny 0.5 --volume-to-shares 100
-```
-
-`inspect`有界读取官网页面及配置登记的`_hsjdayinfo.js`，以其中`HSJDAY_SOFT_TIME`作为官方更新时点，并使用`runtime.defaults.json`登记的ZIP地址`https://data.tdx.com.cn/vipdoc/hsjday.zip`；网页HTML未嵌入ZIP链接或日期时仍按上述独立端点核验。`download-verify`仅在官方日期覆盖目标会话后下载完整包到`G:/codex_tmp`，并核验SHA-256、ZIP CRC、entry范围与安全预算。若官网返回已知静态Cookie挑战，只解析固定字段生成同域Cookie并重试一次，不执行网页JavaScript；未识别的HTML响应直接拒绝。每次运行使用独立临时子目录，避免覆盖先前包。端点集中在`source_policy.vipdata_official`配置，后续官网路径变更时可受控更新。`--consume-symbol`为可选的单证券NON_PIT研究预览，必须显式给出单位合同；它复用现有TDX读取、Canonical选择和Core，不写PG或持久业务文件。
-
-`source-vipdata --mode download-verify`默认在命令结束时清理本次下载目录。需要将官方包交给后续正式消费者时，可显式传入`--retain-package`，回执会给出保留路径；完成入库后须精确清理该G盘临时包。
+`doctor`读取唯一登记的`config/runtime.defaults.json`，输出包/配置/来源根/数据库身份的结构诊断，不连接PG或来源。配置值不证明TDX来源当前可读或PG实际连接/部署就绪；业务能力以只读诊断的实际结果为准，doctor输出不授权业务启动。
 
 当前可安装包只包含 `src/stock_a` 业务模块；运行依赖为`psycopg[binary]`，并在Windows上安装`tzdata`以提供`Asia/Shanghai`时区数据库。构建使用固定版本`flit_core==4.1.0`。支持Python 3.10及以上，当前已核验的解释器版本以外不据此声称逐版本实测。
 
@@ -123,94 +99,19 @@ python -m venv 'G:\codex_tmp\stock-a\venv'
 & 'G:\codex_tmp\stock-a\venv\Scripts\python.exe' -m pip install 'G:\codex_tmp\stock-a\wheel\stock_a-0.1.0-py3-none-any.whl'
 ```
 
-安装后的模块入口不读取项目配置、行情文件或数据库。调用示例显式提供日线单位、画像输入和规则：
+安装包使用自身的程序与合同资源，并共用唯一的`config`槽位；正式股票价格Reader从PG读取BaoStock类型化事实。低层研究内核不是行情采集入口，也不代表全域数值、数据库或页面验收完成。
 
-```python
-from collections.abc import Mapping
+## 当前来源与产品入口
 
-from stock_a.research.profile import ProfileHandoff, profile
-from stock_a.sources.tdx.day import UnitContract, decode_day_record
+股票价格只使用BaoStock已保存的PG捕获：RAW未复权用于当日价格与量额，QFQ前复权用于跨日Core/Profile结构。TDX只提供行业/GN概念目录与成员关系；本项目没有本地TDX股票日线、VIPDATA日K或`.tnf`名称读取入口。现行命令以`stock-a --help`为准；数据初始化和数据日更只通过产品运营菜单显式启动。
 
-def evaluate(raw32: bytes, units: UnitContract, field_id: str,
-             handoff: ProfileHandoff, rules: Mapping, field_registry: list[Mapping]):
-    day = decode_day_record(raw32, units)
-    result = profile(field_id, handoff, rules, field_registry)
-    return day, result
-```
-
-调用方为 `evaluate` 提供原始32字节记录、单位合同、字段ID、带质量和上下文的ProfileHandoff、已登记规则及字段注册表；画像规则需符合字段合同。接口展示纯内核调用，不代表已完成真实来源采集、全域数值验收、数据库写入、服务或页面运行。
-
-## TDX日线有界读取
-
-TDX日线文件入口需要调用方显式提供绝对文件路径、非空保护根、单位合同和读取预算；不会从当前目录、旧项目或默认盘符寻找来源。生产根只应由本项目唯一`config`中的已绑定配置解析后传入。下面示例中的变量由调用方提供，不能用测试/交付目录代替生产配置：
-
-```python
-from stock_a.sources.tdx.day_source import open_day_file
-from stock_a.sources.tdx.day_stream import ReadLimits
-
-limits = ReadLimits(
-    max_bytes=declared_source_byte_budget,
-    max_records=declared_source_record_budget,
-    chunk_records=256,
-    max_seconds=declared_read_seconds,
-)
-
-with open_day_file(source_path, (bound_source_root,), units, limits) as scan:
-    for located in scan:
-        consume_in_memory(located.record_index, located.byte_offset, located.decoded)
-    summary = scan.summary  # 仅在EOF、顺序/预算和最终句柄检查全部通过后可读
-```
-
-`iter_day_records(readonly_stream, units, limits)`复用同一扫描内核，适用于调用方管理的非seekable二进制流，不关闭调用方流。文件入口使用只读Windows句柄，并核验句柄最终路径、身份及扫描前后大小/修改时点。超限、坏日期、重复/冲突、路径越界、扫描中变化及提前退出都不能获得完整摘要；已yield前缀不能视为完整输入。读取摘要不替代来源捕获、PIT时钟或业务版本。
-
-## TDX真实数据研究查询
-
-研究查询从`runtime.defaults.json`中的TDX只读来源根定位日线文件，按显式单位合同与预算完成整文件扫描，再复用既有Core。年度日历资源按文件年份动态装载；当前含经沪深交易所年度公告交叉核验的2025、2026年会话，资源记录版本、覆盖、来源URL和摘要。跨年查询只连接目标年前连续覆盖的年度后缀，缺失中间年度会明确报告日历缺口，不会把两侧会话拼成连续历史。目标日期必须显式指定且为已核验交易会话；若目标年不足70个已知会话且缺少连续前置年度，Core依赖足够历史的字段标记`CALENDAR_LOOKBACK_NOT_COVERED`，独立可验证的目标日原始行情仍会返回。缺bar的正式会话标为`UNKNOWN`，不会据此推断停牌或上市前；源记录落在已覆盖年度的休市日时拒绝计算。
-
-来源代码仅是研究序列定位键，不提供稳定`security_id`证明。输出区分`source_last_session`、`target_session`与本机`read_time`；金额/数量的解码质量和单位可信度分列，倍率仍是调用方假设。结果始终标记`NON_PIT_RETROSPECTIVE`和原始未复权坐标；不得当作当前行情、严格PIT、公司行为已调整或生产结论。命令不连接PostgreSQL、不写数据库或持久业务文件。
-
-```powershell
-stock-a research-stock SH.600000 --target-session YYYY-MM-DD `
-  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
-  --max-bytes 16777216 --max-records 200000 --max-seconds 30
-
-stock-a research-stock SH.600000 --target-session YYYY-MM-DD `
-  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
-  --format summary --include-profile-preview
-
-stock-a research-stock SH.600000 --target-session YYYY-MM-DD `
-  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
-  --format summary --include-baostock-evidence
-
-stock-a research-compare SH.600000 SZ.000001 SZ.300001 --target-session YYYY-MM-DD `
-  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
-  --max-bytes 16777216 --max-records 200000 --max-seconds 30 `
-  --max-total-bytes 335544320 --max-total-records 4000000 --max-total-seconds 120
-
-stock-a research-universe-preview --target-session YYYY-MM-DD `
-  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
-  --offset 0 --limit 20 --market ALL --board ALL
-
-stock-a research-universe-preview --target-session YYYY-MM-DD `
-  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
-  --offset 0 --limit 20 --format summary --include-profile-preview
-```
-
-`research-stock`和`research-compare`输出同一既有Core的盘后基础观察摘要，标记`RESEARCH_PREVIEW_NON_PIT`，包含原始收盘、MA5/20/60、ATR20、ret5/20、金额/数量质量和均线位置；每个值保留质量与未知原因。`research-stock --include-profile-preview`在同一次Raw/Core读取上追加11项基础画像组件清单，逐项给出结果或缺因、质量、输入来源/窗口和规则引用。该预览把目标日`raw.close`局部映射到规则的价格输入名，只用于`RAW_UNADJUSTED`描述；不表示已执行P06复权或身份/PIT验证。周/月闭合周期和横截面相对能力按实际缺失输入显示`NOT_IMPLEMENTED`或`CONTRACT_UNBOUND`，不会填成正常状态。画像预览不生成Seed、Priority、评分、排序或交易信号。`--amount-to-cny`和`--volume-to-shares`是调用方声明的研究单位假设，不能替代经独立来源合同验收的单位权威。`research-compare`最多接受20个不同证券，并在每只证券的读取上限外共享`--max-total-bytes`、`--max-total-records`、`--max-total-seconds`。超限后保留全部请求分母；`available`、`failed`、`partial_unknown`和`not_evaluated`构成精确分类分区，后续证券不会被静默省略。耗时上限在每个读取块和证券边界检查，文件系统调用本身无法被同步扫描中断时，单个正在执行的系统调用可能延后返回。对比不对证券做身份推断或静默去重。
-
-`research-stock --include-baostock-evidence`是显式联网的单证券、单日、未复权补充查询；默认命令、`research-compare`和全市场分页均不加载BaoStock SDK、不请求该来源。需安装可选依赖`stock-a[baostock]`。请求固定使用`frequency=d`、`adjustflag=3`，包含完整OHLC字段，单socket超时5秒、最多8行、零重试，并报告实际SDK响应字段与UTC请求时钟。补充结果保留Bao原始字段及逐字段质量，并逐项对照原始未复权开、高、低、收；Bao文档中的单位展示为尚未独立验收的单位假设。金额比较保留精确差，并按调用方声明的TDX金额倍率单独模拟IEEE754 float32：只有Bao金额经该坐标编码后精确等于可还原的TDX float32值时，才标记为`FLOAT32_QUANTIZATION_EQUIVALENT_UNDER_DECLARED_UNITS`，同时报告ULP和相对差；该解释不证明单位权威，也不使用固定容差。成交量使用整数独立核对，任意差值均原样保留并标记未解释，不归因于金额float32舍入或复权。上述结果不据此替换TDX或判定TDX错误。Bao换手`turn`按百分比除以100输出fraction；历史换手分位需要已绑定身份及完整前60个有效观察，本单日查询不计算。`tradestatus`、`isST`仅为Bao来源证据；缺行、缺字段或未知枚举均不推断停牌、退市或正常状态。此输出仍为`SOURCE_SYMBOL_ONLY`、`RAW_UNADJUSTED`、`NON_PIT_RETROSPECTIVE`，且不解除正式`profile()`准入阻断。
-
-`research-universe-preview`只读枚举已配置来源根内的`vipdoc/sh/lday`和`vipdoc/sz/lday`，按标准化来源代码排序，使用`_normalize_symbol`的范围规则保留沪深主板/创业板候选；不依据ST名称过滤。文件名只代表`TDX_SOURCE_CANDIDATES_NON_PIT`来源候选，不证明证券实体、上市状态、当日可交易或行情更新。默认每页20只、最多100只，支持offset/limit及市场/板别过滤；目录项和发现耗时有独立上限，目录缺失、越界链接、重复代码及超预算明确失败且不报告完整总数。单页跨20只子批查询时仍共享一次字节、记录和耗时预算。默认以短摘要显示总候选分母、本页、剩余和未评价数量；`--format json`提供完整逐对象详情。`raw_availability`与`core_availability`独立列出观察数、未知数和原因；兼容字段`status`/`classification`不意味着Core全部已知。页内每行生成的单股详情查询引用携带同一目标日、单位和单文件预算，并显式请求画像组件预览；该摘要不连接PG、不写业务状态。
-
-JSON和短摘要另提供`coverage_summary`中的当前页实际目标Bar、目标缺Bar、读取失败、未评价对象、按市场/板别拆分及本页已完成读取文件的末条日期直方图/最大值。末条日期只代表本页完整读到EOF并核验句柄的来源文件，不是来源可得时钟，也不自动证明完整过滤池；多页总体只能在调用方确认计划页全部实际执行后合并。`candidate_counts_by_board`是来源文件名候选分布，主板/创业板研究候选与被研究范围排除的文件分开；均不等同官方有效证券总体。
-
-可选`--include-profile-preview`在当前请求页复用一次价格画像字段合同，在原有Raw/Core计算上附加11项Profile组件；不额外扫描来源，也不逐股重载合同。分页JSON保留组件来源、质量、原因和规则身份，并提供紧凑页级摘要。失败和预算未评价对象不伪造组件。预览范围仍按请求日期与来源包显式披露。
+远端行业/GN目录与成员来源经`source-tdx-sector-members`管理；目录、成员和研究页面只读取已保存的PG结果。GET请求不采集来源、不启动全市场计算或写PG。未计算、数据不完整、无存储事实与未知质量按接口返回的状态分别展示。
 
 ## 本机市场与个股研究
 
 在开发环境中，产品研究服务仅监听`127.0.0.1:28766`，页面从固定`stock_a.stock`读取Raw和画像；单股查询按日期和来源版本读取PG历史并调用现役Core/Profile。服务不写PG、不扫描来源ZIP、不联网、不保存结果；结果按实际数据范围和NON_PIT质量展示，不表示官方上市总体或正式选股。
 
-页面按明确日期、数字来源包ID和代码筛选Raw与画像结果；没有可用数据时显示对应缺失或质量信息。
+页面按明确研究日期、BaoStock来源捕获ID、价格坐标和代码读取Raw与画像结果；没有已存结果时显示未计算、无存储事实或对应质量原因。
 
 ```powershell
 $researchCutoff = Read-Host '输入研究截止日（YYYY-MM-DD）'
@@ -218,71 +119,3 @@ stock-a product-serve --host 127.0.0.1 --port 28766 --research-cutoff $researchC
 ```
 
 按`Ctrl+C`安全停止。服务拒绝其它主机、端口28765或已被占用的28766；不会接管或终止现有进程。
-
-## GBBQ字节解析
-
-`decode_gbbq_bytes`只解析调用方已经取得的有限字节。调用方必须提供协议版本、类别1单位版本、来源引用及字节/记录预算；它不打开来源文件或读取配置。此示例展示纯解析调用，`source_ref`用于追溯输入，不是证券稳定身份：
-
-```python
-from stock_a.sources.tdx.actions import (
-    GBBQ_PROTOCOL_VERSION,
-    GBBQ_UNIT_VERSION,
-    decode_gbbq_bytes,
-)
-
-parsed = decode_gbbq_bytes(
-    content,
-    source_ref="SYNTHETIC:gbbq-example",
-    protocol_version=GBBQ_PROTOCOL_VERSION,
-    unit_version=GBBQ_UNIT_VERSION,
-    max_bytes=content_byte_budget,
-    max_records=record_budget,
-)
-for record in parsed.records:
-    if record.semantic_status == "SUPPORTED_CATEGORY_1" and record.data_quality == "VALID":
-        fields = record.xrxd_fields()  # Fraction精确值；单位由版本合同固定
-```
-
-解码会保留输入顺序、重复记录、行质量、来源位置及未知类别；类别2–14的经济语义尚未接入类别1解释。市场/代码产生的`source_symbol`不等于稳定`security_id`，解析结果也不证明真实来源、PIT或公司行为准入。协议和类别1单位合同见[算法合同§3](docs/design/算法合同与升级规则.md#3-canonical复权与制度)。
-
-## 精确仿射坐标运输
-
-`stock_a.canonical.adjustment`提供无IO的精确仿射系数、价格/逆变换、OHLC与差值运输。每次调用必须显式提供稳定实体、源/目标basis、目标会话、带时区的知识截止及正tick；公司行为的有效会话和可得时钟由上游经过核验后注入。示例只用于合成研究，不能替代真实来源或PIT证明。
-
-```python
-from datetime import date, datetime, timezone
-from fractions import Fraction
-
-from stock_a.canonical.adjustment import (
-    AdjustmentContext,
-    XrxdEvent,
-    affine_price,
-    build_affine_factor,
-    transport_difference,
-)
-
-context = AdjustmentContext(
-    security_id="SYNTHETIC:entity-1",
-    source_basis="RAW:S1",
-    target_basis="ADJ:S2",
-    target_session=date(2026, 1, 2),
-    source_cutoff=datetime(2026, 1, 3, tzinfo=timezone.utc),
-    tick=Fraction(1, 100),
-)
-event = XrxdEvent(
-    event_ref="SYNTHETIC:event-1",
-    source_ref="SYNTHETIC:actions",
-    security_id=context.security_id,
-    effective_session=date(2026, 1, 2),
-    available_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
-    cash_per_10=1,
-    rights_price=0,
-    bonus_per_10=0,
-    rights_per_10=0,
-)
-factor = build_affine_factor([event], source_session=date(2026, 1, 1), context=context)
-adjusted = affine_price(11, factor, tick=context.tick)  # Fraction(109, 10)，即10.90
-atr = transport_difference(2, factor)  # 2；仅乘alpha，不加beta
-```
-
-同日多事件须传唯一`same_day_order`；缺序、重复引用、未知实体或不支持事件跨越均明确拒绝。正式`ADJ:`坐标在factor中绑定tick，省略或重复传入tick都按该绑定值计算；不同tick有不同目标坐标身份。需要精确未量化结果时，必须明确使用独立`RESEARCH:`坐标和`EXACT_RESEARCH`模式。正式价格只在最终目标坐标执行一次HALF_UP。完整合同见[算法合同§3](docs/design/算法合同与升级规则.md#3-canonical复权与制度)。
