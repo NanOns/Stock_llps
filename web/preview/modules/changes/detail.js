@@ -62,6 +62,8 @@ function openChangeTimeline(item, side) {
       version.source_capture_id === returnCaptureId,
   );
   if (!returnVersion) return;
+  state.priceCoordinate = "FORWARD_ADJUSTED";
+  $("priceCoordinateSelect").value = "FORWARD_ADJUSTED";
   const returnBinding =
     state.changeBinding?.origin === "exact-symbol"
       ? {
