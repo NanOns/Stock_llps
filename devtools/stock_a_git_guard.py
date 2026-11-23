@@ -140,6 +140,10 @@ FORBIDDEN_EXTERNAL_PART = re.compile(
 BUSINESS_FILE_HINT = re.compile(
     r"""(?ix)(?:response|archive|journal|checkpoint|resume|restore|capture|raw[_-]?source)"""
 )
+JSON_PATH_FIELD = re.compile(
+    r"""(?ix)(?:^|[._-])(?:paths?|root|directories?|dirs?|files?|filenames?|uri|location|archive|journal|response|checkpoint|resume|restore|capture|raw[_-]?source)(?:$|[._-])"""
+)
+JSON_REGEX_FIELD = re.compile(r"(?i)(?:pattern|regex|regexp|expression)")
 FORBIDDEN_CONFIG_PATH_ROLE = re.compile(
     r"""(?ix)(?:paths\s*\[\s*["'](?:delivery_root|release_root|runtime_data_root|private_configuration_root)["']\s*\]|(?:delivery_root|release_root|runtime_data_root|private_configuration_root))"""
 )
@@ -291,14 +295,23 @@ def _file_io_path_errors(path: str, text: str) -> list[str]:
     except SyntaxError:
         return []
     assignments: dict[str, str] = {}
+
+    def remember_target(target: ast.AST, source: str) -> None:
+        if isinstance(target, (ast.Name, ast.Attribute)):
+            assignments[ast.unparse(target)] = source
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             source = ast.get_source_segment(text, node.value) or ""
             for target in node.targets:
-                if isinstance(target, ast.Name):
-                    assignments[target.id] = source
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            assignments[node.target.id] = ast.get_source_segment(text, node.value) or ""
+                remember_target(target, source)
+        elif isinstance(node, ast.AnnAssign):
+            remember_target(node.target, ast.get_source_segment(text, node.value) or "")
+        elif isinstance(node, ast.AugAssign):
+            target = ast.unparse(node.target)
+            previous = assignments.get(target, target)
+            value = ast.get_source_segment(text, node.value) or ""
+            assignments[target] = f"{previous}\n{value}"
 
     def expand_source(source: str, seen: set[str] | None = None) -> str:
         seen = set() if seen is None else seen
@@ -342,6 +355,70 @@ def _file_io_path_errors(path: str, text: str) -> list[str]:
     return sorted(errors)
 
 
+def _json_path_errors(path: str, text: str) -> list[str]:
+    """检查非运行配置JSON中的外部路径和业务旁路目标。"""
+    try:
+        value = json.loads(text)
+    except (ValueError, UnicodeError):
+        return ["JSON资源无法解析，拒绝校验路径"]
+
+    errors: set[str] = set()
+
+    def visit(item, key: str = "") -> None:
+        if isinstance(item, dict):
+            for child_key, child in item.items():
+                full_key = f"{key}.{child_key}" if key else str(child_key)
+                visit(child, full_key)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child, key)
+        elif isinstance(item, str):
+            candidate = item.strip()
+            if not candidate or JSON_REGEX_FIELD.search(key):
+                return
+            if re.match(r"(?i)^[a-z][a-z0-9+.-]*://", candidate):
+                return
+
+            drive_path = bool(DRIVE_PATH.search(candidate))
+            unc_path = bool(UNC_PATH.search(candidate))
+            if candidate.startswith("//"):
+                host = candidate[2:].split("/", 1)[0].casefold()
+                if JSON_PATH_FIELD.search(key) or "." in host or host == "localhost":
+                    unc_path = False
+
+            path_field = bool(JSON_PATH_FIELD.search(key))
+            has_separator = "/" in candidate or "\\" in candidate
+            path_like = drive_path or unc_path or path_field
+            if not path_like and has_separator:
+                path_like = any(
+                    re.search(re.escape(suffix) + r"(?![A-Za-z0-9])", candidate, re.I)
+                    for suffix in PERSISTENT_SIDE_CAR_SUFFIXES
+                )
+            if drive_path or unc_path:
+                errors.update(_external_path_errors(path, candidate))
+            if path_like and FORBIDDEN_EXTERNAL_PART.search(candidate):
+                errors.add("JSON资源引用交付、过程资料或测试路径")
+            if path_like:
+                suffixes = {
+                    suffix
+                    for suffix in PERSISTENT_SIDE_CAR_SUFFIXES
+                    if re.search(
+                        re.escape(suffix) + r"(?![A-Za-z0-9])", candidate, re.I
+                    )
+                }
+                if suffixes:
+                    errors.add(
+                        "JSON资源引用业务旁路文件格式：" + ", ".join(sorted(suffixes))
+                    )
+                if re.search(r"\.json(?![A-Za-z0-9])", candidate, re.I) and (
+                    DAILY_FILE.search(candidate) or BUSINESS_FILE_HINT.search(candidate)
+                ):
+                    errors.add("JSON资源引用每日或响应JSON旁路")
+
+    visit(value)
+    return sorted(errors)
+
+
 def business_content_errors(path: str, raw: bytes) -> list[str]:
     """检查现役源码/配置中的固定样例及每日旁路文件引用。"""
     if not path.startswith(("src/", "web/", "config/")):
@@ -370,6 +447,8 @@ def business_content_errors(path: str, raw: bytes) -> list[str]:
         errors.append("固定板别进入现役源码/配置")
     if path == "config/runtime.defaults.json":
         errors.extend(_config_path_errors(text))
+    elif path.endswith(".json"):
+        errors.extend(_json_path_errors(path, text))
     if path.endswith((".py", ".pyi")):
         errors.extend(_file_io_path_errors(path, text))
     elif path.startswith("web/"):
