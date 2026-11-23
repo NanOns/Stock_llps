@@ -661,10 +661,25 @@ def research_stock_pg_support_followup_preview(
         if anchor_row
         else None
     )
-    if anchor_bar is None or anchor_bar.prices.quality != "OBSERVED":
+    anchor_trade_state, anchor_trade_reason = trade_status_state_from_pg_row(
+        anchor_row, price_coordinate=price_coordinate
+    )
+    if (
+        anchor_bar is None
+        or anchor_bar.prices.quality != "OBSERVED"
+        or anchor_trade_state != "ACTUAL"
+    ):
         base["status"] = "NOT_EVALUABLE"
-        base["reason_code"] = "BREAKOUT_PLATFORM_ACTUAL_BAR_REQUIRED"
-        base["reason"] = "D1 TRUE出生会话缺少可验证QFQ OHLC actual Bar。"
+        base["reason_code"] = (
+            "BREAKOUT_PLATFORM_ACTUAL_TRADE_REQUIRED"
+            if anchor_trade_state != "ACTUAL"
+            else "BREAKOUT_PLATFORM_ACTUAL_BAR_REQUIRED"
+        )
+        base["reason"] = (
+            anchor_trade_reason or "D1 TRUE出生会话没有明确tradestatus=1。"
+            if anchor_trade_state != "ACTUAL"
+            else "D1 TRUE出生会话缺少可验证QFQ OHLC actual Bar。"
+        )
         return base
     shadow_entity_id = "SOURCE_SYMBOL_SCOPED_NONFORMAL:" + ":".join(
         str(source_identity[key]) for key in source_identity
@@ -745,6 +760,9 @@ def research_stock_pg_support_followup_preview(
             if row
             else None
         )
+        trade_state, trade_reason = trade_status_state_from_pg_row(
+            row, price_coordinate=price_coordinate
+        )
         if selected_bar is None:
             reason = (
                 (row or {}).get("bar_reason")
@@ -761,8 +779,12 @@ def research_stock_pg_support_followup_preview(
             ohlc = selected_bar.prices
             actual = (
                 FieldValue(True)
-                if selected_bar.prices.quality == "OBSERVED"
-                else unknown(selected_bar.prices.reason or "PRICE_QUALITY_UNKNOWN")
+                if selected_bar.prices.quality == "OBSERVED" and trade_state == "ACTUAL"
+                else unknown(
+                    trade_reason
+                    or selected_bar.prices.reason
+                    or "PRICE_QUALITY_UNKNOWN"
+                )
             )
             if actual.value is True:
                 price_values = tuple(
@@ -839,6 +861,8 @@ def research_stock_pg_support_followup_preview(
                 "target_bar_status": preview.get("target_bar_status"),
                 "price_quality": (row or {}).get("qfq_price_quality", "UNKNOWN"),
                 "raw_price_quality": (row or {}).get("price_quality", "UNKNOWN"),
+                "trade_status_state": trade_state,
+                "trade_status_reason": trade_reason,
                 "bar_reason": (row or {}).get("bar_reason")
                 or (row or {}).get("qfq_price_reason"),
                 "coordinate_ohlc": {

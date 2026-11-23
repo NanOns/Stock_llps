@@ -133,12 +133,23 @@ def _forward_calendar_matches_rule_scope(
     target_session: date,
     endpoint_session: date,
 ) -> bool:
-    """接纳历史窗口复合修订中同一年度的精确官方日历分量。"""
-    if rule_revision == forward_revision:
-        return True
-    if target_session.year != endpoint_session.year:
+    """按T0至端点覆盖年度核对规则链与Forward路径修订。"""
+    from stock_a.research.entry_context.sessions import _load_calendar
+    from stock_a.research.source_forward_path import (
+        forward_calendar_revision_compatible,
+    )
+
+    try:
+        official_revision_chain = _load_calendar(endpoint_session)[2]
+    except ValueError:
         return False
-    return f"{target_session.year}:{forward_revision}" in rule_revision.split("+")
+    return forward_calendar_revision_compatible(
+        target_session,
+        endpoint_session,
+        rule_revision=rule_revision,
+        path_revision=forward_revision,
+        official_revision_chain=official_revision_chain,
+    )
 
 
 def read_fep_source_contexts(
@@ -310,6 +321,7 @@ def read_fep_source_contexts(
             }
             forward_path_scopes: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
             forward_rows = cursor.fetchall()
+            calendar_compatibility: dict[tuple[Any, ...], bool] = {}
             for row in forward_rows:
                 (
                     symbol,
@@ -333,6 +345,22 @@ def read_fep_source_contexts(
                     path_version,
                     forward_calendar_revision,
                 ) = row
+                compatibility_key = (
+                    calendar_revision,
+                    forward_calendar_revision,
+                    target,
+                    endpoint_session,
+                )
+                if compatibility_key not in calendar_compatibility:
+                    calendar_compatibility[compatibility_key] = (
+                        _forward_calendar_matches_rule_scope(
+                            rule_revision=calendar_revision,
+                            forward_revision=forward_calendar_revision,
+                            target_session=target,
+                            endpoint_session=endpoint_session,
+                        )
+                    )
+                compatible_calendar = calendar_compatibility[compatibility_key]
                 scoped_rows = forward_path_scopes.setdefault(
                     (forward_calendar_revision, horizon), {}
                 )
@@ -357,22 +385,16 @@ def read_fep_source_contexts(
                         coordinate == "FORWARD_ADJUSTED"
                         and scope == "NON_PIT_EXPLORATORY"
                         and path_version == PATH_VERSION
-                        and _forward_calendar_matches_rule_scope(
-                            rule_revision=calendar_revision,
-                            forward_revision=forward_calendar_revision,
-                            target_session=target,
-                            endpoint_session=endpoint_session,
-                        )
+                        and compatible_calendar
                         and endpoint_session <= research_cutoff
                     ),
                 }
                 scoped_rows[symbol] = forward
-                if _forward_calendar_matches_rule_scope(
-                    rule_revision=calendar_revision,
-                    forward_revision=forward_calendar_revision,
-                    target_session=target,
-                    endpoint_session=endpoint_session,
-                ):
+                if compatible_calendar:
+                    if symbol in forward_by_horizon[horizon]:
+                        raise ResearchFactConflict(
+                            "FEP同T0期限命中多个兼容Forward日历版本"
+                        )
                     forward_by_horizon[horizon][symbol] = forward
 
             cursor.execute(

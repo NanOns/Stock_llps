@@ -77,6 +77,21 @@ def _rule_fact(state: Any, reasons: Any) -> dict[str, Any]:
     return {"state": state, "reasons": clean_reasons}
 
 
+def _calendar_revision_components(value: Any) -> dict[int, str] | None:
+    if not isinstance(value, str) or not value:
+        return None
+    result: dict[int, str] = {}
+    for component in value.split("+"):
+        year_text, separator, revision = component.partition(":")
+        if not separator or not year_text.isdigit() or not revision:
+            return None
+        year = int(year_text)
+        if not 1000 <= year <= 9999 or year in result:
+            return None
+        result[year] = revision
+    return result or None
+
+
 def _seed_rps_field(row: Mapping[str, Any], prefix: str) -> FieldValue:
     quality = row.get(f"{prefix}_quality")
     reason = row.get(f"{prefix}_reason")
@@ -259,12 +274,49 @@ def persist_source_computable_rules_from_saved(
 
     seed_scope = seed_rows[0]
     seed_calendar_revision = seed_scope.get("calendar_revision")
-    launch_calendar = launch.get("official_calendar", {}).get("calendar_revision")
-    if not isinstance(seed_calendar_revision, str) or not isinstance(
-        launch_calendar, str
+    launch_calendar = launch.get("official_calendar")
+    launch_calendar_id = (
+        launch_calendar.get("calendar_id")
+        if isinstance(launch_calendar, Mapping)
+        else None
+    )
+    launch_calendar_revision = (
+        launch_calendar.get("calendar_revision")
+        if isinstance(launch_calendar, Mapping)
+        else None
+    )
+    seed_calendar_id = seed_scope.get("calendar_id")
+    seed_revision_components = _calendar_revision_components(seed_calendar_revision)
+    if (
+        seed_revision_components is None
+        or not isinstance(launch_calendar_revision, str)
+        or not launch_calendar_revision
+        or not isinstance(launch_calendar_id, str)
+        or not launch_calendar_id
+        or seed_calendar_id != launch_calendar_id
+        or seed_revision_components.get(target_session.year) != launch_calendar_revision
     ):
         raise SourceFrozenRulesError(
             "SOURCE_RULE_CALENDAR_REVISION_MISMATCH", "D0或Seed缺少官方日历修订"
+        )
+    try:
+        seed_target, seed_sessions, expected_seed_calendar_revision = (
+            resolve_pg_history_window(target_session.isoformat(), history_session_count)
+        )
+    except ValueError as error:
+        raise SourceFrozenRulesError(
+            "SOURCE_RULE_SEED_WINDOW_INVALID", "Seed画像窗口无法按官方会话解析"
+        ) from error
+    if (
+        seed_target != target_session
+        or len(seed_sessions) != history_session_count
+        or not seed_sessions
+        or seed_sessions[-1] != target_session
+        or expected_seed_calendar_revision != seed_calendar_revision
+    ):
+        raise SourceFrozenRulesError(
+            "SOURCE_RULE_SEED_WINDOW_INVALID",
+            "Seed日历修订链未覆盖目标日和完整画像窗口",
         )
 
     evidence = read_source_launch_watch_evidence(

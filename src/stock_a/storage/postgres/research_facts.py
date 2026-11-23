@@ -1138,6 +1138,11 @@ def _read_research_rows_cursor(
     limit=None,
 ):
     """从已保存事实读取完整三态分母及共享路径，不扫描Raw。"""
+    from stock_a.research.entry_context.sessions import _load_calendar
+    from stock_a.research.source_forward_path import (
+        forward_calendar_revision_compatible,
+    )
+
     if horizon not in {1, 3, 5, 10, 20}:
         raise ValueError("后继期限必须为1、3、5、10或20")
     if offset < 0 or (limit is not None and not 1 <= limit <= 100):
@@ -1150,14 +1155,17 @@ def _read_research_rows_cursor(
                   p.mfe_numerator, p.mfe_denominator, p.mae_numerator,
                   p.mae_denominator, p.mdd_numerator, p.mdd_denominator,
                   r.frozen_line_numerator, r.frozen_line_denominator,
-                  r.frozen_line_source, r.source_capture_id
+                  r.frozen_line_source, r.source_capture_id,
+                  p.calendar_revision,p.price_coordinate,p.scope
            FROM source_rule_evaluations r
            LEFT JOIN source_forward_path_facts p
              ON p.target_session=r.target_session
             AND p.source_symbol=r.source_symbol
             AND p.source_capture_id=r.source_capture_id
             AND p.horizon=%s
-            AND p.path_rule_version=%s AND p.calendar_revision=r.calendar_revision
+            AND p.path_rule_version=%s
+            AND p.price_coordinate='FORWARD_ADJUSTED'
+            AND p.scope='NON_PIT_EXPLORATORY'
             AND p.endpoint_session <= %s
            WHERE r.target_session=%s AND r.source_capture_id=%s
              AND r.rule_id=%s AND r.rule_version=%s AND r.profile_revision=%s
@@ -1187,14 +1195,43 @@ def _read_research_rows_cursor(
     rows = cursor.fetchall()
     if not rows and symbol is None and limit is None:
         raise ResearchFactNotFound("未找到精确输入版本的持久规则事实")
-    if rows and (
-        len({row[21] for row in rows}) != 1
-        or len({row[0] for row in rows}) != len(rows)
-    ):
-        raise ResearchFactConflict(
-            "精确规则版本存在多个来源捕获或重复代码，必须先消除歧义"
-        )
-    return rows
+    if rows and len({row[21] for row in rows}) != 1:
+        raise ResearchFactConflict("精确规则版本存在多个来源捕获，必须先消除歧义")
+    official_revision_chain = _load_calendar(research_cutoff)[2]
+    rows_by_symbol: dict[str, list[tuple[Any, ...]]] = {}
+    for row in rows:
+        rows_by_symbol.setdefault(row[0], []).append(row)
+    selected_rows = []
+    for source_symbol, candidates in sorted(rows_by_symbol.items()):
+        compatible = [
+            row
+            for row in candidates
+            if row[4] is not None
+            and row[22] is not None
+            and row[23] == "FORWARD_ADJUSTED"
+            and row[24] == "NON_PIT_EXPLORATORY"
+            and forward_calendar_revision_compatible(
+                target,
+                row[4],
+                rule_revision=calendar_revision,
+                path_revision=row[22],
+                official_revision_chain=official_revision_chain,
+            )
+        ]
+        if len(compatible) > 1:
+            raise ResearchFactConflict("同一规则事实命中多个兼容Forward日历版本")
+        if compatible:
+            selected_rows.append(tuple(compatible[0][:22]))
+            continue
+        selected = list(candidates[0][:22])
+        selected[4:18] = [None] * 14
+        if any(row[4] is not None for row in candidates):
+            selected[10] = "UNKNOWN"
+            selected[11] = ["FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH"]
+        selected_rows.append(tuple(selected))
+    if len({row[0] for row in selected_rows}) != len(selected_rows):
+        raise ResearchFactConflict("精确规则版本存在重复证券行")
+    return selected_rows
 
 
 def read_board_members(config, *, industry_snapshot_id, concept_snapshot_id):

@@ -487,6 +487,10 @@ def read_cohort_symbol_forward_paths(
     horizon_due_sessions,
 ):
     """从PG按精确规则T0键读取单股T+1/T+3/T+5路径，不重算价格。"""
+    from stock_a.research.entry_context.sessions import _load_calendar
+    from stock_a.research.source_forward_path import (
+        forward_calendar_revision_compatible,
+    )
     from stock_a.storage.postgres.research_facts import RULES
 
     if (
@@ -505,6 +509,7 @@ def read_cohort_symbol_forward_paths(
         or tuple(sorted(set(horizon_due_sessions))) != tuple(horizon_due_sessions)
     ):
         raise ValueError("单股多期限读取范围或规则键无效")
+    _, _, official_revision_chain, _ = _load_calendar(research_cutoff)
 
     due_by_horizon = {
         horizon: (
@@ -609,7 +614,17 @@ def read_cohort_symbol_forward_paths(
             exact = [
                 row
                 for row in candidates
-                if row[1] == PATH_VERSION and row[2] == calendar_revision
+                if row[1] == PATH_VERSION
+                and row[3] == due_session
+                and row[11] == "FORWARD_ADJUSTED"
+                and row[12] == "NON_PIT_EXPLORATORY"
+                and forward_calendar_revision_compatible(
+                    target,
+                    row[3],
+                    rule_revision=calendar_revision,
+                    path_revision=row[2],
+                    official_revision_chain=official_revision_chain,
+                )
             ]
             if len(exact) > 1:
                 item.update(
@@ -651,7 +666,7 @@ def read_cohort_symbol_forward_paths(
                 )
                 observed = (
                     valid
-                    and maturity == "ENDPOINT_OBSERVED"
+                    and maturity == "ENDPOINT_OBSERVED_NON_PIT"
                     and endpoint_quality == "OBSERVED"
                     and numerator is not None
                     and denominator is not None

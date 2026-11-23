@@ -15,10 +15,8 @@ from stock_a.storage.postgres.research_facts import (
     SCOPE,
     ResearchFactConflict,
 )
-from stock_a.storage.postgres.source_raw import (
-    _page_version_status,
-    _transaction,
-)
+from stock_a.storage.postgres.source_raw import _transaction
+from stock_a.research.source_forward_path import forward_calendar_revision_compatible
 
 _KINDS = (
     "ENTRY",
@@ -154,7 +152,7 @@ def read_cohort_enrollment_datewise_comparison(
                           f.horizon,f.endpoint_session,f.maturity,f.endpoint_quality,
                           f.endpoint_reason,f.endpoint_numerator::text,
                           f.endpoint_denominator::text,f.path_quality,f.path_reasons,
-                          f.price_coordinate,f.scope
+                          f.price_coordinate,f.scope,f.calendar_revision
                    FROM selected s
                    JOIN source_rule_evaluations r
                      ON r.target_session=s.target_session
@@ -175,12 +173,10 @@ def read_cohort_enrollment_datewise_comparison(
                    LEFT JOIN source_forward_path_facts f
                      ON f.target_session=r.target_session
                     AND f.source_capture_id=r.source_capture_id
-                    AND f.source_capture_id=r.source_capture_id
                     AND f.source_symbol=r.source_symbol
                     AND f.horizon=ANY(%s::smallint[])
                     AND f.path_rule_version=%s
-                    AND f.calendar_revision=r.calendar_revision
-                    AND f.price_coordinate='RAW_UNADJUSTED' AND f.scope=%s
+                    AND f.price_coordinate='FORWARD_ADJUSTED' AND f.scope=%s
                     AND f.endpoint_session<=%s
                    ORDER BY s.target_session,e.enrollment_kind,r.source_symbol,
                             e.id,f.horizon
@@ -259,6 +255,7 @@ def read_cohort_enrollment_datewise_comparison(
                 path_reasons,
                 coordinate,
                 scope,
+                forward_calendar_revision,
             ) = row
             context = next(
                 item for item in contexts if item["target_session"] == target
@@ -333,20 +330,21 @@ def read_cohort_enrollment_datewise_comparison(
             if horizon is not None:
                 if horizon not in (1, 3, 5):
                     raise ResearchFactConflict("跨T0 Forward期限超出冻结范围")
-                if horizon in entry["forward"]:
-                    raise ResearchFactConflict("同一T0登记与期限存在多个Forward事实")
-                entry["forward"][horizon] = {
-                    "endpoint_session": endpoint_session,
-                    "maturity": maturity,
-                    "endpoint_quality": endpoint_quality,
-                    "endpoint_reason": endpoint_reason,
-                    "numerator": numerator_text,
-                    "denominator": denominator_text,
-                    "path_quality": path_quality,
-                    "path_reasons": path_reasons,
-                    "coordinate": coordinate,
-                    "scope": scope,
-                }
+                entry["forward"].setdefault(horizon, []).append(
+                    {
+                        "endpoint_session": endpoint_session,
+                        "maturity": maturity,
+                        "endpoint_quality": endpoint_quality,
+                        "endpoint_reason": endpoint_reason,
+                        "numerator": numerator_text,
+                        "denominator": denominator_text,
+                        "path_quality": path_quality,
+                        "path_reasons": path_reasons,
+                        "coordinate": coordinate,
+                        "scope": scope,
+                        "calendar_revision": forward_calendar_revision,
+                    }
+                )
 
         for context in contexts:
             target = context["target_session"]
@@ -390,12 +388,38 @@ def read_cohort_enrollment_datewise_comparison(
                             maturity_counts["NOT_DUE"] += 1
                             reason_counts["WAITING_FOR_FUTURE_OFFICIAL_SESSION"] += 1
                             continue
-                        fact = entry["forward"].get(horizon)
-                        if fact is None:
+                        candidates = entry["forward"].get(horizon)
+                        if candidates is None:
                             outcome_counts["NOT_COMPUTED"] += 1
                             maturity_counts["MISSING_FACT"] += 1
                             reason_counts["MISSING_FORWARD_FACT"] += 1
                             continue
+                        exact = [
+                            fact
+                            for fact in candidates
+                            if fact["endpoint_session"] == endpoint
+                            and fact["coordinate"] == "FORWARD_ADJUSTED"
+                            and fact["scope"] == "NON_PIT_EXPLORATORY"
+                            and forward_calendar_revision_compatible(
+                                target,
+                                fact["endpoint_session"],
+                                rule_revision=context["calendar_revision"],
+                                path_revision=fact["calendar_revision"],
+                                official_revision_chain=calendar_revision,
+                            )
+                        ]
+                        if len(exact) > 1:
+                            raise ResearchFactConflict(
+                                "同一T0登记与期限命中多个兼容Forward日历版本"
+                            )
+                        if not exact:
+                            outcome_counts["NOT_COMPUTED"] += 1
+                            maturity_counts["CALENDAR_OR_COORDINATE_MISMATCH"] += 1
+                            reason_counts[
+                                "FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH"
+                            ] += 1
+                            continue
+                        fact = exact[0]
                         if fact["endpoint_session"] != endpoint:
                             raise ResearchFactConflict(
                                 "跨T0 Forward端点与截止内官方交易会话错位"
@@ -408,12 +432,12 @@ def read_cohort_enrollment_datewise_comparison(
                         numerator = fact["numerator"]
                         denominator = fact["denominator"]
                         if (
-                            fact["maturity"] == "ENDPOINT_OBSERVED"
+                            fact["maturity"] == "ENDPOINT_OBSERVED_NON_PIT"
                             and fact["endpoint_quality"] == "OBSERVED"
                             and numerator is not None
                             and denominator is not None
                             and int(denominator) > 0
-                            and fact["coordinate"] == "RAW_UNADJUSTED"
+                            and fact["coordinate"] == "FORWARD_ADJUSTED"
                             and fact["scope"] == SCOPE
                         ):
                             value = Fraction(int(numerator), int(denominator))
@@ -574,7 +598,7 @@ def read_cohort_enrollment_datewise_comparison(
         "rule_version": RULE_VERSION,
         "path_rule_version": PATH_VERSION,
         "scope": SCOPE,
-        "price_coordinate": "RAW_UNADJUSTED",
+        "price_coordinate": "FORWARD_ADJUSTED",
         "research_cutoff": research_cutoff.isoformat(),
         "paired_t0_date_count": paired_t0_count,
         "comparable_t0_date_count_by_horizon": comparable_by_horizon,
@@ -599,6 +623,8 @@ def read_cohort_enrollment_lifecycle_groups(
     previous_session: date | None,
 ) -> dict[str, Any]:
     """在一个精确T0×规则内分组，GET只读PG且只读截止内会话。"""
+    from stock_a.research.entry_context.sessions import _load_calendar
+
     if (
         type(target) is not date
         or type(research_cutoff) is not date
@@ -629,6 +655,16 @@ def read_cohort_enrollment_lifecycle_groups(
         )
     ):
         raise ValueError("来源登记分组的T0、版本或有界后继范围无效")
+    _, _, official_revision_chain, official_sessions = _load_calendar(research_cutoff)
+    try:
+        target_index = official_sessions.index(target)
+    except ValueError as error:
+        raise ValueError("登记T0不在官方日历内") from error
+    expected_horizon_sessions = tuple(
+        official_sessions[target_index + 1 : target_index + 1 + len(horizon_sessions)]
+    )
+    if expected_horizon_sessions != horizon_sessions:
+        raise ValueError("登记后继会话与目标日后的官方交易日历不一致")
 
     key = (
         target,
@@ -854,19 +890,17 @@ def read_cohort_enrollment_lifecycle_groups(
                       f.horizon,f.endpoint_session,f.maturity,f.endpoint_quality,
                       f.endpoint_reason,f.endpoint_numerator::text,
                       f.endpoint_denominator::text,f.path_quality,f.path_reasons,
-                      f.price_coordinate,f.scope
+                      f.price_coordinate,f.scope,f.calendar_revision
                FROM source_rule_evaluations r
                JOIN source_research_enrollments e ON e.rule_fact_id=r.id
                LEFT JOIN source_forward_path_facts f
                  ON f.target_session=r.target_session
                 AND f.source_capture_id=r.source_capture_id
-                AND f.source_capture_id=r.source_capture_id
                 AND f.source_symbol=r.source_symbol
                 AND f.horizon=ANY(%s::smallint[])
                 AND f.path_rule_version=%s
-                AND f.calendar_revision=r.calendar_revision
                 AND f.endpoint_session<=%s
-                AND f.price_coordinate='RAW_UNADJUSTED' AND f.scope=%s
+                AND f.price_coordinate='FORWARD_ADJUSTED' AND f.scope=%s
                WHERE r.target_session=%s AND r.source_capture_id=%s AND r.rule_id=%s
                  AND r.rule_version=%s AND r.profile_revision=%s
                  AND r.history_session_count=%s AND r.d1_history_session_count=%s
@@ -875,14 +909,43 @@ def read_cohort_enrollment_lifecycle_groups(
             (list(_HORIZONS), PATH_VERSION, research_cutoff, SCOPE, *key),
         )
         forward_rows = cursor.fetchall()
-        forward_by_enrollment: dict[tuple[int, int], tuple[Any, ...]] = {}
+        forward_candidates: dict[tuple[int, int], list[tuple[Any, ...]]] = {}
         for row in forward_rows:
             if row[3] is None:
                 continue
             identity = (int(row[0]), int(row[3]))
-            if identity in forward_by_enrollment:
-                raise ResearchFactConflict("同一登记与期限命中多条Forward事实")
-            forward_by_enrollment[identity] = row
+            forward_candidates.setdefault(identity, []).append(row)
+
+        forward_by_enrollment: dict[tuple[int, int], tuple[Any, ...]] = {}
+        forward_calendar_mismatch: set[tuple[int, int]] = set()
+        for identity, candidates in forward_candidates.items():
+            horizon = identity[1]
+            due_session = (
+                horizon_sessions[horizon - 1]
+                if len(horizon_sessions) >= horizon
+                else None
+            )
+            compatible = [
+                row
+                for row in candidates
+                if due_session is not None
+                and row[4] == due_session
+                and row[12] == "FORWARD_ADJUSTED"
+                and row[13] == SCOPE
+                and forward_calendar_revision_compatible(
+                    target,
+                    due_session,
+                    rule_revision=calendar_revision,
+                    path_revision=row[14],
+                    official_revision_chain=official_revision_chain,
+                )
+            ]
+            if len(compatible) > 1:
+                raise ResearchFactConflict("同一登记与期限命中多个兼容Forward事实")
+            if compatible:
+                forward_by_enrollment[identity] = compatible[0]
+            else:
+                forward_calendar_mismatch.add(identity)
 
         group_results = []
         for kind in _KINDS:
@@ -909,8 +972,15 @@ def read_cohort_enrollment_lifecycle_groups(
                     row = forward_by_enrollment.get((entry["id"], horizon))
                     if row is None:
                         outcomes["NOT_COMPUTED"] += 1
-                        maturity_counts["MISSING_FACT"] += 1
-                        unevaluable_reasons["MISSING_FORWARD_FACT"] += 1
+                        identity = (entry["id"], horizon)
+                        if identity in forward_calendar_mismatch:
+                            maturity_counts["CALENDAR_OR_COORDINATE_MISMATCH"] += 1
+                            unevaluable_reasons[
+                                "FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH"
+                            ] += 1
+                        else:
+                            maturity_counts["MISSING_FACT"] += 1
+                            unevaluable_reasons["MISSING_FORWARD_FACT"] += 1
                         continue
                     (
                         _,
@@ -927,6 +997,7 @@ def read_cohort_enrollment_lifecycle_groups(
                         path_reasons,
                         coordinate,
                         scope,
+                        _path_calendar_revision,
                     ) = row
                     if stored_endpoint != endpoint_session:
                         raise ResearchFactConflict("Forward端点与官方会话期限不一致")
@@ -934,12 +1005,12 @@ def read_cohort_enrollment_lifecycle_groups(
                     endpoint_quality_counts[endpoint_quality or "UNKNOWN"] += 1
                     path_quality_counts[path_quality or "UNKNOWN"] += 1
                     if (
-                        maturity == "ENDPOINT_OBSERVED"
+                        maturity == "ENDPOINT_OBSERVED_NON_PIT"
                         and endpoint_quality == "OBSERVED"
                         and numerator_text is not None
                         and denominator_text is not None
                         and int(denominator_text) > 0
-                        and coordinate == "RAW_UNADJUSTED"
+                        and coordinate == "FORWARD_ADJUSTED"
                         and scope == SCOPE
                     ):
                         values.append(
@@ -1056,21 +1127,17 @@ def read_cohort_enrollment_lifecycle_groups(
         line_counts = {kind: {h: Counter() for h in _HORIZONS} for kind in _KINDS}
         raw_session_versions = []
         if line_scope != "NOT_APPLICABLE":
-            closed_sessions = []
-            for session in horizon_sessions:
-                version_status, actual, expected = _page_version_status(
-                    cursor, session, source_capture_id
-                )
-                raw_session_versions.append(
-                    {
-                        "session": session.isoformat(),
-                        "status": version_status,
-                        "row_count": actual,
-                        "expected_count": expected,
-                    }
-                )
-                if version_status == "CLOSED":
-                    closed_sessions.append(session)
+            closed_sessions = list(horizon_sessions)
+            raw_session_versions = [
+                {
+                    "session": session.isoformat(),
+                    "status": "OFFICIAL_SESSION_CAPTURE_SCOPED",
+                    "source_capture_id": source_capture_id,
+                    "row_count": None,
+                    "expected_count": None,
+                }
+                for session in horizon_sessions
+            ]
             cursor.execute(
                 """WITH horizons AS (
                      SELECT unnest(ARRAY[1,3,5]::smallint[]) AS horizon
@@ -1095,11 +1162,13 @@ def read_cohort_enrollment_lifecycle_groups(
                               WHEN NOT (s.session_date=ANY(%s::date[]))
                                 THEN 'UNKNOWN'
                               WHEN p.source_symbol IS NULL OR c.capture_id IS NULL
-                                OR p.bar_status<>'TARGET_PRESENT'
-                                OR p.price_quality<>'OBSERVED'
-                                OR p.raw_close IS NULL OR p.raw_close<=0
+                                OR p.qfq_bar_status IS DISTINCT FROM 'TARGET_PRESENT'
+                                OR p.qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+                                OR p.qfq_tradestatus_quality IS DISTINCT FROM 'OBSERVED'
+                                OR p.qfq_tradestatus_value IS DISTINCT FROM '1'
+                                OR p.qfq_close IS NULL OR p.qfq_close<=0
                                 THEN 'UNKNOWN'
-                              WHEN p.raw_close*l.frozen_line_denominator
+                              WHEN p.qfq_close*l.frozen_line_denominator
                                    <=l.frozen_line_numerator
                                 THEN 'TOUCHED'
                               ELSE 'ABOVE'
@@ -1118,6 +1187,7 @@ def read_cohort_enrollment_lifecycle_groups(
                        ON c.capture_id=p.source_capture_id
                       AND c.source_capture_id=p.source_capture_id
                       AND c.target_session=p.session_date
+                      AND c.provider='BAOSTOCK'
                    ), touch_points AS (
                      SELECT p.*,
                             min(session_date) FILTER (WHERE point_state='TOUCHED')
@@ -1211,7 +1281,7 @@ def read_cohort_enrollment_lifecycle_groups(
             "status": "AVAILABLE",
             "scope": SCOPE,
             "identity_status": "SOURCE_SYMBOL_ONLY",
-            "price_coordinate": "RAW_UNADJUSTED",
+            "price_coordinate": "FORWARD_ADJUSTED",
             "target_session": target.isoformat(),
             "research_cutoff": research_cutoff.isoformat(),
             "rule": rule,

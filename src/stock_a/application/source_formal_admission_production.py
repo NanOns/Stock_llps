@@ -738,6 +738,10 @@ def run_source_formal_admission_from_saved(
         target_session=target_session,
         source_capture_id=source_capture_id,
         expected_source_count=expected_count,
+        algorithm_contract=rows[0]["algorithm_contract"],
+        session_contract=rows[0]["session_contract"],
+        calendar_revision=rows[0]["calendar_revision"],
+        seed_producer_version=rows[0]["seed_producer_version"],
         profile_history_session_count=(
             seed_scope["history_session_count"] if seed_scope else None
         ),

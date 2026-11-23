@@ -17,6 +17,7 @@ from . import source_raw
 _TABLE = "source_d0_formal_admission_day_facts"
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+_ADMISSION_CONTRACT = "STOCK_A_D0_EVENT_ADMISSION_R1"
 _STATES = ("READY", "BLOCKED", "NOT_READY", "NOT_REQUIRED")
 _GATE_COLUMNS = {
     "research_universe": ("research_universe_state", "research_universe_reason"),
@@ -390,6 +391,10 @@ def read_source_formal_admission_day(
     target_session: date,
     source_capture_id: int,
     expected_source_count: int,
+    algorithm_contract: str,
+    session_contract: str,
+    calendar_revision: str,
+    seed_producer_version: str | None,
     source_symbols: Sequence[str] | None = None,
     profile_history_session_count: int | None = None,
     profile_revision: str | None = None,
@@ -399,10 +404,15 @@ def read_source_formal_admission_day(
         type(target_session) is not date
         or type(source_capture_id) is not int
         or source_capture_id <= 0
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
         or type(expected_source_count) is not int
         or expected_source_count <= 0
+        or not isinstance(algorithm_contract, str)
+        or not algorithm_contract
+        or not isinstance(session_contract, str)
+        or not session_contract
+        or not isinstance(calendar_revision, str)
+        or not calendar_revision
+        or seed_producer_version not in {None, _SEED_PRODUCER_VERSION}
         or profile_history_session_count is not None
         and (
             type(profile_history_session_count) is not int
@@ -435,12 +445,20 @@ def read_source_formal_admission_day(
     ):
         scope_predicate = (
             "target_session=%s AND source_capture_id=%s "
-            "AND scenario='LAUNCH_CONFIRM' AND raw_producer_version=%s"
+            "AND scenario='LAUNCH_CONFIRM' AND raw_producer_version=%s "
+            "AND algorithm_contract=%s AND session_contract=%s "
+            "AND calendar_revision=%s AND admission_contract=%s "
+            "AND seed_producer_version IS NOT DISTINCT FROM %s"
         )
         scope_parameters: tuple[Any, ...] = (
             target_session,
             source_capture_id,
             _D0_LAUNCH_PRODUCER_VERSION,
+            algorithm_contract,
+            session_contract,
+            calendar_revision,
+            _ADMISSION_CONTRACT,
+            seed_producer_version,
         )
         if profile_revision is not None:
             scope_predicate += " AND profile_revision=%s"
@@ -458,6 +476,10 @@ def read_source_formal_admission_day(
                 "reason_code": "FORMAL_ADMISSION_NOT_COMPUTED_FOR_EXACT_INPUT",
                 "target_session": target_session.isoformat(),
                 "source_capture_id": source_capture_id,
+                "algorithm_contract": algorithm_contract,
+                "session_contract": session_contract,
+                "calendar_revision": calendar_revision,
+                "seed_producer_version": seed_producer_version,
                 "source_count": expected_source_count,
                 "profile_history_session_count": profile_history_session_count,
                 "profile_revision": profile_revision,
@@ -472,6 +494,10 @@ def read_source_formal_admission_day(
                 "reason_code": "FORMAL_ADMISSION_SCOPE_AMBIGUOUS",
                 "target_session": target_session.isoformat(),
                 "source_capture_id": source_capture_id,
+                "algorithm_contract": algorithm_contract,
+                "session_contract": session_contract,
+                "calendar_revision": calendar_revision,
+                "seed_producer_version": seed_producer_version,
                 "source_count": expected_source_count,
                 "profile_history_session_count": profile_history_session_count,
                 "profile_revision": profile_revision,
@@ -495,6 +521,10 @@ def read_source_formal_admission_day(
                 "reason_code": "FORMAL_ADMISSION_PROFILE_REVISION_MISMATCH",
                 "target_session": target_session.isoformat(),
                 "source_capture_id": source_capture_id,
+                "algorithm_contract": algorithm_contract,
+                "session_contract": session_contract,
+                "calendar_revision": calendar_revision,
+                "seed_producer_version": seed_producer_version,
                 "source_count": expected_source_count,
                 "profile_history_session_count": profile_history_session_count,
                 "profile_revision": selected_profile_revision,
@@ -514,12 +544,21 @@ def read_source_formal_admission_day(
                 WHERE target_session=%s AND source_capture_id=%s
                   AND scenario='LAUNCH_CONFIRM'
                   AND raw_producer_version=%s
+                  AND algorithm_contract=%s AND session_contract=%s
+                  AND calendar_revision=%s
+                  AND admission_contract=%s
+                  AND seed_producer_version IS NOT DISTINCT FROM %s
                   AND history_session_count IS NOT DISTINCT FROM %s
                   AND profile_revision IS NOT DISTINCT FROM %s""",
             (
                 target_session,
                 source_capture_id,
                 _D0_LAUNCH_PRODUCER_VERSION,
+                algorithm_contract,
+                session_contract,
+                calendar_revision,
+                _ADMISSION_CONTRACT,
+                seed_producer_version,
                 selected_d0_history_session_count,
                 selected_profile_revision,
             ),
@@ -533,6 +572,10 @@ def read_source_formal_admission_day(
                 "reason_code": "FORMAL_ADMISSION_NOT_COMPUTED_FOR_EXACT_INPUT",
                 "target_session": target_session.isoformat(),
                 "source_capture_id": source_capture_id,
+                "algorithm_contract": algorithm_contract,
+                "session_contract": session_contract,
+                "calendar_revision": calendar_revision,
+                "seed_producer_version": seed_producer_version,
                 "source_count": expected_source_count,
                 "history_session_count": selected_d0_history_session_count,
                 "profile_history_session_count": selected_profile_history_session_count,
@@ -553,6 +596,10 @@ def read_source_formal_admission_day(
                 "reason_code": "FORMAL_ADMISSION_PARTITION_NOT_CLOSED",
                 "target_session": target_session.isoformat(),
                 "source_capture_id": source_capture_id,
+                "algorithm_contract": algorithm_contract,
+                "session_contract": session_contract,
+                "calendar_revision": calendar_revision,
+                "seed_producer_version": seed_producer_version,
                 "source_count": expected_source_count,
                 "history_session_count": selected_d0_history_session_count,
                 "profile_history_session_count": selected_profile_history_session_count,
@@ -626,6 +673,9 @@ def read_source_formal_admission_day(
                 "WHERE target_session=%s AND source_capture_id=%s "
                 "AND scenario='LAUNCH_CONFIRM' "
                 "AND raw_producer_version=%s "
+                "AND algorithm_contract=%s AND session_contract=%s "
+                "AND calendar_revision=%s AND admission_contract=%s "
+                "AND seed_producer_version IS NOT DISTINCT FROM %s "
                 "AND history_session_count IS NOT DISTINCT FROM %s "
                 "AND profile_revision IS NOT DISTINCT FROM %s "
                 "AND source_symbol=ANY(%s) ORDER BY source_symbol",
@@ -633,6 +683,11 @@ def read_source_formal_admission_day(
                     target_session,
                     source_capture_id,
                     _D0_LAUNCH_PRODUCER_VERSION,
+                    algorithm_contract,
+                    session_contract,
+                    calendar_revision,
+                    _ADMISSION_CONTRACT,
+                    seed_producer_version,
                     selected_d0_history_session_count,
                     selected_profile_revision,
                     list(selected),
@@ -695,9 +750,13 @@ def read_source_formal_admission_day(
                 by_symbol[symbol] = item
         return {
             "status": "AVAILABLE",
-            "contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
+            "contract": _ADMISSION_CONTRACT,
             "target_session": target_session.isoformat(),
             "source_capture_id": source_capture_id,
+            "algorithm_contract": algorithm_contract,
+            "session_contract": session_contract,
+            "calendar_revision": calendar_revision,
+            "seed_producer_version": seed_producer_version,
             "history_session_count": selected_d0_history_session_count,
             "profile_history_session_count": selected_profile_history_session_count,
             "profile_revision": selected_profile_revision,

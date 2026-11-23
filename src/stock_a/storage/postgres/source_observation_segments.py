@@ -373,11 +373,10 @@ def _compute_segment_rows(
             )
             day_candidates = facts_by_pair.get(pair, {}).get(session, ())
             successor_rule = (target_context or {}).get("rule") or {}
-            valid = [
+            context_valid = [
                 row
                 for row in day_candidates
-                if pair_comparable
-                and row[3] == rule_id
+                if row[3] == rule_id
                 and row[4] == rule_version
                 and row[4] == successor_rule.get("version")
                 and row[6] == successor_rule.get("profile_revision")
@@ -388,6 +387,16 @@ def _compute_segment_rows(
                 and row[11] == successor_rule.get("scope")
                 and row[12] == (target_context or {}).get("capture")
             ]
+            restart_after_gap = bool(
+                not previous_context_available
+                and lifecycle in {"PAUSED", "EXITED_UNKNOWN"}
+                and target_context
+                and target_context.get("inputs_complete")
+                and target_context.get("rules_complete")
+                and len(context_valid) == 1
+                and context_valid[0][5] in {"TRUE", "FALSE", "UNKNOWN"}
+            )
+            valid = context_valid if pair_comparable or restart_after_gap else []
             current = (
                 Observation(session, valid[0][5], valid[0][1])
                 if len(day_candidates) == len(valid) == 1
@@ -395,6 +404,8 @@ def _compute_segment_rows(
                 else None
             )
             invalid_reason = None
+            if restart_after_gap:
+                invalid_reason = "OBSERVATION_SEGMENT_RESTARTED_AFTER_GAP"
             if current is None:
                 if day_candidates and not valid:
                     invalid_reason = "RULE_CONTEXT_NOT_COMPARABLE"
@@ -1291,6 +1302,7 @@ def read_source_observation_segments(
                     }
                 item["forward_paths"] = _enrollment_forward_paths(
                     {
+                        "target_session": target,
                         "package": item["source_capture_id"],
                         "capture": item["anchor_capture_id"],
                         "source_symbol": item["source_symbol"],
@@ -1610,6 +1622,7 @@ def read_source_observation_segment_followups(
                 )
             latest = entries[-1] if entries else None
             forward_anchor = {
+                "target_session": anchor[1],
                 "capture": anchor[3],
                 "source_symbol": anchor[4],
                 "calendar_revision": anchor[11],

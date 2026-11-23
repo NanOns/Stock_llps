@@ -17,6 +17,80 @@ from stock_a.research.entry_history.history_timeline import (
 from stock_a.sources.baostock.identity import normalize_baostock_symbol
 
 
+def _calendar_revision_map(value: Any) -> dict[int, str] | None:
+    if not isinstance(value, str) or not value:
+        return None
+    result: dict[int, str] = {}
+    for component in value.split("+"):
+        year_text, separator, revision = component.partition(":")
+        if not separator or not year_text.isdigit() or not revision:
+            return None
+        year = int(year_text)
+        if not 1000 <= year <= 9999 or year in result:
+            return None
+        result[year] = revision
+    return result or None
+
+
+def forward_calendar_revision_compatible(
+    target_session: date,
+    endpoint_session: date,
+    *,
+    rule_revision: str,
+    path_revision: str,
+    official_revision_chain: str,
+) -> bool:
+    """按T0与收益端点覆盖年份核对日历修订，不比较完整链字符串。"""
+    if (
+        type(target_session) is not date
+        or type(endpoint_session) is not date
+        or endpoint_session < target_session
+    ):
+        return False
+    official = _calendar_revision_map(official_revision_chain)
+    if official is None:
+        return False
+    required_years = tuple(range(target_session.year, endpoint_session.year + 1))
+    if any(year not in official for year in required_years):
+        return False
+
+    rule = _calendar_revision_map(rule_revision)
+    if rule is None:
+        if rule_revision != official[target_session.year]:
+            return False
+        rule = {target_session.year: rule_revision}
+    if rule.get(target_session.year) != official[target_session.year]:
+        return False
+
+    path = _calendar_revision_map(path_revision)
+    if path is None:
+        path = {
+            year: path_revision
+            for year in required_years
+            if path_revision == official[year]
+        }
+    if not path:
+        return False
+    for revisions in (rule, path):
+        if any(
+            year not in official or official[year] != revision
+            for year, revision in revisions.items()
+        ):
+            return False
+    for year in required_years:
+        rule_revision_for_year = rule.get(year)
+        path_revision_for_year = path.get(year)
+        if rule_revision_for_year is None and path_revision_for_year is None:
+            return False
+        if (
+            rule_revision_for_year is not None
+            and path_revision_for_year is not None
+            and rule_revision_for_year != path_revision_for_year
+        ):
+            return False
+    return True
+
+
 def exploratory_raw_path(
     sessions: Sequence[date],
     rows: Sequence[Mapping[str, Any]],

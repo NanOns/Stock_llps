@@ -618,20 +618,25 @@ def _prepare_fep_from_contexts(
             "source_io_attempted": False,
             "ddl_executed": False,
         }
-    calendar_data, _, calendar_revision, calendar_sessions = _load_calendar(
+    _, calendar_metadata, _calendar_revision_chain, calendar_sessions = _load_calendar(
         research_cutoff
     )
-    annual_calendar_revision = calendar_data.get("revision")
+    annual_revisions = {
+        int(item["year"]): item["revision"] for item in calendar_metadata
+    }
     session_index = {session: index for index, session in enumerate(calendar_sessions)}
     for context in contexts:
         target = context["target_session"]
+        target_calendar_data, _, _, _ = _load_calendar(target)
+        target_year_revision = annual_revisions.get(target.year)
         resolved, _window, rule_calendar_revision = resolve_pg_history_window(
             target.isoformat(), context["d1_history_session_count"]
         )
-        annual_component = f"{target.year}:{annual_calendar_revision}"
+        annual_component = f"{target.year}:{target_year_revision}"
         if (
             resolved != target
             or target not in session_index
+            or target_year_revision != target_calendar_data.get("revision")
             or rule_calendar_revision != context["calendar_revision"]
             or annual_component not in context["calendar_revision"].split("+")
         ):
@@ -696,6 +701,8 @@ def _prepare_fep_from_contexts(
                 if endpoint_index >= len(calendar_sessions):
                     raise ValueError("官方日历不足以判断FEP后继到期状态")
                 endpoint_session = calendar_sessions[endpoint_index]
+                if endpoint_session.year not in annual_revisions:
+                    raise ValueError("FEP端点年度缺少已核验官方日历资源")
                 due = endpoint_session <= research_cutoff
                 due_by_horizon[horizon] = due
                 forward = context["forward_by_horizon"][horizon]

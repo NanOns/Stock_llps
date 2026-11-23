@@ -344,6 +344,7 @@ def read_source_observation_outcomes_cursor(
                 pre_due_reason_counts[key + (pre_due_reason,)] += 1
 
         forward_anchor = {
+            "target_session": t0_session,
             "capture": anchor["anchor_capture_id"],
             "source_symbol": anchor["source_symbol"],
             "calendar_revision": anchor["calendar_revision"],

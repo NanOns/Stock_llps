@@ -963,7 +963,7 @@ def compute_source_pool_seed(
             if profile_snapshot_missing
             else profile_revision,
             "runtime_profile_revision": runtime_revision,
-            "status": "MISSING_RAW_RECOMPUTED"
+            "status": "MISSING_QFQ_RECOMPUTED"
             if profile_snapshot_missing
             else "MATCH"
             if runtime_revision == profile_revision
@@ -975,7 +975,7 @@ def compute_source_pool_seed(
             if profile_snapshot_missing
             else "同源、同窗口摘要且质量完整的已存Core字段直接复用；未保存的比率和画像分项按现役合同从QFQ计算，画像不合格时回算。"
         ),
-        "stored_profile_status": "MISSING_RAW_RECOMPUTED"
+        "stored_profile_status": "MISSING_QFQ_RECOMPUTED"
         if profile_snapshot_missing
         else "AVAILABLE",
         "scope": rps["scope"],

@@ -130,26 +130,23 @@ def refresh_remote_tdx_sector_members(
     snapshot_ids = {
         item["source_kind"]: item["existing_snapshot_id"]
         for item in preflight["revisions"]
-        if item["existing_snapshot_id"] is not None
+        if item["decision"] == "REUSE_IDENTICAL_VERSION"
+        and item["existing_snapshot_id"] is not None
     }
     readback: dict[str, Any] | None = None
-    if not validate_only and (insert_candidates or reusable):
-        readback = (
-            {
-                "status": "PASS",
-                "independent_readback_transaction": inserted[
-                    "independent_readback_transaction"
-                ],
-                "independent_readback": inserted["independent_readback"],
-            }
-            if inserted is not None
-            else verify_remote_sector_source_readback(config, reusable, snapshot_ids)
-        )
+    if inserted is not None:
         snapshot_ids.update(
             {
                 item["source_kind"]: int(item["snapshot_id"])
                 for item in (inserted or {}).get("snapshots", [])
             }
+        )
+    readback_snapshots = [
+        snapshot for snapshot in snapshots if snapshot.source_kind in snapshot_ids
+    ]
+    if not validate_only and readback_snapshots:
+        readback = verify_remote_sector_source_readback(
+            config, readback_snapshots, snapshot_ids
         )
 
     consumer_queries: dict[str, Any] = {}
@@ -190,6 +187,20 @@ def refresh_remote_tdx_sector_members(
             result_status = "INSERTED"
         else:
             result_status = "IDEMPOTENT_ZERO_WRITE"
+        if validate_only:
+            oracle_status = (
+                "MATCHED_EXISTING_TYPED_SET"
+                if decision["decision"] == "REUSE_IDENTICAL_VERSION"
+                else "NOT_RUN_VALIDATE_ONLY"
+            )
+        elif snapshot_id is None:
+            oracle_status = "BLOCKED_NO_STABLE_SNAPSHOT_ID"
+        elif readback is not None and str(snapshot_id) in readback.get(
+            "independent_readback", {}
+        ):
+            oracle_status = "PG_TYPED_SET_READBACK_PASS"
+        else:
+            oracle_status = "INDEPENDENT_READBACK_NOT_RUN"
         per_snapshot.append(
             {
                 "snapshot_id": snapshot_id,
@@ -206,13 +217,7 @@ def refresh_remote_tdx_sector_members(
                 "source_quality": snapshot.source_quality,
                 "clock_quality": snapshot.clock_quality,
                 "research_mode": snapshot.research_mode,
-                "independent_oracle_status": (
-                    "PG_TYPED_SET_READBACK_PASS"
-                    if snapshot.source_kind in snapshot_ids and readback is not None
-                    else "MATCHED_EXISTING_TYPED_SET"
-                    if decision["decision"] == "REUSE_IDENTICAL_VERSION"
-                    else "NOT_RUN_VALIDATE_ONLY"
-                ),
+                "independent_oracle_status": oracle_status,
                 "preflight_decision": decision["decision"],
                 "result": result_status,
                 "reason_code": decision.get("reason_code"),
@@ -327,10 +332,10 @@ def refresh_remote_tdx_sector_members(
                 "delete_count": 0,
                 "other_business_table_writes": 0,
                 "transaction_count": inserted["transaction_count"],
-                "independent_readback_transaction": inserted[
-                    "independent_readback_transaction"
-                ],
-                "independent_readback": inserted["independent_readback"],
+                "independent_readback_transaction": bool(readback),
+                "independent_readback": readback["independent_readback"]
+                if readback
+                else {},
             }
             if inserted is not None
             else {

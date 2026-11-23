@@ -1714,6 +1714,10 @@ def _read_single_symbol_context(
         "after": launch.get("after"),
         "transition": launch.get("transition", "NOT_COMPUTED"),
         "transition_kind": launch.get("transition_kind", "UNKNOWN"),
+        "producer_version": launch.get("producer_version"),
+        "algorithm_contract": launch.get("algorithm_contract"),
+        "session_contract": launch.get("session_contract"),
+        "calendar_revision": launch.get("calendar_revision"),
         "reason_codes": launch.get("reason_codes", []),
         "scenario_status": "AVAILABLE"
         if all(
@@ -2567,7 +2571,11 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
            'producer_version',producer_version,'history_session_count',history_session_count,
            'calendar_id',calendar_id,'calendar_revision',calendar_revision,
            'research_mode',research_mode,'price_coordinate',price_coordinate
-       ) FROM seed_scope)""",
+       ) FROM seed_scope),
+       (SELECT jsonb_build_object(
+           'producer_version',producer_version,'algorithm_contract',algorithm_contract,
+           'session_contract',session_contract,'calendar_revision',calendar_revision
+       ) FROM d0_scope)""",
             (
                 before_session,
                 target_session,
@@ -2601,6 +2609,7 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
         d1_status,
         rules_match_seed,
         seed_scope,
+        d0_scope,
     ) = row
     counts = {group: int((counts_raw or {}).get(group, 0)) for group in sorted(groups)}
     results = rows_raw or []
@@ -2629,6 +2638,7 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
             "rules_match_seed": bool(rules_match_seed),
         },
         "seed_scope": seed_scope,
+        "d0_scope": d0_scope,
         "execution": {
             "transaction": "REPEATABLE READ READ ONLY",
             "database_write_attempted": False,

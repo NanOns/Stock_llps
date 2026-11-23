@@ -105,6 +105,37 @@ class SourceD0RawError(ValueError):
         super().__init__(message)
 
 
+def _rps_unavailability(error: ValueError) -> str:
+    """仅把精确来源池缺失视为不可评价，其余RPS错误保持可区分失败。"""
+    message = str(error)
+    if message == "目标日没有精确来源池":
+        return "HISTORICAL_RPS_SOURCE_POOL_EMPTY"
+    if message in {
+        "来源池分母不完整",
+        "来源池分页分母发生变化",
+        "RPS端点QFQ分区或证券总体未闭合",
+        "RPS端点分页期间分母发生变化",
+        "RPS端点代码总体与分页分母不闭合",
+        "RPS历史分页期间行数分母发生变化",
+        "RPS QFQ历史会话覆盖未完整闭合",
+        "RPS历史行数与PG分页分母不一致",
+    }:
+        raise SourceD0RawError(
+            "D0_RPS_SOURCE_POOL_INCOMPLETE",
+            f"RPS来源分区未闭合：{message}",
+            category="DATA_PARTITION",
+        ) from error
+    if message == "RPS目标、截止、paired capture或分页上限无效":
+        raise SourceD0RawError(
+            "D0_RPS_SCOPE_INVALID", message, category="ARGUMENT"
+        ) from error
+    raise SourceD0RawError(
+        "D0_RPS_INPUT_INVALID",
+        f"RPS算法合同或来源输入失败：{message}",
+        category="DATA_OR_CONTRACT",
+    ) from error
+
+
 def attach_continuation_observation(item):
     """归约来源续强子条件，不把诊断父观察升级为正式父事件。"""
     obs = item["prior_shape_observation"]
@@ -187,11 +218,6 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_capture_id)
     end = calendar["sessions"].index(target)
     sessions = calendar["sessions"][max(0, end - 44) : end + 1]
     short_sessions = sessions[-25:]
-    unavailable_messages = {
-        "目标日没有精确来源池": "HISTORICAL_RPS_SOURCE_POOL_EMPTY",
-        "来源池分母不完整": "RPS_SOURCE_POOL_INCOMPLETE",
-        "来源池分页分母发生变化": "RPS_SOURCE_POOL_INCOMPLETE",
-    }
     target_rps_error = None
     target_rps = day["seed"].get("rps_read")
     if target_rps is None:
@@ -207,9 +233,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_capture_id)
                 raise
             target_rps_error = error.code
         except ValueError as error:
-            if str(error) not in unavailable_messages:
-                raise
-            target_rps_error = unavailable_messages[str(error)]
+            target_rps_error = _rps_unavailability(error)
         if target_rps_error:
             target_rps = {"facts": {symbol: {} for symbol in expected}}
     if set(target_rps["facts"]) != expected:
@@ -309,9 +333,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_capture_id)
                     raise
                 rps_errors[prior] = error.code
             except ValueError as error:
-                if str(error) not in unavailable_messages:
-                    raise
-                rps_errors[prior] = unavailable_messages[str(error)]
+                rps_errors[prior] = _rps_unavailability(error)
         historical_rps = {
             prior: rps_cache[prior].get(symbol, {}).get("rps5_delta3_pp")
             for prior in needed
@@ -596,13 +618,21 @@ def attach_stock_risk_readiness(
     previous_ma = prior["core"]["fields"]["core.ma20"]
     current_close = preview["qfq"]["close"]
     current_ma = preview["core"]["fields"]["core.ma20"]
-    if all(
-        x.get("quality") == "OBSERVED"
-        for x in (previous_close, previous_ma, current_close, current_ma)
-    ):
-        crossed = Fraction(previous_close["value"]) <= Fraction(
-            previous_ma["value"]["exact"]
-        ) and Fraction(current_close["value"]) > Fraction(current_ma["value"]["exact"])
+    exact_values = tuple(
+        _rendered_exact_fraction(value)
+        for value in (previous_close, previous_ma, current_close, current_ma)
+    )
+    if all(value is not None for value in exact_values):
+        (
+            previous_close_value,
+            previous_ma_value,
+            current_close_value,
+            current_ma_value,
+        ) = exact_values
+        crossed = (
+            previous_close_value <= previous_ma_value
+            and current_close_value > current_ma_value
+        )
         cross = {"state": "TRUE" if crossed else "FALSE", "reason": None}
     else:
         cross = {"state": "UNKNOWN", "reason": "PREVIOUS_MA20_CROSS_INPUT_UNKNOWN"}
@@ -966,7 +996,7 @@ def attach_recovery_failure_followup(
                     raise ValueError("布尔值不是有效OHLC")
                 values = [
                     Fraction(row[key])
-                    for key in ("raw_open", "raw_high", "raw_low", "raw_close")
+                    for key in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
                 ]
                 opening, high, low, close = values
                 if (
@@ -1280,6 +1310,21 @@ def _fraction(value: Any) -> dict[str, str] | None:
         return None
 
 
+def _rendered_exact_fraction(field: Any) -> Fraction | None:
+    """严格读取现役QFQ渲染字段的exact分数，不经float或展示小数。"""
+    if not isinstance(field, Mapping) or field.get("quality") != "OBSERVED":
+        return None
+    value = field.get("value")
+    exact = value.get("exact") if isinstance(value, Mapping) else value
+    if not isinstance(exact, (str, int, Fraction)) or isinstance(exact, bool):
+        return None
+    try:
+        result = Fraction(exact)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return result if result.denominator > 0 else None
+
+
 def _iso(value: Any) -> str | None:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
@@ -1463,13 +1508,120 @@ def _classify_transition(before_state: str | None, after_state: str | None) -> s
 
 
 def _official_calendar(target: date) -> dict[str, Any]:
-    payload, _metadata, revision_chain, sessions = _load_calendar(target)
+    payload, metadata, revision_chain, sessions = _load_calendar(target)
     return {
         "calendar_id": payload["calendar_id"],
         "calendar_revision": payload["revision"],
         "calendar_revision_chain": revision_chain,
+        "calendar_revision_by_year": {
+            int(item["year"]): item["revision"] for item in metadata
+        },
+        "target_year": target.year,
         "sessions": sessions,
     }
+
+
+def _calendar_revision_map(identity: Mapping[str, Any]) -> dict[int, str] | None:
+    raw = identity.get("calendar_revision_by_year")
+    if isinstance(raw, Mapping):
+        revisions: dict[int, str] = {}
+        for year, revision in raw.items():
+            try:
+                parsed_year = int(year)
+            except (TypeError, ValueError):
+                return None
+            if (
+                not 1000 <= parsed_year <= 9999
+                or not isinstance(revision, str)
+                or not revision
+                or parsed_year in revisions
+            ):
+                return None
+            revisions[parsed_year] = revision
+        return revisions or None
+
+    chain = identity.get("calendar_revision_chain")
+    if not isinstance(chain, str) or not chain:
+        return None
+    revisions = {}
+    for component in chain.split("+"):
+        year_text, separator, revision = component.partition(":")
+        if not separator or not year_text.isdigit() or not revision:
+            return None
+        year = int(year_text)
+        if not 1000 <= year <= 9999 or year in revisions:
+            return None
+        revisions[year] = revision
+    return revisions or None
+
+
+def _calendar_identities_compatible(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> bool:
+    """允许相邻年度各自修订，同时要求共享资源逐年一致且覆盖完整。"""
+    if before.get("calendar_id") != after.get("calendar_id"):
+        return False
+    before_revisions = _calendar_revision_map(before)
+    after_revisions = _calendar_revision_map(after)
+    before_year = before.get("target_year")
+    after_year = after.get("target_year")
+    if (
+        before_revisions is None
+        or after_revisions is None
+        or type(before_year) is not int
+        or type(after_year) is not int
+        or not before_year <= after_year <= before_year + 1
+        or before_year not in before_revisions
+        or after_year not in after_revisions
+        or before.get("calendar_revision") != before_revisions[before_year]
+        or after.get("calendar_revision") != after_revisions[after_year]
+    ):
+        return False
+    if any(
+        before_revisions[year] != revision
+        for year, revision in after_revisions.items()
+        if year in before_revisions
+    ):
+        return False
+    return all(year in after_revisions for year in range(before_year, after_year + 1))
+
+
+def _adjacent_d0_calendar_windows(
+    before_session: date, target_session: date
+) -> tuple[dict[str, Any], tuple[date, ...], tuple[date, ...]]:
+    """在目标端完整连续日历内定位相邻会话及两端窗口。"""
+    before_calendar = _official_calendar(before_session)
+    after_calendar = _official_calendar(target_session)
+    if not _calendar_identities_compatible(before_calendar, after_calendar):
+        raise SourceD0RawError(
+            "D0_CALENDAR_REVISIONS_INCOMPATIBLE",
+            "相邻日期覆盖的年度日历资源缺失或共享年度修订冲突。",
+            category="DATA",
+        )
+    sessions = after_calendar["sessions"]
+    try:
+        before_index = sessions.index(before_session)
+        after_index = sessions.index(target_session)
+    except ValueError as error:
+        raise SourceD0RawError(
+            "D0_OFFICIAL_CALENDAR_INVALID",
+            "相邻日期未同时出现在目标端已核验的连续官方日历中。",
+            category="ARGUMENT",
+        ) from error
+    if after_index != before_index + 1:
+        raise SourceD0RawError(
+            "D0_SESSIONS_NOT_ADJACENT",
+            "前后日期必须是连续日历中的相邻官方会话。",
+            category="ARGUMENT",
+        )
+    before_window = tuple(sessions[max(0, before_index - 20) : before_index + 1])
+    after_window = tuple(sessions[max(0, after_index - 20) : after_index + 1])
+    if len(before_window) != 21 or len(after_window) != 21:
+        raise SourceD0RawError(
+            "D0_CHANGE_WINDOW_LEFT_TRUNCATED",
+            "相邻变化的两端都必须具备目标会话及前20个官方会话。",
+        )
+    return after_calendar, before_window, after_window
 
 
 def query_source_d0_raw_launch(
@@ -1604,6 +1756,9 @@ def query_source_d0_raw_launch(
     calendar_identity = {
         "calendar_id": calendar["calendar_id"],
         "calendar_revision": calendar["calendar_revision"],
+        "calendar_revision_chain": calendar["calendar_revision_chain"],
+        "calendar_revision_by_year": calendar["calendar_revision_by_year"],
+        "target_year": calendar["target_year"],
     }
 
     process_started = time.perf_counter()
@@ -1619,7 +1774,10 @@ def query_source_d0_raw_launch(
             research_cutoff=research_cutoff,
             source_capture_id=source_capture_id,
             sessions=sessions,
-            expected_calendar=calendar_identity,
+            expected_calendar={
+                "calendar_id": calendar_identity["calendar_id"],
+                "calendar_revision": calendar_identity["calendar_revision"],
+            },
             history_source_symbol=symbol if _single_symbol_only else None,
         )
     except D0RawPgError as error:
@@ -1631,7 +1789,13 @@ def query_source_d0_raw_launch(
     rps_input_error = None
     if scenario == "RECOVERY_TURN":
         if _rps_result_error is not None:
-            rps_input_error = f"RPS_INPUT_VALUE_ERROR:{_rps_result_error}"
+            if _rps_result_error != "PG_SOURCE_NO_MATCH":
+                raise SourceD0RawError(
+                    "D0_RPS_INPUT_INVALID",
+                    "RPS读取只允许将精确来源事实缺失标为不可评价。",
+                    category="DATA_OR_CONTRACT",
+                )
+            rps_input_error = _rps_result_error
         else:
             try:
                 rps = (
@@ -1654,8 +1818,12 @@ def query_source_d0_raw_launch(
                     rps_input_error = "D0_RPS_SOURCE_POOL_MISMATCH"
                 else:
                     rps_facts = rps["facts"]
+            except RawSourcePgError as error:
+                if error.code != "PG_SOURCE_NO_MATCH":
+                    raise
+                rps_input_error = "PG_SOURCE_NO_MATCH"
             except ValueError as error:
-                rps_input_error = f"RPS_INPUT_VALUE_ERROR:{error}"
+                rps_input_error = _rps_unavailability(error)
     calculate_started = time.perf_counter()
     calculate_cpu_started = time.process_time()
     results = []
@@ -1805,11 +1973,7 @@ def query_source_d0_raw_launch(
                             raise
                         rps_errors[prior["session"]] = error.code
                     except ValueError as error:
-                        if str(error) != "目标日没有精确来源池":
-                            raise
-                        rps_errors[prior["session"]] = (
-                            "HISTORICAL_RPS_SOURCE_POOL_EMPTY"
-                        )
+                        rps_errors[prior["session"]] = _rps_unavailability(error)
                 if historical_rps:
                     item["prior_shape_observation"] = observe_prior_shapes(
                         sessions=shape_sessions,
@@ -2063,45 +2227,9 @@ def _query_source_d0_raw_launch_changes(
             category="ARGUMENT",
         )
 
-    try:
-        after_calendar = _official_calendar(target_session)
-        before_index = after_calendar["sessions"].index(before_session)
-        after_index = after_calendar["sessions"].index(target_session)
-    except (ResearchEntryError, ValueError) as error:
-        raise SourceD0RawError("D0_OFFICIAL_CALENDAR_INVALID", str(error)) from error
-    if after_index != before_index + 1:
-        raise SourceD0RawError(
-            "D0_SESSIONS_NOT_ADJACENT",
-            "前后日期必须是同一版本官方交易日历中的相邻会话。",
-            category="ARGUMENT",
-        )
-    try:
-        before_calendar = _official_calendar(before_session)
-    except ResearchEntryError as error:
-        raise SourceD0RawError("D0_OFFICIAL_CALENDAR_INVALID", str(error)) from error
-    before_identity = {
-        key: before_calendar[key] for key in ("calendar_id", "calendar_revision")
-    }
-    after_identity = {
-        key: after_calendar[key] for key in ("calendar_id", "calendar_revision")
-    }
-    if before_identity != after_identity or after_index != before_index + 1:
-        raise SourceD0RawError(
-            "D0_SESSIONS_NOT_ADJACENT",
-            "前后日期必须是同一版本官方交易日历中的相邻会话。",
-            category="ARGUMENT",
-        )
-    before_sessions = tuple(
-        before_calendar["sessions"][max(0, before_index - 20) : before_index + 1]
+    _, before_sessions, after_sessions = _adjacent_d0_calendar_windows(
+        before_session, target_session
     )
-    after_sessions = tuple(
-        after_calendar["sessions"][max(0, after_index - 20) : after_index + 1]
-    )
-    if len(before_sessions) != 21 or len(after_sessions) != 21:
-        raise SourceD0RawError(
-            "D0_CHANGE_WINDOW_LEFT_TRUNCATED",
-            "相邻变化的两端都必须具备目标会话及前20个官方会话。",
-        )
 
     started = time.perf_counter()
     try:
@@ -2140,8 +2268,9 @@ def _query_source_d0_raw_launch_changes(
     after_source = after_result["source_version"]
     compatible_identity = (
         before_source["source_capture_id"] == after_source["source_capture_id"]
-        and before_source["source_capture_id"] == after_source["source_capture_id"]
-        and before_result["official_calendar"] == after_result["official_calendar"]
+        and _calendar_identities_compatible(
+            before_result["official_calendar"], after_result["official_calendar"]
+        )
         and before_result["session_contract"] == after_result["session_contract"]
         and before_result["algorithm_contract"] == after_result["algorithm_contract"]
         and before_result["producer_version"] == after_result["producer_version"]

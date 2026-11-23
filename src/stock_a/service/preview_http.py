@@ -1784,15 +1784,29 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             read_source_formal_admission_day,
         )
 
-        formal_admission_day = read_source_formal_admission_day(
-            config,
-            target_session=target_session,
-            source_capture_id=after_source["source_capture_id"],
-            expected_source_count=after_source["research_expected_row_count"],
-            source_symbols=sorted(page_symbols),
-            profile_history_session_count=history_session_count,
-            profile_revision=profile_revision,
-        )
+        d0_scope = page_result.get("d0_scope")
+        if not isinstance(d0_scope, Mapping):
+            formal_admission_day = {
+                "status": "NOT_COMPUTED",
+                "reason_code": "FORMAL_ADMISSION_D0_VERSION_NOT_AVAILABLE",
+                "by_symbol": {},
+                "counts": None,
+            }
+        else:
+            seed_scope = page_result.get("seed_scope") or {}
+            formal_admission_day = read_source_formal_admission_day(
+                config,
+                target_session=target_session,
+                source_capture_id=after_source["source_capture_id"],
+                expected_source_count=after_source["research_expected_row_count"],
+                algorithm_contract=d0_scope["algorithm_contract"],
+                session_contract=d0_scope["session_contract"],
+                calendar_revision=d0_scope["calendar_revision"],
+                seed_producer_version=seed_scope.get("producer_version"),
+                source_symbols=sorted(page_symbols),
+                profile_history_session_count=history_session_count,
+                profile_revision=profile_revision,
+            )
         t0_summary_query_started = time.perf_counter()
         from stock_a.storage.postgres.t0_early_observations import (
             read_source_t0_early_triage_summaries_for_symbols,
@@ -7015,9 +7029,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 source_capture_id=source_capture_id,
                             ),
                         )
-                    except ValueError as error:
+                    except RawSourcePgError as error:
+                        if error.code != "PG_SOURCE_NO_MATCH":
+                            raise
                         rps = None
-                        rps_error = f"{type(error).__name__}:{error}"
+                        rps_error = error.code
                     recovery = query_source_d0_raw_launch(
                         self.preview_server.state.config,
                         scenario="RECOVERY_TURN",
@@ -7808,15 +7824,39 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     read_source_formal_admission_day,
                 )
 
-                formal_admission_day = read_source_formal_admission_day(
-                    config,
-                    target_session=target,
-                    source_capture_id=source_context["source_capture_id"],
-                    expected_source_count=source_context["research_expected_row_count"],
-                    source_symbols=[symbol],
-                    profile_history_session_count=session_count,
-                    profile_revision=profile_revision,
-                )
+                d0_contract = single_evidence.get("d0") or {}
+                if not all(
+                    isinstance(d0_contract.get(key), str) and d0_contract[key]
+                    for key in (
+                        "algorithm_contract",
+                        "session_contract",
+                        "calendar_revision",
+                    )
+                ):
+                    formal_admission_day = {
+                        "status": "NOT_COMPUTED",
+                        "reason_code": "FORMAL_ADMISSION_D0_VERSION_NOT_AVAILABLE",
+                        "by_symbol": {},
+                        "counts": None,
+                    }
+                else:
+                    formal_admission_day = read_source_formal_admission_day(
+                        config,
+                        target_session=target,
+                        source_capture_id=source_context["source_capture_id"],
+                        expected_source_count=source_context[
+                            "research_expected_row_count"
+                        ],
+                        algorithm_contract=d0_contract["algorithm_contract"],
+                        session_contract=d0_contract["session_contract"],
+                        calendar_revision=d0_contract["calendar_revision"],
+                        seed_producer_version=(
+                            single_evidence.get("seed_scope") or {}
+                        ).get("producer_version"),
+                        source_symbols=[symbol],
+                        profile_history_session_count=session_count,
+                        profile_revision=profile_revision,
+                    )
                 formal_d0_admission = present_source_formal_admission(
                     stored_day=formal_admission_day,
                     source_symbol=symbol,

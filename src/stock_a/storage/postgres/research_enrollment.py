@@ -1425,6 +1425,7 @@ def read_enrollment_followups(
         )
         for row in anchors:
             anchors_by_id[row[0]] = {
+                "target_session": row[1],
                 "source_capture_id": row[4],
                 "capture": row[5],
                 "rule_fact_id": row[6],
@@ -1885,8 +1886,13 @@ def _enrollment_forward_paths(
     cutoff: date,
 ) -> list[dict[str, Any]]:
     """按登记T0的来源捕获、日历及路径版本投影已到期收益。"""
+    from stock_a.research.entry_context.sessions import _load_calendar
+    from stock_a.research.source_forward_path import (
+        forward_calendar_revision_compatible,
+    )
     from stock_a.storage.postgres.research_facts import PATH_VERSION
 
+    _, _, official_revision_chain, _ = _load_calendar(cutoff)
     result = []
     for horizon in (1, 3, 5):
         due_session = due_by_horizon[horizon]
@@ -1916,7 +1922,17 @@ def _enrollment_forward_paths(
             exact = [
                 row
                 for row in candidates
-                if row[4] == PATH_VERSION and row[5] == anchor.get("calendar_revision")
+                if row[4] == PATH_VERSION
+                and row[6] == due_session
+                and row[20] == "FORWARD_ADJUSTED"
+                and row[21] == "NON_PIT_EXPLORATORY"
+                and forward_calendar_revision_compatible(
+                    anchor["target_session"],
+                    due_session,
+                    rule_revision=anchor.get("calendar_revision"),
+                    path_revision=row[5],
+                    official_revision_chain=official_revision_chain,
+                )
             ]
             if len(exact) != 1:
                 if exact or candidates:
@@ -1935,8 +1951,8 @@ def _enrollment_forward_paths(
                 row = exact[0]
                 (
                     _target,
-                    capture_id,
                     symbol,
+                    capture_id,
                     _horizon,
                     path_version,
                     calendar_revision,
@@ -1957,6 +1973,10 @@ def _enrollment_forward_paths(
                     price_coordinate,
                     scope,
                 ) = row[:22]
+                if type(capture_id) is not int or not isinstance(symbol, str):
+                    raise ValueError(
+                        "Forward路径行列类型与source_symbol/source_capture_id合同不符"
+                    )
                 valid_key = (
                     capture_id == anchor.get("capture")
                     and symbol == anchor.get("source_symbol")
@@ -1971,7 +1991,7 @@ def _enrollment_forward_paths(
                     item["reason_codes"] = ["FORWARD_PATH_SCOPE_MISMATCH"]
                 else:
                     observed = (
-                        maturity == "ENDPOINT_OBSERVED"
+                        maturity == "ENDPOINT_OBSERVED_NON_PIT"
                         and endpoint_quality == "OBSERVED"
                         and numerator is not None
                         and denominator is not None
@@ -2041,7 +2061,7 @@ def _enrollment_forward_paths(
                     if not observed and not item["reason_codes"]:
                         item["reason_codes"] = [
                             "FORWARD_ENDPOINT_NOT_OBSERVED"
-                            if maturity == "ENDPOINT_OBSERVED"
+                            if maturity == "ENDPOINT_OBSERVED_NON_PIT"
                             else "FORWARD_PATH_MATURITY_MISMATCH"
                         ]
         result.append(item)
