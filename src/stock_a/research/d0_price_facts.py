@@ -119,9 +119,28 @@ def calculate_d0_first_day_damage(
             else "raw_price_coordinate",
             row.get("price_coordinate"),
         )
-        if row_coordinate not in (None, price_coordinate):
+        if row_coordinate != price_coordinate:
             return _unknown(
                 "PRICE_COORDINATE_MISMATCH",
+                sessions=window,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
+            )
+        response_fields = row.get("qfq_response_fields")
+        if (
+            row.get("qfq_adjustflag") not in (2, "2")
+            or row.get("qfq_response_session_date")
+            not in (
+                session,
+                session.isoformat(),
+            )
+            or str(row.get("qfq_response_source_code") or "").upper()
+            != source_symbol.upper()
+            or not isinstance(response_fields, (list, tuple, set, frozenset))
+            or not {"date", "code", "close"}.issubset(set(response_fields))
+        ):
+            return _unknown(
+                "QFQ_RESPONSE_IDENTITY_MISMATCH",
                 sessions=window,
                 source_capture_id=source_capture_id,
                 price_coordinate=price_coordinate,
@@ -145,39 +164,31 @@ def calculate_d0_first_day_damage(
                 source_capture_id=source_capture_id,
                 price_coordinate=price_coordinate,
             )
-        if row.get("qfq_price_quality") != "OBSERVED":
-            reason_code = row.get("qfq_price_reason") or "QFQ_PRICE_QUALITY_UNKNOWN"
+        if row.get("qfq_close_quality") != "OBSERVED":
+            reason_code = row.get("qfq_close_reason") or "QFQ_CLOSE_QUALITY_UNKNOWN"
             return _unknown(
                 str(reason_code),
                 sessions=window,
                 source_capture_id=source_capture_id,
                 price_coordinate=price_coordinate,
             )
-        values = [
-            row.get(name) for name in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
-        ]
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, (Decimal, int, Fraction))
-            or isinstance(value, Decimal)
-            and not value.is_finite()
-            for value in values
+        close_value = row.get("qfq_close")
+        if (
+            isinstance(close_value, bool)
+            or not isinstance(close_value, (Decimal, int, Fraction))
+            or isinstance(close_value, Decimal)
+            and not close_value.is_finite()
         ):
             return _unknown(
-                "INVALID_PRICE_OHLC",
+                "INVALID_PRICE_CLOSE",
                 sessions=window,
                 source_capture_id=source_capture_id,
                 price_coordinate=price_coordinate,
             )
-        opening, high, low, close_value = (Fraction(value) for value in values)
-        if (
-            min(opening, high, low, close_value) <= 0
-            or low > high
-            or not low <= opening <= high
-            or not low <= close_value <= high
-        ):
+        close_value = Fraction(close_value)
+        if close_value <= 0:
             return _unknown(
-                "INVALID_PRICE_OHLC",
+                "INVALID_PRICE_CLOSE",
                 sessions=window,
                 source_capture_id=source_capture_id,
                 price_coordinate=price_coordinate,
@@ -223,6 +234,7 @@ _REASONS = {
     "SOURCE_CAPTURE_IDENTITY_MISMATCH": "历史行与目标来源代码、日期或paired capture不一致。",
     "PRICE_COORDINATE_MISMATCH": "官方会话窗口内的价格坐标不是QFQ。",
     "OFFICIAL_SESSION_BAR_MISSING": "严格官方窗口至少一个会话缺少有效QFQ日线。",
+    "INVALID_PRICE_CLOSE": "官方会话QFQ收盘价缺失、非有限或非正数。",
     "QFQ_PRICE_QUALITY_UNKNOWN": "官方会话QFQ价格质量未知。",
     "INVALID_PRICE_CLOSE": "官方会话收盘价缺失、非有限或非正数。",
     "INVALID_PRICE_OHLC": "官方会话QFQ OHLC缺失、非法或不满足价格范围关系。",

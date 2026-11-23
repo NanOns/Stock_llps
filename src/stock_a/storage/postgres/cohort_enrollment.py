@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import nullcontext
 from datetime import date
 from fractions import Fraction
 from statistics import median
@@ -40,6 +41,7 @@ def read_cohort_enrollment_datewise_comparison(
     research_cutoff: date,
     source_capture_id: int,
     rule: str,
+    _cursor: Any | None = None,
 ) -> dict[str, Any]:
     """对已保存T0范围一次批量读取ENTRY/REENTRY及其Forward事实。"""
     from stock_a.research.entry_context.sessions import _load_calendar
@@ -124,11 +126,12 @@ def read_cohort_enrollment_datewise_comparison(
         windows = [item["event_window_start"] for item in contexts]
         calendars = [item["calendar_revision"] for item in contexts]
         pool_counts = [item["source_pool_count"] for item in contexts]
-        with _transaction(config, write=False, statement_timeout_ms=15000) as (
-            _,
-            cursor,
-            _,
-        ):
+        transaction = (
+            _transaction(config, write=False, statement_timeout_ms=15000)
+            if _cursor is None
+            else nullcontext((None, _cursor, None))
+        )
+        with transaction as (_, cursor, _):
             cursor.execute(
                 """WITH selected AS (
                        SELECT * FROM unnest(

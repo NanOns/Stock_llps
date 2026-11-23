@@ -799,6 +799,9 @@ def fetch_baostock_price_window(
                         continue
                     if not isinstance(network_response, Mapping):
                         network_response = {}
+                    session_cleanup_failed = (
+                        network_response.get("status") == "LOGOUT_FAILED"
+                    )
                     login_attempted = network_response.get("login_attempted") is True
                     query_count = network_response.get("query_calls", 0)
                     if type(query_count) is not int or not 0 <= query_count <= len(
@@ -901,12 +904,17 @@ def fetch_baostock_price_window(
                         request_attempt["response_row_count"] = (
                             len(response_rows) if isinstance(response_rows, list) else 0
                         )
-                        request_attempt["status"] = symbol_response.get(
-                            "status", "QUERY_FAILED"
+                        request_attempt["status"] = (
+                            "LOGOUT_FAILED"
+                            if session_cleanup_failed
+                            else symbol_response.get("status", "QUERY_FAILED")
                         )
-                        request_attempt["local_error"] = symbol_response.get(
-                            "local_error"
-                        ) or symbol_response.get("query_error_code")
+                        request_attempt["local_error"] = (
+                            network_response.get("logout_error_code") or "LOGOUT_FAILED"
+                            if session_cleanup_failed
+                            else symbol_response.get("local_error")
+                            or symbol_response.get("query_error_code")
+                        )
                         if isinstance(symbol_response.get("response_fields"), list):
                             request_attempt["returned_fields"] = tuple(
                                 symbol_response["response_fields"]
@@ -916,7 +924,8 @@ def fetch_baostock_price_window(
                         request_attempt["response_row_count"] = 0
                         request_attempt["local_error"] = network_response.get("status")
                     if (
-                        not isinstance(symbol_response, Mapping)
+                        session_cleanup_failed
+                        or not isinstance(symbol_response, Mapping)
                         or symbol_response.get("status") != "RESPONSE_RECEIVED"
                         or symbol_response.get("complete") is not True
                     ):
@@ -927,12 +936,19 @@ def fetch_baostock_price_window(
                                 "attempt": attempt,
                                 "symbol": symbol,
                                 "status": (
-                                    symbol_response.get("status", "NO_SYMBOL_RESPONSE")
+                                    "LOGOUT_FAILED"
+                                    if session_cleanup_failed
+                                    else symbol_response.get(
+                                        "status", "NO_SYMBOL_RESPONSE"
+                                    )
                                     if isinstance(symbol_response, Mapping)
                                     else "NO_SYMBOL_RESPONSE"
                                 ),
                                 "error_code": (
-                                    symbol_response.get("local_error")
+                                    network_response.get("logout_error_code")
+                                    or "LOGOUT_FAILED"
+                                    if session_cleanup_failed
+                                    else symbol_response.get("local_error")
                                     if isinstance(symbol_response, Mapping)
                                     else network_response.get("status")
                                 ),

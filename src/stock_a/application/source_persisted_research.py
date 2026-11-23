@@ -15,9 +15,7 @@ from stock_a.research.source_forward_path import exploratory_raw_path
 from stock_a.storage.postgres.research_events import read_source_events
 from stock_a.storage.postgres.cohort_stats import read_cohort_page
 from stock_a.storage.postgres.research_facts import (
-    read_board_members,
     read_research_keys,
-    read_research_rows,
 )
 from stock_a.storage.postgres.baostock_price_facts import (
     RAW_COORDINATE,
@@ -536,12 +534,35 @@ def compare_persisted_cohorts(
         horizon=1,
         research_cutoff=research_cutoff,
     )
-    left = read_research_rows(
-        target=before, event_window_start=before_event_window_start, **common
-    )
-    right = read_research_rows(
-        target=after, event_window_start=after_event_window_start, **common
-    )
+    from stock_a.storage.postgres import research_facts, source_raw
+
+    cursor_arguments = {
+        name: value
+        for name, value in common.items()
+        if name not in {"config", "event_window_start"}
+    }
+    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        left = research_facts._read_research_rows_cursor(
+            cursor,
+            target=before,
+            event_window_start=before_event_window_start,
+            **cursor_arguments,
+        )
+        right = research_facts._read_research_rows_cursor(
+            cursor,
+            target=after,
+            event_window_start=after_event_window_start,
+            **cursor_arguments,
+        )
+        snapshots, members = research_facts._read_board_members_cursor(
+            cursor,
+            industry_snapshot_id=industry_snapshot_id,
+            concept_snapshot_id=concept_snapshot_id,
+        )
     left_by_symbol = {row[0]: row for row in left}
     right_by_symbol = {row[0]: row for row in right}
     universe = set(left_by_symbol) | set(right_by_symbol)
@@ -555,11 +576,6 @@ def compare_persisted_cohorts(
             "before_reasons": a[2] if a else [],
             "after_reasons": b[2] if b else [],
         }
-    snapshots, members = read_board_members(
-        config,
-        industry_snapshot_id=industry_snapshot_id,
-        concept_snapshot_id=concept_snapshot_id,
-    )
     boards = {}
     mapped = {"INDUSTRY": set(), "CONCEPT": set()}
     symbol_boards = []

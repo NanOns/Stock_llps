@@ -121,8 +121,8 @@ _PRICE_POSITION_QUERY_FIELDS = {
     "c_vs_ma20": {
         "left_field": "qfq_close",
         "left_value_sql": "r.qfq_close",
-        "left_quality_sql": "COALESCE(r.qfq_price_quality, 'UNKNOWN')",
-        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.qfq_price_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.qfq_price_reason, 'QFQ_PRICE_REASON_MISSING') ELSE r.qfq_price_reason END",
+        "left_quality_sql": "COALESCE(r.qfq_close_quality, 'UNKNOWN')",
+        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.qfq_close_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.qfq_close_reason, 'QFQ_CLOSE_REASON_MISSING') ELSE r.qfq_close_reason END",
         "right_field": "ma20",
         "right_value_sql": "p.ma20",
         "right_quality_sql": "p.ma20_quality",
@@ -131,8 +131,8 @@ _PRICE_POSITION_QUERY_FIELDS = {
     "c_vs_prior_high20": {
         "left_field": "qfq_close",
         "left_value_sql": "r.qfq_close",
-        "left_quality_sql": "COALESCE(r.qfq_price_quality, 'UNKNOWN')",
-        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.qfq_price_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.qfq_price_reason, 'QFQ_PRICE_REASON_MISSING') ELSE r.qfq_price_reason END",
+        "left_quality_sql": "COALESCE(r.qfq_close_quality, 'UNKNOWN')",
+        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.qfq_close_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.qfq_close_reason, 'QFQ_CLOSE_REASON_MISSING') ELSE r.qfq_close_reason END",
         "right_field": "prior_high20",
         "right_value_sql": "p.prior_high20",
         "right_quality_sql": "p.prior_high20_quality",
@@ -236,7 +236,7 @@ _BIAS20_ATR_UNKNOWN_SQL = """(
     OR p.atr20 IS NULL
     OR p.atr20 <= 0
     OR r.source_symbol IS NULL
-    OR r.qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+    OR r.qfq_close_quality IS DISTINCT FROM 'OBSERVED'
     OR r.qfq_close IS NULL
 )"""
 _BIAS20_ATR_UNKNOWN_REASON_SQL = """CASE
@@ -257,8 +257,8 @@ _BIAS20_ATR_UNKNOWN_REASON_SQL = """CASE
       OR p.atr20 <= 0
       THEN COALESCE(p.atr20_reason, 'ATR20_NOT_POSITIVE_OR_UNAVAILABLE')
     WHEN r.source_symbol IS NULL THEN 'SOURCE_PRICE_ROW_MISSING'
-    WHEN r.qfq_price_quality IS DISTINCT FROM 'OBSERVED'
-      THEN COALESCE(r.qfq_price_reason, 'QFQ_PRICE_QUALITY_UNKNOWN')
+    WHEN r.qfq_close_quality IS DISTINCT FROM 'OBSERVED'
+      THEN COALESCE(r.qfq_close_reason, 'QFQ_CLOSE_QUALITY_UNKNOWN')
     WHEN r.qfq_close IS NULL THEN 'OBSERVED_QFQ_CLOSE_MISSING'
     ELSE NULL
 END"""
@@ -378,12 +378,12 @@ def _profile_pair_price_position_fields(position: str, *, side: str) -> dict[str
         if field == "qfq_close":
             return (
                 f"{side}_qfq_close",
-                f"COALESCE({side}_qfq_price_quality, 'UNKNOWN')",
+                f"COALESCE({side}_qfq_close_quality, 'UNKNOWN')",
                 f"""CASE
 WHEN NOT {side}_raw_record_present THEN 'SOURCE_RAW_ROW_MISSING'
-WHEN {side}_qfq_price_quality IS DISTINCT FROM 'OBSERVED'
-  THEN COALESCE({side}_qfq_price_reason, 'QFQ_PRICE_REASON_MISSING')
-ELSE {side}_qfq_price_reason END""",
+WHEN {side}_qfq_close_quality IS DISTINCT FROM 'OBSERVED'
+  THEN COALESCE({side}_qfq_close_reason, 'QFQ_CLOSE_REASON_MISSING')
+ELSE {side}_qfq_close_reason END""",
             )
         return (
             f"{side}_{field}",
@@ -1339,7 +1339,7 @@ def _bias20_atr_state_expression(side: str) -> str:
           OR {side}_atr20 IS NULL
           OR {side}_atr20 <= 0
           OR NOT {side}_raw_record_present
-          OR {side}_qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_qfq_close_quality IS DISTINCT FROM 'OBSERVED'
           OR {side}_qfq_close IS NULL
           THEN 'UNKNOWN'::text
         WHEN {side}_bias20_atr_exact_numerator::numeric
@@ -1382,10 +1382,10 @@ def _bias20_atr_state_reason_expression(side: str) -> str:
                         'ATR20_NOT_POSITIVE_OR_UNAVAILABLE')
         WHEN NOT {side}_raw_record_present
           THEN 'SOURCE_PRICE_ROW_MISSING'
-        WHEN {side}_qfq_price_quality IS DISTINCT FROM 'OBSERVED'
+        WHEN {side}_qfq_close_quality IS DISTINCT FROM 'OBSERVED'
           OR {side}_qfq_close IS NULL
-          THEN 'QFQ_PRICE_QUALITY_UNKNOWN:' ||
-               COALESCE({side}_qfq_price_reason,
+          THEN 'QFQ_CLOSE_QUALITY_UNKNOWN:' ||
+               COALESCE({side}_qfq_close_reason,
                         {side}_window_reason,
                         'NO_REASON')
         ELSE NULL::text
@@ -1550,6 +1550,8 @@ WITH old_rows AS (
            r.raw_high AS joined_raw_high,
            r.raw_low AS joined_raw_low,
            r.raw_close AS joined_raw_close,
+           r.raw_close_quality AS joined_raw_close_quality,
+           r.raw_close_reason AS joined_raw_close_reason,
            r.price_quality AS joined_raw_price_quality,
            r.price_reason AS joined_raw_price_reason,
            r.qfq_open AS joined_qfq_open,
@@ -1562,8 +1564,8 @@ WITH old_rows AS (
            CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_high ELSE r.qfq_high END AS joined_selected_high,
            CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_low ELSE r.qfq_low END AS joined_selected_low,
            CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_close ELSE r.qfq_close END AS joined_selected_close,
-           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_quality ELSE r.qfq_price_quality END AS joined_selected_price_quality,
-           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_reason ELSE r.qfq_price_reason END AS joined_selected_price_reason
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_quality ELSE r.qfq_close_quality END AS joined_selected_price_quality,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_reason ELSE r.qfq_close_reason END AS joined_selected_price_reason
     FROM source_symbol_price_profiles p
     LEFT JOIN source_raw_daily r
       ON r.source_symbol=p.source_symbol
@@ -1579,6 +1581,8 @@ WITH old_rows AS (
            r.raw_high AS joined_raw_high,
            r.raw_low AS joined_raw_low,
            r.raw_close AS joined_raw_close,
+           r.raw_close_quality AS joined_raw_close_quality,
+           r.raw_close_reason AS joined_raw_close_reason,
            r.price_quality AS joined_raw_price_quality,
            r.price_reason AS joined_raw_price_reason,
            r.qfq_open AS joined_qfq_open,
@@ -1591,8 +1595,8 @@ WITH old_rows AS (
            CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_high ELSE r.qfq_high END AS joined_selected_high,
            CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_low ELSE r.qfq_low END AS joined_selected_low,
            CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_close ELSE r.qfq_close END AS joined_selected_close,
-           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_quality ELSE r.qfq_price_quality END AS joined_selected_price_quality,
-           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_reason ELSE r.qfq_price_reason END AS joined_selected_price_reason
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_quality ELSE r.qfq_close_quality END AS joined_selected_price_quality,
+           CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.price_reason ELSE r.qfq_close_reason END AS joined_selected_price_reason
     FROM source_symbol_price_profiles p
     LEFT JOIN source_raw_daily r
       ON r.source_symbol=p.source_symbol
@@ -1639,6 +1643,10 @@ WITH old_rows AS (
            n.price_window_reason AS after_window_reason,
            o.joined_raw_close AS before_raw_close,
            n.joined_raw_close AS after_raw_close,
+           o.joined_raw_close_quality AS before_raw_close_quality,
+           n.joined_raw_close_quality AS after_raw_close_quality,
+           o.joined_raw_close_reason AS before_raw_close_reason,
+           n.joined_raw_close_reason AS after_raw_close_reason,
            o.joined_qfq_close AS before_qfq_close,
            n.joined_qfq_close AS after_qfq_close,
            o.joined_selected_open AS before_selected_open,
@@ -1751,6 +1759,7 @@ WITH old_rows AS (
            n.volume_unit_status AS after_volume_unit_status,
            COALESCE(
                o.source_symbol IS NOT NULL AND n.source_symbol IS NOT NULL
+               AND o.source_capture_id=n.source_capture_id
                AND o.producer_contract=n.producer_contract
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
@@ -1772,6 +1781,7 @@ WITH old_rows AS (
            ) AS core_compatible,
            COALESCE(
                o.source_symbol IS NOT NULL AND n.source_symbol IS NOT NULL
+               AND o.source_capture_id=n.source_capture_id
                AND o.producer_contract=n.producer_contract
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
@@ -2679,7 +2689,10 @@ FROM classified""",
        before_pit_status, after_pit_status,
        before_bar_status, after_bar_status,
        before_window_status, after_window_status, before_window_reason, after_window_reason,
-       before_raw_close, after_raw_close,before_qfq_close,after_qfq_close,
+       before_raw_close, after_raw_close,
+       before_raw_close_quality, after_raw_close_quality,
+       before_raw_close_reason, after_raw_close_reason,
+       before_qfq_close,after_qfq_close,
        before_selected_close,after_selected_close,
        before_selected_price_quality,after_selected_price_quality,
        before_selected_price_reason,after_selected_price_reason,
@@ -2815,7 +2828,10 @@ LIMIT %s""",
        before_pit_status, after_pit_status,
        before_bar_status, after_bar_status,
        before_window_status, after_window_status, before_window_reason, after_window_reason,
-       before_raw_close, after_raw_close,before_qfq_close,after_qfq_close,
+       before_raw_close, after_raw_close,
+       before_raw_close_quality, after_raw_close_quality,
+       before_raw_close_reason, after_raw_close_reason,
+       before_qfq_close,after_qfq_close,
        before_selected_close,after_selected_close,
        before_selected_price_quality,after_selected_price_quality,
        before_selected_price_reason,after_selected_price_reason,
@@ -4065,6 +4081,8 @@ def read_profile_breadth_members(
            before_raw_high, after_raw_high,
            before_raw_low, after_raw_low,
            before_raw_close, after_raw_close,
+           before_raw_close_quality, after_raw_close_quality,
+           before_raw_close_reason, after_raw_close_reason,
            before_qfq_close, after_qfq_close,
            before_selected_close, after_selected_close,
            before_selected_price_quality, after_selected_price_quality,
@@ -4101,6 +4119,8 @@ SELECT totals.total,
        page.before_raw_high, page.after_raw_high,
        page.before_raw_low, page.after_raw_low,
        page.before_raw_close, page.after_raw_close,
+       page.before_raw_close_quality, page.after_raw_close_quality,
+       page.before_raw_close_reason, page.after_raw_close_reason,
        page.before_qfq_close, page.after_qfq_close,
        page.before_selected_close, page.after_selected_close,
        page.before_selected_price_quality, page.after_selected_price_quality,
@@ -4423,8 +4443,8 @@ LEFT JOIN ranked_candidates candidate ON candidate.source_symbol=%s""",
         else _field_pair_status(
             before_value=row["before_raw_close"],
             after_value=row["after_raw_close"],
-            before_quality=row["before_raw_price_quality"],
-            after_quality=row["after_raw_price_quality"],
+            before_quality=row["before_raw_close_quality"],
+            after_quality=row["after_raw_close_quality"],
             compatible=price_compatible,
         )
     )
@@ -4434,8 +4454,8 @@ LEFT JOIN ranked_candidates candidate ON candidate.source_symbol=%s""",
         else "NOT_COMPARABLE"
         if not row["core_compatible"]
         else "UNKNOWN"
-        if row["before_raw_price_quality"] != "OBSERVED"
-        or row["after_raw_price_quality"] != "OBSERVED"
+        if row["before_selected_price_quality"] != "OBSERVED"
+        or row["after_selected_price_quality"] != "OBSERVED"
         or row["before_ma20_quality"] != "OBSERVED"
         or row["after_ma20_quality"] != "OBSERVED"
         else "COMPARABLE"
@@ -5032,16 +5052,18 @@ WHERE {where_sql}""",
        r.price_reason AS target_raw_price_reason,
        r.qfq_open AS target_qfq_open,r.qfq_high AS target_qfq_high,
        r.qfq_low AS target_qfq_low,r.qfq_close AS target_qfq_close,
+       r.qfq_close_quality AS target_qfq_close_quality,
+       r.qfq_close_reason AS target_qfq_close_reason,
        r.qfq_price_quality AS target_qfq_price_quality,
        r.qfq_price_reason AS target_qfq_price_reason,
        r.qfq_open AS selected_open,r.qfq_high AS selected_high,
        r.qfq_low AS selected_low,r.qfq_close AS selected_close,
-       r.qfq_price_quality AS selected_price_quality,
-       r.qfq_price_reason AS selected_price_reason,
+       r.qfq_close_quality AS selected_price_quality,
+       r.qfq_close_reason AS selected_price_reason,
        CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING'
-            WHEN r.qfq_price_quality IS DISTINCT FROM 'OBSERVED'
-              THEN COALESCE(r.qfq_price_reason, 'QFQ_PRICE_REASON_MISSING')
-            ELSE r.qfq_price_reason END AS selected_price_reason_detail,
+            WHEN r.qfq_close_quality IS DISTINCT FROM 'OBSERVED'
+              THEN COALESCE(r.qfq_close_reason, 'QFQ_CLOSE_REASON_MISSING')
+            ELSE r.qfq_close_reason END AS selected_price_reason_detail,
        {_BIAS20_ATR_UNKNOWN_REASON_SQL} AS bias20_atr_unknown_reason,
        {position_projection},
        {selected_profile_projection}
@@ -5116,12 +5138,12 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                     "target_qfq_close" if left_field == "qfq_close" else left_field
                 )
                 left_quality_key = (
-                    "target_qfq_price_quality"
+                    "target_qfq_close_quality"
                     if left_field == "qfq_close"
                     else f"{left_field}_quality"
                 )
                 left_reason_key = (
-                    "target_qfq_price_reason"
+                    "target_qfq_close_reason"
                     if left_field == "qfq_close"
                     else f"{left_field}_reason"
                 )

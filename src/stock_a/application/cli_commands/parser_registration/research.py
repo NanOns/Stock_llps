@@ -21,7 +21,7 @@ def register_commands(commands):
         "--local-tdx-max-sessions",
         type=int,
         default=60,
-        help="本地TDX诊断最多解析的单日记录数，1至75，默认60；超限时拒绝继续扫描",
+        help="本地TDX诊断最多使用的近期官方会话数，1至75，默认60；完整文件扫描仍受字节/记录预算限制",
     )
     stock.add_argument(
         "--format",
@@ -33,7 +33,7 @@ def register_commands(commands):
     stock.add_argument(
         "--include-profile-preview",
         action="store_true",
-        help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT研究结果",
+        help="请求11项正式画像预览；本地TDX仅有RAW坐标，故该选项明确返回不可用",
     )
     compare = commands.add_parser(
         "research-compare", help="显式本地TDX离线只读比较多个来源代码"

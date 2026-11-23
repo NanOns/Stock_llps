@@ -6,19 +6,19 @@ import argparse
 from decimal import Decimal, InvalidOperation
 import sys
 
-from stock_a.contracts import PriceProfileContractError, load_price_profile_contract
 from stock_a.domain import ContractError
 from stock_a.sources.tdx.day import UnitContract
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 from stock_a.research.entry import (
     CompareBudget,
     ResearchEntryError,
-    research_compare,
-    research_stock,
+)
+from stock_a.research.entry_core.local_tdx_diagnostic import (
+    research_local_tdx_compare_diagnostic,
+    research_local_tdx_stock_diagnostic,
 )
 from stock_a.application.runtime_config import (
     DiagnosticError,
-    _CONFIG_ROOT,
     _EXIT_ARGUMENT,
     _EXIT_ENGINEERING,
     _EXIT_OK,
@@ -61,7 +61,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         )
         limits = ReadLimits(
             args.max_bytes,
-            min(args.max_records, local_limit) if not compare else args.max_records,
+            args.max_records,
             args.chunk_records,
             Decimal(args.max_seconds),
         )
@@ -70,25 +70,16 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             "ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT
         ) from error
 
-    profile_contract = None
     if not compare and getattr(args, "include_profile_preview", False):
-        try:
-            profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
-        except PriceProfileContractError as error:
-            _emit(
-                {
-                    "ok": False,
-                    "code": error.code,
-                    "message": str(error),
-                    "database_io_attempted": False,
-                },
-                error=True,
-            )
-            return _EXIT_UNAVAILABLE
+        raise DiagnosticError(
+            "LOCAL_TDX_PROFILE_PREVIEW_UNAVAILABLE",
+            "正式画像要求BaoStock QFQ；本地TDX RAW仅供离线诊断，不能计算或代替画像。",
+            _EXIT_UNAVAILABLE,
+        )
 
     try:
         if compare:
-            result = research_compare(
+            result = research_local_tdx_compare_diagnostic(
                 symbols=args.symbols,
                 target_session=args.target_session,
                 source_roots=roots,
@@ -101,13 +92,13 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 ),
             )
         else:
-            result = research_stock(
+            result = research_local_tdx_stock_diagnostic(
                 symbol=args.symbol,
                 target_session=args.target_session,
                 source_roots=roots,
                 units=units,
                 limits=limits,
-                profile_contract=profile_contract,
+                max_history_sessions=local_limit,
             )
     except ResearchEntryError as error:
         code = (

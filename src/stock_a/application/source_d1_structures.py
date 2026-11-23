@@ -105,7 +105,6 @@ def _history_observations(
     tuple[CoreObservation, ...],
     tuple[Bar, ...],
     dict[date, Mapping[str, Any]],
-    dict[date, Any],
 ]:
     normalized = symbol.strip().upper()
     if _SYMBOL.fullmatch(normalized) is None:
@@ -142,7 +141,6 @@ def _history_observations(
     )
     observations: list[CoreObservation] = []
     bars: list[Bar] = []
-    decoded_by_session = {}
     for ordinal, day in enumerate(days):
         row = row_map.get(day)
         observation = _core_observation_from_pg_price_row(
@@ -152,8 +150,6 @@ def _history_observations(
             price_coordinate="FORWARD_ADJUSTED",
             coordinate_id=coordinate_id,
         )
-        if row is not None:
-            decoded_by_session[day] = row
         values = (
             _valid_ohlc(
                 tuple(
@@ -179,7 +175,7 @@ def _history_observations(
         )
         observations.append(observation)
         bars.append(Bar(ordinal, unknown(reason)))
-    return tuple(observations), tuple(bars), row_map, decoded_by_session
+    return tuple(observations), tuple(bars), row_map
 
 
 def _core_at(
@@ -680,7 +676,7 @@ def _pool_candidate_result(
             history_rows=candidate["history_rows"],
             source_capture_id=source_capture_id,
         )
-    observations, bars, row_map, _decoded_by_session = history_inputs
+    observations, bars, row_map = history_inputs
     core_cache: dict[int, dict[str, FieldValue]] = {}
     if core_previews_by_session is not None:
         if set(core_previews_by_session) != set(sessions):
@@ -911,7 +907,6 @@ def _structure_history_core_previews(
     history_rows: Sequence[Mapping[str, Any]],
     source_capture_id: int,
     preview_context,
-    decoded_by_session: Mapping[date, Any] | None = None,
 ) -> dict[date, dict[str, Any]]:
     previews = research_stock_pg_d1_history_previews(
         symbol=symbol,
@@ -922,7 +917,6 @@ def _structure_history_core_previews(
         price_coordinate="FORWARD_ADJUSTED",
         history_rows=history_rows,
         context=preview_context,
-        _decoded_by_session=decoded_by_session,
     )
     return {
         day: {"core": {"fields": preview["structure_core_fields"]}}
@@ -1490,6 +1484,7 @@ def discover_source_d1_structures(
     source_page_count = 0
     source_context_read_count = 0
     history_rows_decoded = 0
+    history_decode_passes = 0
     core_calculations = 0
     generation_calls = 0
     historical_change_page: list[dict[str, Any]] = []
@@ -1560,7 +1555,6 @@ def discover_source_d1_structures(
                 )
             seen_symbols.add(symbol)
             last_symbol = symbol
-            target_rows.extend(target_matches)
 
         if source_context is None:
             source_context = read_source_version_context(
@@ -1603,6 +1597,7 @@ def discover_source_d1_structures(
             history_inputs = None
             core_previews = None
             if structure_changes:
+                history_decode_passes += 2
                 history_inputs = _history_observations(
                     symbol=candidate["source_symbol"],
                     sessions=days,
@@ -1616,9 +1611,14 @@ def discover_source_d1_structures(
                     history_rows=candidate["history_rows"],
                     source_capture_id=source_capture_id,
                     preview_context=structure_preview_context,
-                    decoded_by_session=history_inputs[3],
                 )
+                # The preview adapter decodes the same persisted rows independently;
+                # count both actual passes instead of implying the ignored legacy
+                # `_decoded_by_session` keyword reused the observations above.
+                history_rows_decoded += len(history_inputs[2])
                 structure_core_preview_count += len(core_previews)
+            else:
+                history_decode_passes += 1
             result, decoded_count, core_count, range_check_count = (
                 _pool_candidate_result(
                     candidate=candidate,
@@ -2156,7 +2156,7 @@ def discover_source_d1_structures(
             "full_pool_scan_passes": 1,
             "evaluated_source_rows": len(seen_symbols),
             "raw_history_rows_decoded": history_rows_decoded,
-            "raw_history_decode_passes": 1,
+            "raw_history_decode_passes": history_decode_passes,
             "target_generation_raw_rows_decoded": history_rows_decoded,
             "structure_history_core_preview_sessions": structure_core_preview_count,
             "structure_timeline_candidates": structure_timeline_candidate_count,
@@ -2186,7 +2186,7 @@ def evaluate_source_d1_structure_timeline(
             history_rows=history_rows,
             source_capture_id=source_capture_id,
         )
-    observations, bars, row_map, _decoded_by_session = history_inputs
+    observations, bars, row_map = history_inputs
     if set(core_previews_by_session) != set(sessions):
         raise PgResearchBindingError(
             "D1_STRUCTURE_HISTORY_PREVIEW_INCOMPLETE",
@@ -2488,7 +2488,6 @@ def discover_source_d1_prior_support_reference(
         history_rows=history_rows,
         source_capture_id=source_capture_id,
         preview_context=prepare_source_d1_preview_context(days),
-        decoded_by_session=history_inputs[3],
     )
     timeline = evaluate_source_d1_structure_timeline(
         symbol=normalized,

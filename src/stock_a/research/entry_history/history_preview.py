@@ -777,10 +777,10 @@ def research_stock_pg_history_preview(
         )
 
     raw_field_specs = {
-        "open": ("raw_open", "price_quality", "price_reason"),
-        "high": ("raw_high", "price_quality", "price_reason"),
-        "low": ("raw_low", "price_quality", "price_reason"),
-        "close": ("raw_close", "price_quality", "price_reason"),
+        "open": ("raw_open", "raw_open_quality", "raw_open_reason"),
+        "high": ("raw_high", "raw_high_quality", "raw_high_reason"),
+        "low": ("raw_low", "raw_low_quality", "raw_low_reason"),
+        "close": ("raw_close", "raw_close_quality", "raw_close_reason"),
         "preclose": ("raw_preclose", "raw_preclose_quality", "raw_preclose_reason"),
         "amount": ("raw_amount", "amount_quality", "amount_reason"),
         "volume": ("raw_volume", "volume_quality", "volume_reason"),
@@ -803,7 +803,10 @@ def research_stock_pg_history_preview(
     qfq_fields = {
         name: _render_field(
             _field_from_pg_raw(
-                target_row, column, "qfq_price_quality", "qfq_price_reason"
+                target_row,
+                column,
+                f"qfq_{name}_quality",
+                f"qfq_{name}_reason",
             )
             if target_row is not None
             else unknown("TARGET_BAR_MISSING")
@@ -830,23 +833,14 @@ def research_stock_pg_history_preview(
             quality = str(row.get(key) or "UNKNOWN")
             counts[quality] = counts.get(quality, 0) + 1
 
-    ma20_sessions = expected_sessions[-20:]
-    atr20_sessions = expected_sessions[-21:]
-    ma20_actual = sum(
-        rows_by_session.get(session, {}).get("qfq_price_quality") == "OBSERVED"
-        and all(
-            rows_by_session[session].get(column) is not None
-            for column in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
-        )
-        for session in ma20_sessions
-    )
+    ma20_rows, _ma20_window_reason = _actual_window(history, 20)
+    ma20_actual = sum(row.close.quality == "OBSERVED" for row in ma20_rows)
+    atr_rows, _atr_window_reason = _actual_window(history, 21)
     atr20_actual = sum(
-        rows_by_session.get(session, {}).get("qfq_price_quality") == "OBSERVED"
-        and all(
-            rows_by_session[session].get(column) is not None
-            for column in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
-        )
-        for session in atr20_sessions
+        previous.close.quality == "OBSERVED"
+        and current.high.quality == "OBSERVED"
+        and current.low.quality == "OBSERVED"
+        for previous, current in zip(atr_rows, atr_rows[1:])
     )
     core_ma20 = core.get("core.ma20")
     core_atr20 = core.get("core.atr20")

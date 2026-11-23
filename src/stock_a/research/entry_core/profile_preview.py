@@ -82,8 +82,12 @@ def _qfq_target_close_field(target_bar: Any) -> FieldValue:
         return qfq_close
     if not isinstance(target_bar, Mapping):
         return unknown("QFQ_TARGET_BAR_MISSING")
-    qfq_quality = target_bar.get("qfq_price_quality", "UNKNOWN")
-    qfq_reason = target_bar.get("qfq_price_reason")
+    if "qfq_close_quality" in target_bar:
+        qfq_quality = target_bar.get("qfq_close_quality")
+        qfq_reason = target_bar.get("qfq_close_reason")
+    else:
+        qfq_quality = target_bar.get("qfq_price_quality", "UNKNOWN")
+        qfq_reason = target_bar.get("qfq_price_reason")
     if qfq_quality == "OBSERVED":
         if qfq_close is None:
             raise ResearchEntryError(

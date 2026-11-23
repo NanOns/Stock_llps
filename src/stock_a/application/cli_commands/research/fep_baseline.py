@@ -8,6 +8,7 @@ from stock_a.application.runtime_config import (
     _EXIT_ARGUMENT,
     _EXIT_ENGINEERING,
     _EXIT_OK,
+    _EXIT_UNAVAILABLE,
     DiagnosticError,
     load_runtime_config,
 )
@@ -70,12 +71,34 @@ def _run_source_fep_baseline(args) -> int:
         return _EXIT_ENGINEERING
     result.update(
         {
-            "ok": True,
             "configuration_path": str(config_path),
             "producer": "stock_a.application.fep_baseline.produce_fep_baseline",
             "source_reads": "EXISTING_PG_TYPED_FACTS_ONLY",
             "future_market_quotes_read": False,
         }
     )
+    if result.get("status") == "NOT_COMPUTED":
+        result.update(
+            {
+                "ok": False,
+                "code": "FEP_BASELINE_NOT_COMPUTED",
+                "message": "没有匹配的已存Forward目标事实；没有持久化FEP统计行。",
+                "database_write_attempted": False,
+            }
+        )
+        _emit(result, error=True)
+        return _EXIT_UNAVAILABLE
+    if result.get("status") != "PERSISTED":
+        _emit(
+            {
+                "ok": False,
+                "code": "FEP_BASELINE_STATUS_INVALID",
+                "message": "FEP生产没有返回已提交的持久化结果。",
+                "database_write_attempted": result.get("database_write_attempted"),
+            },
+            error=True,
+        )
+        return _EXIT_ENGINEERING
+    result["ok"] = True
     _emit(result)
     return _EXIT_OK

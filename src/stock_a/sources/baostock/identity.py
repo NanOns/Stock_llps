@@ -104,12 +104,19 @@ def _valid_response(
     )
 
 
-def _parse_optional_date(value: object) -> date | None:
+def parse_baostock_optional_date(value: object) -> date | None:
+    """只接受供应方基本资料合同中的YYYY-MM-DD或空退市日期。"""
     if value is None or value == "":
         return None
-    if not isinstance(value, str):
-        raise ValueError("日期字段必须是文本或空值")
-    return date.fromisoformat(value)
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is None
+    ):
+        raise ValueError("BaoStock基本资料日期字段必须使用规范YYYY-MM-DD文本")
+    parsed = date.fromisoformat(value)
+    if parsed.isoformat() != value:
+        raise ValueError("BaoStock基本资料日期字段不是规范YYYY-MM-DD文本")
+    return parsed
 
 
 def _parse_enum(value: object, allowed: set[int]) -> int | None:
@@ -273,8 +280,10 @@ def project_identity_lifecycle(
         )
     date_error = False
     try:
-        ipo_date = _parse_optional_date(basic.get("ipoDate"))
-        out_date = _parse_optional_date(basic.get("outDate"))
+        ipo_date = parse_baostock_optional_date(basic.get("ipoDate"))
+        out_date = parse_baostock_optional_date(basic.get("outDate"))
+        if ipo_date is None:
+            raise ValueError("上市日期不得为空")
     except ValueError:
         ipo_date = out_date = None
         date_error = True

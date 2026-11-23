@@ -365,6 +365,11 @@ def read_source_t0_pulse_transition_facts(
     target_profile_revision: str,
 ) -> dict[int, dict[str, Any]]:
     """读取绑定两端独立来源捕获和Profile修订的既存PULSE转移。"""
+    from stock_a.research.entry_context.sessions import _load_calendar
+    from stock_a.research.source_forward_path import (
+        forward_calendar_revision_compatible,
+    )
+
     pulse_ids = tuple(sorted(set(target_pulse_ids)))
     if (
         type(previous_session) is not date
@@ -398,6 +403,24 @@ def read_source_t0_pulse_transition_facts(
             "T0_EARLY_PROFILE_REVISION_INVALID", "相邻两端Profile修订必须分别显式绑定"
         )
 
+    calendar, _, official_revision_chain, official_sessions = _load_calendar(
+        target_session
+    )
+    if (
+        not isinstance(calendar.get("calendar_id"), str)
+        or not calendar["calendar_id"]
+        or target_session not in official_sessions
+        or previous_session not in official_sessions
+        or official_sessions.index(target_session) == 0
+        or official_sessions[official_sessions.index(target_session) - 1]
+        != previous_session
+    ):
+        raise T0EarlyObservationPgError(
+            "T0_EARLY_TRANSITION_CALENDAR_INVALID",
+            "相邻PULSE转移必须绑定当前官方日历中的严格相邻会话",
+        )
+    official_calendar_id = calendar["calendar_id"]
+
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
@@ -408,12 +431,22 @@ def read_source_t0_pulse_transition_facts(
                       t.previous_pulse_state,t.target_pulse_state,
                       t.previous_reason_codes,t.target_reason_codes,
                       t.calculation_status,t.transition_contract,
-                      t.previous_pulse_id
+                      t.previous_pulse_id,t.calendar_id,t.calendar_revision,
+                      t.board_kind,t.board_native_id
                FROM source_sector_pulse_adjacent_transitions t
                JOIN source_sector_cross_period_pulse_facts target
                  ON target.id=t.target_pulse_id
                JOIN source_sector_cross_period_pulse_facts previous
                  ON previous.id=t.previous_pulse_id
+               JOIN tdx_sector_catalog target_catalog
+                 ON target_catalog.id=target.catalog_id
+                AND target_catalog.board_kind=t.board_kind
+                AND target_catalog.board_native_id=t.board_native_id
+               JOIN tdx_sector_catalog previous_catalog
+                 ON previous_catalog.id=previous.catalog_id
+                AND previous_catalog.board_kind=t.board_kind
+                AND previous_catalog.board_native_id=t.board_native_id
+                AND previous_catalog.snapshot_id=target_catalog.snapshot_id
                WHERE t.target_pulse_id=ANY(%s)
                  AND previous.target_session=%s
                  AND previous.source_capture_id=%s
@@ -442,10 +475,26 @@ def read_source_t0_pulse_transition_facts(
         grouped.setdefault(int(row[0]), []).append(row)
     output = {}
     for pulse_id, candidates in grouped.items():
-        if len(candidates) != 1:
+        compatible = [
+            row
+            for row in candidates
+            if row[10] == official_calendar_id
+            and forward_calendar_revision_compatible(
+                previous_session,
+                target_session,
+                rule_revision=official_revision_chain,
+                path_revision=row[11],
+                official_revision_chain=official_revision_chain,
+            )
+        ]
+        if len(compatible) != 1:
             output[pulse_id] = {
                 "status": "UNKNOWN",
-                "reason_codes": ["PULSE_TRANSITION_FACT_AMBIGUOUS"],
+                "reason_codes": [
+                    "PULSE_TRANSITION_FACT_AMBIGUOUS"
+                    if len(compatible) > 1
+                    else "PULSE_TRANSITION_CALENDAR_MISMATCH"
+                ],
             }
             continue
         (
@@ -459,7 +508,7 @@ def read_source_t0_pulse_transition_facts(
             calculation_status,
             contract,
             previous_pulse_id,
-        ) = candidates[0]
+        ) = compatible[0][:10]
         if calculation_status != "COMPLETE":
             output[pulse_id] = {
                 "status": "INCOMPLETE",
@@ -820,8 +869,9 @@ def read_source_t0_early_triage_summaries_for_symbols(
     target_session: date,
     source_capture_id: int,
     source_symbols: Sequence[str],
+    selected_snapshot_ids: Mapping[str, int] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """有界汇总T0旧分型与独立板块驱动/早期性解释视角。"""
+    """按显式成员快照有界汇总T0板块驱动与早期性解释视角。"""
     symbols = tuple(sorted(set(source_symbols)))
     if (
         type(target_session) is not date
@@ -842,14 +892,49 @@ def read_source_t0_early_triage_summaries_for_symbols(
     if not symbols:
         return {}
 
+    if selected_snapshot_ids is None or selected_snapshot_ids == {}:
+        return {
+            symbol: {
+                "status": "SNAPSHOT_SCOPE_REQUIRED",
+                "triage_state": "UNKNOWN",
+                "reason_codes": ["T0_SUMMARY_SELECTED_SNAPSHOT_SCOPE_REQUIRED"],
+                "registration_count": 0,
+                "relation_count": 0,
+                "source_capture_id": source_capture_id,
+            }
+            for symbol in symbols
+        }
+    if (
+        not isinstance(selected_snapshot_ids, Mapping)
+        or any(
+            kind not in _SNAPSHOT_ROLES
+            or type(snapshot_id) is not int
+            or snapshot_id <= 0
+            for kind, snapshot_id in selected_snapshot_ids.items()
+        )
+        or len(set(selected_snapshot_ids.values())) != len(selected_snapshot_ids)
+    ):
+        raise T0EarlyObservationPgError(
+            "T0_EARLY_SUMMARY_SNAPSHOT_SCOPE_INVALID",
+            "T0摘要必须按明确行业或GN快照读取",
+        )
+    selected_snapshots = tuple(sorted(selected_snapshot_ids.items()))
+    selected_snapshot_ids_output = dict(selected_snapshots)
+    selected_values = ",".join("(%s::text,%s::bigint)" for _ in selected_snapshots)
+    selected_params = [value for pair in selected_snapshots for value in pair]
+
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
         _,
     ):
         cursor.execute(
-            """WITH latest AS MATERIALIZED (
-    SELECT DISTINCT ON (o.enrollment_id,o.board_context_key)
+            """WITH selected_snapshots(board_kind,snapshot_id) AS (
+    VALUES __SELECTED_SNAPSHOT_VALUES__
+), latest AS MATERIALIZED (
+    SELECT DISTINCT ON (
+        o.enrollment_id,o.board_context_key,o.membership_snapshot_id
+    )
            o.enrollment_id,o.source_symbol,o.seed_fact_id,
            o.membership_snapshot_id,
            o.board_kind,o.board_native_id,o.board_context_key,
@@ -866,7 +951,13 @@ def read_source_t0_early_triage_summaries_for_symbols(
     FROM source_t0_early_observation_facts o
     WHERE o.target_session=%s AND o.source_capture_id=%s
       AND o.source_symbol=ANY(%s)
-    ORDER BY o.enrollment_id,o.board_context_key,o.recorded_at DESC,o.id DESC
+      AND EXISTS (
+          SELECT 1 FROM selected_snapshots selected
+          WHERE selected.board_kind=o.board_kind
+            AND selected.snapshot_id=o.membership_snapshot_id
+      )
+    ORDER BY o.enrollment_id,o.board_context_key,
+             o.membership_snapshot_id,o.recorded_at DESC,o.id DESC
 ), evidence AS MATERIALIZED (
     SELECT o.*,COALESCE(c.board_name,o.board_native_id) AS board_name,
            o.research_case IN ('D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT')
@@ -969,7 +1060,7 @@ def read_source_t0_early_triage_summaries_for_symbols(
     FROM evidence e
     GROUP BY source_symbol
 ), symbol_boards AS (
-    SELECT source_symbol,board_context_key,
+    SELECT source_symbol,membership_snapshot_id,board_context_key,
            max(board_kind) AS board_kind,
            max(board_native_id) AS board_native_id,
            max(board_name) AS board_name,
@@ -1050,7 +1141,7 @@ def read_source_t0_early_triage_summaries_for_symbols(
     FROM evidence e
     LEFT JOIN LATERAL unnest(e.driver_conflict_codes) AS conflict(code) ON TRUE
     WHERE e.board_kind IS NOT NULL AND e.board_native_id IS NOT NULL
-    GROUP BY e.source_symbol,e.board_context_key
+    GROUP BY e.source_symbol,e.membership_snapshot_id,e.board_context_key
 ), board_summary AS (
     SELECT source_symbol,
            count(*) FILTER(WHERE has_support)::integer AS support_board_count,
@@ -1083,7 +1174,7 @@ def read_source_t0_early_triage_summaries_for_symbols(
     WHERE include_row
 ), ranked_board_examples AS (
     SELECT b.*,row_number() OVER (
-        PARTITION BY source_symbol,category
+        PARTITION BY source_symbol,category,membership_snapshot_id
         ORDER BY board_name COLLATE "C",board_kind COLLATE "C",
                  board_native_id COLLATE "C",board_context_key COLLATE "C"
     ) AS example_rank
@@ -1091,7 +1182,8 @@ def read_source_t0_early_triage_summaries_for_symbols(
 ), board_examples AS (
     SELECT source_symbol,
            jsonb_agg(jsonb_build_object(
-               'board_name',board_name,'pulse_states',pulse_states,
+               'board_name',board_name,'snapshot_id',membership_snapshot_id,
+               'pulse_states',pulse_states,
                'candidate_basis',CASE WHEN has_support
                    THEN 'D0_PULSE_SAME_DIRECTION'
                    ELSE 'PULSE_TRUE_RPS5_RPS20_FRONT' END,
@@ -1105,20 +1197,23 @@ def read_source_t0_early_triage_summaries_for_symbols(
                FILTER(WHERE category='SAME_DIRECTION_CANDIDATE')
                AS same_direction_examples,
            jsonb_agg(jsonb_build_object(
-               'board_name',board_name,'pulse_states',pulse_states,
+               'board_name',board_name,'snapshot_id',membership_snapshot_id,
+               'pulse_states',pulse_states,
                'board_kind',board_kind,'board_native_id',board_native_id
            ) ORDER BY board_name COLLATE "C")
                FILTER(WHERE category='OTHER_BOARD_BACKGROUND')
                AS background_examples,
            jsonb_agg(jsonb_build_object(
-               'board_name',board_name,'board_kind',board_kind,
+               'board_name',board_name,'snapshot_id',membership_snapshot_id,
+               'board_kind',board_kind,
                'pulse_states',pulse_states,
                'direct_conflict_codes',direct_conflict_codes
            ) ORDER BY board_name COLLATE "C")
                FILTER(WHERE category='NAMED_CONDITION_CONFLICT')
                AS conflict_examples,
            jsonb_agg(jsonb_build_object(
-               'board_name',board_name,'pulse_states',pulse_states
+               'board_name',board_name,'snapshot_id',membership_snapshot_id,
+               'pulse_states',pulse_states
            ) ORDER BY board_name COLLATE "C")
                FILTER(WHERE category='CURRENT_EVIDENCE_UNKNOWN')
                AS unknown_examples
@@ -1298,8 +1393,8 @@ LEFT JOIN driver_reason_summary dr USING (source_symbol)
 LEFT JOIN board_examples be USING (source_symbol)
 LEFT JOIN seed_summary sm USING (source_symbol)
 ORDER BY s.source_symbol COLLATE "C"
-            """,
-            (target_session, source_capture_id, list(symbols)),
+            """.replace("__SELECTED_SNAPSHOT_VALUES__", selected_values),
+            tuple(selected_params + [target_session, source_capture_id, list(symbols)]),
         )
         rows = cursor.fetchall()
 
@@ -1325,6 +1420,7 @@ ORDER BY s.source_symbol COLLATE "C"
             "scope": research_mode,
             "price_coordinate": price_coordinate,
             "source_capture_id": source_capture_id,
+            "selected_snapshot_ids": selected_snapshot_ids_output,
             "t0_driver_and_earliness": {
                 "version": "T0_DRIVER_AND_EARLINESS_R1",
                 "registration_count": int(registration_count),
@@ -1411,6 +1507,7 @@ ORDER BY s.source_symbol COLLATE "C"
                 "registration_count": 0,
                 "relation_count": 0,
                 "source_capture_id": source_capture_id,
+                "selected_snapshot_ids": selected_snapshot_ids_output,
             },
         )
     return summaries

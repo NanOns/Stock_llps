@@ -200,9 +200,27 @@ def _fraction(value: Any) -> Fraction | None:
 
 
 def _seed_qfq_target_close(native_price: Mapping[str, Any]) -> Fraction | None:
-    if native_price.get("qfq_price_quality") != "OBSERVED":
-        return None
-    return _fraction(native_price.get("qfq_close"))
+    quality = native_price.get("qfq_close_quality")
+    if quality is None and "qfq_close_quality" not in native_price:
+        quality = native_price.get("qfq_price_quality")
+    value = _fraction(native_price.get("qfq_close"))
+    if quality == "OBSERVED":
+        if value is None or value <= 0:
+            raise StaticResearchPgError(
+                "SEED_TARGET_CLOSE_QUALITY_VALUE_MISMATCH",
+                "QFQ目标收盘质量为OBSERVED但数值缺失或非正",
+            )
+        return value
+    if quality not in {"UNKNOWN", "UNKNOWN_DATA", "NOT_APPLICABLE"}:
+        raise StaticResearchPgError(
+            "SEED_TARGET_CLOSE_QUALITY_INVALID", "QFQ目标收盘质量枚举无效"
+        )
+    if value is not None:
+        raise StaticResearchPgError(
+            "SEED_TARGET_CLOSE_QUALITY_VALUE_MISMATCH",
+            "非OBSERVED的QFQ目标收盘质量不能携带数值",
+        )
+    return None
 
 
 def _fraction_parts(value: Any) -> tuple[int | None, int | None]:
@@ -517,7 +535,7 @@ def _seed_rows(
                 "target_close_quality": "OBSERVED" if close is not None else "UNKNOWN",
                 "target_close_reason": None
                 if close is not None
-                else "TARGET_CLOSE_UNKNOWN",
+                else str(native.get("qfq_close_reason") or "TARGET_CLOSE_UNKNOWN"),
             }
         )
         for name, field_id in (

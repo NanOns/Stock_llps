@@ -41,6 +41,14 @@ class SourceFormalAdmissionProductionError(ValueError):
         super().__init__(message)
 
 
+_QFQ_COORDINATE = "FORWARD_ADJUSTED"
+_RAW_COORDINATE = "RAW_UNADJUSTED"
+_RAW_AMOUNT_UNIT_CONTRACT_VERSION = (
+    "BAOSTOCK_API_DOCUMENTED_UNITS_NOT_INDEPENDENTLY_BOUND_R1"
+)
+_D0_LIQ20_THRESHOLD_CNY = Fraction(20_000_000)
+
+
 def _fraction(value: object) -> Fraction | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -51,6 +59,188 @@ def _fraction(value: object) -> Fraction | None:
     if isinstance(value, int):
         return Fraction(value)
     return None
+
+
+def _same_session(value: object, expected: date) -> bool:
+    return value == expected or value == expected.isoformat()
+
+
+def _same_source_code(value: object, expected: str) -> bool:
+    """BaoStock响应代码大小写不敏感；证券交易所与代码仍须完全匹配。"""
+    return isinstance(value, str) and value.upper() == expected
+
+
+def _qfq_window_row_state(
+    row: Mapping[str, Any] | None,
+    *,
+    symbol: str,
+    session: date,
+    source_capture_id: int,
+) -> tuple[str, str | None]:
+    """核对单日QFQ坐标和响应身份；不将后验调整冒充PIT。"""
+    if row is None:
+        return "UNKNOWN", "QFQ_HISTORY_ROW_NOT_STORED"
+    if (
+        row.get("source_symbol") != symbol
+        or not _same_session(row.get("session_date"), session)
+        or row.get("source_capture_id") != source_capture_id
+    ):
+        return "FALSE", "QFQ_HISTORY_SOURCE_IDENTITY_MISMATCH"
+    if (
+        row.get("price_coordinate") != _QFQ_COORDINATE
+        or row.get("qfq_price_coordinate") != _QFQ_COORDINATE
+        or row.get("qfq_adjustflag") not in (2, "2")
+    ):
+        return "FALSE", "QFQ_HISTORY_COORDINATE_MISMATCH"
+    if not _same_session(
+        row.get("qfq_response_session_date"), session
+    ) or not _same_source_code(row.get("qfq_response_source_code"), symbol):
+        return "FALSE", "QFQ_RESPONSE_IDENTITY_MISMATCH"
+    required_fields = {"date", "code", "open", "high", "low", "close"}
+    response_fields = row.get("qfq_response_fields")
+    if not isinstance(response_fields, (list, tuple, set, frozenset)) or not (
+        required_fields <= set(response_fields)
+    ):
+        return "UNKNOWN", "QFQ_RESPONSE_FIELDS_NOT_CLOSED"
+    if row.get("qfq_bar_status") != "TARGET_PRESENT":
+        return "UNKNOWN", str(row.get("qfq_bar_reason") or "QFQ_TARGET_BAR_NOT_PRESENT")
+    if row.get("qfq_price_quality") != "OBSERVED":
+        return "UNKNOWN", str(
+            row.get("qfq_price_reason") or "QFQ_PRICE_QUALITY_NOT_OBSERVED"
+        )
+    prices = {
+        name: _fraction(row.get(f"qfq_{name}"))
+        for name in ("open", "high", "low", "close")
+    }
+    if any(
+        row.get(f"qfq_{name}_quality") != "OBSERVED" or prices[name] is None
+        for name in prices
+    ):
+        return "UNKNOWN", "QFQ_OHLC_FIELD_QUALITY_NOT_OBSERVED"
+    opening, high, low, close = (
+        prices[name] for name in ("open", "high", "low", "close")
+    )
+    if (
+        any(value <= 0 for value in prices.values() if value is not None)
+        or low > min(opening, close)
+        or high < max(opening, close)
+    ):
+        return "UNKNOWN", "QFQ_OHLC_VALUE_INVALID"
+    return "TRUE", None
+
+
+def _coordinate_window_gate(
+    *,
+    symbol: str,
+    source_capture_id: int,
+    sessions: tuple[date, ...],
+    history: Mapping[date, Mapping[str, Any]],
+) -> FieldValue:
+    """要求21个官方会话逐行绑定同一捕获的QFQ坐标，结果仍是NON_PIT。"""
+    if len(sessions) != 21 or len(set(sessions)) != len(sessions):
+        return unknown("QFQ_WINDOW_SESSION_SET_INVALID")
+    states = [
+        _qfq_window_row_state(
+            history.get(session),
+            symbol=symbol,
+            session=session,
+            source_capture_id=source_capture_id,
+        )
+        for session in sessions
+    ]
+    mismatch = next((reason for state, reason in states if state == "FALSE"), None)
+    if mismatch:
+        return FieldValue(False)
+    unknown_reason = next(
+        (reason for state, reason in states if state == "UNKNOWN"), None
+    )
+    if unknown_reason:
+        return unknown(unknown_reason)
+    return FieldValue(True)
+
+
+def _raw_amount_for_d0_liquidity(
+    row: Mapping[str, Any] | None,
+    *,
+    symbol: str,
+    session: date,
+    source_capture_id: int,
+) -> tuple[Fraction | None, str | None]:
+    """读取RAW金额；仅接受当前BaoStock文档单位合同和实际成交。"""
+    if row is None:
+        return None, "RAW_LIQ20_ROW_NOT_STORED"
+    if (
+        row.get("source_symbol") != symbol
+        or not _same_session(row.get("session_date"), session)
+        or row.get("source_capture_id") != source_capture_id
+    ):
+        return None, "RAW_LIQ20_SOURCE_IDENTITY_MISMATCH"
+    if row.get("raw_adjustflag") not in (3, "3"):
+        return None, "RAW_LIQ20_COORDINATE_NOT_UNADJUSTED"
+    if not _same_session(
+        row.get("raw_response_session_date"), session
+    ) or not _same_source_code(row.get("raw_response_source_code"), symbol):
+        return None, "RAW_RESPONSE_IDENTITY_MISMATCH"
+    response_fields = row.get("raw_response_fields")
+    if not isinstance(response_fields, (list, tuple, set, frozenset)) or not {
+        "date",
+        "code",
+        "amount",
+        "tradestatus",
+    } <= set(response_fields):
+        return None, "RAW_AMOUNT_RESPONSE_FIELDS_NOT_CLOSED"
+    if row.get("bar_status") != "TARGET_PRESENT":
+        return None, str(row.get("bar_reason") or "RAW_AMOUNT_BAR_NOT_PRESENT")
+    trade_state, trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate=_RAW_COORDINATE
+    )
+    if trade_state != "ACTUAL":
+        return None, trade_reason or "RAW_AMOUNT_TRADE_STATUS_NOT_ACTUAL"
+    if row.get("raw_amount_quality") != "RAW_SOURCE_VALUE_OBSERVED":
+        return None, str(
+            row.get("raw_amount_reason") or "RAW_AMOUNT_QUALITY_NOT_OBSERVED"
+        )
+    if (
+        row.get("amount_unit_status") != "CNY_VERIFIED"
+        or row.get("unit_contract_version") != _RAW_AMOUNT_UNIT_CONTRACT_VERSION
+        or row.get("amount_input_unit") != "CNY_DOCUMENTED"
+        or _fraction(row.get("amount_to_cny")) != Fraction(1)
+    ):
+        return None, "RAW_AMOUNT_DOCUMENTED_UNIT_CONTRACT_NOT_BOUND"
+    amount = _fraction(row.get("raw_amount"))
+    if amount is None or amount < 0:
+        return None, "RAW_AMOUNT_VALUE_INVALID"
+    return amount, None
+
+
+def _d0_liquidity_gate(
+    *,
+    symbol: str,
+    source_capture_id: int,
+    sessions: tuple[date, ...],
+    history: Mapping[date, Mapping[str, Any]],
+) -> FieldValue:
+    """以严格前20会话的RAW CNY金额中位数评价D0 liq20三态。"""
+    if len(sessions) != 21 or len(set(sessions)) != len(sessions):
+        return unknown("RAW_LIQ20_SESSION_SET_INVALID")
+    prior_amounts: list[Fraction] = []
+    for session in sessions[:-1]:
+        amount, reason = _raw_amount_for_d0_liquidity(
+            history.get(session),
+            symbol=symbol,
+            session=session,
+            source_capture_id=source_capture_id,
+        )
+        if reason:
+            return unknown(reason)
+        if amount is None:
+            return unknown("RAW_LIQ20_AMOUNT_NOT_OBSERVED")
+        prior_amounts.append(amount)
+    if len(prior_amounts) != 20:
+        return unknown("RAW_LIQ20_WINDOW_NOT_CLOSED")
+    ordered = sorted(prior_amounts)
+    median = (ordered[9] + ordered[10]) / 2
+    return FieldValue(median >= _D0_LIQ20_THRESHOLD_CNY)
 
 
 def _date(value: object) -> date:
@@ -182,24 +372,48 @@ def _raw_history_for_candidates(
                 history[row["session_date"]] = {
                     key: row.get(key)
                     for key in (
+                        "source_code",
                         "source_symbol",
                         "session_date",
                         "source_capture_id",
+                        "price_coordinate",
+                        "qfq_price_coordinate",
+                        "qfq_response_session_date",
+                        "qfq_response_source_code",
+                        "qfq_adjustflag",
+                        "qfq_response_fields",
                         "bar_status",
                         "bar_reason",
                         "qfq_bar_status",
                         "qfq_bar_reason",
                         "qfq_price_quality",
                         "qfq_price_reason",
+                        "qfq_open_quality",
+                        "qfq_high_quality",
+                        "qfq_low_quality",
+                        "qfq_close_quality",
                         "qfq_tradestatus_value",
                         "qfq_tradestatus_quality",
                         "qfq_tradestatus_reason",
-                        "qfq_price_coordinate",
-                        "price_coordinate",
                         "qfq_open",
                         "qfq_high",
                         "qfq_low",
                         "qfq_close",
+                        "raw_response_session_date",
+                        "raw_response_source_code",
+                        "raw_adjustflag",
+                        "raw_response_fields",
+                        "raw_amount",
+                        "raw_amount_quality",
+                        "raw_amount_reason",
+                        "amount_quality",
+                        "amount_unit_status",
+                        "unit_contract_version",
+                        "amount_input_unit",
+                        "amount_to_cny",
+                        "raw_tradestatus_value",
+                        "raw_tradestatus_quality",
+                        "raw_tradestatus_reason",
                     )
                 }
                 batch_rows += 1
@@ -247,42 +461,51 @@ def _line_inputs(
     close = None
     phc20 = None
     current = history.get(target_session)
+    current_coordinate_state, current_coordinate_reason = _qfq_window_row_state(
+        current,
+        symbol=symbol,
+        session=target_session,
+        source_capture_id=source_capture_id,
+    )
     current_trade_state, current_trade_reason = trade_status_state_from_pg_row(
         current, price_coordinate="FORWARD_ADJUSTED"
     )
-    if (
-        current is not None
-        and current.get("source_capture_id") == source_capture_id
-        and current.get("qfq_price_quality") == "OBSERVED"
-        and current_trade_state == "ACTUAL"
-    ):
+    if current_coordinate_state == "TRUE" and current_trade_state == "ACTUAL":
         close = _fraction(current.get("qfq_close"))
     if close is None:
         close_field = unknown(
-            current_trade_reason or "T0_QFQ_CLOSE_NOT_OBSERVED_IN_PAIRED_CAPTURE"
+            current_trade_reason
+            if current_trade_state != "ACTUAL"
+            else current_coordinate_reason
+            or "T0_QFQ_CLOSE_NOT_OBSERVED_IN_PAIRED_CAPTURE"
         )
     else:
         close_field = FieldValue(close)
 
     prior_closes: list[Fraction] = []
+    prior_reason = None
     for session in sessions[:-1]:
         row = history.get(session)
-        if (
-            row is None
-            or row.get("session_date") != session
-            or row.get("source_symbol") != symbol
-            or row.get("source_capture_id") != source_capture_id
-            or row.get("qfq_bar_status") != "TARGET_PRESENT"
-            or row.get("qfq_price_quality") != "OBSERVED"
-            or trade_status_state_from_pg_row(row, price_coordinate="FORWARD_ADJUSTED")[
-                0
-            ]
-            != "ACTUAL"
-        ):
+        row_state, row_reason = _qfq_window_row_state(
+            row,
+            symbol=symbol,
+            session=session,
+            source_capture_id=source_capture_id,
+        )
+        trade_state, trade_reason = trade_status_state_from_pg_row(
+            row, price_coordinate="FORWARD_ADJUSTED"
+        )
+        if row_state != "TRUE":
+            prior_reason = row_reason or "STRICT_PRIOR_QFQ_CLOSES_NOT_COMPLETE"
+            prior_closes = []
+            break
+        if trade_state != "ACTUAL":
+            prior_reason = trade_reason or "STRICT_PRIOR_QFQ_TRADE_STATUS_NOT_ACTUAL"
             prior_closes = []
             break
         value = _fraction(row.get("qfq_close"))
         if value is None or value <= 0:
+            prior_reason = "STRICT_PRIOR_QFQ_CLOSE_INVALID"
             prior_closes = []
             break
         prior_closes.append(value)
@@ -290,7 +513,7 @@ def _line_inputs(
     phc_field = (
         FieldValue(phc20)
         if phc20 is not None
-        else unknown("STRICT_PRIOR_20_CLOSES_NOT_COMPLETE")
+        else unknown(prior_reason or "STRICT_PRIOR_20_CLOSES_NOT_COMPLETE")
     )
     by_session = {session: history.get(session) for session in sessions}
     damage = calculate_d0_first_day_damage(
@@ -501,23 +724,19 @@ def run_source_formal_admission_from_saved(
                 coordinate_gate = unknown(
                     "D0_CALENDAR_COORDINATE_OR_CAPTURE_NOT_PROVED"
                 )
+                liquidity_gate = unknown("D0_CALENDAR_OR_CAPTURE_NOT_PROVED_FOR_LIQ20")
             else:
-                exact_history = all(
-                    session in history
-                    and history[session].get("qfq_price_quality") == "OBSERVED"
-                    and history[session].get("source_symbol") == symbol
-                    and history[session].get("source_capture_id") == source_capture_id
-                    and (
-                        session != target_session
-                        or history[session].get("source_capture_id")
-                        == source_capture_id
-                    )
-                    for session in sessions
+                coordinate_gate = _coordinate_window_gate(
+                    symbol=symbol,
+                    source_capture_id=source_capture_id,
+                    sessions=sessions,
+                    history=history,
                 )
-                coordinate_gate = unknown(
-                    "QFQ_NON_PIT_COORDINATE_NOT_CLOSED"
-                    if exact_history
-                    else "STRICT_D0_WINDOW_NOT_REPRODUCED_FROM_SAVED_RAW"
+                liquidity_gate = _d0_liquidity_gate(
+                    symbol=symbol,
+                    source_capture_id=source_capture_id,
+                    sessions=sessions,
+                    history=history,
                 )
             if seed is None:
                 actual_gate = unknown(seed_scope_reason)
@@ -555,7 +774,7 @@ def run_source_formal_admission_from_saved(
                 "research_universe": unknown("OFFICIAL_RESEARCH_UNIVERSE_NOT_STORED"),
                 "actual_quote": actual_gate,
                 "coordinate_window": coordinate_gate,
-                "d0_liquidity": unknown("RAW_AMOUNT_UNIT_UNVERIFIED"),
+                "d0_liquidity": liquidity_gate,
                 "non_core_damage": core_gate,
                 "non_extreme_extension": extension_gate,
                 "non_first_day_damage": first_day_gate,
@@ -591,14 +810,14 @@ def run_source_formal_admission_from_saved(
                 "UNKNOWN": "TARGET_ACTUAL_QUOTE_NOT_COMPUTED",
             },
             "coordinate_window": {
-                "TRUE": "D0_COORDINATE_WINDOW_MATCHED",
+                "TRUE": "D0_QFQ_WINDOW_CAPTURE_BOUND_NON_PIT",
                 "FALSE": "D0_COORDINATE_WINDOW_INVALID",
-                "UNKNOWN": "QFQ_NON_PIT_COORDINATE_NOT_CLOSED",
+                "UNKNOWN": "D0_QFQ_WINDOW_NOT_PROVED",
             },
             "d0_liquidity": {
-                "TRUE": "D0_LIQ20_THRESHOLD_PROVED",
+                "TRUE": "D0_LIQ20_THRESHOLD_PROVED_FROM_SAVED_RAW_NON_PIT",
                 "FALSE": "D0_LIQ20_BELOW_THRESHOLD",
-                "UNKNOWN": "RAW_AMOUNT_UNIT_UNVERIFIED",
+                "UNKNOWN": "D0_LIQ20_INPUT_OR_DOCUMENTED_UNIT_CONTRACT_UNKNOWN",
             },
             "non_core_damage": {
                 "TRUE": "CORE_DAMAGE_FALSE",

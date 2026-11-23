@@ -881,11 +881,33 @@ def _normalize_request_attempts(
                 "REQUEST_ATTEMPTS_INVALID", "请求响应行数无效"
             )
         status_text = str(status)
-        complete = _get(attempt, "complete", True)
-        if status_text in {"COMPLETED", "NO_DATA"}:
-            db_status = status_text
-        elif status_text == "RESPONSE_RECEIVED" and complete is True:
-            db_status = "NO_DATA" if response_count == 0 else "COMPLETED"
+        missing_complete = object()
+        complete = _get(attempt, "complete", missing_complete)
+        if complete is not missing_complete and type(complete) is not bool:
+            raise BaoStockPriceFactsError(
+                "REQUEST_ATTEMPT_STATUS_INCONSISTENT",
+                "请求完成标记必须为布尔值",
+            )
+        if status_text in {"COMPLETED", "NO_DATA", "RESPONSE_RECEIVED"}:
+            if complete is False or attempt_count < 1:
+                raise BaoStockPriceFactsError(
+                    "REQUEST_ATTEMPT_STATUS_INCONSISTENT",
+                    "已完成请求必须有成功完成标记且至少尝试一次",
+                )
+            if status_text == "COMPLETED" and response_count == 0:
+                raise BaoStockPriceFactsError(
+                    "REQUEST_ATTEMPT_STATUS_INCONSISTENT",
+                    "COMPLETED请求必须至少收到一行响应",
+                )
+            if status_text == "NO_DATA" and response_count != 0:
+                raise BaoStockPriceFactsError(
+                    "REQUEST_ATTEMPT_STATUS_INCONSISTENT",
+                    "NO_DATA请求的响应行数必须为零",
+                )
+            if status_text == "RESPONSE_RECEIVED":
+                db_status = "NO_DATA" if response_count == 0 else "COMPLETED"
+            else:
+                db_status = status_text
         elif (
             status_text in {"NOT_ATTEMPTED", "NOT_ATTEMPTED_BUDGET"}
             or attempt_count == 0

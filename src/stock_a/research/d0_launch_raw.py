@@ -132,6 +132,98 @@ def _predicate(
     }
 
 
+def _window_source_row(
+    session: date,
+    rows: Mapping[date, Mapping[str, Any] | None],
+    *,
+    source_symbol: str,
+    source_capture_id: int,
+    price_coordinate: str,
+) -> tuple[Mapping[str, Any] | None, str | None]:
+    row = rows.get(session)
+    if row is None:
+        return None, "OFFICIAL_SESSION_ROW_MISSING"
+    if (
+        row.get("session_date") != session
+        or row.get("source_symbol") != source_symbol
+        or row.get("source_capture_id") != source_capture_id
+    ):
+        return row, "RAW_SOURCE_IDENTITY_MISMATCH"
+    if price_coordinate != "FORWARD_ADJUSTED":
+        return row, "RAW_COORDINATE_MISMATCH"
+    if (
+        row.get("price_coordinate") != "FORWARD_ADJUSTED"
+        or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
+        or row.get("adjustment_flag") not in (2, "2")
+    ):
+        return row, "RAW_TARGET_CAPTURE_MISMATCH"
+    if row.get("qfq_adjustflag") not in (2, "2"):
+        return row, "QFQ_ADJUSTFLAG_MISMATCH"
+    response_session = row.get("qfq_response_session_date")
+    if (
+        response_session not in (session, session.isoformat())
+        or row.get("qfq_response_source_code") != source_symbol
+    ):
+        return row, "QFQ_RESPONSE_IDENTITY_MISMATCH"
+    response_fields = row.get("qfq_response_fields")
+    if not isinstance(response_fields, (list, tuple, set, frozenset)) or not {
+        "date",
+        "code",
+        "close",
+    }.issubset(response_fields):
+        return row, "QFQ_RESPONSE_FIELDS_NOT_CLOSED"
+    if row.get("qfq_bar_status") != "TARGET_PRESENT":
+        return row, "OFFICIAL_SESSION_BAR_MISSING"
+    trade_state, trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate="FORWARD_ADJUSTED"
+    )
+    if trade_state == "CONFIRMED_SUSPENSION":
+        return row, "CONFIRMED_SUSPENSION_NO_ACTUAL_BAR"
+    if trade_state != "ACTUAL":
+        return row, trade_reason or "TRADE_STATUS_UNKNOWN"
+    return row, None
+
+
+def _window_close(
+    session: date,
+    rows: Mapping[date, Mapping[str, Any] | None],
+    *,
+    source_symbol: str,
+    source_capture_id: int,
+    price_coordinate: str,
+) -> tuple[Mapping[str, Any] | None, dict[str, Fraction] | None, str | None]:
+    """只验证严格QFQ收盘字段，供close-only谓词使用。"""
+    row, error = _window_source_row(
+        session,
+        rows,
+        source_symbol=source_symbol,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
+    )
+    if error:
+        return row, None, error
+    if row is None:
+        return None, None, "OFFICIAL_SESSION_ROW_MISSING"
+    if row.get("qfq_close_quality") == "BAD_VALUE":
+        return row, None, "RAW_PRICE_QUALITY_BAD"
+    if row.get("qfq_close_quality") != "OBSERVED":
+        reason = row.get("qfq_close_reason")
+        return (
+            row,
+            None,
+            reason
+            if isinstance(reason, str) and reason
+            else "RAW_PRICE_QUALITY_UNKNOWN",
+        )
+    close_value = row.get("qfq_close")
+    if isinstance(close_value, bool):
+        return row, None, "INVALID_PRICE_CLOSE"
+    close = _fraction(close_value)
+    if close is None or close <= 0:
+        return row, None, "INVALID_PRICE_CLOSE"
+    return row, {"close": close}, None
+
+
 def _window_row(
     session: date,
     rows: Mapping[date, Mapping[str, Any] | None],
@@ -140,40 +232,41 @@ def _window_row(
     source_capture_id: int,
     price_coordinate: str,
 ) -> tuple[Mapping[str, Any] | None, dict[str, Fraction] | None, str | None]:
-    row = rows.get(session)
+    """验证计算CLV等完整OHLC谓词所需的同捕获QFQ价格行。"""
+    row, error = _window_source_row(
+        session,
+        rows,
+        source_symbol=source_symbol,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
+    )
+    if error:
+        return row, None, error
     if row is None:
         return None, None, "OFFICIAL_SESSION_ROW_MISSING"
-    if (
-        row.get("session_date") != session
-        or row.get("source_symbol") != source_symbol
-        or row.get("source_capture_id") != source_capture_id
-    ):
-        return row, None, "RAW_SOURCE_IDENTITY_MISMATCH"
-    row_coordinate = row.get(
-        "qfq_price_coordinate"
-        if price_coordinate == "FORWARD_ADJUSTED"
-        else "raw_price_coordinate",
-        row.get("price_coordinate"),
-    )
-    if row_coordinate not in (None, price_coordinate):
-        return row, None, "RAW_TARGET_CAPTURE_MISMATCH"
-    if price_coordinate != "FORWARD_ADJUSTED":
-        return row, None, "RAW_COORDINATE_MISMATCH"
-    if row.get("qfq_bar_status") != "TARGET_PRESENT":
-        return row, None, "OFFICIAL_SESSION_BAR_MISSING"
-    trade_state, trade_reason = trade_status_state_from_pg_row(
-        row, price_coordinate="FORWARD_ADJUSTED"
-    )
-    if trade_state == "CONFIRMED_SUSPENSION":
-        return row, None, "CONFIRMED_SUSPENSION_NO_ACTUAL_BAR"
-    if trade_state != "ACTUAL":
-        return row, None, trade_reason or "TRADE_STATUS_UNKNOWN"
+    response_fields = row.get("qfq_response_fields")
+    if not isinstance(response_fields, (list, tuple, set, frozenset)) or not {
+        "date",
+        "code",
+        "open",
+        "high",
+        "low",
+        "close",
+    }.issubset(response_fields):
+        return row, None, "QFQ_RESPONSE_FIELDS_NOT_CLOSED"
     if row.get("qfq_price_quality") == "BAD_VALUE":
         return row, None, "RAW_PRICE_QUALITY_BAD"
     if row.get("qfq_price_quality") != "OBSERVED":
         return row, None, "RAW_PRICE_QUALITY_UNKNOWN"
-    values = {
-        name: _fraction(row.get(column))
+    field_qualities = tuple(
+        row.get(f"qfq_{name}_quality") for name in ("open", "high", "low", "close")
+    )
+    if any(quality == "BAD_VALUE" for quality in field_qualities):
+        return row, None, "RAW_PRICE_QUALITY_BAD"
+    if any(quality != "OBSERVED" for quality in field_qualities):
+        return row, None, "RAW_PRICE_QUALITY_UNKNOWN"
+    raw_values = {
+        name: row.get(column)
         for name, column in (
             ("open", "qfq_open"),
             ("high", "qfq_high"),
@@ -181,6 +274,9 @@ def _window_row(
             ("close", "qfq_close"),
         )
     }
+    if any(isinstance(value, bool) for value in raw_values.values()):
+        return row, None, "INVALID_PRICE_OHLC"
+    values = {name: _fraction(value) for name, value in raw_values.items()}
     if any(value is None for value in values.values()):
         return row, None, "INVALID_PRICE_OHLC"
     opening, high, low, close = (
@@ -354,25 +450,36 @@ def calculate_d0_launch_confirm_raw(
             )
             for session in sessions
         }
+        close_checked = {
+            session: _window_close(
+                session,
+                rows,
+                source_symbol=source_symbol,
+                source_capture_id=source_capture_id,
+                price_coordinate=price_coordinate,
+            )
+            for session in sessions
+        }
         prior = sessions[:20]
         current_session = sessions[-1]
         previous_session = sessions[-2]
         current_row, current_ohlc, current_error = checked[current_session]
+        _, current_close_values, current_close_error = close_checked[current_session]
 
-        prior_close_errors = [checked[session][2] for session in prior]
+        prior_close_errors = [close_checked[session][2] for session in prior]
         if any(prior_close_errors):
             first_error = next(error for error in prior_close_errors if error)
             predicates["close_above_phc20"] = _unknown_predicate(
                 first_error or "OFFICIAL_SESSION_BAR_MISSING",
                 formulas["close_above_phc20"],
             )
-        elif current_error:
+        elif current_close_error:
             predicates["close_above_phc20"] = _unknown_predicate(
-                current_error, formulas["close_above_phc20"]
+                current_close_error, formulas["close_above_phc20"]
             )
         else:
-            phc20 = max(checked[session][1]["close"] for session in prior)
-            close = current_ohlc["close"]
+            phc20 = max(close_checked[session][1]["close"] for session in prior)
+            close = current_close_values["close"]
             predicates["close_above_phc20"] = _predicate(
                 "TRUE" if close > phc20 else "FALSE",
                 reason_code="C_ABOVE_PHC20_TRUE"
@@ -383,18 +490,18 @@ def calculate_d0_launch_confirm_raw(
                 formula=formulas["close_above_phc20"],
             )
 
-        prior_error = checked[previous_session][2]
+        prior_error = close_checked[previous_session][2]
         if prior_error:
             predicates["positive_ret1"] = _unknown_predicate(
                 prior_error, formulas["positive_ret1"]
             )
-        elif current_error:
+        elif current_close_error:
             predicates["positive_ret1"] = _unknown_predicate(
-                current_error, formulas["positive_ret1"]
+                current_close_error, formulas["positive_ret1"]
             )
         else:
-            prior_close = checked[previous_session][1]["close"]
-            close = current_ohlc["close"]
+            prior_close = close_checked[previous_session][1]["close"]
+            close = current_close_values["close"]
             ret1 = close / prior_close - 1
             predicates["positive_ret1"] = _predicate(
                 "TRUE" if ret1 > 0 else "FALSE",
@@ -608,11 +715,21 @@ def calculate_d0_recovery_turn_raw(
         )
         for day in sessions
     ]
+    close_checked = [
+        _window_close(
+            day,
+            rows,
+            source_symbol=source_symbol,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+        )
+        for day in sessions
+    ]
 
     def price(index, field):
         if index < -len(checked) or index >= len(checked):
             return None
-        values = checked[index][1]
+        values = (close_checked if field == "close" else checked)[index][1]
         return None if values is None else values[field]
 
     def ma(end, length):

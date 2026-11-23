@@ -746,11 +746,35 @@ def _raw_public_fields(
     reason_key = (
         "price_reason" if price_coordinate == "RAW_UNADJUSTED" else "qfq_price_reason"
     )
+    field_prefix = "raw" if price_coordinate == "RAW_UNADJUSTED" else "qfq"
     quality = row.get(quality_key)
     price_reason = row.get(reason_key)
     values_public = {
         name: _json_value(values.get(name)) for name in ("open", "high", "low", "close")
     }
+    field_qualities = {
+        name: _json_value(
+            row.get(
+                f"{field_prefix}_{name}_quality",
+                quality,
+            )
+        )
+        for name in ("open", "high", "low", "close")
+    }
+    field_reasons = {
+        name: _json_value(
+            row.get(
+                f"{field_prefix}_{name}_reason",
+                price_reason,
+            )
+        )
+        for name in ("open", "high", "low", "close")
+    }
+    coordinate_request_completed_at = row.get(
+        "raw_request_completed_at"
+        if price_coordinate == "RAW_UNADJUSTED"
+        else "qfq_request_completed_at"
+    )
     return {
         "session_date": row["session_date"].isoformat(),
         "source_symbol": row["source_symbol"],
@@ -767,6 +791,8 @@ def _raw_public_fields(
         "quality": {
             "price_quality": _json_value(quality),
             "price_reason": _json_value(price_reason),
+            "price_field_qualities": field_qualities,
+            "price_field_reasons": field_reasons,
             "amount_quality": _json_value(row.get("amount_quality")),
             "amount_reason": _json_value(row.get("amount_reason")),
             "raw_amount_quality": _json_value(row.get("raw_amount_quality")),
@@ -783,9 +809,17 @@ def _raw_public_fields(
         "source": {
             "provider": "BAOSTOCK",
             "source_capture_id": row.get("source_capture_id"),
-            "captured_at": _json_value(
-                row.get("captured_at", row.get("capture_read_started_at"))
+            "captured_at": _json_value(coordinate_request_completed_at),
+            "coordinate_request_completed_at": _json_value(
+                coordinate_request_completed_at
             ),
+            "raw_request_completed_at": _json_value(
+                row.get("raw_request_completed_at")
+            ),
+            "qfq_request_completed_at": _json_value(
+                row.get("qfq_request_completed_at")
+            ),
+            "capture_read_started_at": _json_value(row.get("capture_read_started_at")),
             "capture_clock_role": row.get("capture_clock_role"),
             "source_clock_role": row.get(
                 "source_clock_role", row.get("capture_clock_role")
@@ -829,6 +863,12 @@ def _page_public_fields(
             "price_reason": row.get("price_reason")
             if raw_selected
             else row.get("qfq_price_reason"),
+            "close_quality": row.get("raw_close_quality")
+            if raw_selected
+            else row.get("qfq_close_quality"),
+            "close_reason": row.get("raw_close_reason")
+            if raw_selected
+            else row.get("qfq_close_reason"),
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "source_object_status": row.get(
                 "source_object_status", "BAOSTOCK_SOURCE_SYMBOL_OBSERVED"
@@ -919,17 +959,38 @@ def _baostock_source_context(
             "BAOSTOCK_CAPTURE_COVERAGE_INCOMPLETE",
             "目标日缺少同一BaoStock捕获的RAW/QFQ双坐标价格目录事实",
         )
+    supplied_rows = list(target_price_rows)
+    if any(
+        not isinstance(row, Mapping)
+        or row.get("source_capture_id") != source_capture_id
+        for row in supplied_rows
+    ):
+        raise PreviewHttpError(
+            409,
+            "BAOSTOCK_TARGET_ROW_CAPTURE_MISMATCH",
+            "价格行捕获ID与所选BaoStock来源上下文不一致",
+        )
     rows = [
         row
-        for row in target_price_rows
-        if row.get("source_capture_id") == source_capture_id
-        and row.get("session_date") in (target_session, target_session.isoformat())
+        for row in supplied_rows
+        if row.get("session_date") in (target_session, target_session.isoformat())
     ]
-    if any(row.get("source_symbol") is None for row in rows):
+    if any(
+        not isinstance(row.get("source_symbol"), str)
+        or _SYMBOL.fullmatch(row["source_symbol"]) is None
+        for row in rows
+    ):
         raise PreviewHttpError(
             409,
             "BAOSTOCK_TARGET_ROW_IDENTITY_INVALID",
-            "BaoStock目标价格行缺少来源代码",
+            "BaoStock目标价格行缺少规范来源代码",
+        )
+    target_symbols = [row["source_symbol"] for row in rows]
+    if len(target_symbols) != len(set(target_symbols)):
+        raise PreviewHttpError(
+            409,
+            "BAOSTOCK_TARGET_ROW_IDENTITY_DUPLICATE",
+            "BaoStock目标日期来源代码重复",
         )
     first = rows[0] if rows else {}
     complete = (
@@ -965,6 +1026,8 @@ def _baostock_source_context(
         "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
         "source_capture_expected_row_count": raw_version.get("expected_row_count"),
         "research_expected_row_count": research_expected_row_count,
+        "target_rows_status": "AVAILABLE" if rows else "EMPTY",
+        "target_row_count": len(rows),
         "raw_price_row_count": raw_version.get("row_count"),
         "qfq_price_row_count": qfq_version.get("row_count"),
         "raw_coverage_status": raw_version.get("coverage_status"),
@@ -1818,6 +1881,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target_session=target_session,
                 source_capture_id=after_source["source_capture_id"],
                 source_symbols=page_symbols,
+                selected_snapshot_ids={
+                    kind: snapshot_id
+                    for kind, snapshot_id in (
+                        ("INDUSTRY", industry_snapshot_id),
+                        ("CONCEPT", concept_snapshot_id),
+                    )
+                    if type(snapshot_id) is int and snapshot_id > 0
+                },
             )
             if page_symbols
             else {}
@@ -2973,6 +3044,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target_session=target,
                 source_capture_id=source_capture_id,
                 source_symbols=[symbol],
+                selected_snapshot_ids=(
+                    {body["board_kind"]: _snapshot_id(body["membership_snapshot_id"])}
+                    if history_fields.issubset(body)
+                    and body.get("board_kind") in {"INDUSTRY", "CONCEPT"}
+                    else {}
+                ),
             )[symbol],
             target_session=target,
             research_cutoff=self.preview_server.state.research_cutoff,
@@ -4498,6 +4575,24 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 target_session=target,
                                 source_capture_id=source_context["source_capture_id"],
                                 source_symbols=sorted(set(symbols)),
+                                selected_snapshot_ids=(
+                                    {
+                                        values["board_kind"]: _snapshot_id(
+                                            values[
+                                                "industry_snapshot_id"
+                                                if values["board_kind"] == "INDUSTRY"
+                                                else "concept_snapshot_id"
+                                            ]
+                                        )
+                                    }
+                                    if values.get(
+                                        "industry_snapshot_id"
+                                        if values.get("board_kind") == "INDUSTRY"
+                                        else "concept_snapshot_id"
+                                    )
+                                    is not None
+                                    else {}
+                                ),
                             )
                             if symbols
                             else {}
@@ -7755,6 +7850,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     target_session=target,
                     source_capture_id=source_context["source_capture_id"],
                     source_symbols=[symbol],
+                    selected_snapshot_ids={
+                        kind: snapshot_id
+                        for kind, snapshot_id in (membership_snapshot_ids or {}).items()
+                        if type(snapshot_id) is int and snapshot_id > 0
+                    },
                 )[symbol]
                 followup_states = {entry["followup"]["status"] for entry in entries}
                 followup_reasons = {entry["followup"]["reason"] for entry in entries}

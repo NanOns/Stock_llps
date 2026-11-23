@@ -84,13 +84,19 @@ export function renderBaoStockPriceSource(data) {
   }
 
   const { fields, labels, qfq } = buildBaoStockPriceSourceView(row);
+  const coordinateResponseCompletedAt = qfq
+    ? row.qfq_request_completed_at
+    : row.raw_request_completed_at;
   const source = {
     ...row,
     source_capture_id: data?.source_capture_id ?? row.source_capture_id,
     source_symbol: data?.source_symbol ?? row.source_symbol,
     target_session: data?.target_session ?? row.session_date,
     capture_id: data?.source_capture_id ?? row.source_capture_id,
-    captured_at: row.capture_read_started_at,
+    captured_at: coordinateResponseCompletedAt,
+    raw_request_completed_at: row.raw_request_completed_at,
+    qfq_request_completed_at: row.qfq_request_completed_at,
+    capture_read_started_at: row.capture_read_started_at,
     adjustment_flag:
       row.adjustment_flag ?? (qfq ? row.qfq_adjustflag : row.raw_adjustflag),
     unit_contract: {
@@ -109,8 +115,13 @@ export function renderBaoStockPriceSource(data) {
   section.append(
     element(
       "p",
-      `来源代码 ${source.source_symbol || "UNKNOWN"} · 会话 ${source.target_session || "UNKNOWN"} · 捕获 ${source.capture_id || "UNKNOWN"} · 捕获时刻 ${source.captured_at || "UNKNOWN"}`,
+      `来源代码 ${source.source_symbol || "UNKNOWN"} · 会话 ${source.target_session || "UNKNOWN"} · 捕获 ${source.capture_id || "UNKNOWN"} · RAW响应完成 ${source.raw_request_completed_at || "UNKNOWN"} · QFQ响应完成 ${source.qfq_request_completed_at || "UNKNOWN"}`,
       "rule",
+    ),
+    element(
+      "p",
+      `该坐标响应完成时刻 ${source.captured_at || "UNKNOWN"} · 捕获读取起始 ${source.capture_read_started_at || "UNKNOWN"}（批次时钟，不代表证券响应完成）`,
+      "muted",
     ),
     element(
       "p",

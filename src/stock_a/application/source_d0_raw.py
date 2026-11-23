@@ -760,6 +760,8 @@ def attach_source_d1_prior_reference(
                 source_prior_identity_reasons.append(
                     f"SOURCE_{identity_field.upper()}_IDENTITY_MISSING"
                 )
+            elif source_prior.get(identity_field) != source_capture_id:
+                source_prior_identity_reasons.append("SOURCE_PRIOR_CAPTURE_ID_MISMATCH")
         for raw_reference in source_prior.get("references", ()):
             if not isinstance(raw_reference, Mapping):
                 continue
@@ -968,13 +970,31 @@ def attach_recovery_failure_followup(
         elif (
             birth is None
             or row.get("source_capture_id") != birth.get("source_capture_id")
+            or row.get("source_symbol") != item["source_symbol"]
             or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
         ):
             reason = "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH"
+        elif (
+            row.get("qfq_adjustflag") not in (2, "2")
+            or row.get("qfq_response_session_date")
+            not in (
+                session,
+                session.isoformat(),
+            )
+            or str(row.get("qfq_response_source_code") or "").upper()
+            != str(row.get("source_symbol") or "").upper()
+            or not isinstance(
+                row.get("qfq_response_fields"), (list, tuple, set, frozenset)
+            )
+            or not {"date", "code", "close"}.issubset(
+                set(row.get("qfq_response_fields") or ())
+            )
+        ):
+            reason = "FOLLOWUP_QFQ_RESPONSE_IDENTITY_MISMATCH"
         elif row.get("qfq_bar_status") != "TARGET_PRESENT":
             reason = "FOLLOWUP_QFQ_BAR_MISSING"
-        elif row.get("qfq_price_quality") != "OBSERVED":
-            reason = "FOLLOWUP_PRICE_UNKNOWN"
+        elif row.get("qfq_close_quality") != "OBSERVED":
+            reason = str(row.get("qfq_close_reason") or "FOLLOWUP_QFQ_CLOSE_UNKNOWN")
         elif (
             trade_status_state_from_pg_row(row, price_coordinate="FORWARD_ADJUSTED")[0]
             != "ACTUAL"
@@ -989,24 +1009,14 @@ def attach_recovery_failure_followup(
             )
         else:
             try:
-                if any(
-                    isinstance(row[key], bool)
-                    for key in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
-                ):
-                    raise ValueError("布尔值不是有效OHLC")
-                values = [
-                    Fraction(row[key])
-                    for key in ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
-                ]
-                opening, high, low, close = values
-                if (
-                    min(values) <= 0
-                    or not low <= min(opening, close)
-                    or not high >= max(opening, close)
-                ):
-                    reason, close = "FOLLOWUP_OHLC_INVALID", None
+                close_value = row.get("qfq_close")
+                if isinstance(close_value, bool) or close_value is None:
+                    raise ValueError("QFQ收盘缺失或非法")
+                close = Fraction(close_value)
+                if close <= 0:
+                    reason, close = "FOLLOWUP_QFQ_CLOSE_INVALID", None
             except (TypeError, ValueError, ZeroDivisionError):
-                reason = "FOLLOWUP_OHLC_INVALID"
+                reason = "FOLLOWUP_QFQ_CLOSE_INVALID"
         if reason is None and line is None:
             reason = "FAILURE_LINE_CANDIDATE_UNAVAILABLE"
         result.append(

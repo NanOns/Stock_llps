@@ -3316,6 +3316,7 @@ def _prepare_reset_resume_inputs_from_persisted_capture(
     from stock_a.sources.baostock.identity import (
         classify_baostock_board,
         normalize_baostock_symbol,
+        parse_baostock_optional_date,
     )
     from stock_a.sources.tdx.remote_sector import (
         fetch_remote_sector_files,
@@ -3980,10 +3981,10 @@ def _prepare_reset_source_inputs(
             unsupported_board_symbols.append(symbol)
             continue
         try:
-            ipo_date = date.fromisoformat(row["ipoDate"])
-            out_date = (
-                date.fromisoformat(row["outDate"]) if row.get("outDate") else None
-            )
+            ipo_date = parse_baostock_optional_date(row["ipoDate"])
+            out_date = parse_baostock_optional_date(row.get("outDate"))
+            if ipo_date is None:
+                raise ValueError("ipoDate不得为空")
         except (KeyError, TypeError, ValueError) as error:
             raise DataJobError(
                 "RESET_BAOSTOCK_LISTING_DATE_INVALID",
@@ -4581,6 +4582,7 @@ def _baostock_universe_from_identity(
     from stock_a.sources.baostock.identity import (
         classify_baostock_board,
         normalize_baostock_symbol,
+        parse_baostock_optional_date,
     )
 
     if not sessions:
@@ -4710,10 +4712,10 @@ def _baostock_universe_from_identity(
             unsupported_board_symbols.append(symbol)
             continue
         try:
-            ipo_date = date.fromisoformat(row["ipoDate"])
-            out_date = (
-                date.fromisoformat(row["outDate"]) if row.get("outDate") else None
-            )
+            ipo_date = parse_baostock_optional_date(row["ipoDate"])
+            out_date = parse_baostock_optional_date(row.get("outDate"))
+            if ipo_date is None:
+                raise ValueError("ipoDate不得为空")
         except (KeyError, TypeError, ValueError) as error:
             raise DataJobError(
                 "BAOSTOCK_LISTING_DATE_INVALID",

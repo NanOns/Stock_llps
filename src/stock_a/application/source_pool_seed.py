@@ -838,6 +838,38 @@ def compute_source_pool_seed(
                     )
                     prior_close = observations[-2].close
                 current_close = observations[-1].close
+                qfq_close_quality = target_row.get("qfq_close_quality")
+                qfq_close_reason = target_row.get("qfq_close_reason")
+                if "qfq_close_quality" not in target_row:
+                    qfq_close_quality = current_close.quality
+                    qfq_close_reason = current_close.reason
+                qfq_close_value = target_row.get("qfq_close")
+                if "qfq_close_quality" not in target_row:
+                    qfq_close_value = current_close.value
+                if qfq_close_quality == "OBSERVED":
+                    if qfq_close_value is None:
+                        raise ResearchEntryError(
+                            "QFQ_TARGET_CLOSE_QUALITY_VALUE_MISMATCH",
+                            "QFQ收盘质量为OBSERVED但目标行收盘值缺失",
+                        )
+                    try:
+                        qfq_close_fraction = Fraction(qfq_close_value)
+                    except (TypeError, ValueError, ZeroDivisionError) as error:
+                        raise ResearchEntryError(
+                            "QFQ_TARGET_CLOSE_VALUE_INVALID",
+                            "QFQ目标收盘不是精确数值",
+                        ) from error
+                    if qfq_close_fraction <= 0:
+                        raise ResearchEntryError(
+                            "QFQ_TARGET_CLOSE_VALUE_INVALID",
+                            "QFQ目标收盘必须为正数",
+                        )
+                    qfq_close_value = str(qfq_close_fraction)
+                elif qfq_close_value is not None:
+                    raise ResearchEntryError(
+                        "QFQ_TARGET_CLOSE_QUALITY_VALUE_MISMATCH",
+                        "非OBSERVED的QFQ收盘质量不能携带数值",
+                    )
                 actual_quote_state = preview["actual_quote_state"]
                 raw_quote = tuple(
                     target_row.get(column)
@@ -890,9 +922,11 @@ def compute_source_pool_seed(
                         if actual_quote_state == "ACTUAL"
                         else None
                     ),
-                    "qfq_close": str(current_close.value)
-                    if current_close and current_close.quality == "OBSERVED"
+                    "qfq_close": str(qfq_close_value)
+                    if qfq_close_quality == "OBSERVED"
                     else None,
+                    "qfq_close_quality": qfq_close_quality or "UNKNOWN",
+                    "qfq_close_reason": qfq_close_reason,
                     "qfq_price_quality": current_close.quality
                     if current_close
                     else "UNKNOWN_DATA",
@@ -1230,19 +1264,23 @@ def read_source_pool_seed(
             if item["quality"] == "OBSERVED":
                 item["value"] = {"exact": item["value"]}
             native_fields[f"core.{name}"] = item
+        stored_close = (
+            Fraction(
+                int(row["target_close_numerator"]),
+                int(row["target_close_denominator"]),
+            )
+            if row["target_close_numerator"] is not None
+            and row["target_close_denominator"] is not None
+            else None
+        )
         native = {
             "actual_quote": bool(row["target_actual_quote"]),
             "actual_quote_state": predicates["actual_bar"]["state"],
             "actual_quote_reason": predicates["actual_bar"]["reason"],
-            "close": str(
-                Fraction(
-                    int(row["target_close_numerator"]),
-                    int(row["target_close_denominator"]),
-                )
-            )
-            if row["target_close_numerator"] is not None
-            and row["target_close_denominator"] is not None
-            else None,
+            "close": str(stored_close) if stored_close is not None else None,
+            "qfq_close": str(stored_close) if stored_close is not None else None,
+            "qfq_close_quality": row["target_close_quality"],
+            "qfq_close_reason": row["target_close_reason"],
             "fields": native_fields,
             "return_field_sources": row["return_field_sources"],
         }
@@ -1503,7 +1541,7 @@ def _board_native(pool, symbols, peer_members, board_id, *, peer_cache=None):
             if (
                 quote_state(s) == "TRUE"
                 and native.get("qfq_close") is not None
-                and native.get("qfq_price_quality") == "OBSERVED"
+                and native.get("qfq_close_quality") == "OBSERVED"
                 and ma is not None
             ):
                 ma_pairs.append(Fraction(native["qfq_close"]) > ma)

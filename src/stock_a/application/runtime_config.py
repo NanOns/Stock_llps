@@ -13,6 +13,8 @@ from stock_a.domain.source_policy import validate_baostock_primary_policy
 
 _WORKSPACE = Path("G:/codex work/Stock A")
 
+_TEMPORARY_ROOT = Path("G:/codex_tmp")
+
 _CONFIG_ROOT = _WORKSPACE / "config"
 
 _CONFIG_FILE = _CONFIG_ROOT / "runtime.defaults.json"
@@ -148,6 +150,10 @@ def _validate_config(config: Any) -> None:
     if Path(paths["configuration_root"]).resolve() != _CONFIG_ROOT.resolve():
         raise DiagnosticError(
             "CONFIG_INVALID", "配置configuration_root与唯一配置槽位不一致"
+        )
+    if Path(paths["temporary_root"]).resolve() != _TEMPORARY_ROOT.resolve():
+        raise DiagnosticError(
+            "CONFIG_INVALID", "配置temporary_root必须解析到G:/codex_tmp"
         )
     policy = _require_mapping(root.get("configuration_policy"), "configuration_policy")
     if (

@@ -1252,33 +1252,39 @@ def _read_research_rows_cursor(
     return selected_rows
 
 
+def _read_board_members_cursor(cursor, *, industry_snapshot_id, concept_snapshot_id):
+    """从调用方已打开的快照读取板块成员及快照身份。"""
+    cursor.execute(
+        """SELECT snapshot_id, source_kind, observed_at, research_mode
+           FROM tdx_sector_source_snapshots WHERE snapshot_id IN (%s,%s)""",
+        (industry_snapshot_id, concept_snapshot_id),
+    )
+    snapshots = cursor.fetchall()
+    kinds = {row[0]: row[1] for row in snapshots}
+    if kinds != {
+        industry_snapshot_id: "TDX_TDXHY_CFG",
+        concept_snapshot_id: "TDX_INFOHARBOR_BLOCK_DAT",
+    } or any(row[3] != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT" for row in snapshots):
+        raise ValueError("行业或概念快照身份和后验模式不匹配")
+    cursor.execute(
+        """SELECT m.board_kind,m.board_native_id,c.board_name,m.source_symbol
+           FROM tdx_sector_members m JOIN tdx_sector_catalog c
+             ON c.id=m.catalog_id
+           WHERE c.snapshot_id IN (%s,%s)
+           ORDER BY m.board_kind,m.board_native_id,m.source_symbol""",
+        (industry_snapshot_id, concept_snapshot_id),
+    )
+    return snapshots, cursor.fetchall()
+
+
 def read_board_members(config, *, industry_snapshot_id, concept_snapshot_id):
     """读取明确指定的后验行业及概念成员，不推断历史有效期。"""
     with _transaction(config, write=False) as (_, cursor, _):
-        cursor.execute(
-            """SELECT snapshot_id, source_kind, observed_at, research_mode
-               FROM tdx_sector_source_snapshots WHERE snapshot_id IN (%s,%s)""",
-            (industry_snapshot_id, concept_snapshot_id),
+        return _read_board_members_cursor(
+            cursor,
+            industry_snapshot_id=industry_snapshot_id,
+            concept_snapshot_id=concept_snapshot_id,
         )
-        snapshots = cursor.fetchall()
-        kinds = {row[0]: row[1] for row in snapshots}
-        if kinds != {
-            industry_snapshot_id: "TDX_TDXHY_CFG",
-            concept_snapshot_id: "TDX_INFOHARBOR_BLOCK_DAT",
-        } or any(
-            row[3] != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT" for row in snapshots
-        ):
-            raise ValueError("行业或概念快照身份和后验模式不匹配")
-        cursor.execute(
-            """SELECT m.board_kind,m.board_native_id,c.board_name,m.source_symbol
-               FROM tdx_sector_members m JOIN tdx_sector_catalog c
-                 ON c.id=m.catalog_id
-               WHERE c.snapshot_id IN (%s,%s)
-               ORDER BY m.board_kind,m.board_native_id,m.source_symbol""",
-            (industry_snapshot_id, concept_snapshot_id),
-        )
-        members = cursor.fetchall()
-    return snapshots, members
 
 
 def read_research_keys(config, *, target, source_capture_id, calendar_revision):

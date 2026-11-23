@@ -240,7 +240,9 @@ def _records_for_page(
             "history_records_status": result["history_records_status"],
             "history_actual_price_bar_count": int(window.get("real_bar_count", 0)),
             "target_bar_status": result["target_bar_status"],
-            "target_price_quality": target_row["qfq_price_quality"],
+            "target_price_quality": target_row.get(
+                "qfq_close_quality", target_row.get("qfq_price_quality", "UNKNOWN")
+            ),
             "ma20_window_valid_bar_count": int(result["ma20_window_valid_bar_count"]),
             "ma20_window_expected_bar_count": int(
                 result["ma20_window_expected_bar_count"]

@@ -220,76 +220,7 @@ def read_cohort_page(
         return total, groups, rows, rules, rps_pulse_groups
 
 
-def read_cohort_date_comparison(
-    config,
-    *,
-    research_cutoff,
-    source_capture_id,
-    rule,
-    horizon,
-    limit=20,
-):
-    """只读最多20个已保存T0日的冻结三态Cohort逐日统计。"""
-    from stock_a.storage.postgres.research_facts import RULES
-
-    if (
-        rule not in RULES
-        or horizon not in (1, 3, 5)
-        or type(limit) is not int
-        or not 1 <= limit <= 20
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
-    ):
-        raise ValueError("Cohort跨日读取的规则、期限、分页或来源包参数无效")
-
-    with _transaction(config, write=False, statement_timeout_ms=15000) as (
-        _,
-        cursor,
-        _,
-    ):
-        cursor.execute(
-            """WITH selected_sessions AS (
-                   SELECT DISTINCT target_session
-                   FROM source_cohort_group_stats
-                   WHERE research_cutoff=%s AND source_capture_id=%s
-                     AND rule_id=%s AND rule_version=%s
-                     AND path_rule_version=%s AND horizon=%s
-                   ORDER BY target_session DESC LIMIT %s
-               )
-               SELECT s.target_session,s.source_capture_id,s.profile_revision,
-                      s.history_session_count,s.d1_history_session_count,
-                      s.event_window_start,s.calendar_revision,s.state,s.weighting,
-                      s.source_pool_count,s.member_count,s.evaluable_count,
-                      s.positive_count,s.median_numerator,s.median_denominator,
-                      s.maturity_codes,s.maturity_counts,s.path_quality_codes,
-                      s.path_quality_counts,s.reason_codes,s.reason_counts
-               FROM source_cohort_group_stats s
-               JOIN selected_sessions x USING (target_session)
-               WHERE s.research_cutoff=%s AND s.source_capture_id=%s
-                 AND s.rule_id=%s AND s.rule_version=%s
-                 AND s.path_rule_version=%s AND s.horizon=%s
-               ORDER BY s.target_session DESC,s.source_capture_id,
-                        s.profile_revision,s.history_session_count,
-                        s.d1_history_session_count,s.event_window_start,
-                        s.calendar_revision,s.state,s.weighting""",
-            (
-                research_cutoff,
-                source_capture_id,
-                rule,
-                RULE_VERSION,
-                PATH_VERSION,
-                horizon,
-                limit,
-                research_cutoff,
-                source_capture_id,
-                rule,
-                RULE_VERSION,
-                PATH_VERSION,
-                horizon,
-            ),
-        )
-        stored = cursor.fetchall()
-
+def _cohort_date_comparison_payload(stored):
     by_session = {}
     for row in stored:
         (
@@ -439,17 +370,92 @@ def read_cohort_date_comparison(
         )
 
     due_date_count = sum(item["status"] == "AVAILABLE" for item in dates)
-    from stock_a.storage.postgres.cohort_enrollment import (
-        read_cohort_enrollment_datewise_comparison,
-    )
+    return dates, due_date_count
 
-    enrollment_datewise = read_cohort_enrollment_datewise_comparison(
-        config,
-        dates=dates,
-        research_cutoff=research_cutoff,
-        source_capture_id=source_capture_id,
-        rule=rule,
-    )
+
+def read_cohort_date_comparison(
+    config,
+    *,
+    research_cutoff,
+    source_capture_id,
+    rule,
+    horizon,
+    limit=20,
+):
+    """只读最多20个已保存T0日的冻结三态Cohort逐日统计。"""
+    from stock_a.storage.postgres.research_facts import RULES
+
+    if (
+        rule not in RULES
+        or horizon not in (1, 3, 5)
+        or type(limit) is not int
+        or not 1 <= limit <= 20
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+    ):
+        raise ValueError("Cohort跨日读取的规则、期限、分页或来源包参数无效")
+
+    with _transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """WITH selected_sessions AS (
+                   SELECT DISTINCT target_session
+                   FROM source_cohort_group_stats
+                   WHERE research_cutoff=%s AND source_capture_id=%s
+                     AND rule_id=%s AND rule_version=%s
+                     AND path_rule_version=%s AND horizon=%s
+                   ORDER BY target_session DESC LIMIT %s
+               )
+               SELECT s.target_session,s.source_capture_id,s.profile_revision,
+                      s.history_session_count,s.d1_history_session_count,
+                      s.event_window_start,s.calendar_revision,s.state,s.weighting,
+                      s.source_pool_count,s.member_count,s.evaluable_count,
+                      s.positive_count,s.median_numerator,s.median_denominator,
+                      s.maturity_codes,s.maturity_counts,s.path_quality_codes,
+                      s.path_quality_counts,s.reason_codes,s.reason_counts
+               FROM source_cohort_group_stats s
+               JOIN selected_sessions x USING (target_session)
+               WHERE s.research_cutoff=%s AND s.source_capture_id=%s
+                 AND s.rule_id=%s AND s.rule_version=%s
+                 AND s.path_rule_version=%s AND s.horizon=%s
+               ORDER BY s.target_session DESC,s.source_capture_id,
+                        s.profile_revision,s.history_session_count,
+                        s.d1_history_session_count,s.event_window_start,
+                        s.calendar_revision,s.state,s.weighting""",
+            (
+                research_cutoff,
+                source_capture_id,
+                rule,
+                RULE_VERSION,
+                PATH_VERSION,
+                horizon,
+                limit,
+                research_cutoff,
+                source_capture_id,
+                rule,
+                RULE_VERSION,
+                PATH_VERSION,
+                horizon,
+            ),
+        )
+        stored = cursor.fetchall()
+        dates, due_date_count = _cohort_date_comparison_payload(stored)
+        from stock_a.storage.postgres.cohort_enrollment import (
+            read_cohort_enrollment_datewise_comparison,
+        )
+
+        enrollment_datewise = read_cohort_enrollment_datewise_comparison(
+            config,
+            dates=dates,
+            research_cutoff=research_cutoff,
+            source_capture_id=source_capture_id,
+            rule=rule,
+            _cursor=cursor,
+        )
+
     return {
         "status": "AVAILABLE" if dates else "NO_STORED_FACT",
         "scope": "NON_PIT_EXPLORATORY",

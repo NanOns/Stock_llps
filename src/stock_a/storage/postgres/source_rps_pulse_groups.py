@@ -1380,6 +1380,92 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
     return counts
 
 
+def _select_rps_pulse_forward_rows(
+    rows: Sequence[Sequence[Any]],
+    *,
+    target: date,
+    expected_endpoints: dict[int, date | None],
+    calendar_revision: str,
+    official_revision_chain: str,
+) -> list[tuple[Any, ...]]:
+    """每个T0事实/期限只选一条年度日历兼容路径。"""
+    from stock_a.research.source_forward_path import (
+        forward_calendar_revision_compatible,
+    )
+    from stock_a.storage.postgres.research_facts import ResearchFactConflict
+
+    grouped: dict[tuple[int, int], list[Sequence[Any]]] = defaultdict(list)
+    for row in rows:
+        if len(row) != 36:
+            raise ResearchFactConflict("RPS×PULSE查询行缺少Forward日历修订字段")
+        grouped[(int(row[0]), int(row[25]))].append(row)
+
+    selected_rows: list[tuple[Any, ...]] = []
+    for identity, candidates in sorted(grouped.items()):
+        horizon = identity[1]
+        due_session = expected_endpoints[horizon]
+        base_rows = {tuple(row[:26]) + (row[34],) for row in candidates}
+        if len(base_rows) != 1:
+            raise ResearchFactConflict("同一T0/期限Forward候选绑定了不同关系事实")
+
+        paths = [
+            row for row in candidates if row[35] is not None or row[26] is not None
+        ]
+        compatible = [
+            row
+            for row in paths
+            if due_session is not None
+            and row[26] == due_session
+            and forward_calendar_revision_compatible(
+                target,
+                due_session,
+                rule_revision=calendar_revision,
+                path_revision=row[35],
+                official_revision_chain=official_revision_chain,
+            )
+        ]
+        if len(compatible) > 1:
+            raise ResearchFactConflict("同一RPS×PULSE关系命中多个兼容Forward日历版本")
+        if compatible:
+            selected_rows.append(tuple(compatible[0][:35]))
+            continue
+
+        if due_session is not None and any(row[26] == due_session for row in paths):
+            if len(paths) > 1:
+                raise ResearchFactConflict("同一RPS×PULSE关系存在多个不兼容Forward候选")
+            selected_rows.append(
+                _forward_path_unknown_row(
+                    paths[0], "FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH"
+                )
+            )
+            continue
+
+        if len(paths) > 1:
+            raise ResearchFactConflict("同一RPS×PULSE关系命中多个Forward候选")
+        if paths:
+            reason = (
+                "FORWARD_PATH_STORED_BEFORE_OFFICIAL_ENDPOINT_DUE"
+                if due_session is None
+                else "FORWARD_PATH_ENDPOINT_SESSION_MISMATCH"
+            )
+            selected_rows.append(_forward_path_unknown_row(paths[0], reason))
+        else:
+            selected_rows.append(tuple(candidates[0][:35]))
+    return selected_rows
+
+
+def _forward_path_unknown_row(row: Sequence[Any], reason: str) -> tuple[Any, ...]:
+    """保留错误路径身份但清除其数值，避免误计为Observed收益。"""
+    unknown = list(row[:35])
+    unknown[28] = "UNKNOWN"
+    unknown[29] = reason
+    unknown[30] = None
+    unknown[31] = None
+    unknown[32] = "UNKNOWN"
+    unknown[33] = [reason]
+    return tuple(unknown)
+
+
 def read_rps_pulse_forward_groups_cursor(
     cursor: Any,
     *,
@@ -1407,8 +1493,8 @@ def read_rps_pulse_forward_groups_cursor(
     from stock_a.research.entry_context.sessions import _load_calendar
     from stock_a.storage.postgres.research_facts import PATH_VERSION, RULE_VERSION
 
-    _, _, official_revision, sessions = _load_calendar(research_cutoff)
-    if calendar_revision != official_revision:
+    _, _, official_revision_chain, sessions = _load_calendar(research_cutoff)
+    if calendar_revision != official_revision_chain:
         raise ValueError("Cohort日历修订与现行官方日历不一致")
     if target not in sessions:
         raise ValueError("RPS×PULSE T0不在官方日历中")
@@ -1586,7 +1672,8 @@ def read_rps_pulse_forward_groups_cursor(
                   h.horizon,p.endpoint_session,p.maturity,p.endpoint_quality,
                   p.endpoint_reason,p.endpoint_numerator,p.endpoint_denominator,
                   p.path_quality,p.path_reasons,
-                  (c.source_t0_fact_id IS NOT NULL) AS change_fact_present
+                  (c.source_t0_fact_id IS NOT NULL) AS change_fact_present,
+                  p.calendar_revision
            FROM latest o
            JOIN source_rule_evaluations r ON r.id=o.rule_fact_id
            LEFT JOIN source_rps_pulse_t0_change_facts c
@@ -1599,7 +1686,6 @@ def read_rps_pulse_forward_groups_cursor(
             AND p.source_symbol=o.source_symbol
             AND p.horizon=h.horizon
             AND p.path_rule_version=%s
-            AND p.calendar_revision=r.calendar_revision
             AND p.price_coordinate='FORWARD_ADJUSTED'
             AND p.scope='NON_PIT_EXPLORATORY'
             AND p.endpoint_session<=%s
@@ -1635,7 +1721,16 @@ def read_rps_pulse_forward_groups_cursor(
             *([rule_state_filter] if rule_state_filter != "ALL" else []),
         ),
     )
-    rows = cursor.fetchall()
+    raw_rows = cursor.fetchall()
+    if len(raw_rows) > _MAX_OUTCOME_ROWS:
+        raise ValueError("所选T0/冻结规则的Forward候选超过轻量读取上限")
+    rows = _select_rps_pulse_forward_rows(
+        raw_rows,
+        target=target,
+        expected_endpoints=expected_endpoints,
+        calendar_revision=calendar_revision,
+        official_revision_chain=official_revision_chain,
+    )
     if len(rows) > _MAX_OUTCOME_ROWS:
         raise ValueError("所选T0/冻结规则的板块关系超过轻量读取上限")
 
@@ -1745,7 +1840,13 @@ def read_rps_pulse_forward_groups_cursor(
         )
         endpoint_due = expected_endpoints[horizon]
         actual_path = endpoint_session is not None
-        if actual_path and endpoint_session != endpoint_due:
+        if endpoint_reason in {
+            "FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH",
+            "FORWARD_PATH_ENDPOINT_SESSION_MISMATCH",
+            "FORWARD_PATH_STORED_BEFORE_OFFICIAL_ENDPOINT_DUE",
+        }:
+            outcome_state = "UNKNOWN"
+        elif actual_path and endpoint_session != endpoint_due:
             outcome_state = "INCOMPLETE"
         elif endpoint_due is None:
             outcome_state = "NOT_DUE"

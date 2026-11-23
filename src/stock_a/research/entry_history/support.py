@@ -60,10 +60,12 @@ def _source_price_bar_from_pg_row(
     if price_coordinate == "RAW_UNADJUSTED":
         names = ("raw_open", "raw_high", "raw_low", "raw_close")
         quality_column, reason_column = "price_quality", "price_reason"
+        field_prefix = "raw"
         status = row.get("bar_status")
     elif price_coordinate == "FORWARD_ADJUSTED":
         names = ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
         quality_column, reason_column = "qfq_price_quality", "qfq_price_reason"
+        field_prefix = "qfq"
         status = row.get("qfq_bar_status")
     else:
         raise ResearchEntryError(
@@ -79,9 +81,19 @@ def _source_price_bar_from_pg_row(
             "PG_PRICE_CAPTURE_ID_INVALID", "PG来源价格行缺少paired source_capture_id"
         )
     fields = tuple(
-        _field_from_pg_raw(row, column, quality_column, reason_column)
-        for column in names
+        _field_from_pg_raw(
+            row,
+            column,
+            f"{field_prefix}_{field}_quality"
+            if f"{field_prefix}_{field}_quality" in row
+            else quality_column,
+            f"{field_prefix}_{field}_reason"
+            if f"{field_prefix}_{field}_reason" in row
+            else reason_column,
+        )
+        for field, column in zip(("open", "high", "low", "close"), names, strict=True)
     )
+    group_quality = row.get(quality_column)
     if all(item.quality == "OBSERVED" for item in fields):
         try:
             values = tuple(exact_number(item.value) for item in fields)
@@ -93,8 +105,12 @@ def _source_price_bar_from_pg_row(
             and values[2] <= min(values[0], values[3])
             and max(values[0], values[3]) <= values[1]
         )
-        if valid:
+        if valid and group_quality == "OBSERVED":
             prices = FieldValue(values)
+        elif valid:
+            prices = unknown(
+                row.get(reason_column) or "PRICE_GROUP_QUALITY_NOT_OBSERVED"
+            )
         else:
             prices = unknown("PRICE_BAR_INVALID")
             fields = tuple(unknown("PRICE_BAR_INVALID") for _ in names)
@@ -196,7 +212,7 @@ def _core_observation_from_pg_price_row(
     status = row.get(status_column)
     if status not in {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}:
         raise ResearchEntryError("PG_PRICE_STATUS_INVALID", "PG来源价格状态未登记")
-    trade_state, trade_reason = trade_status_state_from_pg_row(
+    trade_state, _trade_reason = trade_status_state_from_pg_row(
         row, price_coordinate=price_coordinate
     )
     amount = _field_from_pg_raw(row, "raw_amount", "amount_quality", "amount_reason")
@@ -235,12 +251,8 @@ def _core_observation_from_pg_price_row(
             native_volume=native_volume,
         )
     selected = _source_price_bar_from_pg_row(row, price_coordinate=price_coordinate)
-    if selected is None or selected.prices.quality != "OBSERVED":
-        reason = (
-            selected.prices.reason
-            if selected is not None and selected.prices.reason
-            else "PRICE_COORDINATE_VALUE_UNKNOWN"
-        )
+    if selected is None:
+        reason = "PRICE_COORDINATE_ROW_NOT_PRESENT"
         return CoreObservation(
             session=session,
             state=(
@@ -259,21 +271,6 @@ def _core_observation_from_pg_price_row(
             native_volume=native_volume,
         )
     state = trade_state
-    if state == "UNKNOWN":
-        reason = trade_reason or "TRADE_STATUS_UNKNOWN"
-        return CoreObservation(
-            session=session,
-            state=state,
-            coordinate_id=coordinate_id,
-            open=unknown(reason),
-            high=unknown(reason),
-            low=unknown(reason),
-            close=unknown(reason),
-            amount=amount,
-            volume=volume,
-            native_amount=native_amount,
-            native_volume=native_volume,
-        )
     return CoreObservation(
         session=session,
         state=state,

@@ -307,6 +307,12 @@ def _aggregate_raw_activity(
     calendar_closed: bool,
     window_truncated_session_count: int,
 ) -> tuple[Fraction | None, str, str | None, str | None]:
+    unit_statuses = {getattr(row, unit_status_field) for row in rows}
+    unit_status = expected_unit if unit_statuses == {expected_unit} else "UNKNOWN"
+    if not calendar_closed:
+        return None, "NOT_COMPUTED", "CALENDAR_PERIOD_NOT_CLOSED", unit_status
+    if window_truncated_session_count:
+        return None, "UNKNOWN", "WINDOW_START_TRUNCATED", unit_status
     activity_rows = tuple(
         row for row in rows if row.trade_status_state != "CONFIRMED_SUSPENSION"
     )
@@ -331,10 +337,6 @@ def _aggregate_raw_activity(
         return None, "UNKNOWN", "|".join(reasons), "UNKNOWN"
     unit_statuses = {getattr(row, unit_status_field) for row in activity_rows}
     unit_status = expected_unit if unit_statuses == {expected_unit} else "UNKNOWN"
-    if not calendar_closed:
-        return None, "NOT_COMPUTED", "CALENDAR_PERIOD_NOT_CLOSED", unit_status
-    if window_truncated_session_count:
-        return None, "UNKNOWN", "WINDOW_START_TRUNCATED", unit_status
     values = [getattr(row, field) for row in activity_rows]
     qualities = [getattr(row, f"{field}_quality") for row in activity_rows]
     if (
