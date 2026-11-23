@@ -3052,8 +3052,6 @@ class DataJobCoordinator:
 
     def _execute_job(self, job_id: UUID, plan: Mapping[str, Any]) -> None:
         prepared_reset_inputs = None
-        reset_input_bound = False
-        job_finished = False
         try:
             execution_plan = dict(plan)
             if (
@@ -3090,7 +3088,6 @@ class DataJobCoordinator:
                         job_id=job_id,
                         fingerprint=prepared["preflight_fingerprint"],
                     )
-                    reset_input_bound = True
                 execution_plan["_prepared_baostock_reset_inputs"] = (
                     prepared_reset_inputs
                 )
@@ -3152,7 +3149,6 @@ class DataJobCoordinator:
                 )
                 if plan.get("operation") == "CLEAR_DERIVED":
                     data_job_pg.finish_job(self.config, job_id=job_id)
-                    job_finished = True
                     return
             _execute_shared_production_chain(
                 config=self.config,
@@ -3162,7 +3158,6 @@ class DataJobCoordinator:
                 begin_callback=self._begin_units,
             )
             data_job_pg.finish_job(self.config, job_id=job_id)
-            job_finished = True
         except Exception as error:  # noqa: BLE001 - 后台任务必须把任意阶段异常持久化为失败状态。
             error_code = getattr(error, "code", type(error).__name__)
             error_message = str(error)[:1000]
