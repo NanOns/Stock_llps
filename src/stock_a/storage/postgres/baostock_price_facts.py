@@ -25,6 +25,7 @@ _COORDINATE_FLAGS = {RAW_COORDINATE: "3", QFQ_COORDINATE: "2"}
 _NON_PIT_CLOCK_ROLE = "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
 _NAME_PARSER_CONTRACT = "BAOSTOCK_QUERY_STOCK_BASIC/R1"
 _NAME_SOURCE_FILE = "BAOSTOCK_QUERY_STOCK_BASIC"
+_PRICE_FIELD_QUALITY_MIGRATION_ID = 66
 _PRICE_COLUMNS = (
     "source_symbol",
     "market",
@@ -37,6 +38,14 @@ _PRICE_COLUMNS = (
     "raw_high",
     "raw_low",
     "raw_close",
+    "raw_open_quality",
+    "raw_open_reason",
+    "raw_high_quality",
+    "raw_high_reason",
+    "raw_low_quality",
+    "raw_low_reason",
+    "raw_close_quality",
+    "raw_close_reason",
     "price_quality",
     "price_reason",
     "raw_amount",
@@ -69,6 +78,14 @@ _PRICE_COLUMNS = (
     "qfq_high",
     "qfq_low",
     "qfq_close",
+    "qfq_open_quality",
+    "qfq_open_reason",
+    "qfq_high_quality",
+    "qfq_high_reason",
+    "qfq_low_quality",
+    "qfq_low_reason",
+    "qfq_close_quality",
+    "qfq_close_reason",
     "qfq_price_quality",
     "qfq_price_reason",
     "qfq_response_session_date",
@@ -112,6 +129,14 @@ _RAW_PRICE_COLUMNS = (
     "raw_high",
     "raw_low",
     "raw_close",
+    "raw_open_quality",
+    "raw_open_reason",
+    "raw_high_quality",
+    "raw_high_reason",
+    "raw_low_quality",
+    "raw_low_reason",
+    "raw_close_quality",
+    "raw_close_reason",
     "price_quality",
     "price_reason",
     "raw_preclose",
@@ -129,6 +154,14 @@ _QFQ_PRICE_COLUMNS = (
     "qfq_high",
     "qfq_low",
     "qfq_close",
+    "qfq_open_quality",
+    "qfq_open_reason",
+    "qfq_high_quality",
+    "qfq_high_reason",
+    "qfq_low_quality",
+    "qfq_low_reason",
+    "qfq_close_quality",
+    "qfq_close_reason",
     "qfq_price_quality",
     "qfq_price_reason",
 )
@@ -200,6 +233,19 @@ class BaoStockPriceFactsError(Exception):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+
+
+def _require_price_field_quality_migration(cursor: Any) -> None:
+    cursor.execute(
+        "SELECT EXISTS (SELECT 1 FROM migration_ledger "
+        "WHERE migration_id=%s AND lineage='STOCK_A_INITIAL_R1')",
+        (_PRICE_FIELD_QUALITY_MIGRATION_ID,),
+    )
+    if cursor.fetchone() != (True,):
+        raise BaoStockPriceFactsError(
+            "PRICE_FIELD_QUALITY_MIGRATION_REQUIRED",
+            "0066字段级价格质量迁移未应用，拒绝读写新价格投影",
+        )
 
 
 def _aware(value: Any, label: str) -> datetime:
@@ -981,6 +1027,7 @@ def _price_group(
 ) -> dict[str, Any]:
     names = ("open", "high", "low", "close")
     values: dict[str, Any] = {}
+    field_columns: dict[str, Any] = {}
     qualities: list[str] = []
     reasons: list[tuple[str, str | None]] = []
     for name in names:
@@ -989,6 +1036,9 @@ def _price_group(
             values[name] = None
             qualities.append("UNKNOWN")
             reasons.append((name, unavailable_reason))
+            field_columns[f"{prefix}_{name}"] = None
+            field_columns[f"{prefix}_{name}_quality"] = "UNKNOWN"
+            field_columns[f"{prefix}_{name}_reason"] = unavailable_reason
             continue
         value, quality, reason = _field_value(
             field,
@@ -1003,23 +1053,28 @@ def _price_group(
         values[name] = value
         qualities.append(quality)
         reasons.append((name, reason))
+        field_columns[f"{prefix}_{name}"] = value
+        field_columns[f"{prefix}_{name}_quality"] = quality
+        field_columns[f"{prefix}_{name}_reason"] = reason
     quality_column = "qfq_price_quality" if prefix == "qfq" else "price_quality"
     reason_column = "qfq_price_reason" if prefix == "qfq" else "price_reason"
+    known_values = {
+        name: values[name]
+        for name, quality in zip(names, qualities, strict=True)
+        if quality == "OBSERVED"
+    }
+    high_value = known_values.get("high")
+    low_value = known_values.get("low")
+    if (
+        high_value is not None
+        and any(value > high_value for value in known_values.values())
+    ) or (
+        low_value is not None
+        and any(value < low_value for value in known_values.values())
+    ):
+        raise BaoStockPriceFactsError("PRICE_OHLC_INVALID", f"{prefix}OHLC区间关系非法")
     if all(quality == "OBSERVED" for quality in qualities):
-        open_value, high_value, low_value, close_value = (
-            values[name] for name in names
-        )
-        if high_value < max(open_value, low_value, close_value) or low_value > min(
-            open_value, high_value, close_value
-        ):
-            raise BaoStockPriceFactsError(
-                "PRICE_OHLC_INVALID", f"{prefix}OHLC区间关系非法"
-            )
-        return {
-            **{f"{prefix}_{name}": values[name] for name in names},
-            quality_column: "OBSERVED",
-            reason_column: None,
-        }
+        return {**field_columns, quality_column: "OBSERVED", reason_column: None}
     group_quality = (
         "BAD_VALUE"
         if "BAD_VALUE" in qualities
@@ -1028,10 +1083,25 @@ def _price_group(
         else "UNKNOWN"
     )
     return {
-        **{f"{prefix}_{name}": None for name in names},
+        **field_columns,
         quality_column: group_quality,
         reason_column: _field_reason(reasons),
     }
+
+
+def _unknown_price_group(prefix: str, reason: str) -> dict[str, Any]:
+    quality_column = "qfq_price_quality" if prefix == "qfq" else "price_quality"
+    reason_column = "qfq_price_reason" if prefix == "qfq" else "price_reason"
+    fields = {
+        column: value
+        for name in ("open", "high", "low", "close")
+        for column, value in (
+            (f"{prefix}_{name}", None),
+            (f"{prefix}_{name}_quality", "UNKNOWN"),
+            (f"{prefix}_{name}_reason", reason),
+        )
+    }
+    return {**fields, quality_column: "UNKNOWN", reason_column: reason}
 
 
 def _coordinate_schema(
@@ -1180,12 +1250,7 @@ def _raw_payload(
             "RAW_BAR_NOT_RETURNED" if request_complete else "RAW_REQUEST_NOT_COMPLETED"
         )
         group = {
-            "raw_open": None,
-            "raw_high": None,
-            "raw_low": None,
-            "raw_close": None,
-            "price_quality": "UNKNOWN",
-            "price_reason": reason,
+            **_unknown_price_group("raw", reason),
         }
         preclose = None
         preclose_quality = "UNKNOWN"
@@ -1282,12 +1347,7 @@ def _qfq_payload(
             "QFQ_BAR_NOT_RETURNED" if request_complete else "QFQ_REQUEST_NOT_COMPLETED"
         )
         price = {
-            "qfq_open": None,
-            "qfq_high": None,
-            "qfq_low": None,
-            "qfq_close": None,
-            "qfq_price_quality": "UNKNOWN",
-            "qfq_price_reason": reason,
+            **_unknown_price_group("qfq", reason),
         }
         preclose = (None, "UNKNOWN", reason)
     else:
@@ -2069,6 +2129,7 @@ def persist_baostock_price_batch(
         cursor,
         _scope,
     ):
+        _require_price_field_quality_migration(cursor)
         cursor.execute(
             """SELECT provider,capture_uuid,range_start_session,range_end_session,
                       price_coordinates,parser_contract,requested_symbol_count,
@@ -2463,6 +2524,14 @@ _PRICE_READ_COLUMNS = (
     "raw_high",
     "raw_low",
     "raw_close",
+    "raw_open_quality",
+    "raw_open_reason",
+    "raw_high_quality",
+    "raw_high_reason",
+    "raw_low_quality",
+    "raw_low_reason",
+    "raw_close_quality",
+    "raw_close_reason",
     "price_quality",
     "price_reason",
     "raw_preclose",
@@ -2476,6 +2545,14 @@ _PRICE_READ_COLUMNS = (
     "qfq_high",
     "qfq_low",
     "qfq_close",
+    "qfq_open_quality",
+    "qfq_open_reason",
+    "qfq_high_quality",
+    "qfq_high_reason",
+    "qfq_low_quality",
+    "qfq_low_reason",
+    "qfq_close_quality",
+    "qfq_close_reason",
     "qfq_price_quality",
     "qfq_price_reason",
     "qfq_response_session_date",
@@ -2554,9 +2631,13 @@ _PRICE_READ_SELECT = """SELECT
     c.source_available_at AS capture_available_at,
     d.source_symbol,d.source_code,d.market,d.board,d.session_date,
     d.bar_status,d.bar_reason,d.raw_open,d.raw_high,d.raw_low,d.raw_close,
+    d.raw_open_quality,d.raw_open_reason,d.raw_high_quality,d.raw_high_reason,
+    d.raw_low_quality,d.raw_low_reason,d.raw_close_quality,d.raw_close_reason,
     d.price_quality,d.price_reason,d.raw_preclose,d.raw_preclose_quality,
     d.raw_preclose_reason,d.raw_response_session_date,d.raw_response_source_code,
     d.raw_adjustflag,d.raw_response_fields,d.qfq_open,d.qfq_high,d.qfq_low,d.qfq_close,
+    d.qfq_open_quality,d.qfq_open_reason,d.qfq_high_quality,d.qfq_high_reason,
+    d.qfq_low_quality,d.qfq_low_reason,d.qfq_close_quality,d.qfq_close_reason,
     d.qfq_price_quality,d.qfq_price_reason,d.qfq_response_session_date,
     d.qfq_response_source_code,d.qfq_adjustflag,d.qfq_response_fields,
     d.qfq_bar_status,d.qfq_bar_reason,d.qfq_preclose,d.qfq_preclose_quality,
@@ -2619,6 +2700,14 @@ def _price_row_payload(row: Mapping[str, Any], price_coordinate: str) -> dict[st
             "selected_high": row[f"{prefix}_high"],
             "selected_low": row[f"{prefix}_low"],
             "selected_close": row[f"{prefix}_close"],
+            "selected_open_quality": result[f"{prefix}_open_quality"],
+            "selected_open_reason": result[f"{prefix}_open_reason"],
+            "selected_high_quality": result[f"{prefix}_high_quality"],
+            "selected_high_reason": result[f"{prefix}_high_reason"],
+            "selected_low_quality": result[f"{prefix}_low_quality"],
+            "selected_low_reason": result[f"{prefix}_low_reason"],
+            "selected_close_quality": result[f"{prefix}_close_quality"],
+            "selected_close_reason": result[f"{prefix}_close_reason"],
             "selected_bar_status": (
                 row["bar_status"] if raw_selected else row["qfq_bar_status"]
             ),
@@ -2691,6 +2780,7 @@ def read_baostock_price_history_rows_cursor(
     price_coordinate: str,
 ) -> list[dict[str, Any]]:
     """在调用方同一只读快照内读取指定捕获的RAW或QFQ typed日线。"""
+    _require_price_field_quality_migration(cursor)
     if (
         type(source_capture_id) is not int
         or source_capture_id <= 0
@@ -2876,6 +2966,7 @@ def read_baostock_price_history_batch(
         cursor,
         _scope,
     ):
+        _require_price_field_quality_migration(cursor)
         cursor.execute(
             """SELECT requested_symbol_count
                FROM stock.source_captures
@@ -3190,6 +3281,7 @@ def read_baostock_price_page(
         cursor,
         _scope,
     ):
+        _require_price_field_quality_migration(cursor)
         where_market = "(%s='ALL' OR d.market=%s)"
         where_board = "(%s='ALL' OR d.board=%s)"
         status_column = (
@@ -3351,6 +3443,7 @@ def read_baostock_price_detail(
         cursor,
         _scope,
     ):
+        _require_price_field_quality_migration(cursor)
         cursor.execute(
             """SELECT DISTINCT d.source_capture_id
                FROM stock.source_raw_daily d

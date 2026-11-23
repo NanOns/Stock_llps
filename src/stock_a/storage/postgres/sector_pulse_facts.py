@@ -78,6 +78,7 @@ _COLUMNS = (
     "formal_rotation_state",
 )
 _KEY = (
+    "target_session",
     "source_capture_id",
     "catalog_id",
     "profile_revision",
@@ -525,6 +526,15 @@ def _persist_once(
         cursor,
         _connection_identity,
     ):
+        cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM migration_ledger "
+            "WHERE migration_id=66 AND lineage='STOCK_A_INITIAL_R1')"
+        )
+        if cursor.fetchone() != (True,):
+            raise SectorPulsePgError(
+                "SECTOR_PULSE_KEY_MIGRATION_REQUIRED",
+                "0066目标会话唯一键迁移未应用，拒绝写入多会话PULSE",
+            )
         _validate_write_scope(
             cursor,
             target_session=target_session,
@@ -554,10 +564,12 @@ def _persist_once(
                 )
             catalog_ids = [row[_COLUMNS.index("catalog_id")] for row in group]
             predicate = (
-                "source_capture_id=%s AND profile_revision=%s "
+                "target_session=%s AND source_capture_id=%s "
+                "AND profile_revision=%s "
                 "AND catalog_id=ANY(%s) AND algorithm_contract=%s"
             )
             params = (
+                target_session,
                 source_version["source_capture_id"],
                 profile_revision,
                 catalog_ids,
@@ -594,9 +606,11 @@ def _persist_once(
             catalog_ids = [row[_COLUMNS.index("catalog_id")] for row in group]
             cursor.execute(
                 f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE "
-                "source_capture_id=%s AND profile_revision=%s "
+                "target_session=%s AND source_capture_id=%s "
+                "AND profile_revision=%s "
                 "AND catalog_id=ANY(%s) AND algorithm_contract=%s ORDER BY catalog_id",
                 (
+                    target_session,
                     source_version["source_capture_id"],
                     profile_revision,
                     catalog_ids,

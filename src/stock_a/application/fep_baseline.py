@@ -63,9 +63,7 @@ def _base_row(
 ) -> dict[str, Any]:
     return {
         "research_cutoff": research_cutoff,
-        "source_capture_id": context["source_capture_id"]
-        if summary_scope == "T0"
-        else None,
+        "source_capture_id": context["source_capture_id"],
         "target_session": context["target_session"] if summary_scope == "T0" else None,
         "period_start_session": None,
         "period_end_session": None,

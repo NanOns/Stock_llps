@@ -14,6 +14,7 @@ RULE_VERSION = "SOURCE_COHORT_RULES_R1"
 PATH_VERSION = "SOURCE_RAW_FORWARD_PATH_R1"
 SCOPE = "NON_PIT_EXPLORATORY"
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+_MULTISESSION_KEY_MIGRATION_ID = 66
 
 
 class ResearchFactNotFound(ValueError):
@@ -26,6 +27,18 @@ class ResearchFactConflict(ValueError):
     """同一业务键对应不同冻结事实，事务必须完整回滚。"""
 
     preserve_transaction_error = True
+
+
+def _require_multisession_key_migration(cursor: Any) -> None:
+    cursor.execute(
+        "SELECT EXISTS (SELECT 1 FROM migration_ledger "
+        "WHERE migration_id=%s AND lineage='STOCK_A_INITIAL_R1')",
+        (_MULTISESSION_KEY_MIGRATION_ID,),
+    )
+    if cursor.fetchone() != (True,):
+        raise ResearchFactConflict(
+            "0066目标会话唯一键迁移未应用，拒绝写入Forward或规则事实"
+        )
 
 
 RULES = frozenset(
@@ -86,6 +99,7 @@ PATH_COLUMNS = (
     "scope",
 )
 RULE_KEY = (
+    "target_session",
     "source_capture_id",
     "source_symbol",
     "rule_id",
@@ -97,6 +111,7 @@ RULE_KEY = (
     "calendar_revision",
 )
 PATH_KEY = (
+    "target_session",
     "source_capture_id",
     "source_symbol",
     "horizon",
@@ -344,6 +359,7 @@ def write_forward_path_rows(
         raise ValueError("T+1 QFQ路径行存在日期、capture、坐标、期限或键混用")
 
     with _transaction(config, write=True, statement_timeout_ms=30000) as (_, cursor, _):
+        _require_multisession_key_migration(cursor)
         cursor.execute(
             """SELECT capture_uuid,provider,range_start_session,range_end_session,
                       price_coordinates,source_time_quality,source_clock_role,
@@ -741,6 +757,7 @@ def write_computed_rule_rows(
         cursor,
         _,
     ):
+        _require_multisession_key_migration(cursor)
         cursor.execute(
             "SELECT source_symbol,source_capture_id FROM source_raw_daily "
             "WHERE session_date=%s AND source_capture_id=%s "
@@ -1002,6 +1019,7 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
     if len(rule_keys) != len(set(rule_keys)) or len(path_keys) != len(set(path_keys)):
         raise ValueError("同一研究批次内存在重复真实业务键")
     with _transaction(config, write=True) as (_, cursor, _):
+        _require_multisession_key_migration(cursor)
         cursor.execute(
             """SELECT source_symbol,source_capture_id FROM source_raw_daily
                WHERE session_date=%s AND source_capture_id=%s""",
