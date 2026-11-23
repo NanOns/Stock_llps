@@ -535,6 +535,7 @@ def build_data_job_plan(
     raw_coverage: Mapping[str, Any],
     execution_authorized: bool,
     sector_pair: Mapping[str, Any] | None = None,
+    _forward_path_seed_availability_out: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     from datetime import datetime
 
@@ -1377,6 +1378,23 @@ def build_data_job_plan(
             expected_calendar_revision=calendar_revision,
         )
 
+    forward_path_sessions = module_output_sessions.get("FORWARD_PATH", ())
+    if _forward_path_seed_availability_out is not None and forward_path_sessions:
+        sessions_through_cutoff = tuple(
+            session for session in all_sessions if session <= cutoff
+        )
+        session_indexes = {
+            session: index for index, session in enumerate(sessions_through_cutoff)
+        }
+        for target_session in forward_path_sessions:
+            index = session_indexes.get(target_session)
+            if index is None or index + 1 >= len(sessions_through_cutoff):
+                continue
+            t1_session = sessions_through_cutoff[index + 1]
+            _forward_path_seed_availability_out[t1_session.isoformat()] = (
+                seed_available(t1_session)
+            )
+
     sector_pulse_insufficient = sorted(
         {
             *sector_pulse_insufficient,
@@ -2154,12 +2172,14 @@ class DataJobCoordinator:
             )
 
             sector_pair = resolve_source_sector_snapshot_pair(self.config)
+        forward_path_seed_availability: dict[str, bool] = {}
         plan = build_data_job_plan(
             body,
             cutoff=self.research_cutoff,
             raw_coverage=coverage,
             execution_authorized=self.execution_authorized,
             sector_pair=sector_pair,
+            _forward_path_seed_availability_out=forward_path_seed_availability,
         )
         source_policy = self.config.get("source_policy", {})
         primary_policy = (
@@ -2390,7 +2410,13 @@ class DataJobCoordinator:
                 plan["status"] = "BLOCKED_HISTORY_WINDOW"
         plan["sector_snapshot_pair"] = sector_pair
         plan["sector_snapshot_ids"] = sector_pair.get("snapshot_ids")
-        completed = self._complete_plan(plan, request, coverage, sector_pair)
+        completed = self._complete_plan(
+            plan,
+            request,
+            coverage,
+            sector_pair,
+            forward_path_seed_availability,
+        )
         if (
             request["mode"] == "INITIALIZE"
             and request["initialization_mode"] == "RESET_ALL_BUSINESS_FACTS"
@@ -2503,6 +2529,7 @@ class DataJobCoordinator:
         request: Mapping[str, Any],
         coverage: Mapping[str, Any],
         sector_pair: Mapping[str, Any],
+        forward_path_seed_availability: Mapping[str, bool],
     ) -> dict[str, Any]:
         plan["selected_modules"] = request["selected_modules"]
         plan["source_modules"] = request["source_modules"]
@@ -2688,7 +2715,9 @@ class DataJobCoordinator:
                 status, error_code, error_message = _forward_path_dependency_status(
                     due_horizons,
                     t1_seed_available=(
-                        t1_session is not None and seed_available(t1_session)
+                        t1_session is not None
+                        and forward_path_seed_availability.get(t1_session.isoformat())
+                        is True
                     ),
                 )
                 _unit(
