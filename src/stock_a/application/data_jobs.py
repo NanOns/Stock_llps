@@ -3663,6 +3663,7 @@ def _prepare_reset_source_inputs(
     from stock_a.sources.baostock.identity import (
         classify_baostock_board,
         normalize_baostock_symbol,
+        parse_baostock_optional_date,
     )
     from stock_a.sources.tdx.remote_sector import (
         fetch_remote_sector_files,
