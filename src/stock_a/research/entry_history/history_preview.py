@@ -32,7 +32,15 @@ from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_core.profile_preview import (
     _build_profile_preview,
 )
-from stock_a.research.entry_context.sessions import _load_calendar, _parse_target
+from stock_a.research.entry_context.sessions import (
+    _load_calendar,
+    _parse_target,
+    load_period_calendar,
+)
+from stock_a.research.raw_periods import (
+    build_source_symbol_raw_periods,
+    evaluate_raw_period_trend,
+)
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
 from stock_a.research.entry_history.support import (
     _core_observation_from_pg_price_row,
@@ -864,6 +872,60 @@ def research_stock_pg_history_preview(
     )
     profile_preview = None
     if include_profile_preview and profile_contract is not None:
+        raw_period_trends: dict[str, Any] | None = None
+        if (
+            closed_period_bars is None
+            and price_coordinate == "FORWARD_ADJUSTED"
+            and isinstance(profile_contract, Mapping)
+            and (
+                selected_profile_fields is None
+                or "profile.closed_week_trend" in selected_profile_fields
+                or "profile.closed_month_trend" in selected_profile_fields
+            )
+        ):
+            period_calendar_sessions, period_cov_start, period_cov_end = (
+                load_period_calendar(target)
+            )
+            period_bars = build_source_symbol_raw_periods(
+                target_session=target,
+                session_dates=expected_sessions,
+                calendar_sessions=period_calendar_sessions,
+                history_rows=tuple(
+                    rows_by_session[s]
+                    for s in expected_sessions
+                    if s in rows_by_session
+                ),
+                price_coordinate=price_coordinate,
+                calendar_coverage_start=period_cov_start,
+                calendar_coverage_end=period_cov_end,
+            )
+            period_rules = profile_contract.get("profile_expression_registry", {})
+            period_registry = profile_contract.get("field_registry", [])
+            period_source_cutoff = f"BAOSTOCK_CAPTURE:{source_capture_id}:{price_coordinate}:THROUGH:{target.isoformat()}"
+            raw_period_trends = {
+                "profile.closed_week_trend": evaluate_raw_period_trend(
+                    kind="WEEK",
+                    price_coordinate=price_coordinate,
+                    periods=period_bars["WEEK"],
+                    target_session=target,
+                    calendar_id=calendar_payload["calendar_id"],
+                    calendar_revision=calendar_revision,
+                    source_cutoff=period_source_cutoff,
+                    profile_rules=period_rules,
+                    field_registry=period_registry,
+                ),
+                "profile.closed_month_trend": evaluate_raw_period_trend(
+                    kind="MONTH",
+                    price_coordinate=price_coordinate,
+                    periods=period_bars["MONTH"],
+                    target_session=target,
+                    calendar_id=calendar_payload["calendar_id"],
+                    calendar_revision=calendar_revision,
+                    source_cutoff=period_source_cutoff,
+                    profile_rules=period_rules,
+                    field_registry=period_registry,
+                ),
+            }
         profile_preview = _build_profile_preview(
             selected_fields=selected_profile_fields,
             symbol=normalized,
@@ -880,6 +942,7 @@ def research_stock_pg_history_preview(
             source_capture_id=source_capture_id,
             price_coordinate=price_coordinate,
             closed_period_bars=closed_period_bars,
+            raw_period_trends=raw_period_trends,
             source_snapshot_role="BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
         )
         components = profile_preview.get("components", [])

@@ -14,6 +14,32 @@ _BOARD_LIMIT_RULES: dict[str, tuple[Decimal, str]] = {
     "GEM": (Decimal("0.2000"), "CN_GEM_NON_ST_20PCT_R1"),
     "STAR_BOARD": (Decimal("0.2000"), "CN_STAR_NON_ST_20PCT_R1"),
 }
+# 交易所风险警示股票（ST/*ST）涨跌幅制度生效分段表：(生效起日元组(Y,M,D)或None, 涨跌幅比例, 规则ID)
+# 按生效起日降序排列，命中首条 target_ymd >= effective_from 即为当日有效制度。
+_ST_LIMIT_REGIMES: dict[
+    str, tuple[tuple[tuple[int, int, int] | None, Decimal, str], ...]
+] = {
+    "MAIN_BOARD": (
+        ((2026, 7, 6), Decimal("0.1000"), "CN_MAIN_ST_10PCT_20260706_R1"),
+        (None, Decimal("0.0500"), "CN_MAIN_ST_5PCT_PRE_20260706_R1"),
+    ),
+    "GEM": (((2020, 8, 24), Decimal("0.2000"), "CN_GEM_ST_20PCT_R1"),),
+    "STAR_BOARD": ((None, Decimal("0.2000"), "CN_STAR_ST_20PCT_R1"),),
+}
+
+
+def _resolve_st_limit_rule(
+    board: str, target_session: date
+) -> tuple[Decimal, str] | None:
+    """按日期有效交易所风险警示股票涨跌幅制度表解析 ST/*ST 限价规则。"""
+    regimes = _ST_LIMIT_REGIMES.get(board)
+    if regimes is None:
+        return None
+    target_ymd = (target_session.year, target_session.month, target_session.day)
+    for effective_from, limit_pct, rule_id in regimes:
+        if effective_from is None or target_ymd >= effective_from:
+            return (limit_pct, rule_id)
+    return None
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -116,16 +142,7 @@ def evaluate_daily_price_limit(
             rule_id="UNKNOWN_TRADESTATUS",
             reason="TRADESTATUS_UNKNOWN",
         )
-    if raw_is_st_value == "1":
-        return _unknown_result(
-            source_symbol=source_symbol,
-            market=market,
-            board=board,
-            target_session=target_session,
-            rule_id="UNKNOWN_ST_REGIME",
-            reason="ST_LIMIT_REGIME_UNVERIFIED",
-        )
-    if raw_is_st_value != "0":
+    if raw_is_st_value not in {"0", "1"}:
         return _unknown_result(
             source_symbol=source_symbol,
             market=market,
@@ -134,16 +151,28 @@ def evaluate_daily_price_limit(
             rule_id="UNKNOWN_ST_STATUS",
             reason="IS_ST_STATUS_UNKNOWN",
         )
-    board_rule = _BOARD_LIMIT_RULES.get(board)
-    if board_rule is None:
-        return _unknown_result(
-            source_symbol=source_symbol,
-            market=market,
-            board=board,
-            target_session=target_session,
-            rule_id="UNKNOWN_BOARD_REGIME",
-            reason="BOARD_LIMIT_REGIME_UNSUPPORTED",
-        )
+    if raw_is_st_value == "1":
+        board_rule = _resolve_st_limit_rule(board, target_session)
+        if board_rule is None:
+            return _unknown_result(
+                source_symbol=source_symbol,
+                market=market,
+                board=board,
+                target_session=target_session,
+                rule_id="UNKNOWN_ST_REGIME",
+                reason="ST_LIMIT_REGIME_UNVERIFIED",
+            )
+    else:
+        board_rule = _BOARD_LIMIT_RULES.get(board)
+        if board_rule is None:
+            return _unknown_result(
+                source_symbol=source_symbol,
+                market=market,
+                board=board,
+                target_session=target_session,
+                rule_id="UNKNOWN_BOARD_REGIME",
+                reason="BOARD_LIMIT_REGIME_UNSUPPORTED",
+            )
     limit_pct, rule_id = board_rule
     if type(history_present_count) is not int or history_present_count < 6:
         return _unknown_result(

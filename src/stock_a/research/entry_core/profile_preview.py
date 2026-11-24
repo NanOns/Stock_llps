@@ -199,6 +199,7 @@ def _build_profile_preview(
     source_capture_id: int,
     price_coordinate: str,
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
+    raw_period_trends: Mapping[str, Any] | None = None,
     source_snapshot_role: str = "BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
     selected_fields: frozenset[str] | None = None,
 ) -> dict[str, Any]:
@@ -305,6 +306,30 @@ def _build_profile_preview(
                         "quality": period_result.quality,
                         "value": _render_field(period_result)["value"],
                         "reason": period_result.reason,
+                        "production_eligibility": "PREVIEW_ONLY_QFQ_NON_PIT",
+                        "input_fields": [period_field_id],
+                    }
+                )
+                continue
+            supplied_raw_trend = (
+                raw_period_trends.get(field_id)
+                if isinstance(raw_period_trends, Mapping)
+                else None
+            )
+            if supplied_raw_trend is not None:
+                raw_status = getattr(supplied_raw_trend, "status", "UNKNOWN")
+                is_observed = raw_status == "OBSERVED"
+                raw_value = getattr(supplied_raw_trend, "value", None)
+                raw_reason = getattr(supplied_raw_trend, "reason", None)
+                components.append(
+                    {
+                        "field_id": field_id,
+                        "rule_id": rule.get("expression_ref"),
+                        "expression_ref": rule.get("expression_ref"),
+                        "status": "EVALUATED" if is_observed else "UNKNOWN",
+                        "quality": "OBSERVED" if is_observed else "UNKNOWN_DATA",
+                        "value": raw_value if is_observed else None,
+                        "reason": None if is_observed else raw_reason,
                         "production_eligibility": "PREVIEW_ONLY_QFQ_NON_PIT",
                         "input_fields": [period_field_id],
                     }

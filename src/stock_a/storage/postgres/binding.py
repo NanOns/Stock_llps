@@ -82,6 +82,8 @@ _MIGRATION_FILES = (
     "0068_r02_market_breadth_change.sql",
     "0069_r02_remove_breadth_change_downstream_sha.sql",
     "0070_r01_price_profile_suspension_status.sql",
+    "0071_r02_price_profile_values_column.sql",
+    "0072_r02_limit_up_streak_day_facts.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -143,6 +145,8 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_CLOSE_02_D0_MARKET_CHANGE_R1": frozenset({68}),
     "R02_P1_FOCUS_MISMATCH_AND_DROP_BREADTH_SHA_R1": frozenset({69}),
     "R01_AUDIT_BUGFIX_SUSPENSION_AND_MISSING_UNITS_R1": frozenset({70}),
+    "R02_AUDIT_FIX_PROFILE_VALUES_R1": frozenset({71}),
+    "R02_LIMIT_UP_LADDER_FACTS_R1": frozenset({72}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -350,6 +354,10 @@ _RELATIONS_BY_MIGRATION_COUNT[68] = _RELATIONS_BY_MIGRATION_COUNT[67] | {
 }
 _RELATIONS_BY_MIGRATION_COUNT[69] = _RELATIONS_BY_MIGRATION_COUNT[68]
 _RELATIONS_BY_MIGRATION_COUNT[70] = _RELATIONS_BY_MIGRATION_COUNT[69]
+_RELATIONS_BY_MIGRATION_COUNT[71] = _RELATIONS_BY_MIGRATION_COUNT[70]
+_RELATIONS_BY_MIGRATION_COUNT[72] = _RELATIONS_BY_MIGRATION_COUNT[71] | {
+    "source_limit_up_streak_day_facts",
+}
 
 
 class BindingRefused(Exception):

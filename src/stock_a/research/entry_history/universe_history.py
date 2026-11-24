@@ -208,6 +208,7 @@ def research_universe_pg_history_preview(
                             "field_id": field_id,
                             "status": "FAILED",
                             "quality": "UNKNOWN",
+                            "value": None,
                             "reason": error_code,
                         }
                         for field_id in component_ids
@@ -326,6 +327,7 @@ def research_universe_pg_history_preview(
                     "field_id": item.get("field_id"),
                     "status": item.get("status"),
                     "quality": item.get("quality"),
+                    "value": item.get("value"),
                     "reason": item.get("reason"),
                 }
                 for item in components

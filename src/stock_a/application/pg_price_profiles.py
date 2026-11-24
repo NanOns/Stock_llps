@@ -366,6 +366,13 @@ def _records_for_page(
             item.get("quality") or item.get("status") or "UNKNOWN"
             for item in profile_components
         ]
+        record["profile_values"] = [
+            ""
+            if item.get("value") is None
+            or (item.get("quality") or item.get("status")) != "OBSERVED"
+            else str(item.get("value"))
+            for item in profile_components
+        ]
         record["profile_reasons"] = [
             item.get("reason") or "" for item in profile_components
         ]

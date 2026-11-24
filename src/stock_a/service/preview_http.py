@@ -4668,16 +4668,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         getattr(error, "code", "MARKET_PARTICIPATION_READ_FAILED"),
                         str(error),
                     ) from error
+                from stock_a.storage.postgres.limit_up_ladder import (
+                    read_market_limit_up_ladder_summary,
+                )
                 from stock_a.storage.postgres.market_breadth import (
                     read_market_breadth_change,
                 )
 
+                capture_id_val = _capture_id(values["source_capture_id"])
                 breadth_change = read_market_breadth_change(
                     self.preview_server.state.config,
                     target_session=target,
-                    source_capture_id=_capture_id(values["source_capture_id"]),
+                    source_capture_id=capture_id_val,
                     calendar_revision=market.calendar["calendar_revision"],
                     contract_version=market.calculation.contract_version,
+                )
+                limit_up_ladder = read_market_limit_up_ladder_summary(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    source_capture_id=capture_id_val,
                 )
                 self._send_json(
                     200,
@@ -4688,6 +4697,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             market_participation=participation,
                             breadth_change=breadth_change,
                         ),
+                        "limit_up_ladder": limit_up_ladder,
                     },
                 )
                 return

@@ -92,6 +92,7 @@ _PROFILE_COLUMNS = (
     "profile_field_ids",
     "profile_statuses",
     "profile_qualities",
+    "profile_values",
     "profile_reasons",
     "price_damage",
     "price_damage_quality",
@@ -485,6 +486,7 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "profile_field_ids",
         "profile_statuses",
         "profile_qualities",
+        "profile_values",
         "profile_reasons",
     ):
         values = normalized.get(name)
@@ -1751,6 +1753,8 @@ WITH old_rows AS (
            n.profile_statuses AS after_profile_statuses,
            o.profile_qualities AS before_profile_qualities,
            n.profile_qualities AS after_profile_qualities,
+           o.profile_values AS before_profile_values,
+           n.profile_values AS after_profile_values,
            o.profile_reasons AS before_profile_reasons,
            n.profile_reasons AS after_profile_reasons,
            o.amount_unit_status AS before_amount_unit_status,
@@ -2705,6 +2709,7 @@ FROM classified""",
        before_profile_field_ids, after_profile_field_ids,
        before_profile_statuses, after_profile_statuses,
        before_profile_qualities, after_profile_qualities,
+       before_profile_values, after_profile_values,
        before_profile_reasons, after_profile_reasons,
        before_source_available_at, after_source_available_at,
        before_source_time_quality, after_source_time_quality,
@@ -2860,6 +2865,7 @@ LIMIT %s""",
        before_profile_field_ids, after_profile_field_ids,
        before_profile_statuses, after_profile_statuses,
        before_profile_qualities, after_profile_qualities,
+       before_profile_values, after_profile_values,
        before_profile_reasons, after_profile_reasons,
        before_source_available_at, after_source_available_at,
        before_source_time_quality, after_source_time_quality,
@@ -4925,11 +4931,14 @@ WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
     OR COALESCE(array_length(p.profile_statuses, 1), 0) <> 11
     OR COALESCE(array_ndims(p.profile_qualities), 0) <> 1
     OR COALESCE(array_length(p.profile_qualities, 1), 0) <> 11
+    OR COALESCE(array_ndims(p.profile_values), 0) <> 1
+    OR COALESCE(array_length(p.profile_values, 1), 0) <> 11
     OR COALESCE(array_ndims(p.profile_reasons), 0) <> 1
     OR COALESCE(array_length(p.profile_reasons, 1), 0) <> 11
     OR array_lower(p.profile_field_ids, 1) IS DISTINCT FROM 1
     OR array_lower(p.profile_statuses, 1) IS DISTINCT FROM array_lower(p.profile_field_ids, 1)
     OR array_lower(p.profile_qualities, 1) IS DISTINCT FROM array_lower(p.profile_field_ids, 1)
+    OR array_lower(p.profile_values, 1) IS DISTINCT FROM array_lower(p.profile_field_ids, 1)
     OR array_lower(p.profile_reasons, 1) IS DISTINCT FROM array_lower(p.profile_field_ids, 1)
     OR (SELECT count(DISTINCT field_id)::bigint
         FROM unnest(p.profile_field_ids) AS fields(field_id)) <> 11
@@ -5036,14 +5045,16 @@ WHERE {where_sql}""",
             selected_profile_projection = """NULL::text AS selected_profile_field_id,
        NULL::text AS selected_profile_status,
        NULL::text AS selected_profile_quality,
+       NULL::text AS selected_profile_value,
        NULL::text AS selected_profile_reason"""
             selected_profile_parameters: list[Any] = []
         else:
             selected_profile_projection = """p.profile_field_ids[array_position(p.profile_field_ids,%s)] AS selected_profile_field_id,
        p.profile_statuses[array_position(p.profile_field_ids,%s)] AS selected_profile_status,
        p.profile_qualities[array_position(p.profile_field_ids,%s)] AS selected_profile_quality,
+       NULLIF(p.profile_values[array_position(p.profile_field_ids,%s)], '') AS selected_profile_value,
        p.profile_reasons[array_position(p.profile_field_ids,%s)] AS selected_profile_reason"""
-            selected_profile_parameters = [profile_field_id] * 4
+            selected_profile_parameters = [profile_field_id] * 5
         cursor.execute(
             f"""SELECT p.*,
        r.raw_open AS target_raw_open,r.raw_high AS target_raw_high,
