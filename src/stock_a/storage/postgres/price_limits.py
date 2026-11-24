@@ -56,6 +56,9 @@ def persist_source_price_limits_for_session(
                    SELECT source_symbol, session_date, market, board,
                           bar_status, raw_tradestatus_value, raw_is_st_value,
                           raw_preclose, raw_open, raw_high, raw_low, raw_close,
+                          raw_preclose_quality, raw_open_quality, raw_high_quality,
+                          raw_low_quality, raw_close_quality,
+                          raw_tradestatus_quality, raw_is_st_quality,
                           LAG(raw_close) OVER (
                               PARTITION BY source_symbol ORDER BY session_date
                           ) AS prev_raw_close,
@@ -73,7 +76,10 @@ def persist_source_price_limits_for_session(
                SELECT source_symbol, market, board, bar_status,
                       raw_tradestatus_value, raw_is_st_value,
                       raw_preclose, prev_raw_close, hist_present_cnt,
-                      raw_open, raw_high, raw_low, raw_close
+                      raw_open, raw_high, raw_low, raw_close,
+                      raw_preclose_quality, raw_open_quality, raw_high_quality,
+                      raw_low_quality, raw_close_quality,
+                      raw_tradestatus_quality, raw_is_st_quality
                FROM hist
                WHERE session_date = %s
                ORDER BY source_symbol""",
@@ -103,6 +109,13 @@ def persist_source_price_limits_for_session(
             raw_high,
             raw_low,
             raw_close,
+            raw_preclose_quality,
+            raw_open_quality,
+            raw_high_quality,
+            raw_low_quality,
+            raw_close_quality,
+            raw_tradestatus_quality,
+            raw_is_st_quality,
         ) in raw_rows:
             fact = evaluate_daily_price_limit(
                 source_symbol=symbol,
@@ -120,6 +133,13 @@ def persist_source_price_limits_for_session(
                 raw_high=raw_high,
                 raw_low=raw_low,
                 raw_close=raw_close,
+                raw_preclose_quality=raw_preclose_quality,
+                raw_open_quality=raw_open_quality,
+                raw_high_quality=raw_high_quality,
+                raw_low_quality=raw_low_quality,
+                raw_close_quality=raw_close_quality,
+                raw_tradestatus_quality=raw_tradestatus_quality,
+                raw_is_st_quality=raw_is_st_quality,
             )
             status_counts[fact["limit_status"]] = (
                 status_counts.get(fact["limit_status"], 0) + 1

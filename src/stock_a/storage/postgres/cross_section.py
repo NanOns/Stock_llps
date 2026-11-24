@@ -32,14 +32,20 @@ def _to_db_numeric(
     if fv.quality != "OBSERVED" or fv.value is None:
         return None, "UNKNOWN_DATA", fv.reason or "UNKNOWN_DATA"
     val = fv.value
+    quantum = Decimal(10) ** (-scale)
     if isinstance(val, Fraction):
-        dec = (Decimal(val.numerator) / Decimal(val.denominator)).quantize(
-            Decimal(10) ** (-scale)
-        )
+        dec = (Decimal(val.numerator) / Decimal(val.denominator)).quantize(quantum)
+        exact_sign = 1 if val > 0 else (-1 if val < 0 else 0)
     elif isinstance(val, Decimal):
-        dec = val.quantize(Decimal(10) ** (-scale))
+        dec = val.quantize(quantum)
+        exact_sign = 1 if val > 0 else (-1 if val < 0 else 0)
     else:
-        dec = Decimal(str(val)).quantize(Decimal(10) ** (-scale))
+        parsed = Decimal(str(val))
+        dec = parsed.quantize(quantum)
+        exact_sign = 1 if parsed > 0 else (-1 if parsed < 0 else 0)
+    # 严守零边界保号：若精确原值严格非零而定长舍入坍缩为 0，保留最小非零量子防止 >0 / <0 谓词翻转
+    if exact_sign != 0 and dec == 0:
+        dec = quantum if exact_sign > 0 else -quantum
     return dec, "OBSERVED", None
 
 
@@ -110,15 +116,22 @@ def persist_cross_section_day_facts(
         ):
             cursor.execute(
                 """SELECT source_symbol,
-                          rps5, rps5_quality, rps20, rps20_quality,
-                          rps5_delta1_pp, rps5_delta1_pp_quality,
-                          rps5_delta3_pp, rps5_delta3_pp_quality,
-                          rps20_delta1_pp, rps20_delta1_pp_quality,
-                          rps20_delta3_pp, rps20_delta3_pp_quality,
-                          rel_market_1, rel_market_1_quality,
-                          rel_market_3, rel_market_3_quality,
-                          rel_market_5, rel_market_5_quality,
-                          rel_market_20, rel_market_20_quality
+                          universe_capture_id, pit_status,
+                          rps5, rps5_quality, rps5_reason,
+                          rps20, rps20_quality, rps20_reason,
+                          rps5_delta1_pp, rps5_delta1_pp_quality, rps5_delta1_pp_reason,
+                          rps5_delta3_pp, rps5_delta3_pp_quality, rps5_delta3_pp_reason,
+                          rps20_delta1_pp, rps20_delta1_pp_quality, rps20_delta1_pp_reason,
+                          rps20_delta3_pp, rps20_delta3_pp_quality, rps20_delta3_pp_reason,
+                          rel_market_1, rel_market_1_quality, rel_market_1_reason,
+                          rel_market_3, rel_market_3_quality, rel_market_3_reason,
+                          rel_market_5, rel_market_5_quality, rel_market_5_reason,
+                          rel_market_20, rel_market_20_quality, rel_market_20_reason,
+                          target_universe_count, rps5_known_count, rps20_known_count,
+                          rel_market_1_start_session, rel_market_1_denominator, rel_market_1_known_count,
+                          rel_market_3_start_session, rel_market_3_denominator, rel_market_3_known_count,
+                          rel_market_5_start_session, rel_market_5_denominator, rel_market_5_known_count,
+                          rel_market_20_start_session, rel_market_20_denominator, rel_market_20_known_count
                    FROM stock.source_cross_section_day_facts
                    WHERE target_session = %s
                      AND price_capture_id = %s
@@ -138,26 +151,9 @@ def persist_cross_section_day_facts(
                 expected = {
                     r[1]: (
                         r[1],
-                        r[10],
-                        r[11],
-                        r[13],
-                        r[14],
-                        r[16],
-                        r[17],
-                        r[19],
-                        r[20],
-                        r[22],
-                        r[23],
-                        r[25],
-                        r[26],
-                        r[28],
-                        r[29],
-                        r[31],
-                        r[32],
-                        r[34],
-                        r[35],
-                        r[37],
-                        r[38],
+                        r[3],
+                        r[9],
+                        *r[10:55],
                     )
                     for r in rows_to_insert
                 }

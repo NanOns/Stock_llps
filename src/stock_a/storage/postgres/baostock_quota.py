@@ -144,39 +144,53 @@ def consume_baostock_api_quota(
     if type(count) is not int or count < 0 or type(failed) is not int or failed < 0:
         raise ValueError("QUOTA_COUNT_INVALID")
     target_day = quota_date if quota_date is not None else _beijing_today()
-    with _transaction(config, write=True, statement_timeout_ms=10000) as (
-        _,
-        cursor,
-        _,
-    ):
-        cursor.execute(
-            """SELECT COALESCE(sum(call_count), 0)::bigint
-               FROM stock.baostock_daily_api_quota_ledger
-               WHERE quota_date = %s""",
-            (target_day,),
-        )
-        current_total = int(cursor.fetchone()[0])
-        if current_total + count > daily_limit:
-            raise BaoStockQuotaError(
-                "BAOSTOCK_DAILY_ENGINEERING_BUDGET_EXCEEDED",
-                f"今日累计 {current_total} + 本次 {count} 超过内部工程日上限 {daily_limit}",
-            )
-        cursor.execute(
-            """INSERT INTO stock.baostock_daily_api_quota_ledger (
-                   quota_date, api_name, call_count, failed_count, updated_at
-               ) VALUES (%s, %s, %s, %s, now())
-               ON CONFLICT (quota_date, api_name) DO UPDATE SET
-                   call_count = stock.baostock_daily_api_quota_ledger.call_count + EXCLUDED.call_count,
-                   failed_count = stock.baostock_daily_api_quota_ledger.failed_count + EXCLUDED.failed_count,
-                   updated_at = now()
-               RETURNING call_count, failed_count""",
-            (target_day, api_name, count, failed),
-        )
-        new_calls, new_failed = cursor.fetchone()
-    return {
-        "quota_date": target_day.isoformat(),
-        "api_name": api_name,
-        "api_call_count": int(new_calls),
-        "api_failed_count": int(new_failed),
-        "daily_total_calls": current_total + count,
-    }
+    day_lock_key = f"STOCK_A_BAOSTOCK_QUOTA_DAY:{target_day.isoformat()}"
+    for attempt in range(5):
+        try:
+            with _transaction(config, write=True, statement_timeout_ms=10000) as (
+                _,
+                cursor,
+                _,
+            ):
+                # 事务级咨询锁串行化同日预算 SUM 检查与 UPSERT 扣减，杜绝并发竞态突破上限
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))", (day_lock_key,)
+                )
+                cursor.execute(
+                    """SELECT COALESCE(sum(call_count), 0)::bigint
+                       FROM stock.baostock_daily_api_quota_ledger
+                       WHERE quota_date = %s""",
+                    (target_day,),
+                )
+                current_total = int(cursor.fetchone()[0])
+                if current_total + count > daily_limit:
+                    raise BaoStockQuotaError(
+                        "BAOSTOCK_DAILY_ENGINEERING_BUDGET_EXCEEDED",
+                        f"今日累计 {current_total} + 本次 {count} 超过内部工程日上限 {daily_limit}",
+                    )
+                cursor.execute(
+                    """INSERT INTO stock.baostock_daily_api_quota_ledger (
+                           quota_date, api_name, call_count, failed_count, updated_at
+                       ) VALUES (%s, %s, %s, %s, now())
+                       ON CONFLICT (quota_date, api_name) DO UPDATE SET
+                           call_count = stock.baostock_daily_api_quota_ledger.call_count + EXCLUDED.call_count,
+                           failed_count = stock.baostock_daily_api_quota_ledger.failed_count + EXCLUDED.failed_count,
+                           updated_at = now()
+                       RETURNING call_count, failed_count""",
+                    (target_day, api_name, count, failed),
+                )
+                new_calls, new_failed = cursor.fetchone()
+            return {
+                "quota_date": target_day.isoformat(),
+                "api_name": api_name,
+                "api_call_count": int(new_calls),
+                "api_failed_count": int(new_failed),
+                "daily_total_calls": current_total + count,
+            }
+        except RawSourcePgError as exc:
+            if isinstance(exc.__cause__, BaoStockQuotaError):
+                raise exc.__cause__ from None
+            if getattr(exc.__cause__, "sqlstate", None) == "40001" and attempt < 4:
+                continue
+            raise
+    raise AssertionError("不可达的配额扣减重试状态")

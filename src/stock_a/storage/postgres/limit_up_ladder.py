@@ -283,7 +283,20 @@ def read_market_limit_up_ladder_summary(
         }
 
     actual_symbols = {r[0] for r in rows}
-    if expected_symbols and actual_symbols != expected_symbols:
+    if not expected_symbols:
+        return {
+            "status": "INCOMPLETE",
+            "target_session": target_session.isoformat(),
+            "source_capture_id": source_capture_id,
+            "calendar_revision": calendar_revision,
+            "contract_version": LIMIT_UP_LADDER_CONTRACT_VERSION,
+            "expected_symbol_count": 0,
+            "actual_symbol_count": len(actual_symbols),
+            "missing_symbol_count": 0,
+            "extra_symbol_count": len(actual_symbols),
+            "reason": "UPSTREAM_PRICE_LIMITS_MISSING",
+        }
+    if actual_symbols != expected_symbols:
         return {
             "status": "INCOMPLETE",
             "target_session": target_session.isoformat(),

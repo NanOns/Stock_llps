@@ -1476,21 +1476,34 @@ def _cleanup_version_rows(
                ORDER BY target_session,source_capture_id,contract_version,calendar_revision""",
             (list(target_sessions), cutoff),
         )
-        return [
-            {
-                "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
-                "algorithm_version": str(row[2]),
-                "parent_rows": int(row[4]),
-                "child_rows": 0,
-                "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "contract_version": str(row[2]),
-                    "calendar_revision": str(row[3]),
-                },
-            }
-            for row in cursor.fetchall()
-        ]
+        limit_versions: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            cursor.execute(
+                """SELECT count(*)
+                   FROM stock.source_limit_up_streak_day_facts
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND calendar_revision=%s""",
+                (row[0], int(row[1]), str(row[3])),
+            )
+            streak_rows = int(cursor.fetchone()[0])
+            limit_versions.append(
+                {
+                    "target_session": row[0],
+                    "source_version": {"source_capture_id": int(row[1])},
+                    "algorithm_version": str(row[2]),
+                    "parent_rows": int(row[4]),
+                    "child_rows": 0,
+                    "dependent_rows": {
+                        "stock.source_limit_up_streak_day_facts": streak_rows,
+                    },
+                    "version_key": {
+                        "source_capture_id": int(row[1]),
+                        "contract_version": str(row[2]),
+                        "calendar_revision": str(row[3]),
+                    },
+                }
+            )
+        return limit_versions
 
     if module_code == "LIMIT_UP_LADDER":
         cursor.execute(
@@ -2011,6 +2024,42 @@ def _cleanup_preview_in_cursor(
                             ),
                         }
                     )
+    if module_code == "PRICE_LIMITS":
+        selected_session_set = set(sessions)
+        for version in versions:
+            key = version["version_key"]
+            cursor.execute(
+                """SELECT target_session, count(*)
+                   FROM stock.source_limit_up_streak_day_facts
+                   WHERE target_session>%s AND target_session<=%s
+                     AND source_capture_id=%s AND calendar_revision=%s
+                   GROUP BY target_session
+                   ORDER BY target_session""",
+                (
+                    version["target_session"],
+                    cutoff,
+                    key["source_capture_id"],
+                    key["calendar_revision"],
+                ),
+            )
+            downstream_dates = [
+                (row[0].isoformat(), int(row[1]))
+                for row in cursor.fetchall()
+                if row[0] not in selected_session_set
+            ]
+            if downstream_dates:
+                dates_text = ", ".join(f"{d}({c}行)" for d, c in downstream_dates)
+                blockers.append(
+                    {
+                        "referenced_table": spec["parent_table"],
+                        "dependent_table": "stock.source_limit_up_streak_day_facts",
+                        "constraint": "业务依赖：后续会话日线连板递推依赖本会话限价事实",
+                        "reason": (
+                            "后续日期存在未纳入本次清理的连板事实，禁止越界静默删除或留存过期连板："
+                            f"{dates_text}；请先清理对应后续日期的LIMIT_UP_LADDER或扩大清理日期范围"
+                        ),
+                    }
+                )
     tables = list(
         spec.get("cleanup_tables", (spec["child_table"], spec["parent_table"]))
     )
@@ -2533,10 +2582,10 @@ def clear_derived_module(
                     "stock.source_sector_pulse_adjacent_transitions"
                 ] += cursor.rowcount
             elif module_code == "PRICE_LIMITS":
-                # 联动清理同捕获、同日历下 >= target_session 的下游连板连续会话，防止前态修订导致连板静默过期
+                # 仅清理预览范围内同捕获、同日历、同会话的连板事实（后续未纳入日期已在预览阶段安全阻断）
                 cursor.execute(
                     """DELETE FROM stock.source_limit_up_streak_day_facts
-                       WHERE target_session>=%s AND source_capture_id=%s
+                       WHERE target_session=%s AND source_capture_id=%s
                          AND calendar_revision=%s""",
                     (
                         target_session,
@@ -2700,7 +2749,7 @@ def clear_derived_module(
 
         expected_counts = {
             table: int(preview.get("affected_rows_by_table", {}).get(table, 0))
-            for table in spec["progress_tables"]
+            for table in cleanup_count_tables
         }
         if deleted_rows != expected_counts:
             raise DataJobPgError(

@@ -16,7 +16,7 @@ from stock_a.research.market_indices import (
     MARKET_INDEX_CONTRACT_VERSION,
     compute_style_spreads,
 )
-from stock_a.storage.postgres.source_raw import _transaction
+from stock_a.storage.postgres.source_raw import RawSourcePgError, _transaction
 
 
 def _to_dec(val: Fraction | Decimal | None, scale: int) -> Decimal | None:
@@ -168,76 +168,84 @@ def persist_market_environment_series(
     )
     inserted = 0
     unchanged = 0
-    with _transaction(config, write=True, statement_timeout_ms=15000) as (
-        _,
-        cursor,
-        _,
-    ):
-        for item in reduced:
-            sess_str = str(item["session"])
-            sess_dt = date.fromisoformat(sess_str)
-            ax = axes_by_session.get(sess_str, {})
-            vals = (
-                str(ax.get("trend_axis") or "UNKNOWN"),
-                str(ax.get("breadth_axis") or "UNKNOWN"),
-                str(ax.get("participation_axis") or "UNKNOWN"),
-                str(ax.get("pressure_axis") or "UNKNOWN"),
-                item["raw_status"],
-                item["raw_label"],
-                item["displayed_label"],
-                item["display_status"],
-                item["pending_label"],
-                int(item["pending_count"]),
-            )
-            cursor.execute(
-                """SELECT trend_axis, breadth_axis, participation_axis, pressure_axis,
-                          raw_status, raw_label, displayed_label, display_status,
-                          pending_label, pending_count
-                   FROM stock.source_market_environment_day_facts
-                   WHERE target_session = %s AND stock_capture_id = %s
-                     AND primary_index_symbol = %s AND calendar_revision = %s
-                     AND rule_version = %s""",
-                (
-                    sess_dt,
-                    stock_capture_id,
-                    primary_index_symbol,
-                    calendar_revision,
-                    rule_version,
-                ),
-            )
-            existing = cursor.fetchone()
-            if existing is not None:
-                if existing == vals:
-                    unchanged += 1
-                    continue
-                raise ValueError(
-                    f"MARKET_ENVIRONMENT_SAME_KEY_DIFFERENT_CONTENT:{sess_str}"
-                )
-            cursor.execute(
-                """INSERT INTO stock.source_market_environment_day_facts (
-                       target_session, stock_capture_id, index_capture_id,
-                       primary_index_symbol, index_config_version,
-                       calendar_id, calendar_revision, rule_version,
-                       trend_axis, breadth_axis, participation_axis, pressure_axis,
-                       raw_status, raw_label, displayed_label, display_status,
-                       pending_label, pending_count
-                   ) VALUES (
-                       %s, %s, %s, %s, %s, %s, %s, %s,
-                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                   )""",
-                (
-                    sess_dt,
-                    stock_capture_id,
+    try:
+        with _transaction(config, write=True, statement_timeout_ms=15000) as (
+            _,
+            cursor,
+            _,
+        ):
+            for item in reduced:
+                sess_str = str(item["session"])
+                sess_dt = date.fromisoformat(sess_str)
+                ax = axes_by_session.get(sess_str, {})
+                vals = (
                     index_capture_id,
-                    primary_index_symbol,
                     index_config_version,
-                    calendar_id,
-                    calendar_revision,
-                    rule_version,
-                    *vals,
-                ),
-            )
-            inserted += 1
+                    str(ax.get("trend_axis") or "UNKNOWN"),
+                    str(ax.get("breadth_axis") or "UNKNOWN"),
+                    str(ax.get("participation_axis") or "UNKNOWN"),
+                    str(ax.get("pressure_axis") or "UNKNOWN"),
+                    item["raw_status"],
+                    item["raw_label"],
+                    item["displayed_label"],
+                    item["display_status"],
+                    item["pending_label"],
+                    int(item["pending_count"]),
+                )
+                cursor.execute(
+                    """SELECT index_capture_id, index_config_version,
+                              trend_axis, breadth_axis, participation_axis, pressure_axis,
+                              raw_status, raw_label, displayed_label, display_status,
+                              pending_label, pending_count
+                       FROM stock.source_market_environment_day_facts
+                       WHERE target_session = %s AND stock_capture_id = %s
+                         AND primary_index_symbol = %s AND calendar_revision = %s
+                         AND rule_version = %s""",
+                    (
+                        sess_dt,
+                        stock_capture_id,
+                        primary_index_symbol,
+                        calendar_revision,
+                        rule_version,
+                    ),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    if existing == vals:
+                        unchanged += 1
+                        continue
+                    raise ValueError(
+                        f"MARKET_ENVIRONMENT_SAME_KEY_DIFFERENT_CONTENT:{sess_str}"
+                    )
+                cursor.execute(
+                    """INSERT INTO stock.source_market_environment_day_facts (
+                           target_session, stock_capture_id, index_capture_id,
+                           primary_index_symbol, index_config_version,
+                           calendar_id, calendar_revision, rule_version,
+                           trend_axis, breadth_axis, participation_axis, pressure_axis,
+                           raw_status, raw_label, displayed_label, display_status,
+                           pending_label, pending_count
+                       ) VALUES (
+                           %s, %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                       )""",
+                    (
+                        sess_dt,
+                        stock_capture_id,
+                        index_capture_id,
+                        primary_index_symbol,
+                        index_config_version,
+                        calendar_id,
+                        calendar_revision,
+                        rule_version,
+                        *vals[2:],
+                    ),
+                )
+                inserted += 1
+    except RawSourcePgError as exc:
+        if isinstance(exc.__cause__, ValueError):
+            raise exc.__cause__ from None
+        raise
     return {
         "status": "NO_CHANGE" if inserted == 0 else "PERSISTED",
         "inserted_count": inserted,
@@ -251,16 +259,60 @@ def read_market_indices_and_style_summary(
     target_session: date,
     calendar_revision: str,
     index_contract: Mapping[str, Any],
+    index_capture_id: int | None = None,
+    config_version: str | None = None,
 ) -> dict[str, Any]:
-    """只读查询目标日各参考指数已存因子与风格剪刀差（未落库时诚实返回 NOT_COMPUTED）。"""
+    """只读查询目标日单一选定捕获与配置版本下的参考指数因子与风格剪刀差（杜绝跨捕获混算）。"""
     with _transaction(config, write=False, statement_timeout_ms=10000) as (
         _,
         cursor,
         _,
     ):
+        selected_capture_id = index_capture_id
+        selected_config_version = config_version
+        if selected_capture_id is None or selected_config_version is None:
+            # 优先锁定主参考指数（PRIMARY_MARKET）的最新 (index_capture_id, config_version)
+            cursor.execute(
+                """SELECT index_capture_id, config_version
+                   FROM stock.source_market_index_day_facts
+                   WHERE target_session = %s
+                     AND calendar_revision = %s
+                     AND contract_version = %s
+                     AND (%s::bigint IS NULL OR index_capture_id = %s)
+                     AND (%s::text IS NULL OR config_version = %s)
+                   ORDER BY
+                     CASE WHEN index_role_at_run = 'PRIMARY_MARKET' THEN 0 ELSE 1 END,
+                     index_capture_id DESC,
+                     config_version DESC
+                   LIMIT 1""",
+                (
+                    target_session,
+                    calendar_revision,
+                    MARKET_INDEX_CONTRACT_VERSION,
+                    selected_capture_id,
+                    selected_capture_id,
+                    selected_config_version,
+                    selected_config_version,
+                ),
+            )
+            scope_row = cursor.fetchone()
+            if scope_row is None:
+                return {
+                    "status": "NOT_COMPUTED",
+                    "target_session": target_session.isoformat(),
+                    "calendar_revision": calendar_revision,
+                    "contract_version": MARKET_INDEX_CONTRACT_VERSION,
+                    "index_capture_id": selected_capture_id,
+                    "config_version": selected_config_version,
+                    "indices": [],
+                    "style_spreads": [],
+                    "reason": "MARKET_INDEX_FACTS_NOT_PERSISTED",
+                }
+            selected_capture_id = int(scope_row[0])
+            selected_config_version = str(scope_row[1])
+
         cursor.execute(
-            """SELECT DISTINCT ON (source_symbol)
-                      source_symbol, official_code, index_capture_id,
+            """SELECT source_symbol, official_code, index_capture_id,
                       index_role_at_run, close_points,
                       ret1_fraction, ret1_quality, ret1_reason,
                       ret5_fraction, ret5_quality, ret5_reason,
@@ -271,8 +323,16 @@ def read_market_indices_and_style_summary(
                WHERE target_session = %s
                  AND calendar_revision = %s
                  AND contract_version = %s
-               ORDER BY source_symbol, index_capture_id DESC""",
-            (target_session, calendar_revision, MARKET_INDEX_CONTRACT_VERSION),
+                 AND index_capture_id = %s
+                 AND config_version = %s
+               ORDER BY source_symbol""",
+            (
+                target_session,
+                calendar_revision,
+                MARKET_INDEX_CONTRACT_VERSION,
+                selected_capture_id,
+                selected_config_version,
+            ),
         )
         rows = cursor.fetchall()
 
@@ -282,6 +342,8 @@ def read_market_indices_and_style_summary(
             "target_session": target_session.isoformat(),
             "calendar_revision": calendar_revision,
             "contract_version": MARKET_INDEX_CONTRACT_VERSION,
+            "index_capture_id": selected_capture_id,
+            "config_version": selected_config_version,
             "indices": [],
             "style_spreads": [],
             "reason": "MARKET_INDEX_FACTS_NOT_PERSISTED",
@@ -331,6 +393,8 @@ def read_market_indices_and_style_summary(
         "target_session": target_session.isoformat(),
         "calendar_revision": calendar_revision,
         "contract_version": MARKET_INDEX_CONTRACT_VERSION,
+        "index_capture_id": selected_capture_id,
+        "config_version": selected_config_version,
         "indices": items,
         "style_spreads": spreads,
     }

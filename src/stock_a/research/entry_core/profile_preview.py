@@ -185,6 +185,82 @@ def _profile_window(
     }
 
 
+_CROSS_MIN_WINDOW_SESSIONS: dict[str, int] = {
+    "cross.rel_market_1": 2,
+    "cross.rel_market_3": 4,
+    "cross.rps5": 6,
+    "cross.rel_market_5": 6,
+    "cross.rps5_delta1_pp": 7,
+    "cross.rps5_delta3_pp": 9,
+    "cross.rps20": 21,
+    "cross.rel_market_20": 21,
+    "cross.rps20_delta1_pp": 22,
+    "cross.rps20_delta3_pp": 24,
+}
+
+
+def _resolve_cross_universe_context(
+    input_id: str,
+    dependency: str,
+    metadata: Mapping[str, Any] | None,
+) -> Any:
+    """从真实横截面批次/PG元数据提取总体与端点上下文，绝不拼接假总体字符串。"""
+    if not isinstance(metadata, Mapping) or not metadata:
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+            f"横截面输入缺少真实总体与端点元数据：{input_id}/{dependency}",
+        )
+    universe_version = metadata.get("universe_version")
+    rank_meta = metadata.get("rank_metadata")
+    rel_meta = metadata.get("relative_metadata")
+    if dependency == "context.universe_ref_with_each_exact_endpoint":
+        if isinstance(rank_meta, Mapping) and rank_meta:
+            parts: list[str] = []
+            for key in sorted(rank_meta):
+                info = rank_meta[key]
+                if isinstance(info, Mapping) and info.get("endpoint_date") is not None:
+                    ep_d = info["endpoint_date"]
+                    ep_s = ep_d.isoformat() if hasattr(ep_d, "isoformat") else str(ep_d)
+                    parts.append(
+                        f"{key}:{info.get('universe_id')}:{info.get('universe_revision')}@{ep_s}"
+                    )
+            if parts:
+                return "|".join(parts)
+        if isinstance(universe_version, str) and universe_version.strip():
+            return universe_version.strip()
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+            f"横截面端点总体元数据缺失：{input_id}/{dependency}",
+        )
+    if dependency == "context.start_session_universe_ref":
+        rel_key = input_id.removeprefix("cross.")
+        if isinstance(rel_meta, Mapping) and isinstance(rel_meta.get(rel_key), Mapping):
+            start_d = rel_meta[rel_key].get("start_session")
+            if (
+                start_d is not None
+                and isinstance(universe_version, str)
+                and universe_version.strip()
+            ):
+                start_s = (
+                    start_d.isoformat()
+                    if hasattr(start_d, "isoformat")
+                    else str(start_d)
+                )
+                return f"{universe_version.strip()}@{start_s}"
+        if isinstance(universe_version, str) and universe_version.strip():
+            return universe_version.strip()
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+            f"横截面起始日总体元数据缺失：{input_id}/{dependency}",
+        )
+    if isinstance(universe_version, str) and universe_version.strip():
+        return universe_version.strip()
+    raise ResearchEntryError(
+        "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+        f"横截面总体版本缺失：{input_id}/{dependency}",
+    )
+
+
 def _build_profile_preview(
     *,
     symbol: str,
@@ -201,6 +277,7 @@ def _build_profile_preview(
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     raw_period_trends: Mapping[str, Any] | None = None,
     cross_section_fields: Mapping[str, FieldValue] | None = None,
+    cross_section_metadata: Mapping[str, Any] | None = None,
     source_snapshot_role: str = "BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
     selected_fields: frozenset[str] | None = None,
 ) -> dict[str, Any]:
@@ -264,6 +341,12 @@ def _build_profile_preview(
     target_close = _qfq_target_close_field(target_bar)
 
     components: list[dict[str, Any]] = []
+    # 若调用方仅选 profile.relative，自动补算必要一阶前置依赖（最终输出仍按 selected_fields 过滤）
+    evaluation_fields = (
+        selected_fields | frozenset({"profile.compression", "profile.ma_structure"})
+        if selected_fields is not None and "profile.relative" in selected_fields
+        else selected_fields
+    )
     # 二阶基础画像（profile.relative 依赖同层 profile.compression / profile.ma_structure）排在最后求值
     ordered_rules = sorted(
         rules.items(),
@@ -280,7 +363,7 @@ def _build_profile_preview(
             raise ResearchEntryError(
                 "PROFILE_PREVIEW_CONTRACT_INVALID", "Profile规则缺少field_id"
             )
-        if selected_fields is not None and field_id not in selected_fields:
+        if evaluation_fields is not None and field_id not in evaluation_fields:
             continue
         unavailable = _PROFILE_PERIOD_INPUTS.get(field_id)
         if (
@@ -436,14 +519,17 @@ def _build_profile_preview(
                 input_value = cross_section_fields[input_id]
                 window_contract = field_registry.get("window_contract", "NONE")
                 if window_contract != "NONE":
-                    first_ep = history[0].session if history else target_session
-                    selected_sess = tuple(row.session for row in history) or (
+                    req_len = _CROSS_MIN_WINDOW_SESSIONS.get(input_id, 1)
+                    sliced_history = history[-req_len:] if history else ()
+                    selected_sess = tuple(row.session for row in sliced_history) or (
                         target_session,
                     )
+                    first_ep = selected_sess[0]
+                    last_ep = selected_sess[-1]
                     window_identity = WindowIdentity(
                         contract=window_contract,
                         first_endpoint=first_ep,
-                        last_endpoint=target_session,
+                        last_endpoint=last_ep,
                         selected_sessions=selected_sess,
                         calendar_revision=calendar_revision,
                         status_revision="BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
@@ -452,8 +538,8 @@ def _build_profile_preview(
                     input_window = {
                         "contract": window_contract,
                         "first_endpoint": first_ep.isoformat(),
-                        "last_endpoint": target_session.isoformat(),
-                        "requested_sessions": len(selected_sess),
+                        "last_endpoint": last_ep.isoformat(),
+                        "requested_sessions": req_len,
                         "selected_session_count": len(selected_sess),
                         "selected_sessions": [s.isoformat() for s in selected_sess],
                         "calendar_revision": calendar_revision,
@@ -537,8 +623,8 @@ def _build_profile_preview(
                     "context.universe_ref_with_each_exact_endpoint",
                     "context.start_session_universe_ref",
                 }:
-                    contexts[dependency] = (
-                        f"CROSS_SECTION_UNIVERSE|{target_session.isoformat()}|{calendar_revision}"
+                    contexts[dependency] = _resolve_cross_universe_context(
+                        input_id, dependency, cross_section_metadata
                     )
                 else:
                     raise ResearchEntryError(
@@ -599,6 +685,8 @@ def _build_profile_preview(
         )
         result = evaluate_profile_kernel(field_id, handoff, rules, used_registry)
         evaluated_profile_values[field_id] = result
+        if selected_fields is not None and field_id not in selected_fields:
+            continue
         components.append(
             {
                 "field_id": field_id,

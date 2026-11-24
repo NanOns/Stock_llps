@@ -6,13 +6,43 @@ from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
+from pathlib import Path
 import random
 import re
 import time
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
 
+from stock_a.contracts.loader import load_price_profile_contract
 from .source_raw import RawSourcePgError, _transaction
+
+
+@lru_cache(maxsize=4)
+def _allowed_profile_enum_values(config_root_str: str) -> dict[str, frozenset[str]]:
+    """从现役正式价格画像合同加载各 profile.* 字段的合法枚举集合（不维护第二份清单）。"""
+    contract = load_price_profile_contract(Path(config_root_str).resolve()).document
+    allowed: dict[str, frozenset[str]] = {}
+    for item in contract.get("field_registry", ()):
+        fid = item.get("field_id")
+        if not isinstance(fid, str) or not fid.startswith("profile."):
+            continue
+        schema = item.get("value_schema")
+        values = schema.get("allowed_values") if isinstance(schema, Mapping) else None
+        if isinstance(values, list) and values:
+            allowed[fid] = frozenset(str(v) for v in values)
+    return allowed
+
+
+def _resolve_config_root(config: Mapping[str, Any] | None) -> Path:
+    if isinstance(config, Mapping):
+        policy = config.get("configuration_policy")
+        if isinstance(policy, Mapping) and isinstance(policy.get("root"), str):
+            return Path(policy["root"]).resolve()
+        ws = config.get("workspace_root")
+        if isinstance(ws, str) and ws.strip():
+            return (Path(ws) / "config").resolve()
+    return (Path(__file__).resolve().parents[4] / "config").resolve()
 
 
 MAX_PROFILE_ROWS_PER_BATCH = 10000
@@ -439,7 +469,11 @@ def validate_profile_batch_size(row_count: int) -> None:
         )
 
 
-def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_record(
+    record: Mapping[str, Any],
+    *,
+    allowed_enums: Mapping[str, frozenset[str]] | None = None,
+) -> dict[str, Any]:
     if set(record) != set(_PROFILE_COLUMNS):
         raise PriceProfilePgError(
             "PROFILE_RECORD_FIELDS_INVALID", "价格画像写入字段与typed表合同不一致"
@@ -498,14 +532,26 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
             raise PriceProfilePgError(
                 "PROFILE_COMPONENTS_INVALID", "11项Profile状态未按合同闭合"
             )
-    for quality_item, value_item in zip(
-        normalized["profile_qualities"], normalized["profile_values"], strict=True
+    for field_id_item, quality_item, value_item in zip(
+        normalized["profile_field_ids"],
+        normalized["profile_qualities"],
+        normalized["profile_values"],
+        strict=True,
     ):
-        if quality_item == "OBSERVED" and not value_item.strip():
-            raise PriceProfilePgError(
-                "PROFILE_OBSERVED_VALUE_MISSING",
-                "OBSERVED基础画像必须携带非空合法分类枚举值",
-            )
+        if quality_item == "OBSERVED":
+            trimmed = value_item.strip()
+            if not trimmed:
+                raise PriceProfilePgError(
+                    "PROFILE_OBSERVED_VALUE_MISSING",
+                    "OBSERVED基础画像必须携带非空合法分类枚举值",
+                )
+            if allowed_enums is not None:
+                valid_set = allowed_enums.get(field_id_item)
+                if valid_set is not None and trimmed not in valid_set:
+                    raise PriceProfilePgError(
+                        "PROFILE_OBSERVED_VALUE_INVALID",
+                        f"OBSERVED基础画像枚举值不在现役合同允许集合中：{field_id_item}={trimmed}",
+                    )
     if len(set(normalized["profile_field_ids"])) != 11:
         raise PriceProfilePgError(
             "PROFILE_COMPONENTS_INVALID", "Profile字段标识存在重复"
@@ -616,7 +662,10 @@ def insert_profile_records_in_transaction(
     if not isinstance(records, (tuple, list)) or not records:
         raise PriceProfilePgError("PROFILE_BATCH_EMPTY", "价格画像批次不能为空")
     validate_profile_batch_size(len(records))
-    prepared = [_normalize_record(item) for item in records]
+    allowed_enums = _allowed_profile_enum_values(str(_resolve_config_root(config)))
+    prepared = [
+        _normalize_record(item, allowed_enums=allowed_enums) for item in records
+    ]
     symbols = [item["source_symbol"] for item in prepared]
     if len(set(symbols)) != len(symbols):
         raise PriceProfilePgError(
@@ -666,7 +715,10 @@ def _persist_profile_records_once(
     if not isinstance(records, (tuple, list)) or not records:
         raise PriceProfilePgError("PROFILE_BATCH_EMPTY", "价格画像批次不能为空")
     validate_profile_batch_size(len(records))
-    prepared = [_normalize_record(item) for item in records]
+    allowed_enums = _allowed_profile_enum_values(str(_resolve_config_root(config)))
+    prepared = [
+        _normalize_record(item, allowed_enums=allowed_enums) for item in records
+    ]
     first = prepared[0]
     batch_key = (
         first["target_session"],

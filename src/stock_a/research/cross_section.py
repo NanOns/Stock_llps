@@ -555,10 +555,13 @@ def _batch_rank_endpoint(
 ) -> tuple[dict[str, FieldValue], int]:
     """对单个端点做一次 O(n log n) 精确中秩排序并分发给全体成员。"""
     valid_pairs: list[tuple[Fraction, str]] = []
+    missing_reasons: dict[str, str] = {}
     for entity in members:
-        fv = endpoint.returns[entity]
+        fv = _field(endpoint, entity)
         if fv.quality == "OBSERVED":
             valid_pairs.append((exact_number(fv.value), entity))
+        else:
+            missing_reasons[entity] = fv.reason or "TARGET_RETURN_UNKNOWN"
     known_count = len(valid_pairs)
     if known_count < 2:
         return (
@@ -584,7 +587,9 @@ def _batch_rank_endpoint(
         idx = end
     for entity in members:
         if entity not in ranks:
-            ranks[entity] = unknown("TARGET_RETURN_UNKNOWN")
+            ranks[entity] = unknown(
+                missing_reasons.get(entity, "TARGET_RETURN_UNKNOWN")
+            )
     return ranks, known_count
 
 
@@ -597,10 +602,13 @@ def _batch_relative_endpoint(
     if denominator == 0:
         return {}, 0, 0
     known_values: dict[str, Fraction] = {}
+    missing_reasons: dict[str, str] = {}
     for entity in members:
-        fv = endpoint.returns[entity]
+        fv = _field(endpoint, entity)
         if fv.quality == "OBSERVED":
             known_values[entity] = exact_number(fv.value)
+        else:
+            missing_reasons[entity] = fv.reason or "TARGET_RETURN_UNKNOWN"
     known_count = len(known_values)
     missing = denominator - known_count
     if known_count == 0:
@@ -623,7 +631,7 @@ def _batch_relative_endpoint(
     for entity in members:
         val = known_values.get(entity)
         if val is None:
-            out[entity] = unknown("TARGET_RETURN_UNKNOWN")
+            out[entity] = unknown(missing_reasons.get(entity, "TARGET_RETURN_UNKNOWN"))
         else:
             out[entity] = FieldValue(val - market_mean)
     return out, denominator, known_count
@@ -642,22 +650,23 @@ def calculate_cross_section_batch(
 
     - 支持任意长窗端点为 None（窗口历史不足时仅局部降级该因子，绝不阻断短窗）；
     - 每个端点仅排序/求均值一次，再统一分发给目标日全体成员；
-    - 严守中秩公式、起始日 Universe 绑定、缺失比例 >20% 拒绝与逐实体目标坐标校验。
+    - 严守官方日历完整性校验、当前排名总体与目标日一致、中秩公式、起始日 Universe 绑定与缺失比例 >20% 拒绝。
     """
     if type(target_date) is not date:
         raise ContractError("横截面目标日必须是date")
-    if not isinstance(calendar, MarketSessionCalendar):
-        raise ContractError("横截面必须绑定版本化官方日历")
-    if target_date not in calendar.sessions:
-        raise ContractError("目标日不在官方交易日历中")
+    _validate_calendar(calendar, target_date)
     target_members = tuple(target_universe_members)
+    if not target_members:
+        raise ContractError("目标日Universe成员清单不得为空")
     if len(set(target_members)) != len(target_members):
         raise ContractError("目标日Universe成员不得重复")
+    sorted_target_members = tuple(sorted(target_members))
     target_index = calendar.sessions.index(target_date)
 
-    # 校验并一次计算所有已提供的 rank_endpoints
+    # 校验并一次计算所有已提供的 rank_endpoints（记录 6 端点完整业务依据）
     rank_maps: dict[str, dict[str, FieldValue]] = {}
     rank_known_counts: dict[str, int] = {}
+    rank_meta: dict[str, dict[str, Any]] = {}
     for period in (5, 20):
         for offset in (0, 1, 3):
             key = (
@@ -666,6 +675,15 @@ def calculate_cross_section_batch(
             ep = rank_endpoints.get(key)
             if ep is None:
                 rank_known_counts[key] = 0
+                rank_meta[key] = {
+                    "endpoint_date": None,
+                    "return_start_date": None,
+                    "universe_id": None,
+                    "universe_revision": None,
+                    "denominator": 0,
+                    "known_count": 0,
+                    "unknown_count": 0,
+                }
                 continue
             if target_index < offset:
                 raise ContractError(f"官方日历不足以支撑端点{key}")
@@ -680,9 +698,22 @@ def calculate_cross_section_batch(
                 return_period=period,
                 relative=False,
             )
+            if offset == 0 and members != sorted_target_members:
+                raise ContractError(
+                    f"当前排名端点{key}的Universe成员必须与目标日总体完全一致"
+                )
             r_map, k_cnt = _batch_rank_endpoint(ep, members)
             rank_maps[key] = r_map
             rank_known_counts[key] = k_cnt
+            rank_meta[key] = {
+                "endpoint_date": ep.endpoint_date,
+                "return_start_date": ep.return_start_date,
+                "universe_id": ep.universe_id,
+                "universe_revision": ep.universe_revision,
+                "denominator": len(members),
+                "known_count": k_cnt,
+                "unknown_count": len(members) - k_cnt,
+            }
 
     # 校验并一次计算所有已提供的 relative_endpoints (1, 3, 5, 20)
     rel_maps: dict[str, dict[str, FieldValue]] = {}
@@ -763,10 +794,13 @@ def calculate_cross_section_batch(
 
     return {
         "target_date": target_date,
+        "calendar_id": calendar.calendar_id,
+        "calendar_revision": calendar.revision,
         "contract_version": CROSS_SECTION_CONTRACT_VERSION,
         "target_universe_count": len(target_members),
         "rps5_known_count": rank_known_counts.get("rps5_current", 0),
         "rps20_known_count": rank_known_counts.get("rps20_current", 0),
+        "rank_metadata": rank_meta,
         "relative_metadata": rel_meta,
         "by_entity": by_entity,
     }

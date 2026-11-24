@@ -126,8 +126,15 @@ def evaluate_daily_price_limit(
     raw_close: Any,
     ipo_date: date | None = None,
     listing_session_ordinal: int | None = None,
+    raw_preclose_quality: str | None = None,
+    raw_open_quality: str | None = None,
+    raw_high_quality: str | None = None,
+    raw_low_quality: str | None = None,
+    raw_close_quality: str | None = None,
+    raw_tradestatus_quality: str | None = None,
+    raw_is_st_quality: str | None = None,
 ) -> dict[str, Any]:
-    """按日期有效板别、ST、停牌、上市阶段与RAW参考价计算日线涨跌停可判定事实。"""
+    """按日期有效板别、ST、停牌、上市阶段、RAW字段质量与RAW参考价计算日线涨跌停可判定事实。"""
     if price_coordinate != "RAW_UNADJUSTED":
         raise ValueError("PRICE_LIMIT_REQUIRES_RAW_UNADJUSTED")
     if bar_status != "TARGET_PRESENT":
@@ -138,6 +145,15 @@ def evaluate_daily_price_limit(
             target_session=target_session,
             rule_id="UNKNOWN_MISSING_BAR",
             reason="RAW_BAR_NOT_PRESENT",
+        )
+    if raw_tradestatus_quality is not None and raw_tradestatus_quality != "OBSERVED":
+        return _unknown_result(
+            source_symbol=source_symbol,
+            market=market,
+            board=board,
+            target_session=target_session,
+            rule_id="UNKNOWN_TRADESTATUS",
+            reason="TRADESTATUS_QUALITY_NOT_OBSERVED",
         )
     if raw_tradestatus_value == "0":
         return _unknown_result(
@@ -160,6 +176,15 @@ def evaluate_daily_price_limit(
             rule_id="UNKNOWN_TRADESTATUS",
             reason="TRADESTATUS_UNKNOWN",
         )
+    if raw_is_st_quality is not None and raw_is_st_quality != "OBSERVED":
+        return _unknown_result(
+            source_symbol=source_symbol,
+            market=market,
+            board=board,
+            target_session=target_session,
+            rule_id="UNKNOWN_ST_STATUS",
+            reason="IS_ST_QUALITY_NOT_OBSERVED",
+        )
     if raw_is_st_value not in {"0", "1"}:
         return _unknown_result(
             source_symbol=source_symbol,
@@ -169,6 +194,22 @@ def evaluate_daily_price_limit(
             rule_id="UNKNOWN_ST_STATUS",
             reason="IS_ST_STATUS_UNKNOWN",
         )
+    for q_val in (
+        raw_preclose_quality,
+        raw_open_quality,
+        raw_high_quality,
+        raw_low_quality,
+        raw_close_quality,
+    ):
+        if q_val is not None and q_val != "OBSERVED":
+            return _unknown_result(
+                source_symbol=source_symbol,
+                market=market,
+                board=board,
+                target_session=target_session,
+                rule_id="UNKNOWN_RAW_PRICE_QUALITY",
+                reason="RAW_PRICE_QUALITY_NOT_OBSERVED",
+            )
     if raw_is_st_value == "1":
         board_rule = _resolve_regime_rule(_ST_LIMIT_REGIMES, board, target_session)
         if board_rule is None:
