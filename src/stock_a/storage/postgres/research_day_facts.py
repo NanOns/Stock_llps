@@ -50,6 +50,49 @@ def _calendar_revision_matches_target_year(
     return components.get(target_year) == target_revision
 
 
+def _select_target_year_d0_scope(
+    scopes: Sequence[Sequence[Any]],
+    *,
+    target_session: date,
+    before_session: date,
+    d1_calendar_revision: str,
+) -> Sequence[Any]:
+    """优先选D0目标年度修订；仅在其缺失时接受唯一兼容的D1复合链。"""
+    from stock_a.research.entry_context.sessions import _load_calendar
+
+    payload = _load_calendar(target_session)[0]
+    target_year_revision = payload.get("revision")
+    if not isinstance(target_year_revision, str) or not target_year_revision:
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_D0_CALENDAR_REVISION_INVALID",
+            "官方日历缺少目标年度修订，拒绝选择D0版本",
+        )
+    prior_scopes = [scope for scope in scopes if scope[17] == before_session]
+    preferred = [scope for scope in prior_scopes if scope[10] == target_year_revision]
+    if len(preferred) == 1:
+        return preferred[0]
+    if len(preferred) > 1:
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_D0_SCOPE_MISSING_OR_AMBIGUOUS",
+            "目标年度D0日历修订对应多个冻结事实范围",
+        )
+    compatible = [
+        scope
+        for scope in prior_scopes
+        if _calendar_revision_matches_target_year(
+            d1_calendar_revision,
+            target_year=target_session.year,
+            target_revision=scope[10],
+        )
+    ]
+    if len(compatible) == 1:
+        return compatible[0]
+    raise ResearchDayPgError(
+        "RESEARCH_DAY_D0_SCOPE_MISSING_OR_AMBIGUOUS",
+        "目标年度D0修订缺失，且D1复合日历链没有唯一兼容的前态范围",
+    )
+
+
 _D0_COLUMNS = (
     "before_session",
     "target_session",
@@ -1925,12 +1968,12 @@ def read_source_research_day(
         d0_scopes = cursor.fetchall()
         if not d0_scopes:
             return incomplete_result("精确目标D0事实缺失")
-        if len(d0_scopes) != 1:
-            raise ResearchDayPgError(
-                "RESEARCH_DAY_D0_SCOPE_MISSING_OR_AMBIGUOUS",
-                "目标D0事实缺失或读取键不唯一",
-            )
-        d0_scope = d0_scopes[0]
+        d0_scope = _select_target_year_d0_scope(
+            d0_scopes,
+            target_session=target_session,
+            before_session=before_session,
+            d1_calendar_revision=calendar_revision,
+        )
         if d0_scope[16] != source_capture_id:
             return incomplete_result(
                 "D0与D1绑定的来源数据包编号不一致",
