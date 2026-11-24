@@ -192,6 +192,7 @@ _CLEANUP_MODULES = {
         "child_table": None,
         "cleanup_tables": (
             "stock.source_t0_early_observation_facts",
+            "stock.source_research_enrollments",
             "stock.source_rule_evaluations",
             "stock.source_d0_formal_admission_day_facts",
         ),
@@ -199,6 +200,12 @@ _CLEANUP_MODULES = {
             "stock.source_d0_formal_admission_day_facts",
             "stock.source_rule_evaluations",
             "stock.source_t0_early_observation_facts",
+        ),
+        "row_checked_fk_tables": frozenset(
+            {
+                "stock.source_research_observation_segment_days",
+                "stock.source_rps_pulse_t0_change_facts",
+            }
         ),
         "algorithm_column": "raw_producer_version",
         "algorithm_label": "Focus正式准入生产者版本",
@@ -1002,9 +1009,12 @@ def _cleanup_fk_blockers(cursor: Any, spec: Mapping[str, Any]) -> list[dict[str,
                 )
             )
 
+    row_checked_fk_tables = set(spec.get("row_checked_fk_tables", ()))
     blockers = []
     for table in cleanup_tables:
-        for referencing_table in sorted(relations_by_parent[table] - cleanup_table_set):
+        for referencing_table in sorted(
+            relations_by_parent[table] - cleanup_table_set - row_checked_fk_tables
+        ):
             matching = next(
                 item
                 for item in details
@@ -1348,6 +1358,14 @@ def _cleanup_version_rows(
                 (target_session, capture_id, profile_revision),
             )
             t0_rows = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(DISTINCT e.id) FROM stock.source_research_enrollments e
+                   JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
+                   WHERE r.target_session=%s AND r.source_capture_id=%s
+                     AND r.profile_revision IS NOT DISTINCT FROM %s""",
+                (target_session, capture_id, profile_revision),
+            )
+            enrollment_rows = int(cursor.fetchone()[0])
             versions.append(
                 {
                     "target_session": target_session,
@@ -1358,6 +1376,7 @@ def _cleanup_version_rows(
                     "child_rows": 0,
                     "dependent_rows": {
                         "stock.source_rule_evaluations": rule_rows,
+                        "stock.source_research_enrollments": enrollment_rows,
                         "stock.source_t0_early_observation_facts": t0_rows,
                     },
                     "version_key": {
@@ -1748,22 +1767,56 @@ def _cleanup_preview_in_cursor(
                     "stock.source_research_enrollments",
                     """SELECT count(DISTINCT e.id)
                        FROM stock.source_research_enrollments e
-                       JOIN stock.source_rule_evaluations r
-                         ON r.id=e.rule_fact_id OR r.id=e.previous_rule_fact_id
-                       WHERE r.target_session=%s AND r.source_capture_id=%s
-                         AND r.profile_revision IS NOT DISTINCT FROM %s""",
+                       JOIN stock.source_rule_evaluations current_rule
+                         ON current_rule.id=e.rule_fact_id
+                       JOIN stock.source_rule_evaluations previous_rule
+                         ON previous_rule.id=e.previous_rule_fact_id
+                       WHERE previous_rule.target_session=%s
+                         AND previous_rule.source_capture_id=%s
+                         AND previous_rule.profile_revision IS NOT DISTINCT FROM %s
+                         AND current_rule.target_session>%s""",
                 ),
                 (
                     "stock.source_research_observation_segment_days",
                     """SELECT count(DISTINCT o.id)
                        FROM stock.source_research_observation_segment_days o
-                       JOIN stock.source_rule_evaluations r
+                       LEFT JOIN stock.source_rule_evaluations r
                          ON r.id=o.anchor_rule_fact_id OR r.id=o.evidence_rule_fact_id
-                       WHERE r.target_session=%s AND r.source_capture_id=%s
-                         AND r.profile_revision IS NOT DISTINCT FROM %s""",
+                       LEFT JOIN stock.source_research_enrollments e
+                         ON e.id=o.source_enrollment_id
+                         OR e.id=o.parent_enrollment_id
+                         OR e.id=o.linked_enrollment_id
+                       LEFT JOIN stock.source_rule_evaluations er ON er.id=e.rule_fact_id
+                       WHERE (
+                           r.target_session=%s AND r.source_capture_id=%s
+                           AND r.profile_revision IS NOT DISTINCT FROM %s
+                       ) OR (
+                           er.target_session=%s AND er.source_capture_id=%s
+                           AND er.profile_revision IS NOT DISTINCT FROM %s
+                       )""",
+                ),
+                (
+                    "stock.source_rps_pulse_t0_change_facts",
+                    """SELECT count(*)
+                       FROM stock.source_rps_pulse_t0_change_facts p
+                       LEFT JOIN stock.source_rule_evaluations r ON r.id=p.rule_fact_id
+                       LEFT JOIN stock.source_t0_early_observation_facts t
+                         ON t.id=p.source_t0_fact_id
+                       LEFT JOIN stock.source_rule_evaluations tr ON tr.id=t.rule_fact_id
+                       WHERE (
+                           r.target_session=%s AND r.source_capture_id=%s
+                           AND r.profile_revision IS NOT DISTINCT FROM %s
+                       ) OR (
+                           tr.target_session=%s AND tr.source_capture_id=%s
+                           AND tr.profile_revision IS NOT DISTINCT FROM %s
+                       )""",
                 ),
             ):
-                cursor.execute(sql, rule_scope)
+                if dependent_table == "stock.source_research_enrollments":
+                    params = (*rule_scope, version["target_session"])
+                else:
+                    params = (*rule_scope, *rule_scope)
+                cursor.execute(sql, params)
                 dependent_rows = int(cursor.fetchone()[0])
                 if dependent_rows:
                     blockers.append(
@@ -2005,6 +2058,7 @@ def _cleanup_preview_in_cursor(
         else "无已存结果",
         "target_sessions": [session.isoformat() for session in sessions],
         "affected_tables": tables,
+        "progress_tables": list(spec.get("progress_tables", tables)),
         "affected_rows_by_table": rows_by_table,
         "affected_rows": affected_rows,
         "dependents": dependency_rows,
@@ -2355,6 +2409,19 @@ def clear_derived_module(
                 )
                 deleted_by_session[target_session.isoformat()][
                     "stock.source_t0_early_observation_facts"
+                ] += cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM stock.source_research_enrollments e
+                       WHERE e.rule_fact_id IN (
+                           SELECT r.id FROM stock.source_rule_evaluations r
+                           WHERE r.target_session=%s AND r.source_capture_id=%s
+                             AND r.profile_revision IS NOT DISTINCT FROM %s
+                       )""",
+                    rule_scope,
+                )
+                deleted_rows["stock.source_research_enrollments"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_research_enrollments"
                 ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_rule_evaluations

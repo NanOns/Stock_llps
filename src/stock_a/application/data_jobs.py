@@ -4450,17 +4450,18 @@ def _execute_derived_cleanup(
             status=409,
         )
     affected_tables = set(preview.get("affected_tables", ()))
+    progress_tables = set(preview.get("progress_tables") or affected_tables)
     target_set = set(targets)
     units = [
         unit
         for unit in plan["stage_units"]
         if unit["target_session"] in target_set
-        and unit["business_table"] in affected_tables
+        and unit["business_table"] in progress_tables
     ]
     if (
         not targets
-        or not affected_tables
-        or len(units) != len(targets) * len(affected_tables)
+        or not progress_tables
+        or len(units) != len(targets) * len(progress_tables)
     ):
         raise DataJobError(
             "DATA_JOB_CLEANUP_PLAN_MISMATCH",
