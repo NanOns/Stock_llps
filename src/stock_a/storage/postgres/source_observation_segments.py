@@ -85,7 +85,12 @@ class ObservationSegmentConflict(ValueError):
 
 
 def _validate_producer_arguments(
-    *, research_cutoff: date, source_capture_id: int, rule_ids: Sequence[str] | None
+    *,
+    research_cutoff: date,
+    source_capture_id: int,
+    rule_ids: Sequence[str] | None,
+    target_sessions: Sequence[date] | None,
+    replace_known_incomplete_successors: bool,
 ) -> None:
     if (
         type(research_cutoff) is not date
@@ -95,28 +100,94 @@ def _validate_producer_arguments(
             rule_ids is not None
             and (
                 not rule_ids
-                or len(set(rule_ids)) != len(rule_ids)
                 or any(
                     not isinstance(rule, str) or not rule.strip() for rule in rule_ids
                 )
+                or len(set(rule_ids)) != len(rule_ids)
             )
         )
     ):
         raise ValueError("来源观察段生产参数无效")
+    if target_sessions is not None and (
+        isinstance(target_sessions, (str, bytes))
+        or not target_sessions
+        or any(type(session) is not date for session in target_sessions)
+        or tuple(sorted(set(target_sessions))) != tuple(target_sessions)
+        or any(session > research_cutoff for session in target_sessions)
+    ):
+        raise ValueError("来源观察段目标登记会话范围无效")
+    if type(replace_known_incomplete_successors) is not bool or (
+        replace_known_incomplete_successors
+        and (target_sessions is None or len(target_sessions) != 1)
+    ):
+        raise ValueError("来源观察段陈旧事实修复必须绑定显式登记会话")
+
+
+def _is_known_incomplete_successor(
+    actual_row: Sequence[Any], expected_row: Sequence[Any]
+) -> bool:
+    """只允许替换已证明缺少目标日规则上下文的旧后继行。"""
+    actual = dict(zip(_SEGMENT_COLUMNS, actual_row, strict=True))
+    expected = dict(zip(_SEGMENT_COLUMNS, expected_row, strict=True))
+    immutable_columns = (
+        "source_enrollment_id",
+        "source_capture_id",
+        "source_symbol",
+        "rule_id",
+        "rule_version",
+        "t0_session",
+        "anchor_rule_fact_id",
+        "anchor_capture_id",
+        "enrollment_kind",
+        "parent_enrollment_id",
+        "observation_session",
+        "previous_session",
+        "target_capture_id",
+        "source_time_quality",
+        "source_clock_role",
+        "scope",
+        "price_coordinate",
+        "identity_status",
+        "producer_contract",
+        "producer_version",
+    )
+    missing_context_columns = (
+        "evidence_rule_fact_id",
+        "observation_state",
+        "profile_revision",
+        "history_session_count",
+        "d1_history_session_count",
+        "event_window_start",
+        "calendar_revision",
+    )
+    return (
+        expected["observation_session"] > expected["t0_session"]
+        and expected["previous_session"] == expected["t0_session"]
+        and all(actual[key] == expected[key] for key in immutable_columns)
+        and all(actual[key] is None for key in missing_context_columns)
+        and actual["lifecycle"] == "PAUSED"
+        and actual["event_code"] == "PAUSED_UNKNOWN"
+        and actual["quality_status"] == "INCOMPLETE"
+        and actual["comparability_status"] == "INCOMPLETE"
+        and actual["reason_code"] == "NO_STORED_FACT"
+    )
 
 
 def _anchor_rows(
-    cursor: Any, *, source_capture_id: int, cutoff: date, rule_ids: Sequence[str] | None
+    cursor: Any,
+    *,
+    source_capture_id: int,
+    cutoff: date,
+    rule_ids: Sequence[str] | None,
+    target_sessions: Sequence[date] | None = None,
 ) -> list[tuple[Any, ...]]:
     rule_filter = "AND r.rule_id = ANY(%s)" if rule_ids else ""
-    params: tuple[Any, ...] = (
-        (source_capture_id, cutoff, list(rule_ids))
-        if rule_ids
-        else (
-            source_capture_id,
-            cutoff,
-        )
-    )
+    target_filter = "AND r.target_session=ANY(%s)" if target_sessions else ""
+    params: list[Any] = [source_capture_id, cutoff]
+    if target_sessions:
+        params.append(list(target_sessions))
+    if rule_ids:
+        params.append(list(rule_ids))
     cursor.execute(
         f"""SELECT e.id,r.target_session,r.id,r.source_symbol,r.rule_id,r.rule_version,
                   r.profile_revision,r.history_session_count,r.d1_history_session_count,
@@ -126,11 +197,12 @@ def _anchor_rows(
            FROM source_research_enrollments e
            JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
            WHERE r.source_capture_id=%s AND r.target_session<=%s
+             {target_filter}
              AND e.enrollment_kind IN
                  ('ENTRY','FIRST_OBSERVED_LEFT_CENSORED','REENTRY')
              {rule_filter}
            ORDER BY r.rule_id,r.target_session,r.source_symbol,e.id""",
-        params,
+        tuple(params),
     )
     return list(cursor.fetchall())
 
@@ -522,6 +594,8 @@ def persist_source_observation_segments(
     research_cutoff: date,
     source_capture_id: int,
     rule_ids: Sequence[str] | None = None,
+    target_sessions: Sequence[date] | None = None,
+    replace_known_incomplete_successors: bool = False,
 ) -> dict[str, Any]:
     """从已存来源规则登记离线生成逐会话观察段；一次事务整体提交。"""
     selected_rules = tuple(rule_ids) if rule_ids is not None else None
@@ -529,12 +603,19 @@ def persist_source_observation_segments(
         research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
         rule_ids=selected_rules,
+        target_sessions=target_sessions,
+        replace_known_incomplete_successors=replace_known_incomplete_successors,
     )
+    selected_sessions = tuple(target_sessions) if target_sessions is not None else None
     calendar_sessions = tuple(
         session
         for session in _load_calendar(research_cutoff)[3]
         if session <= research_cutoff
     )
+    if selected_sessions is not None and any(
+        session not in calendar_sessions for session in selected_sessions
+    ):
+        raise ValueError("来源观察段目标登记会话不在正式交易日历中")
     with _transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
         cursor,
@@ -545,6 +626,7 @@ def persist_source_observation_segments(
             source_capture_id=source_capture_id,
             cutoff=research_cutoff,
             rule_ids=selected_rules,
+            target_sessions=selected_sessions,
         )
         if not anchors:
             return {
@@ -652,8 +734,30 @@ def persist_source_observation_segments(
         for key, actual_row in existing_by_key.items():
             expected_row = expected_by_key.get(key)
             if expected_row is not None and actual_row != expected_row:
+                if not (
+                    replace_known_incomplete_successors
+                    and _is_known_incomplete_successor(actual_row, expected_row)
+                ):
+                    raise ObservationSegmentConflict(
+                        "现有观察日事实与修正生产结果同键异内容，拒绝覆盖"
+                    )
+        replaced_keys = {
+            key
+            for key, actual_row in existing_by_key.items()
+            if key in expected_by_key
+            and actual_row != expected_by_key[key]
+            and replace_known_incomplete_successors
+            and _is_known_incomplete_successor(actual_row, expected_by_key[key])
+        }
+        if replaced_keys:
+            cursor.executemany(
+                """DELETE FROM source_research_observation_segment_days
+                   WHERE source_enrollment_id=%s AND observation_session=%s""",
+                sorted(replaced_keys),
+            )
+            if max(0, cursor.rowcount) != len(replaced_keys):
                 raise ObservationSegmentConflict(
-                    "现有观察日事实与修正生产结果同键异内容，拒绝覆盖"
+                    "已核验的缺失上下文后继行删除数量不一致，事务已回滚"
                 )
         corrected_deleted_count = 0
         if stale_keys:
@@ -691,6 +795,19 @@ def persist_source_observation_segments(
         quality_counts = Counter(row[18] for row in rows)
         lifecycle_counts = Counter(row[16] for row in rows)
         rule_counts = Counter(row[4] for row in anchors)
+        expected_by_session = Counter(row[5].isoformat() for row in rows)
+        inserted_keys = {
+            key
+            for key in expected_by_key
+            if key not in existing_by_key or key in replaced_keys
+        }
+        inserted_by_session = Counter(
+            expected_by_key[key][5].isoformat() for key in inserted_keys
+        )
+        if inserted_count != len(inserted_keys):
+            raise ObservationSegmentConflict(
+                "观察段事务插入数量与差异键数不一致，事务已回滚"
+            )
         return {
             "status": "PERSISTED",
             "source_capture_id": source_capture_id,
@@ -698,8 +815,11 @@ def persist_source_observation_segments(
             "enrollment_count": len(anchors),
             "source_symbol_count": len({row[3] for row in anchors}),
             "observation_count": len(rows),
+            "target_session_counts": dict(sorted(expected_by_session.items())),
+            "target_session_inserted_counts": dict(sorted(inserted_by_session.items())),
             "inserted_count": inserted_count,
             "corrected_deleted_count": corrected_deleted_count,
+            "repaired_incomplete_successor_count": len(replaced_keys),
             "rule_counts": dict(sorted(rule_counts.items())),
             "event_counts": dict(sorted(event_counts.items())),
             "quality_counts": dict(sorted(quality_counts.items())),
@@ -1262,14 +1382,14 @@ def read_source_observation_segments(
         if displayed_items_by_id:
             displayed_ids = sorted(displayed_items_by_id)
             cursor.execute(
-                """SELECT e.id,f.target_session,f.source_capture_id,
-                          f.source_symbol,f.horizon,
+                """SELECT e.id,f.target_session,f.source_symbol,
+                          f.source_capture_id,f.horizon,
                           f.path_rule_version,f.calendar_revision,f.endpoint_session,
                           f.maturity,f.endpoint_quality,f.endpoint_reason,
                           f.endpoint_numerator,f.endpoint_denominator,f.path_quality,
-                          f.path_reasons,f.price_coordinate,f.scope,
-                          f.mfe_numerator,f.mfe_denominator,f.mae_numerator,
-                          f.mae_denominator,f.mdd_numerator,f.mdd_denominator
+                          f.path_reasons,f.mfe_numerator,f.mfe_denominator,
+                          f.mae_numerator,f.mae_denominator,f.mdd_numerator,
+                          f.mdd_denominator,f.price_coordinate,f.scope
                    FROM source_research_enrollments e
                    JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
                    JOIN source_forward_path_facts f

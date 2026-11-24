@@ -155,6 +155,8 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "operation",
         "initialization_mode",
         "daily_mode",
+        "observation_rule_ids",
+        "replace_known_incomplete_observation_successors",
         "reset_confirmed",
         "reset_preview_fingerprint",
     }
@@ -245,6 +247,48 @@ def _request_fields(body: Any) -> dict[str, Any]:
         counts = {}
     if not modules:
         raise DataJobError("DATA_JOB_MODULE_SELECTION_EMPTY", "至少选择一个实际模块。")
+    observation_rule_ids = body.get("observation_rule_ids")
+    if observation_rule_ids is not None:
+        from stock_a.storage.postgres.research_facts import RULES
+
+        if (
+            not isinstance(observation_rule_ids, list)
+            or not observation_rule_ids
+            or any(
+                not isinstance(rule_id, str) or rule_id not in RULES
+                for rule_id in observation_rule_ids
+            )
+            or len(observation_rule_ids) != len(set(observation_rule_ids))
+            or "OBSERVATION_SEGMENTS" not in modules
+        ):
+            raise DataJobError(
+                "DATA_JOB_OBSERVATION_RULE_SCOPE_INVALID",
+                "观察段规则过滤必须是现行登记规则的非空唯一子集。",
+            )
+        observation_rule_ids = sorted(observation_rule_ids)
+    replace_known_incomplete = body.get(
+        "replace_known_incomplete_observation_successors", False
+    )
+    if type(replace_known_incomplete) is not bool:
+        raise DataJobError(
+            "DATA_JOB_OBSERVATION_REPAIR_SCOPE_INVALID",
+            "观察段陈旧后继修复范围必须是布尔值。",
+        )
+    if replace_known_incomplete and (
+        mode != "MANUAL_DAILY"
+        or daily_mode != "CUSTOM"
+        or selections["source"]
+        or selections["base"]
+        or selections["research"] != ["OBSERVATION_SEGMENTS"]
+        or operation != "FILL_MISSING"
+        or counts.get("OBSERVATION_SEGMENTS") != 1
+        or observation_rule_ids is None
+        or len(observation_rule_ids) != 1
+    ):
+        raise DataJobError(
+            "DATA_JOB_OBSERVATION_REPAIR_SCOPE_INVALID",
+            "陈旧观察后继修复仅允许单会话、单规则观察段FILL_MISSING任务。",
+        )
     profile_history_count = body.get("profile_history_session_count")
     if profile_history_count is not None:
         profile_history_count = _positive_integer(
@@ -330,6 +374,8 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "operation": operation,
         "initialization_mode": initialization_mode,
         "daily_mode": daily_mode,
+        "observation_rule_ids": observation_rule_ids,
+        "replace_known_incomplete_observation_successors": replace_known_incomplete,
         "reset_confirmed": body.get("reset_confirmed") is True,
         "reset_preview_fingerprint": body.get("reset_preview_fingerprint"),
         "has_module_selection": has_module_selection,
@@ -2557,6 +2603,10 @@ class DataJobCoordinator:
         plan["research_modules"] = request["research_modules"]
         plan["initialization_mode"] = request["initialization_mode"]
         plan["daily_mode"] = request["daily_mode"]
+        plan["observation_rule_ids"] = request["observation_rule_ids"]
+        plan["replace_known_incomplete_observation_successors"] = request[
+            "replace_known_incomplete_observation_successors"
+        ]
         output_counts = dict(request["module_output_session_counts"])
         for module in request["selected_modules"]:
             if module in output_counts:
@@ -2607,6 +2657,13 @@ class DataJobCoordinator:
             "source_modules": request["source_modules"],
             "base_modules": request["base_modules"],
             "research_modules": request["research_modules"],
+            "observation_target_sessions": plan.get("module_output_sessions", {}).get(
+                "OBSERVATION_SEGMENTS", ()
+            ),
+            "observation_rule_ids": request["observation_rule_ids"],
+            "replace_known_incomplete_observation_successors": request[
+                "replace_known_incomplete_observation_successors"
+            ],
             "history_session_count": plan.get("history_session_count"),
             "profile_history_session_count": plan.get("profile_history_session_count"),
             "module_output_session_counts": output_counts,
@@ -2774,11 +2831,11 @@ class DataJobCoordinator:
             seg_days = plan.get("module_output_sessions", {}).get(
                 "OBSERVATION_SEGMENTS", ()
             )
-            if seg_days:
+            for day_text in seg_days:
                 _unit(
                     plan["stage_units"],
                     stage="OBSERVATION_SEGMENTS",
-                    target_session=date.fromisoformat(seg_days[-1]),
+                    target_session=date.fromisoformat(day_text),
                     business_table="stock.source_research_observation_segment_days",
                     status="NOT_STARTED",
                 )
@@ -7644,8 +7701,25 @@ def _execute_shared_production_chain(
                     config,
                     research_cutoff=cutoff,
                     source_capture_id=source_capture_id,
+                    rule_ids=plan.get("observation_rule_ids"),
+                    target_sessions=tuple(
+                        date.fromisoformat(day)
+                        for day in plan.get("module_output_sessions", {}).get(
+                            "OBSERVATION_SEGMENTS", ()
+                        )
+                    ),
+                    replace_known_incomplete_successors=plan.get(
+                        "replace_known_incomplete_observation_successors", False
+                    ),
                 )
                 for unit in seg_units:
+                    target_key = unit["target_session"].isoformat()
+                    expected_rows = int(
+                        res.get("target_session_counts", {}).get(target_key, 0)
+                    )
+                    inserted_rows = int(
+                        res.get("target_session_inserted_counts", {}).get(target_key, 0)
+                    )
                     actual_rows = data_job_pg.read_business_table_count(
                         config,
                         business_table=unit["business_table"],
@@ -7653,8 +7727,9 @@ def _execute_shared_production_chain(
                         source_capture_id=source_capture_id,
                         calendar_revision=cal_revision,
                         research_cutoff=cutoff,
+                        rule_ids=plan.get("observation_rule_ids"),
                     )
-                    if actual_rows < int(res.get("segment_days", 0) or 0):
+                    if actual_rows != expected_rows:
                         raise DataJobError(
                             "OBSERVATION_SEGMENTS_READBACK_MISMATCH",
                             "观察持续分段独立读回行数不足。",
@@ -7668,10 +7743,15 @@ def _execute_shared_production_chain(
                         source_capture_id=source_capture_id,
                         profile_history_session_count=None,
                         d1_history_session_count=None,
-                        expected_rows=actual_rows,
-                        inserted_rows=int(res.get("segment_days", 0) or 0),
+                        expected_rows=expected_rows,
+                        inserted_rows=inserted_rows,
                         quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
-                        no_change=False,
+                        no_change=(
+                            inserted_rows == 0
+                            and int(res.get("repaired_incomplete_successor_count", 0))
+                            == 0
+                            and int(res.get("corrected_deleted_count", 0)) == 0
+                        ),
                         producer_version=RULE_VERSION,
                         calendar_revision=cal_revision,
                     )

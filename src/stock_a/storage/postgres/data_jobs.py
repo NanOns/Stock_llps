@@ -2592,6 +2592,7 @@ def read_business_table_count(
     d1_history_session_count: int | None = None,
     profile_revision: str | None = None,
     producer_version: str | Sequence[str] | None = None,
+    rule_ids: Sequence[str] | None = None,
     calendar_revision: str | None = None,
     sector_snapshot_ids: Mapping[str, int] | None = None,
     followup_target_sessions: Sequence[date] | None = None,
@@ -2602,6 +2603,18 @@ def read_business_table_count(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
+        or (
+            rule_ids is not None
+            and (
+                not isinstance(rule_ids, Sequence)
+                or isinstance(rule_ids, (str, bytes))
+                or not rule_ids
+                or any(
+                    not isinstance(rule_id, str) or not rule_id for rule_id in rule_ids
+                )
+                or len(set(rule_ids)) != len(rule_ids)
+            )
+        )
     ):
         raise DataJobPgError(
             "DATA_JOB_CUTOFF_REQUIRED", "事实读回必须绑定不超过截止日的官方会话"
@@ -2856,8 +2869,19 @@ def read_business_table_count(
         ),
         "stock.source_research_observation_segment_days": (
             """SELECT count(*) FROM stock.source_research_observation_segment_days
-               WHERE t0_session<=%s AND source_capture_id=%s""",
-            lambda: (research_cutoff, source_capture_id),
+               WHERE t0_session=%s AND source_capture_id=%s
+                 AND rule_version=%s AND calendar_revision=%s
+                 AND observation_session<=%s
+                 AND (%s=false OR rule_id=ANY(%s::text[]))""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+                research_cutoff,
+                bool(rule_ids),
+                list(rule_ids or ()),
+            ),
         ),
         "stock.source_market_breadth_days": (
             """SELECT count(*) FROM stock.source_market_breadth_days

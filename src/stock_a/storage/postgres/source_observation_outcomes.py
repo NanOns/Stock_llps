@@ -63,10 +63,11 @@ _OBSERVATION_COLUMNS = (
     "evidence_scope",
 )
 
+# 观察期限匹配器要求证券、捕获及价格坐标/范围维持共享投影顺序。
 _FORWARD_COLUMNS = (
     "target_session",
-    "source_capture_id",
     "source_symbol",
+    "source_capture_id",
     "horizon",
     "path_rule_version",
     "calendar_revision",
@@ -78,14 +79,14 @@ _FORWARD_COLUMNS = (
     "endpoint_denominator",
     "path_quality",
     "path_reasons",
-    "price_coordinate",
-    "scope",
     "mfe_numerator",
     "mfe_denominator",
     "mae_numerator",
     "mae_denominator",
     "mdd_numerator",
     "mdd_denominator",
+    "price_coordinate",
+    "scope",
 )
 
 _METRIC_COLUMNS = {
