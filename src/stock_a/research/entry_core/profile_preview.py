@@ -185,74 +185,265 @@ def _profile_window(
     }
 
 
-_CROSS_MIN_WINDOW_SESSIONS: dict[str, int] = {
-    "cross.rel_market_1": 2,
-    "cross.rel_market_3": 4,
-    "cross.rps5": 6,
-    "cross.rel_market_5": 6,
-    "cross.rps5_delta1_pp": 7,
-    "cross.rps5_delta3_pp": 9,
-    "cross.rps20": 21,
-    "cross.rel_market_20": 21,
-    "cross.rps20_delta1_pp": 22,
-    "cross.rps20_delta3_pp": 24,
+_CROSS_REQUIRED_ENDPOINTS: dict[str, tuple[str, ...]] = {
+    "cross.rps5": ("rps5_current",),
+    "cross.rps5_delta1_pp": ("rps5_current", "rps5_minus1"),
+    "cross.rps5_delta3_pp": ("rps5_current", "rps5_minus3"),
+    "cross.rps20": ("rps20_current",),
+    "cross.rps20_delta1_pp": ("rps20_current", "rps20_minus1"),
+    "cross.rps20_delta3_pp": ("rps20_current", "rps20_minus3"),
+    "cross.rel_market_1": ("rel_market_1",),
+    "cross.rel_market_3": ("rel_market_3",),
+    "cross.rel_market_5": ("rel_market_5",),
+    "cross.rel_market_20": ("rel_market_20",),
 }
+
+
+def _validate_cross_metadata_scope(
+    metadata: Mapping[str, Any] | None,
+    *,
+    target_session: date,
+    source_capture_id: int,
+    calendar_revision: str,
+    input_id: str,
+) -> Mapping[str, Any]:
+    """校验横截面元数据与当前目标日、价格捕获和官方日历版本严格一致。"""
+    if not isinstance(metadata, Mapping) or not metadata:
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+            f"横截面输入缺少真实总体与端点元数据：{input_id}",
+        )
+    meta_target = metadata.get("target_session") or metadata.get("target_date")
+    if meta_target is not None:
+        meta_date = (
+            date.fromisoformat(meta_target)
+            if isinstance(meta_target, str)
+            else meta_target
+        )
+        if meta_date != target_session:
+            raise ResearchEntryError(
+                "PROFILE_PREVIEW_CROSS_METADATA_MISMATCH",
+                f"横截面元数据目标日({meta_date})与画像目标日({target_session})不一致",
+            )
+    meta_cap = metadata.get("price_capture_id")
+    if meta_cap is not None and int(meta_cap) != int(source_capture_id):
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CROSS_METADATA_MISMATCH",
+            f"横截面元数据价格捕获({meta_cap})与画像来源捕获({source_capture_id})不一致",
+        )
+    meta_cal = metadata.get("calendar_revision")
+    if (
+        isinstance(meta_cal, str)
+        and meta_cal.strip()
+        and meta_cal.strip() != calendar_revision
+    ):
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CROSS_METADATA_MISMATCH",
+            f"横截面元数据日历版本({meta_cal})与画像日历版本({calendar_revision})不一致",
+        )
+    return metadata
+
+
+def _collect_cross_field_endpoints(
+    input_id: str,
+    metadata: Mapping[str, Any],
+    *,
+    require_observed_complete: bool,
+) -> list[tuple[str, Mapping[str, Any]]]:
+    """读取单个 cross.* 字段所依赖的真实端点元数据；OBSERVED 字段缺真实端点立即拒收。"""
+    ep_keys = _CROSS_REQUIRED_ENDPOINTS.get(input_id, ())
+    is_rank = input_id.startswith("cross.rps")
+    container = metadata.get("rank_metadata" if is_rank else "relative_metadata")
+    if not isinstance(container, Mapping):
+        if require_observed_complete:
+            raise ResearchEntryError(
+                "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+                f"横截面字段{input_id}缺少真实端点元数据字典",
+            )
+        return []
+    collected: list[tuple[str, Mapping[str, Any]]] = []
+    for ep_key in ep_keys:
+        info = container.get(ep_key)
+        ep_date = info.get("endpoint_date") if isinstance(info, Mapping) else None
+        start_d = (
+            (info.get("return_start_date") or info.get("start_session"))
+            if isinstance(info, Mapping)
+            else None
+        )
+        u_id = info.get("universe_id") if isinstance(info, Mapping) else None
+        u_rev = info.get("universe_revision") if isinstance(info, Mapping) else None
+        complete = (
+            isinstance(info, Mapping)
+            and ep_date is not None
+            and start_d is not None
+            and isinstance(u_id, str)
+            and bool(u_id.strip())
+            and isinstance(u_rev, str)
+            and bool(u_rev.strip())
+        )
+        if not complete:
+            if require_observed_complete:
+                raise ResearchEntryError(
+                    "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+                    f"横截面字段{input_id}的端点{ep_key}缺少真实起止日期或总体身份",
+                )
+            continue
+        collected.append((ep_key, info))
+    return collected
+
+
+def _build_cross_window_from_metadata(
+    input_id: str,
+    input_value: FieldValue,
+    metadata: Mapping[str, Any],
+    *,
+    target_session: date,
+    history: tuple[CoreObservation, ...],
+    official_sessions: Sequence[date] | None,
+    window_contract: str,
+    calendar_revision: str,
+) -> tuple[WindowIdentity, dict[str, Any]]:
+    """严格基于横截面真实端点起止会话构造 WindowIdentity，不再按固定长度猜测切片。"""
+    is_obs = input_value.quality == "OBSERVED"
+    endpoints = _collect_cross_field_endpoints(
+        input_id, metadata, require_observed_complete=is_obs
+    )
+    if not endpoints:
+        identity = WindowIdentity(
+            contract=window_contract,
+            first_endpoint=None,
+            last_endpoint=None,
+            selected_sessions=(),
+            calendar_revision=calendar_revision,
+            status_revision="BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
+        )
+        return identity, {
+            "contract": window_contract,
+            "first_endpoint": None,
+            "last_endpoint": None,
+            "selected_session_count": 0,
+            "selected_sessions": [],
+            "calendar_revision": calendar_revision,
+            "status_revision": "BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
+            "input_quality": input_value.quality,
+            "endpoints": [],
+        }
+
+    starts: list[date] = []
+    ends: list[date] = []
+    ep_summary: list[dict[str, Any]] = []
+    for ep_key, info in endpoints:
+        raw_s = info.get("return_start_date") or info.get("start_session")
+        raw_e = info["endpoint_date"]
+        s_dt = date.fromisoformat(raw_s) if isinstance(raw_s, str) else raw_s
+        e_dt = date.fromisoformat(raw_e) if isinstance(raw_e, str) else raw_e
+        starts.append(s_dt)
+        ends.append(e_dt)
+        ep_summary.append(
+            {
+                "endpoint_key": ep_key,
+                "return_start_date": s_dt.isoformat(),
+                "endpoint_date": e_dt.isoformat(),
+                "universe_id": info["universe_id"],
+                "universe_revision": info["universe_revision"],
+                "denominator": info.get("denominator"),
+                "known_count": info.get("known_count"),
+            }
+        )
+    first_ep = min(starts)
+    last_ep = max(ends)
+    if last_ep != target_session:
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CROSS_METADATA_MISMATCH",
+            f"横截面字段{input_id}真实末日({last_ep})与画像目标日({target_session})不一致",
+        )
+    if official_sessions is not None:
+        selected_sess = tuple(s for s in official_sessions if first_ep <= s <= last_ep)
+    else:
+        selected_sess = tuple(
+            row.session for row in history if first_ep <= row.session <= last_ep
+        )
+    if (
+        not selected_sess
+        or selected_sess[0] != first_ep
+        or selected_sess[-1] != last_ep
+    ):
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CROSS_WINDOW_UNALIGNED",
+            f"横截面字段{input_id}真实窗口[{first_ep}, {last_ep}]未在官方/历史会话中完整对齐",
+        )
+    identity = WindowIdentity(
+        contract=window_contract,
+        first_endpoint=first_ep,
+        last_endpoint=last_ep,
+        selected_sessions=selected_sess,
+        calendar_revision=calendar_revision,
+        status_revision="BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
+    )
+    return identity, {
+        "contract": window_contract,
+        "first_endpoint": first_ep.isoformat(),
+        "last_endpoint": last_ep.isoformat(),
+        "selected_session_count": len(selected_sess),
+        "selected_sessions": [s.isoformat() for s in selected_sess],
+        "calendar_revision": calendar_revision,
+        "status_revision": "BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
+        "input_quality": input_value.quality,
+        "endpoints": ep_summary,
+    }
 
 
 def _resolve_cross_universe_context(
     input_id: str,
     dependency: str,
-    metadata: Mapping[str, Any] | None,
+    metadata: Mapping[str, Any],
+    *,
+    require_observed_complete: bool,
 ) -> Any:
-    """从真实横截面批次/PG元数据提取总体与端点上下文，绝不拼接假总体字符串。"""
-    if not isinstance(metadata, Mapping) or not metadata:
-        raise ResearchEntryError(
-            "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
-            f"横截面输入缺少真实总体与端点元数据：{input_id}/{dependency}",
-        )
-    universe_version = metadata.get("universe_version")
-    rank_meta = metadata.get("rank_metadata")
-    rel_meta = metadata.get("relative_metadata")
+    """严格从真实横截面端点元数据提取总体上下文；绝不回退单一 universe_version 伪造端点依据。"""
+    endpoints = _collect_cross_field_endpoints(
+        input_id, metadata, require_observed_complete=require_observed_complete
+    )
     if dependency == "context.universe_ref_with_each_exact_endpoint":
-        if isinstance(rank_meta, Mapping) and rank_meta:
-            parts: list[str] = []
-            for key in sorted(rank_meta):
-                info = rank_meta[key]
-                if isinstance(info, Mapping) and info.get("endpoint_date") is not None:
+        if not endpoints:
+            if require_observed_complete:
+                raise ResearchEntryError(
+                    "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+                    f"横截面端点总体元数据缺失：{input_id}/{dependency}",
+                )
+            return "UNAVAILABLE_CROSS_ENDPOINTS"
+        # 校验本字段必需端点已齐全后，返回本批次全部可用排名端点的统一规范绑定串，
+        # 确保同一规则下多个 cross.rps* 输入的共享上下文版本严格一致
+        rank_meta = metadata.get("rank_metadata")
+        parts: list[str] = []
+        if isinstance(rank_meta, Mapping):
+            for ep_key in sorted(rank_meta):
+                info = rank_meta[ep_key]
+                if (
+                    isinstance(info, Mapping)
+                    and info.get("endpoint_date") is not None
+                    and info.get("universe_id")
+                    and info.get("universe_revision")
+                ):
                     ep_d = info["endpoint_date"]
                     ep_s = ep_d.isoformat() if hasattr(ep_d, "isoformat") else str(ep_d)
                     parts.append(
-                        f"{key}:{info.get('universe_id')}:{info.get('universe_revision')}@{ep_s}"
+                        f"{ep_key}:{info['universe_id']}:{info['universe_revision']}@{ep_s}"
                     )
-            if parts:
-                return "|".join(parts)
-        if isinstance(universe_version, str) and universe_version.strip():
-            return universe_version.strip()
-        raise ResearchEntryError(
-            "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
-            f"横截面端点总体元数据缺失：{input_id}/{dependency}",
-        )
+        return "|".join(parts)
     if dependency == "context.start_session_universe_ref":
-        rel_key = input_id.removeprefix("cross.")
-        if isinstance(rel_meta, Mapping) and isinstance(rel_meta.get(rel_key), Mapping):
-            start_d = rel_meta[rel_key].get("start_session")
-            if (
-                start_d is not None
-                and isinstance(universe_version, str)
-                and universe_version.strip()
-            ):
-                start_s = (
-                    start_d.isoformat()
-                    if hasattr(start_d, "isoformat")
-                    else str(start_d)
+        if not endpoints:
+            if require_observed_complete:
+                raise ResearchEntryError(
+                    "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
+                    f"横截面起始日总体元数据缺失：{input_id}/{dependency}",
                 )
-                return f"{universe_version.strip()}@{start_s}"
-        if isinstance(universe_version, str) and universe_version.strip():
-            return universe_version.strip()
-        raise ResearchEntryError(
-            "PROFILE_PREVIEW_CROSS_METADATA_MISSING",
-            f"横截面起始日总体元数据缺失：{input_id}/{dependency}",
-        )
+            return "UNAVAILABLE_CROSS_START_UNIVERSE"
+        _, info = endpoints[0]
+        start_d = info.get("return_start_date") or info.get("start_session")
+        start_s = start_d.isoformat() if hasattr(start_d, "isoformat") else str(start_d)
+        return f"{info['universe_id']}:{info['universe_revision']}@{start_s}"
+    universe_version = metadata.get("universe_version")
     if isinstance(universe_version, str) and universe_version.strip():
         return universe_version.strip()
     raise ResearchEntryError(
@@ -278,6 +469,7 @@ def _build_profile_preview(
     raw_period_trends: Mapping[str, Any] | None = None,
     cross_section_fields: Mapping[str, FieldValue] | None = None,
     cross_section_metadata: Mapping[str, Any] | None = None,
+    official_sessions: Sequence[date] | None = None,
     source_snapshot_role: str = "BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
     selected_fields: frozenset[str] | None = None,
 ) -> dict[str, Any]:
@@ -517,35 +709,26 @@ def _build_profile_preview(
                         "本次全市场横截面结果缺少画像输入：" + input_id,
                     )
                 input_value = cross_section_fields[input_id]
+                validated_cross_meta = _validate_cross_metadata_scope(
+                    cross_section_metadata,
+                    target_session=target_session,
+                    source_capture_id=source_capture_id,
+                    calendar_revision=calendar_revision,
+                    input_id=input_id,
+                )
                 window_contract = field_registry.get("window_contract", "NONE")
                 if window_contract != "NONE":
-                    req_len = _CROSS_MIN_WINDOW_SESSIONS.get(input_id, 1)
-                    sliced_history = history[-req_len:] if history else ()
-                    selected_sess = tuple(row.session for row in sliced_history) or (
-                        target_session,
-                    )
-                    first_ep = selected_sess[0]
-                    last_ep = selected_sess[-1]
-                    window_identity = WindowIdentity(
-                        contract=window_contract,
-                        first_endpoint=first_ep,
-                        last_endpoint=last_ep,
-                        selected_sessions=selected_sess,
+                    window_identity, input_window = _build_cross_window_from_metadata(
+                        input_id,
+                        input_value,
+                        validated_cross_meta,
+                        target_session=target_session,
+                        history=history,
+                        official_sessions=official_sessions,
+                        window_contract=window_contract,
                         calendar_revision=calendar_revision,
-                        status_revision="BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
                     )
                     expected_windows[input_id] = window_identity
-                    input_window = {
-                        "contract": window_contract,
-                        "first_endpoint": first_ep.isoformat(),
-                        "last_endpoint": last_ep.isoformat(),
-                        "requested_sessions": req_len,
-                        "selected_session_count": len(selected_sess),
-                        "selected_sessions": [s.isoformat() for s in selected_sess],
-                        "calendar_revision": calendar_revision,
-                        "status_revision": "BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
-                        "input_quality": input_value.quality,
-                    }
                 else:
                     input_window = None
             elif input_id.startswith("profile."):
@@ -623,8 +806,18 @@ def _build_profile_preview(
                     "context.universe_ref_with_each_exact_endpoint",
                     "context.start_session_universe_ref",
                 }:
+                    validated_cross_meta = _validate_cross_metadata_scope(
+                        cross_section_metadata,
+                        target_session=target_session,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=calendar_revision,
+                        input_id=input_id,
+                    )
                     contexts[dependency] = _resolve_cross_universe_context(
-                        input_id, dependency, cross_section_metadata
+                        input_id,
+                        dependency,
+                        validated_cross_meta,
+                        require_observed_complete=(input_value.quality == "OBSERVED"),
                     )
                 else:
                     raise ResearchEntryError(

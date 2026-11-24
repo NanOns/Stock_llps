@@ -85,6 +85,7 @@ _MIGRATION_FILES = (
     "0071_r02_price_profile_values_column.sql",
     "0072_r02_limit_up_streak_day_facts.sql",
     "0073_r02_baostock_ext_universe_index_cross_section.sql",
+    "0074_r02_cross_section_exact_and_endpoints.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -149,6 +150,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_AUDIT_FIX_PROFILE_VALUES_R1": frozenset({71}),
     "R02_LIMIT_UP_LADDER_FACTS_R1": frozenset({72}),
     "R02_BAOSTOCK_EXT_R3_SCHEMA_R1": frozenset({73}),
+    "R02_CROSS_SECTION_EXACT_ENDPOINTS_R1": frozenset({74}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -368,6 +370,9 @@ _RELATIONS_BY_MIGRATION_COUNT[73] = _RELATIONS_BY_MIGRATION_COUNT[72] | {
     "source_market_environment_day_facts",
     "source_cross_section_day_facts",
     "baostock_daily_api_quota_ledger",
+}
+_RELATIONS_BY_MIGRATION_COUNT[74] = _RELATIONS_BY_MIGRATION_COUNT[73] | {
+    "source_cross_section_endpoints",
 }
 
 

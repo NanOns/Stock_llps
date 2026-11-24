@@ -36,6 +36,11 @@ def _allowed_profile_enum_values(config_root_str: str) -> dict[str, frozenset[st
 
 def _resolve_config_root(config: Mapping[str, Any] | None) -> Path:
     if isinstance(config, Mapping):
+        paths = config.get("paths")
+        if isinstance(paths, Mapping):
+            cfg_root = paths.get("configuration_root")
+            if isinstance(cfg_root, (str, Path)) and str(cfg_root).strip():
+                return Path(cfg_root).resolve()
         policy = config.get("configuration_policy")
         if isinstance(policy, Mapping) and isinstance(policy.get("root"), str):
             return Path(policy["root"]).resolve()
@@ -656,15 +661,22 @@ def _normalize_record(
 
 
 def insert_profile_records_in_transaction(
-    cursor: Any, records: Sequence[Mapping[str, Any]]
+    cursor: Any,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    allowed_enums: Mapping[str, frozenset[str]] | None = None,
 ) -> list[str]:
     """按显式来源版本与业务键批量插入画像行。"""
     if not isinstance(records, (tuple, list)) or not records:
         raise PriceProfilePgError("PROFILE_BATCH_EMPTY", "价格画像批次不能为空")
     validate_profile_batch_size(len(records))
-    allowed_enums = _allowed_profile_enum_values(str(_resolve_config_root(config)))
+    resolved_enums = (
+        allowed_enums
+        if allowed_enums is not None
+        else _allowed_profile_enum_values(str(_resolve_config_root(None)))
+    )
     prepared = [
-        _normalize_record(item, allowed_enums=allowed_enums) for item in records
+        _normalize_record(item, allowed_enums=resolved_enums) for item in records
     ]
     symbols = [item["source_symbol"] for item in prepared]
     if len(set(symbols)) != len(symbols):
@@ -799,7 +811,9 @@ ORDER BY source_symbol""",
             item for symbol, item in sorted(requested.items()) if symbol not in existing
         ]
         if missing_records:
-            inserted = insert_profile_records_in_transaction(cursor, missing_records)
+            inserted = insert_profile_records_in_transaction(
+                cursor, missing_records, allowed_enums=allowed_enums
+            )
         else:
             inserted = []
         if inserted:

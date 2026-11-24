@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from bisect import bisect_left, bisect_right
 from datetime import date
 from fractions import Fraction
-from typing import Mapping
+from typing import Any, Mapping, Sequence
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 from stock_a.research.core import MarketSessionCalendar
@@ -723,9 +723,13 @@ def calculate_cross_section_batch(
         ep = relative_endpoints.get(key)
         if ep is None:
             rel_meta[key] = {
+                "endpoint_date": None,
                 "start_session": None,
+                "universe_id": None,
+                "universe_revision": None,
                 "denominator": 0,
                 "known_count": 0,
+                "unknown_count": 0,
             }
             continue
         if ep.endpoint_date != target_date:
@@ -741,9 +745,13 @@ def calculate_cross_section_batch(
         r_map, denom, k_cnt = _batch_relative_endpoint(ep, members)
         rel_maps[key] = r_map
         rel_meta[key] = {
+            "endpoint_date": ep.endpoint_date,
             "start_session": ep.return_start_date,
+            "universe_id": ep.universe_id,
+            "universe_revision": ep.universe_revision,
             "denominator": denom,
             "known_count": k_cnt,
+            "unknown_count": denom - k_cnt,
         }
 
     # 分发到目标日全体成员
