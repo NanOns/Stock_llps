@@ -164,6 +164,17 @@ def _profile_revision(
     )
 
 
+def _resolve_suspension_status(target_row: Mapping[str, Any]) -> str:
+    """根据同捕获同日 BaoStock raw_tradestatus 字段推导目标日停牌状态。"""
+    if target_row.get("raw_tradestatus_quality") == "OBSERVED":
+        value = target_row.get("raw_tradestatus_value")
+        if value == "1":
+            return "SUSPENSION_STATUS_TRADING"
+        if value == "0":
+            return "SUSPENSION_STATUS_SUSPENDED"
+    return "SUSPENSION_STATUS_UNKNOWN"
+
+
 def _records_for_page(
     *,
     page: Mapping[str, Any],
@@ -218,7 +229,7 @@ def _records_for_page(
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
             "listing_status": "LISTING_STATUS_UNKNOWN",
-            "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
+            "suspension_status": _resolve_suspension_status(target_row),
             "pit_status": "NON_PIT_RETROSPECTIVE",
             "source_time_quality": source_time_quality,
             "source_available_at": source_available_at,

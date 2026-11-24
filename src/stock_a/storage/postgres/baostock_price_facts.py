@@ -1266,7 +1266,9 @@ def _raw_payload(
                 raw_amount_reason=reason,
                 amount_quality=quality,
                 amount_reason=reason,
-                amount_unit_status="CNY_VERIFIED",
+                amount_unit_status=(
+                    "CNY_VERIFIED" if observation is not None else "UNIT_UNVERIFIED"
+                ),
             )
         elif field_name == "volume":
             activity.update(
@@ -1277,7 +1279,9 @@ def _raw_payload(
                 raw_volume_reason=reason,
                 volume_quality=quality,
                 volume_reason=reason,
-                volume_unit_status="SHARES_VERIFIED",
+                volume_unit_status=(
+                    "SHARES_VERIFIED" if observation is not None else "UNIT_UNVERIFIED"
+                ),
             )
         else:
             prefix = "raw_turn" if field_name == "turn" else f"raw_{field_name}"
@@ -1380,9 +1384,13 @@ def _qfq_payload(
         activity[quality_column] = quality
         activity[reason_column] = reason
         if field_name == "amount":
-            activity["qfq_amount_unit_status"] = "CNY_VERIFIED"
+            activity["qfq_amount_unit_status"] = (
+                "CNY_VERIFIED" if observation is not None else None
+            )
         elif field_name == "volume":
-            activity["qfq_volume_unit_status"] = "SHARES_VERIFIED"
+            activity["qfq_volume_unit_status"] = (
+                "SHARES_VERIFIED" if observation is not None else None
+            )
 
     if observation is not None:
         bar_status = "TARGET_PRESENT"
@@ -1494,7 +1502,9 @@ def _raw_activity_payload(
                 raw_amount_reason=field_reason,
                 amount_quality=quality,
                 amount_reason=field_reason,
-                amount_unit_status="CNY_VERIFIED",
+                amount_unit_status=(
+                    "CNY_VERIFIED" if observation is not None else "UNIT_UNVERIFIED"
+                ),
             )
         elif field_name == "volume":
             output.update(
@@ -1505,7 +1515,9 @@ def _raw_activity_payload(
                 raw_volume_reason=field_reason,
                 volume_quality=quality,
                 volume_reason=field_reason,
-                volume_unit_status="SHARES_VERIFIED",
+                volume_unit_status=(
+                    "SHARES_VERIFIED" if observation is not None else "UNIT_UNVERIFIED"
+                ),
             )
         else:
             output[f"{prefix}_value"] = value

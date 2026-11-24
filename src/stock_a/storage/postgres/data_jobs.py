@@ -190,8 +190,16 @@ _CLEANUP_MODULES = {
     "FOCUS_FORMAL": {
         "parent_table": "stock.source_d0_formal_admission_day_facts",
         "child_table": None,
-        "cleanup_tables": ("stock.source_d0_formal_admission_day_facts",),
-        "progress_tables": ("stock.source_d0_formal_admission_day_facts",),
+        "cleanup_tables": (
+            "stock.source_t0_early_observation_facts",
+            "stock.source_rule_evaluations",
+            "stock.source_d0_formal_admission_day_facts",
+        ),
+        "progress_tables": (
+            "stock.source_d0_formal_admission_day_facts",
+            "stock.source_rule_evaluations",
+            "stock.source_t0_early_observation_facts",
+        ),
         "algorithm_column": "raw_producer_version",
         "algorithm_label": "Focus正式准入生产者版本",
     },
@@ -1317,24 +1325,51 @@ def _cleanup_version_rows(
                         raw_producer_version,calendar_revision""",
             (list(target_sessions), cutoff),
         )
-        return [
-            {
-                "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
-                "algorithm_version": str(row[3]),
-                "profile_revision": row[2],
-                "parent_rows": int(row[5]),
-                "child_rows": 0,
-                "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "profile_revision": row[2],
-                    "raw_producer_version": str(row[3]),
-                    "calendar_revision": str(row[4]),
-                    "admission_contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
-                },
-            }
-            for row in cursor.fetchall()
-        ]
+        rows = cursor.fetchall()
+        versions: list[dict[str, Any]] = []
+        for row in rows:
+            target_session = row[0]
+            capture_id = int(row[1])
+            profile_revision = row[2]
+            raw_producer_version = str(row[3])
+            calendar_revision = str(row[4])
+            cursor.execute(
+                """SELECT count(*) FROM stock.source_rule_evaluations
+                   WHERE target_session=%s AND source_capture_id=%s
+                     AND profile_revision IS NOT DISTINCT FROM %s""",
+                (target_session, capture_id, profile_revision),
+            )
+            rule_rows = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.source_t0_early_observation_facts t
+                   JOIN stock.source_rule_evaluations r ON r.id=t.rule_fact_id
+                   WHERE r.target_session=%s AND r.source_capture_id=%s
+                     AND r.profile_revision IS NOT DISTINCT FROM %s""",
+                (target_session, capture_id, profile_revision),
+            )
+            t0_rows = int(cursor.fetchone()[0])
+            versions.append(
+                {
+                    "target_session": target_session,
+                    "source_version": {"source_capture_id": capture_id},
+                    "algorithm_version": raw_producer_version,
+                    "profile_revision": profile_revision,
+                    "parent_rows": int(row[5]),
+                    "child_rows": 0,
+                    "dependent_rows": {
+                        "stock.source_rule_evaluations": rule_rows,
+                        "stock.source_t0_early_observation_facts": t0_rows,
+                    },
+                    "version_key": {
+                        "source_capture_id": capture_id,
+                        "profile_revision": profile_revision,
+                        "raw_producer_version": raw_producer_version,
+                        "calendar_revision": calendar_revision,
+                        "admission_contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
+                    },
+                }
+            )
+        return versions
 
     if module_code == "SECTOR_PULSE":
         cursor.execute(
@@ -1700,6 +1735,48 @@ def _cleanup_preview_in_cursor(
                     ),
                 }
             )
+    if module_code == "FOCUS_FORMAL":
+        for version in versions:
+            key = version["version_key"]
+            rule_scope = (
+                version["target_session"],
+                key["source_capture_id"],
+                key["profile_revision"],
+            )
+            for dependent_table, sql in (
+                (
+                    "stock.source_research_enrollments",
+                    """SELECT count(DISTINCT e.id)
+                       FROM stock.source_research_enrollments e
+                       JOIN stock.source_rule_evaluations r
+                         ON r.id=e.rule_fact_id OR r.id=e.previous_rule_fact_id
+                       WHERE r.target_session=%s AND r.source_capture_id=%s
+                         AND r.profile_revision IS NOT DISTINCT FROM %s""",
+                ),
+                (
+                    "stock.source_research_observation_segment_days",
+                    """SELECT count(DISTINCT o.id)
+                       FROM stock.source_research_observation_segment_days o
+                       JOIN stock.source_rule_evaluations r
+                         ON r.id=o.anchor_rule_fact_id OR r.id=o.evidence_rule_fact_id
+                       WHERE r.target_session=%s AND r.source_capture_id=%s
+                         AND r.profile_revision IS NOT DISTINCT FROM %s""",
+                ),
+            ):
+                cursor.execute(sql, rule_scope)
+                dependent_rows = int(cursor.fetchone()[0])
+                if dependent_rows:
+                    blockers.append(
+                        {
+                            "referenced_table": "stock.source_rule_evaluations",
+                            "dependent_table": dependent_table,
+                            "constraint": "外键依赖：下游Focus登记或观察段仍引用该日规则事实",
+                            "reason": (
+                                f"PG读回到{dependent_rows}条下游事实引用"
+                                "stock.source_rule_evaluations；请先清理下游观察段/登记后再清理FOCUS_FORMAL"
+                            ),
+                        }
+                    )
     if module_code == "CORE_PROFILE":
         dependent_queries = (
             (
@@ -2259,6 +2336,36 @@ def clear_derived_module(
                     "stock.source_d0_scenario_day_facts"
                 ] += cursor.rowcount
             elif module_code == "FOCUS_FORMAL":
+                rule_scope = (
+                    target_session,
+                    key["source_capture_id"],
+                    key["profile_revision"],
+                )
+                cursor.execute(
+                    """DELETE FROM stock.source_t0_early_observation_facts t
+                       WHERE t.rule_fact_id IN (
+                           SELECT r.id FROM stock.source_rule_evaluations r
+                           WHERE r.target_session=%s AND r.source_capture_id=%s
+                             AND r.profile_revision IS NOT DISTINCT FROM %s
+                       )""",
+                    rule_scope,
+                )
+                deleted_rows["stock.source_t0_early_observation_facts"] += (
+                    cursor.rowcount
+                )
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_t0_early_observation_facts"
+                ] += cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM stock.source_rule_evaluations
+                       WHERE target_session=%s AND source_capture_id=%s
+                         AND profile_revision IS NOT DISTINCT FROM %s""",
+                    rule_scope,
+                )
+                deleted_rows["stock.source_rule_evaluations"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_rule_evaluations"
+                ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_d0_formal_admission_day_facts
                        WHERE target_session=%s AND source_capture_id=%s

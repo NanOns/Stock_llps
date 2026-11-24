@@ -81,6 +81,7 @@ _MIGRATION_FILES = (
     "0067_r1_audit_close_seed_qfq_target_close_comments.sql",
     "0068_r02_market_breadth_change.sql",
     "0069_r02_remove_breadth_change_downstream_sha.sql",
+    "0070_r01_price_profile_suspension_status.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -141,6 +142,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "AUDIT_CLOSE_101Q23_01_R1_20261123": frozenset({67}),
     "R02_CLOSE_02_D0_MARKET_CHANGE_R1": frozenset({68}),
     "R02_P1_FOCUS_MISMATCH_AND_DROP_BREADTH_SHA_R1": frozenset({69}),
+    "R01_AUDIT_BUGFIX_SUSPENSION_AND_MISSING_UNITS_R1": frozenset({70}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -347,6 +349,7 @@ _RELATIONS_BY_MIGRATION_COUNT[68] = _RELATIONS_BY_MIGRATION_COUNT[67] | {
     "source_market_breadth_change_days",
 }
 _RELATIONS_BY_MIGRATION_COUNT[69] = _RELATIONS_BY_MIGRATION_COUNT[68]
+_RELATIONS_BY_MIGRATION_COUNT[70] = _RELATIONS_BY_MIGRATION_COUNT[69]
 
 
 class BindingRefused(Exception):
