@@ -3275,6 +3275,7 @@ class DataJobCoordinator:
         calendar_revision: str | None = None,
         sector_snapshot_ids: Mapping[str, int] | None = None,
         followup_target_sessions: Sequence[date] | None = None,
+        rule_ids: Sequence[str] | None = None,
         warning_code: str | None = None,
         warning_message: str | None = None,
     ) -> None:
@@ -3297,6 +3298,7 @@ class DataJobCoordinator:
             calendar_revision=calendar_revision,
             sector_snapshot_ids=sector_snapshot_ids,
             followup_target_sessions=followup_target_sessions,
+            rule_ids=rule_ids,
             research_cutoff=self.research_cutoff,
         )
         stored_producer_version = (
@@ -7756,6 +7758,7 @@ def _execute_shared_production_chain(
                         ),
                         producer_version=RULE_VERSION,
                         calendar_revision=cal_revision,
+                        rule_ids=plan.get("observation_rule_ids"),
                     )
                     resolved_unit_keys.add(unit_key(unit))
             except Exception as error:  # noqa: BLE001
