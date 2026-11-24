@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, localcontext
 from fractions import Fraction
-import hashlib
 import re
 from typing import Any, Mapping, Sequence
 
@@ -586,10 +585,6 @@ def prepare_source_market_breadth_change(
     }
     target_unknown = target_symbols - target_eligible
 
-    def set_digest(symbols: set[str]) -> str:
-        payload = "\n".join(sorted(symbols)).encode("ascii")
-        return hashlib.sha256(payload).hexdigest()
-
     change: dict[str, Any] = {
         "before_session": before_session,
         "target_session": target_session,
@@ -625,10 +620,6 @@ def prepare_source_market_breadth_change(
         "deteriorated_symbol_count": 0,
         "unchanged_symbol_count": 0,
         "unknown_symbol_count": calculation.n_source,
-        "source_set_sha256_before": None,
-        "source_set_sha256_target": set_digest(target_symbols),
-        "eligible_set_sha256_before": None,
-        "eligible_set_sha256_target": set_digest(target_eligible),
     }
     if (
         type(before_session) is not date
@@ -701,8 +692,6 @@ def prepare_source_market_breadth_change(
             "eligible_sets_equal": before_eligible == target_eligible,
             "unknown_sets_equal": before_unknown == target_unknown,
             "unknown_reason_mismatch_count": unknown_reason_mismatch_count,
-            "source_set_sha256_before": set_digest(before_symbols),
-            "eligible_set_sha256_before": set_digest(before_eligible),
         }
     )
     before_width = None

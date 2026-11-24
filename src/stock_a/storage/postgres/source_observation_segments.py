@@ -173,6 +173,62 @@ def _is_known_incomplete_successor(
     )
 
 
+def _is_stale_evidence_state_successor(
+    actual_row: Sequence[Any], expected_row: Sequence[Any]
+) -> bool:
+    """只允许替换同规则事实ID已从UNKNOWN修正为已证TRUE/FALSE的旧后继行。"""
+    actual = dict(zip(_SEGMENT_COLUMNS, actual_row, strict=True))
+    expected = dict(zip(_SEGMENT_COLUMNS, expected_row, strict=True))
+    locked_columns = (
+        "source_enrollment_id",
+        "source_capture_id",
+        "source_symbol",
+        "rule_id",
+        "rule_version",
+        "t0_session",
+        "anchor_rule_fact_id",
+        "anchor_capture_id",
+        "enrollment_kind",
+        "parent_enrollment_id",
+        "observation_session",
+        "previous_session",
+        "target_capture_id",
+        "evidence_rule_fact_id",
+        "profile_revision",
+        "history_session_count",
+        "d1_history_session_count",
+        "event_window_start",
+        "calendar_revision",
+        "source_time_quality",
+        "source_clock_role",
+        "scope",
+        "price_coordinate",
+        "identity_status",
+        "producer_contract",
+        "producer_version",
+    )
+    return (
+        expected["observation_session"] > expected["t0_session"]
+        and actual["evidence_rule_fact_id"] is not None
+        and all(actual[key] == expected[key] for key in locked_columns)
+        and actual["observation_state"] == "UNKNOWN"
+        and actual["lifecycle"] == "PAUSED"
+        and actual["event_code"] == "PAUSED_UNKNOWN"
+        and actual["quality_status"] == "UNKNOWN"
+        and actual["reason_code"] == "CURRENT_STATE_UNKNOWN"
+        and expected["observation_state"] in {"TRUE", "FALSE"}
+        and expected["quality_status"] == "OBSERVED"
+    )
+
+
+def _is_replaceable_stale_successor(
+    actual_row: Sequence[Any], expected_row: Sequence[Any]
+) -> bool:
+    return _is_known_incomplete_successor(
+        actual_row, expected_row
+    ) or _is_stale_evidence_state_successor(actual_row, expected_row)
+
+
 def _anchor_rows(
     cursor: Any,
     *,
@@ -736,7 +792,7 @@ def persist_source_observation_segments(
             if expected_row is not None and actual_row != expected_row:
                 if not (
                     replace_known_incomplete_successors
-                    and _is_known_incomplete_successor(actual_row, expected_row)
+                    and _is_replaceable_stale_successor(actual_row, expected_row)
                 ):
                     raise ObservationSegmentConflict(
                         "现有观察日事实与修正生产结果同键异内容，拒绝覆盖"
@@ -747,7 +803,7 @@ def persist_source_observation_segments(
             if key in expected_by_key
             and actual_row != expected_by_key[key]
             and replace_known_incomplete_successors
-            and _is_known_incomplete_successor(actual_row, expected_by_key[key])
+            and _is_replaceable_stale_successor(actual_row, expected_by_key[key])
         }
         if replaced_keys:
             cursor.executemany(

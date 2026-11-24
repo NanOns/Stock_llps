@@ -99,10 +99,6 @@ _CHANGE_COLUMNS = (
     "deteriorated_symbol_count",
     "unchanged_symbol_count",
     "unknown_symbol_count",
-    "source_set_sha256_before",
-    "source_set_sha256_target",
-    "eligible_set_sha256_before",
-    "eligible_set_sha256_target",
 )
 _CHANGE_KEY = (
     "before_session",
@@ -454,10 +450,6 @@ def _change_row(
         int(value.get("deteriorated_symbol_count", 0)),
         int(value.get("unchanged_symbol_count", 0)),
         int(value.get("unknown_symbol_count", 0)),
-        value.get("source_set_sha256_before"),
-        value["source_set_sha256_target"],
-        value.get("eligible_set_sha256_before"),
-        value["eligible_set_sha256_target"],
     )
 
 
@@ -778,9 +770,6 @@ def read_market_breadth_change(
             or change["eligible_sets_equal"] is not True
             or change["unknown_sets_equal"] is not True
             or change["unknown_reason_mismatch_count"] != 0
-            or change["source_set_sha256_before"] != change["source_set_sha256_target"]
-            or change["eligible_set_sha256_before"]
-            != change["eligible_set_sha256_target"]
             or change["source_count_before"] != change["source_count_target"]
             or change["common_source_count"] != change["source_count_target"]
             or change["eligible_count_before"] != change["eligible_count_target"]

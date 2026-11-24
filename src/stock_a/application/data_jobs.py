@@ -92,10 +92,6 @@ def _market_breadth_change_readback_mismatches(
         "deteriorated_symbol_count",
         "unchanged_symbol_count",
         "unknown_symbol_count",
-        "source_set_sha256_before",
-        "source_set_sha256_target",
-        "eligible_set_sha256_before",
-        "eligible_set_sha256_target",
     )
     mismatches = {
         name for name in scalar_fields if actual.get(name) != expected.get(name)
