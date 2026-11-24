@@ -132,10 +132,16 @@ BUSINESS_SUFFIXES = {
 
 DRIVE_PATH = re.compile(r"""(?i)(?<![A-Za-z0-9])([A-Z]:[\\/][^"'<>|;\r\n]+)""")
 UNC_PATH = re.compile(
-    r"""(?<![A-Za-z0-9:/])(?:\\\\|//)(?![?.])[^\\/\s"']+[\\/][^\s"'<>|]+"""
+    r"""(?<![A-Za-z0-9:/])(?:\\\\|//)[A-Za-z0-9][A-Za-z0-9._-]*[\\/][^\s"'<>|]+"""
+)
+WIN_DEVICE_PREFIX = re.compile(r"""^(?:\\\\|//)[?.][\\/]""")
+FILE_URI = re.compile(r"""(?i)\bfile://[^\s"'<>]+""")
+PARENT_ESCAPE = re.compile(
+    r"""(?:\.\./\.\./|\.\.\\\.\.\\|\.parents\[\s*[2-9]\d*\s*\])"""
 )
 FORBIDDEN_EXTERNAL_PART = re.compile(
     r"(?i)Stock A 交付|过程资料|(?:^|[/\\])test[_ -]?temp(?:[/\\]|$)"
+    r"|Google driver|大A交易|codex_workspaces|codex-maintenance|codex-migration"
 )
 BUSINESS_FILE_HINT = re.compile(
     r"""(?ix)(?:response|archive|journal|checkpoint|resume|restore|capture|raw[_-]?source)"""
@@ -149,7 +155,9 @@ FORBIDDEN_CONFIG_PATH_ROLE = re.compile(
 )
 PERSISTENT_SIDE_CAR_SUFFIXES = {
     ".jsonl",
+    ".ndjson",
     ".csv",
+    ".tsv",
     ".parquet",
     ".sqlite",
     ".sqlite3",
@@ -159,6 +167,37 @@ PERSISTENT_SIDE_CAR_SUFFIXES = {
     ".arrow",
     ".pkl",
     ".pickle",
+    ".xlsx",
+    ".xls",
+    ".h5",
+    ".hdf5",
+    ".npy",
+    ".npz",
+    ".lc1",
+    ".lc5",
+    ".gbbq",
+}
+RETIRED_IO_SUFFIXES = {".tnf"}
+FORBIDDEN_SIDECAR_IMPORTS = {
+    "sqlite3",
+    "duckdb",
+    "pandas",
+    "pyarrow",
+    "csv",
+    "pickle",
+    "shelve",
+    "dbm",
+    "openpyxl",
+    "xlrd",
+    "h5py",
+}
+SQL_FILE_IO = re.compile(
+    r"""(?i)\b(?:COPY\b[^;\r\n]*?\b(?:FROM|TO)\b|pg_read_file|pg_read_binary_file|pg_ls_dir|lo_import|lo_export)\b|\\copy\b"""
+)
+WEB_EXTERNAL_URL = re.compile(r"""(?i)\bhttps?://[^\s"'`<>]+""")
+ALLOWED_WEB_XML_NAMESPACES = {
+    "http://www.w3.org/2000/svg",
+    "http://www.w3.org/1999/xlink",
 }
 FILE_IO_CALLS = {
     "open",
@@ -168,11 +207,21 @@ FILE_IO_CALLS = {
     "write_text",
     "write_bytes",
     "mkdir",
+    "makedirs",
     "rename",
     "replace",
     "unlink",
+    "remove",
+    "rmdir",
     "glob",
     "rglob",
+    "iterdir",
+    "listdir",
+    "scandir",
+    "walk",
+    "touch",
+    "symlink_to",
+    "hardlink_to",
     "to_csv",
     "to_json",
     "to_parquet",
@@ -183,14 +232,28 @@ FILE_IO_CALLS = {
     "read_pickle",
     "connect",
     "mkstemp",
+    "mkdtemp",
     "NamedTemporaryFile",
     "TemporaryDirectory",
+    "ZipFile",
+    "TarFile",
     "copyfile",
+    "copy",
     "copy2",
+    "copytree",
     "move",
     "rmtree",
     "dump",
     "load",
+    "spec_from_file_location",
+    "urlretrieve",
+    "expanduser",
+    "home",
+    "Popen",
+    "run",
+    "check_output",
+    "check_call",
+    "system",
 }
 ALLOWED_SOURCE_PATHS = {
     "src/stock_a/application/runtime_config.py": {
@@ -211,6 +274,7 @@ ALLOWED_SOURCE_PATHS = {
         "G:/codex work/Stock A/config/private",
         "G:/",
     },
+    # LEGACY_RETIRED：旧TDX价格模块尚未物理移除时的受控临时根登记，退役清理时同步移除。
     "src/stock_a/storage/postgres/source_raw.py": {"G:/codex_tmp"},
     "src/stock_a/sources/tdx/vipdata.py": {
         "G:/codex_tmp",
@@ -243,14 +307,48 @@ def _normalise_path(value: str) -> str:
     return normalized
 
 
-def _external_path_errors(path: str, text: str) -> list[str]:
+def _has_real_unc(text: str) -> bool:
+    for match in UNC_PATH.finditer(text):
+        token = match.group(0)
+        if WIN_DEVICE_PREFIX.match(token):
+            continue
+        return True
+    return False
+
+
+def _is_allowed_drive_path(
+    candidate: str, allowed: set[str], *, allow_inline_cn_suffix: bool = False
+) -> bool:
+    if candidate in allowed:
+        return True
+    if not allow_inline_cn_suffix:
+        return False
+    for prefix in allowed:
+        if len(prefix) <= 3 or not candidate.startswith(prefix):
+            continue
+        tail = candidate[len(prefix) :]
+        # 仅放行中文报错句中紧跟在已登记路径后的汉字说明，绝不放行分隔符、空格或ASCII路径延续。
+        if tail and all("\u4e00" <= ch <= "\u9fff" for ch in tail):
+            return True
+    return False
+
+
+def _external_path_errors(
+    path: str, text: str, *, allow_inline_cn_suffix: bool = False
+) -> list[str]:
     allowed = ALLOWED_SOURCE_PATHS.get(path, set())
     errors = []
+    if FORBIDDEN_EXTERNAL_PART.search(text):
+        errors.append("源码包含禁止引用的外部交付、过程资料、测试或旧项目目录")
+    if FILE_URI.search(text):
+        errors.append("源码包含file://本地文件URI")
     for match in DRIVE_PATH.finditer(text):
         candidate = _normalise_path(match.group(1))
-        if candidate not in allowed:
+        if not _is_allowed_drive_path(
+            candidate, allowed, allow_inline_cn_suffix=allow_inline_cn_suffix
+        ):
             errors.append(f"未登记的外部绝对路径：{candidate}")
-    if UNC_PATH.search(text):
+    if _has_real_unc(text):
         errors.append("源码包含UNC或网络共享路径")
     return errors
 
@@ -270,7 +368,7 @@ def _config_path_errors(text: str) -> list[str]:
             for index, child in enumerate(item):
                 visit(child, f"{prefix}.{index}")
         elif isinstance(item, str) and (
-            DRIVE_PATH.search(item) or UNC_PATH.search(item)
+            DRIVE_PATH.search(item) or _has_real_unc(item) or FILE_URI.search(item)
         ):
             expected = CONFIG_PATH_FIELDS.get(prefix)
             if expected != item:
@@ -295,13 +393,35 @@ def _file_io_path_errors(path: str, text: str) -> list[str]:
     except SyntaxError:
         return []
     assignments: dict[str, str] = {}
+    errors: set[str] = set()
 
     def remember_target(target: ast.AST, source: str) -> None:
         if isinstance(target, (ast.Name, ast.Attribute)):
             assignments[ast.unparse(target)] = source
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".", 1)[0]
+                if top in FORBIDDEN_SIDECAR_IMPORTS:
+                    errors.add(f"业务源码禁止导入旁路持久化模块：{top}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                top = node.module.split(".", 1)[0]
+                if top in FORBIDDEN_SIDECAR_IMPORTS:
+                    errors.add(f"业务源码禁止导入旁路持久化模块：{top}")
+                if node.module == "importlib.util" and any(
+                    alias.name == "spec_from_file_location" for alias in node.names
+                ):
+                    errors.add(
+                        "业务源码禁止通过spec_from_file_location动态加载外部文件"
+                    )
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # 全模块字符串字面量核验，防止跨文件常量定义外部绝对路径绕过单文件I/O展开。
+            errors.update(
+                _external_path_errors(path, node.value, allow_inline_cn_suffix=True)
+            )
+        elif isinstance(node, ast.Assign):
             source = ast.get_source_segment(text, node.value) or ""
             for target in node.targets:
                 remember_target(target, source)
@@ -324,9 +444,21 @@ def _file_io_path_errors(path: str, text: str) -> list[str]:
     def expression_source(node: ast.AST) -> str:
         return expand_source(ast.get_source_segment(text, node) or "")
 
-    errors = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or _call_name(node) not in FILE_IO_CALLS:
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _call_name(node)
+        if call_name == "spec_from_file_location":
+            errors.add("业务源码禁止通过spec_from_file_location动态加载外部文件")
+        if call_name in {"expanduser", "home"}:
+            receiver = (
+                ast.unparse(node.func.value)
+                if isinstance(node.func, ast.Attribute)
+                else ""
+            )
+            if call_name == "expanduser" or receiver.endswith(("Path", "pathlib")):
+                errors.add("业务文件I/O禁止访问用户主目录（home/expanduser）")
+        if call_name not in FILE_IO_CALLS:
             continue
         candidates = [expression_source(arg) for arg in node.args]
         candidates.extend(expression_source(keyword.value) for keyword in node.keywords)
@@ -335,16 +467,18 @@ def _file_io_path_errors(path: str, text: str) -> list[str]:
         for candidate in candidates:
             normalized = candidate.replace("\\", "/")
             errors.update(_external_path_errors(path, candidate))
+            if PARENT_ESCAPE.search(candidate):
+                errors.add("业务文件I/O包含多级父目录跳出路径（../..或parents[2+]）")
             if FORBIDDEN_CONFIG_PATH_ROLE.search(candidate):
                 errors.add("业务文件I/O使用交付、运行数据或私密配置路径字段")
             suffixes = {
                 suffix
-                for suffix in PERSISTENT_SIDE_CAR_SUFFIXES
+                for suffix in (PERSISTENT_SIDE_CAR_SUFFIXES | RETIRED_IO_SUFFIXES)
                 if re.search(re.escape(suffix) + r"(?![A-Za-z0-9])", normalized, re.I)
             }
             if suffixes:
                 errors.add(
-                    "业务文件I/O引用每日旁路格式：" + ", ".join(sorted(suffixes))
+                    "业务文件I/O引用每日旁路或退役格式：" + ", ".join(sorted(suffixes))
                 )
             if re.search(r"\.json(?![A-Za-z0-9])", normalized, re.I) and (
                 DAILY_FILE.search(normalized) or BUSINESS_FILE_HINT.search(normalized)
@@ -376,11 +510,14 @@ def _json_path_errors(path: str, text: str) -> list[str]:
             candidate = item.strip()
             if not candidate or JSON_REGEX_FIELD.search(key):
                 return
+            if FILE_URI.search(candidate):
+                errors.add("JSON资源包含file://本地文件URI")
+                return
             if re.match(r"(?i)^[a-z][a-z0-9+.-]*://", candidate):
                 return
 
             drive_path = bool(DRIVE_PATH.search(candidate))
-            unc_path = bool(UNC_PATH.search(candidate))
+            unc_path = _has_real_unc(candidate)
             if candidate.startswith("//"):
                 host = candidate[2:].split("/", 1)[0].casefold()
                 if JSON_PATH_FIELD.search(key) or "." in host or host == "localhost":
@@ -419,8 +556,26 @@ def _json_path_errors(path: str, text: str) -> list[str]:
     return sorted(errors)
 
 
+def _sql_content_errors(path: str, text: str) -> list[str]:
+    """检查正式SQL迁移不得执行服务端/客户端外部文件读写。"""
+    errors: set[str] = set()
+    if SQL_FILE_IO.search(text):
+        errors.add("SQL迁移禁止COPY FROM/TO、\\copy或PG服务端文件读写函数")
+    errors.update(_external_path_errors(path, text))
+    return sorted(errors)
+
+
 def business_content_errors(path: str, raw: bytes) -> list[str]:
-    """检查现役源码/配置中的固定样例及每日旁路文件引用。"""
+    """检查现役源码/配置/迁移中的固定样例及外部旁路文件引用。"""
+    if (
+        path.startswith("migrations/")
+        and PurePosixPath(path).suffix.casefold() == ".sql"
+    ):
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeError:
+            return ["迁移SQL不是有效UTF-8"]
+        return _sql_content_errors(path, text)
     if not path.startswith(("src/", "web/", "config/")):
         return []
     if PurePosixPath(path).suffix.casefold() not in BUSINESS_SUFFIXES:
@@ -454,11 +609,15 @@ def business_content_errors(path: str, raw: bytes) -> list[str]:
     elif path.startswith("web/"):
         errors.extend(_external_path_errors(path, text))
         if re.search(
-            r"""(?is)(?:fetch|XMLHttpRequest|FileReader|sendBeacon)\s*\([^)]*?\.(?:jsonl|csv|parquet|sqlite|db|duckdb|feather|arrow)\b""",
+            r"""(?is)(?:fetch|XMLHttpRequest|FileReader|sendBeacon)\s*\([^)]*?\.(?:jsonl|ndjson|csv|tsv|parquet|sqlite|sqlite3|db|duckdb|feather|arrow|xlsx|xls|pkl|pickle)\b""",
             text,
         ):
             errors.append("页面API路径引用每日旁路文件格式")
-    return errors
+        for match in WEB_EXTERNAL_URL.finditer(text):
+            url = match.group(0).rstrip(".,;:)]}")
+            if url not in ALLOWED_WEB_XML_NAMESPACES:
+                errors.append(f"页面包含外部HTTP(S)链接：{url}")
+    return sorted(set(errors))
 
 
 def path_error(path: str) -> str | None:
@@ -624,7 +783,7 @@ def check_records(
 
 def check_business_root(root_path: str, errors: set[str]) -> None:
     root = os.path.abspath(root_path)
-    for family in ("src", "web", "config"):
+    for family in ("src", "web", "config", "migrations"):
         base = os.path.join(root, family)
         if not os.path.isdir(base):
             continue
