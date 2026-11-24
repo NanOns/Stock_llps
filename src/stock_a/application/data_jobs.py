@@ -7726,13 +7726,15 @@ def _execute_shared_production_chain(
                         target_session=unit["target_session"],
                         source_capture_id=source_capture_id,
                         calendar_revision=cal_revision,
+                        producer_version=RULE_VERSION,
                         research_cutoff=cutoff,
                         rule_ids=plan.get("observation_rule_ids"),
                     )
                     if actual_rows != expected_rows:
                         raise DataJobError(
                             "OBSERVATION_SEGMENTS_READBACK_MISMATCH",
-                            "观察持续分段独立读回行数不足。",
+                            "观察持续分段独立读回行数"
+                            f"({actual_rows})与本次目标键预期({expected_rows})不一致。",
                             status=409,
                         )
                     progress_callback(
