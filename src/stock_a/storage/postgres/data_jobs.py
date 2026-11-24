@@ -102,6 +102,7 @@ _MODULE_PROGRESS_TABLES = {
         }
     ),
     "PRICE_LIMITS": frozenset({"stock.source_price_limit_day_facts"}),
+    "LIMIT_UP_LADDER": frozenset({"stock.source_limit_up_streak_day_facts"}),
     "FORWARD_PATH": frozenset({"stock.source_forward_path_facts"}),
     "COHORT_STATS": frozenset({"stock.source_cohort_group_stats"}),
     "FEP_BASELINE": frozenset({"stock.source_fep_baseline_facts"}),
@@ -254,10 +255,21 @@ _CLEANUP_MODULES = {
     "PRICE_LIMITS": {
         "parent_table": "stock.source_price_limit_day_facts",
         "child_table": None,
-        "cleanup_tables": ("stock.source_price_limit_day_facts",),
+        "cleanup_tables": (
+            "stock.source_limit_up_streak_day_facts",
+            "stock.source_price_limit_day_facts",
+        ),
         "progress_tables": ("stock.source_price_limit_day_facts",),
         "algorithm_column": "contract_version",
         "algorithm_label": "涨跌停限价合同版本",
+    },
+    "LIMIT_UP_LADDER": {
+        "parent_table": "stock.source_limit_up_streak_day_facts",
+        "child_table": None,
+        "cleanup_tables": ("stock.source_limit_up_streak_day_facts",),
+        "progress_tables": ("stock.source_limit_up_streak_day_facts",),
+        "algorithm_column": "contract_version",
+        "algorithm_label": "日线连板梯队合同版本",
     },
     "FORWARD_PATH": {
         "parent_table": "stock.source_forward_path_facts",
@@ -1480,6 +1492,31 @@ def _cleanup_version_rows(
             for row in cursor.fetchall()
         ]
 
+    if module_code == "LIMIT_UP_LADDER":
+        cursor.execute(
+            """SELECT target_session,source_capture_id,contract_version,calendar_revision,count(*)
+               FROM stock.source_limit_up_streak_day_facts
+               WHERE target_session=ANY(%s) AND target_session<=%s
+               GROUP BY target_session,source_capture_id,contract_version,calendar_revision
+               ORDER BY target_session,source_capture_id,contract_version,calendar_revision""",
+            (list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"source_capture_id": int(row[1])},
+                "algorithm_version": str(row[2]),
+                "parent_rows": int(row[4]),
+                "child_rows": 0,
+                "version_key": {
+                    "source_capture_id": int(row[1]),
+                    "contract_version": str(row[2]),
+                    "calendar_revision": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
     if module_code == "FORWARD_PATH":
         cursor.execute(
             """SELECT target_session,source_capture_id,path_rule_version,calendar_revision,count(*)
@@ -2138,9 +2175,12 @@ def clear_derived_module(
                 "目标模块日期存在正在运行的生产单元；未删除任何事实",
             )
 
-        deleted_rows: dict[str, int] = {table: 0 for table in spec["progress_tables"]}
+        cleanup_count_tables = tuple(
+            dict.fromkeys((*spec["cleanup_tables"], *spec["progress_tables"]))
+        )
+        deleted_rows: dict[str, int] = {table: 0 for table in cleanup_count_tables}
         deleted_by_session = {
-            session.isoformat(): {table: 0 for table in spec["progress_tables"]}
+            session.isoformat(): {table: 0 for table in cleanup_count_tables}
             for session in sessions
         }
         for version in preview["versions"]:
@@ -2493,6 +2533,23 @@ def clear_derived_module(
                     "stock.source_sector_pulse_adjacent_transitions"
                 ] += cursor.rowcount
             elif module_code == "PRICE_LIMITS":
+                # 联动清理同捕获、同日历下 >= target_session 的下游连板连续会话，防止前态修订导致连板静默过期
+                cursor.execute(
+                    """DELETE FROM stock.source_limit_up_streak_day_facts
+                       WHERE target_session>=%s AND source_capture_id=%s
+                         AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["source_capture_id"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_limit_up_streak_day_facts"] += (
+                    cursor.rowcount
+                )
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_limit_up_streak_day_facts"
+                ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_price_limit_day_facts
                        WHERE target_session=%s AND source_capture_id=%s
@@ -2507,6 +2564,24 @@ def clear_derived_module(
                 deleted_rows["stock.source_price_limit_day_facts"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
                     "stock.source_price_limit_day_facts"
+                ] += cursor.rowcount
+            elif module_code == "LIMIT_UP_LADDER":
+                cursor.execute(
+                    """DELETE FROM stock.source_limit_up_streak_day_facts
+                       WHERE target_session=%s AND source_capture_id=%s
+                         AND contract_version=%s AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["source_capture_id"],
+                        key["contract_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_limit_up_streak_day_facts"] += (
+                    cursor.rowcount
+                )
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_limit_up_streak_day_facts"
                 ] += cursor.rowcount
             elif module_code == "FORWARD_PATH":
                 cursor.execute(

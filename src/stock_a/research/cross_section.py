@@ -532,3 +532,241 @@ def calculate_cross_section(inputs: CrossSectionInput) -> dict[str, CrossSection
             field_id=f"cross.{key}",
         )
     return result
+
+
+CROSS_SECTION_CONTRACT_VERSION = "STOCK_A_CROSS_SECTION_10_R1"
+CROSS_SECTION_10_FIELD_IDS = (
+    "cross.rps5",
+    "cross.rps20",
+    "cross.rps5_delta1_pp",
+    "cross.rps5_delta3_pp",
+    "cross.rps20_delta1_pp",
+    "cross.rps20_delta3_pp",
+    "cross.rel_market_1",
+    "cross.rel_market_3",
+    "cross.rel_market_5",
+    "cross.rel_market_20",
+)
+
+
+def _batch_rank_endpoint(
+    endpoint: ReturnEndpoint,
+    members: tuple[str, ...],
+) -> tuple[dict[str, FieldValue], int]:
+    """对单个端点做一次 O(n log n) 精确中秩排序并分发给全体成员。"""
+    valid_pairs: list[tuple[Fraction, str]] = []
+    for entity in members:
+        fv = endpoint.returns[entity]
+        if fv.quality == "OBSERVED":
+            valid_pairs.append((exact_number(fv.value), entity))
+    known_count = len(valid_pairs)
+    if known_count < 2:
+        return (
+            {entity: unknown("INSUFFICIENT_EVALUABLE_MEMBERS") for entity in members},
+            known_count,
+        )
+    valid_pairs.sort(key=lambda pair: pair[0])
+    ranks: dict[str, FieldValue] = {}
+    idx = 0
+    denom = known_count - 1
+    while idx < known_count:
+        val = valid_pairs[idx][0]
+        end = idx + 1
+        while end < known_count and valid_pairs[end][0] == val:
+            end += 1
+        less = idx
+        equal = end - idx
+        score = (
+            Fraction(100) * (Fraction(less) + Fraction(equal - 1, 2)) / Fraction(denom)
+        )
+        for pos in range(idx, end):
+            ranks[valid_pairs[pos][1]] = FieldValue(score)
+        idx = end
+    for entity in members:
+        if entity not in ranks:
+            ranks[entity] = unknown("TARGET_RETURN_UNKNOWN")
+    return ranks, known_count
+
+
+def _batch_relative_endpoint(
+    endpoint: ReturnEndpoint,
+    members: tuple[str, ...],
+) -> tuple[dict[str, FieldValue], int, int]:
+    """对单个相对市场端点做一次 O(n) 起始日 Universe 等权均值计算并分发全池。"""
+    denominator = len(members)
+    if denominator == 0:
+        return {}, 0, 0
+    known_values: dict[str, Fraction] = {}
+    for entity in members:
+        fv = endpoint.returns[entity]
+        if fv.quality == "OBSERVED":
+            known_values[entity] = exact_number(fv.value)
+    known_count = len(known_values)
+    missing = denominator - known_count
+    if known_count == 0:
+        return (
+            {entity: unknown("INSUFFICIENT_EVALUABLE_MEMBERS") for entity in members},
+            denominator,
+            0,
+        )
+    if Fraction(missing, denominator) > Fraction(1, 5):
+        return (
+            {
+                entity: unknown("RELATIVE_MARKET_MISSING_RATIO_EXCEEDED")
+                for entity in members
+            },
+            denominator,
+            known_count,
+        )
+    market_mean = sum(known_values.values(), Fraction(0)) / Fraction(known_count)
+    out: dict[str, FieldValue] = {}
+    for entity in members:
+        val = known_values.get(entity)
+        if val is None:
+            out[entity] = unknown("TARGET_RETURN_UNKNOWN")
+        else:
+            out[entity] = FieldValue(val - market_mean)
+    return out, denominator, known_count
+
+
+def calculate_cross_section_batch(
+    *,
+    target_date: date,
+    calendar: MarketSessionCalendar,
+    target_universe_members: Sequence[str],
+    target_coordinates: Mapping[str, PriceCoordinate],
+    rank_endpoints: Mapping[str, ReturnEndpoint | None],
+    relative_endpoints: Mapping[str, ReturnEndpoint | None],
+) -> dict[str, Any]:
+    """全市场10项横截面因子批量短窗独立计算入口（ALG-09/10/11）。
+
+    - 支持任意长窗端点为 None（窗口历史不足时仅局部降级该因子，绝不阻断短窗）；
+    - 每个端点仅排序/求均值一次，再统一分发给目标日全体成员；
+    - 严守中秩公式、起始日 Universe 绑定、缺失比例 >20% 拒绝与逐实体目标坐标校验。
+    """
+    if type(target_date) is not date:
+        raise ContractError("横截面目标日必须是date")
+    if not isinstance(calendar, MarketSessionCalendar):
+        raise ContractError("横截面必须绑定版本化官方日历")
+    if target_date not in calendar.sessions:
+        raise ContractError("目标日不在官方交易日历中")
+    target_members = tuple(target_universe_members)
+    if len(set(target_members)) != len(target_members):
+        raise ContractError("目标日Universe成员不得重复")
+    target_index = calendar.sessions.index(target_date)
+
+    # 校验并一次计算所有已提供的 rank_endpoints
+    rank_maps: dict[str, dict[str, FieldValue]] = {}
+    rank_known_counts: dict[str, int] = {}
+    for period in (5, 20):
+        for offset in (0, 1, 3):
+            key = (
+                f"rps{period}_current" if offset == 0 else f"rps{period}_minus{offset}"
+            )
+            ep = rank_endpoints.get(key)
+            if ep is None:
+                rank_known_counts[key] = 0
+                continue
+            if target_index < offset:
+                raise ContractError(f"官方日历不足以支撑端点{key}")
+            expected_date = calendar.sessions[target_index - offset]
+            if ep.endpoint_date != expected_date:
+                raise ContractError(f"RPS端点{key}日期错配：期望{expected_date}")
+            members = _validate_endpoint(
+                ep,
+                target_date=target_date,
+                calendar=calendar,
+                target_coordinates=target_coordinates,
+                return_period=period,
+                relative=False,
+            )
+            r_map, k_cnt = _batch_rank_endpoint(ep, members)
+            rank_maps[key] = r_map
+            rank_known_counts[key] = k_cnt
+
+    # 校验并一次计算所有已提供的 relative_endpoints (1, 3, 5, 20)
+    rel_maps: dict[str, dict[str, FieldValue]] = {}
+    rel_meta: dict[str, dict[str, Any]] = {}
+    for period in (1, 3, 5, 20):
+        key = f"rel_market_{period}"
+        ep = relative_endpoints.get(key)
+        if ep is None:
+            rel_meta[key] = {
+                "start_session": None,
+                "denominator": 0,
+                "known_count": 0,
+            }
+            continue
+        if ep.endpoint_date != target_date:
+            raise ContractError(f"相对市场端点{key}必须绑定目标日{target_date}")
+        members = _validate_endpoint(
+            ep,
+            target_date=target_date,
+            calendar=calendar,
+            target_coordinates=target_coordinates,
+            return_period=period,
+            relative=True,
+        )
+        r_map, denom, k_cnt = _batch_relative_endpoint(ep, members)
+        rel_maps[key] = r_map
+        rel_meta[key] = {
+            "start_session": ep.return_start_date,
+            "denominator": denom,
+            "known_count": k_cnt,
+        }
+
+    # 分发到目标日全体成员
+    by_entity: dict[str, dict[str, FieldValue]] = {}
+    for entity in target_members:
+        fields: dict[str, FieldValue] = {}
+        # rps5 / rps20
+        for period in (5, 20):
+            cur_key = f"rps{period}_current"
+            cur_map = rank_maps.get(cur_key)
+            cur_fv = (
+                cur_map.get(entity, unknown("ENTITY_NOT_IN_ENDPOINT_UNIVERSE"))
+                if cur_map is not None
+                else unknown("ENDPOINT_WINDOW_UNAVAILABLE")
+            )
+            fields[f"cross.rps{period}"] = cur_fv
+            for offset in (1, 3):
+                prior_key = f"rps{period}_minus{offset}"
+                prior_map = rank_maps.get(prior_key)
+                out_key = f"cross.rps{period}_delta{offset}_pp"
+                if cur_map is None or prior_map is None:
+                    fields[out_key] = unknown("ENDPOINT_WINDOW_UNAVAILABLE")
+                else:
+                    prior_fv = prior_map.get(
+                        entity, unknown("ENTITY_NOT_IN_PRIOR_UNIVERSE")
+                    )
+                    if cur_fv.quality == "OBSERVED" and prior_fv.quality == "OBSERVED":
+                        fields[out_key] = FieldValue(
+                            exact_number(cur_fv.value) - exact_number(prior_fv.value)
+                        )
+                    else:
+                        fields[out_key] = unknown(
+                            cur_fv.reason
+                            if cur_fv.quality != "OBSERVED"
+                            else (prior_fv.reason or "PRIOR_RPS_UNKNOWN")
+                        )
+        # rel_market_1 / 3 / 5 / 20
+        for period in (1, 3, 5, 20):
+            key = f"rel_market_{period}"
+            r_map = rel_maps.get(key)
+            if r_map is None:
+                fields[f"cross.{key}"] = unknown("ENDPOINT_WINDOW_UNAVAILABLE")
+            else:
+                fields[f"cross.{key}"] = r_map.get(
+                    entity, unknown("TARGET_NOT_IN_START_UNIVERSE")
+                )
+        by_entity[entity] = fields
+
+    return {
+        "target_date": target_date,
+        "contract_version": CROSS_SECTION_CONTRACT_VERSION,
+        "target_universe_count": len(target_members),
+        "rps5_known_count": rank_known_counts.get("rps5_current", 0),
+        "rps20_known_count": rank_known_counts.get("rps20_current", 0),
+        "relative_metadata": rel_meta,
+        "by_entity": by_entity,
+    }

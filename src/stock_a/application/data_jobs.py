@@ -4170,7 +4170,7 @@ def _prepare_reset_source_inputs(
         eligible = tuple(
             session
             for session in sessions
-            if session >= ipo_date and (out_date is None or session <= out_date)
+            if session >= ipo_date and (out_date is None or session < out_date)
         )
         if not eligible:
             continue
@@ -5744,6 +5744,9 @@ def _execute_shared_production_chain(
     cutoff = date.fromisoformat(plan["research_cutoff"])
     if "PRICE_LIMITS" in base_modules:
         from stock_a.research.price_limits import PRICE_LIMIT_CONTRACT_VERSION
+        from stock_a.storage.postgres.limit_up_ladder import (
+            persist_limit_up_streaks_for_session,
+        )
         from stock_a.storage.postgres.price_limits import (
             persist_source_price_limits_for_session,
         )
@@ -5765,6 +5768,12 @@ def _execute_shared_production_chain(
             begin_callback(job_id=job_id, units=day_units)
             try:
                 report = persist_source_price_limits_for_session(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                )
+                persist_limit_up_streaks_for_session(
                     config,
                     target_session=day,
                     research_cutoff=cutoff,

@@ -498,6 +498,14 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
             raise PriceProfilePgError(
                 "PROFILE_COMPONENTS_INVALID", "11项Profile状态未按合同闭合"
             )
+    for quality_item, value_item in zip(
+        normalized["profile_qualities"], normalized["profile_values"], strict=True
+    ):
+        if quality_item == "OBSERVED" and not value_item.strip():
+            raise PriceProfilePgError(
+                "PROFILE_OBSERVED_VALUE_MISSING",
+                "OBSERVED基础画像必须携带非空合法分类枚举值",
+            )
     if len(set(normalized["profile_field_ids"])) != 11:
         raise PriceProfilePgError(
             "PROFILE_COMPONENTS_INVALID", "Profile字段标识存在重复"
@@ -1560,6 +1568,8 @@ WITH old_rows AS (
            r.qfq_high AS joined_qfq_high,
            r.qfq_low AS joined_qfq_low,
            r.qfq_close AS joined_qfq_close,
+           r.qfq_close_quality AS joined_qfq_close_quality,
+           r.qfq_close_reason AS joined_qfq_close_reason,
            r.qfq_price_quality AS joined_qfq_price_quality,
            r.qfq_price_reason AS joined_qfq_price_reason,
            CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_open ELSE r.qfq_open END AS joined_selected_open,
@@ -1591,6 +1601,8 @@ WITH old_rows AS (
            r.qfq_high AS joined_qfq_high,
            r.qfq_low AS joined_qfq_low,
            r.qfq_close AS joined_qfq_close,
+           r.qfq_close_quality AS joined_qfq_close_quality,
+           r.qfq_close_reason AS joined_qfq_close_reason,
            r.qfq_price_quality AS joined_qfq_price_quality,
            r.qfq_price_reason AS joined_qfq_price_reason,
            CASE WHEN p.price_coordinate='RAW_UNADJUSTED' THEN r.raw_open ELSE r.qfq_open END AS joined_selected_open,
@@ -1651,6 +1663,10 @@ WITH old_rows AS (
            n.joined_raw_close_reason AS after_raw_close_reason,
            o.joined_qfq_close AS before_qfq_close,
            n.joined_qfq_close AS after_qfq_close,
+           o.joined_qfq_close_quality AS before_qfq_close_quality,
+           n.joined_qfq_close_quality AS after_qfq_close_quality,
+           o.joined_qfq_close_reason AS before_qfq_close_reason,
+           n.joined_qfq_close_reason AS after_qfq_close_reason,
            o.joined_selected_open AS before_selected_open,
            n.joined_selected_open AS after_selected_open,
            o.joined_selected_high AS before_selected_high,
@@ -1963,7 +1979,17 @@ WITH old_rows AS (
                             OR before_profile_qualities[
                                    array_position(before_profile_field_ids, field.field_id)]
                                    IS DISTINCT FROM after_profile_qualities[
-                                   array_position(after_profile_field_ids, field.field_id)])
+                                   array_position(after_profile_field_ids, field.field_id)]
+                            OR (
+                                   before_profile_qualities[
+                                       array_position(before_profile_field_ids, field.field_id)] = 'OBSERVED'
+                               AND after_profile_qualities[
+                                       array_position(after_profile_field_ids, field.field_id)] = 'OBSERVED'
+                               AND NULLIF(before_profile_values[
+                                       array_position(before_profile_field_ids, field.field_id)], '')
+                                   IS DISTINCT FROM NULLIF(after_profile_values[
+                                       array_position(after_profile_field_ids, field.field_id)], '')
+                            ))
                     THEN 'PROFILE_STATE_CHANGED'::text END,
                CASE WHEN core_compatible AND (
                          before_ma5_quality IS DISTINCT FROM after_ma5_quality
@@ -2560,6 +2586,7 @@ def read_profile_change_page(
     profile_change_kinds = {
         "QUALITY_CHANGED",
         "STATUS_CHANGED",
+        "VALUE_CHANGED",
         "ANY_STATE_CHANGED",
     }
     if (profile_field_id is None) != (profile_change_kind is None):
@@ -2795,6 +2822,12 @@ LIMIT %s""",
           before_profile_statuses[array_position(before_profile_field_ids,%s::text)]
             IS DISTINCT FROM
           after_profile_statuses[array_position(after_profile_field_ids,%s::text)]
+        WHEN 'VALUE_CHANGED' THEN
+          before_profile_qualities[array_position(before_profile_field_ids,%s::text)] = 'OBSERVED'
+          AND after_profile_qualities[array_position(after_profile_field_ids,%s::text)] = 'OBSERVED'
+          AND NULLIF(before_profile_values[array_position(before_profile_field_ids,%s::text)], '')
+            IS DISTINCT FROM
+          NULLIF(after_profile_values[array_position(after_profile_field_ids,%s::text)], '')
         WHEN 'ANY_STATE_CHANGED' THEN
           before_profile_qualities[array_position(before_profile_field_ids,%s::text)]
             IS DISTINCT FROM
@@ -2802,6 +2835,13 @@ LIMIT %s""",
           OR before_profile_statuses[array_position(before_profile_field_ids,%s::text)]
             IS DISTINCT FROM
           after_profile_statuses[array_position(after_profile_field_ids,%s::text)]
+          OR (
+            before_profile_qualities[array_position(before_profile_field_ids,%s::text)] = 'OBSERVED'
+            AND after_profile_qualities[array_position(after_profile_field_ids,%s::text)] = 'OBSERVED'
+            AND NULLIF(before_profile_values[array_position(before_profile_field_ids,%s::text)], '')
+              IS DISTINCT FROM
+            NULLIF(after_profile_values[array_position(after_profile_field_ids,%s::text)], '')
+          )
         ELSE FALSE
       END"""
             )
@@ -2810,6 +2850,14 @@ LIMIT %s""",
                     profile_field_id,
                     profile_field_id,
                     profile_change_kind,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
                     profile_field_id,
                     profile_field_id,
                     profile_field_id,
@@ -2928,6 +2976,8 @@ LIMIT %s OFFSET %s""",
             after_statuses = row["after_profile_statuses"] or []
             before_qualities = row["before_profile_qualities"] or []
             after_qualities = row["after_profile_qualities"] or []
+            before_values = row.get("before_profile_values") or [""] * len(before_ids)
+            after_values = row.get("after_profile_values") or [""] * len(after_ids)
             before_reasons = row["before_profile_reasons"] or []
             after_reasons = row["after_profile_reasons"] or []
             if (
@@ -2936,6 +2986,8 @@ LIMIT %s OFFSET %s""",
                 == len(after_statuses)
                 == len(before_qualities)
                 == len(after_qualities)
+                == len(before_values)
+                == len(after_values)
                 == len(before_reasons)
                 == len(after_reasons)
                 == len(after_ids)
@@ -2944,38 +2996,61 @@ LIMIT %s OFFSET %s""",
                 and set(before_ids) == set(after_ids)
             ):
                 before_fields = {
-                    field_id: (status, quality, reason)
-                    for field_id, status, quality, reason in zip(
+                    field_id: (status, quality, value or None, reason)
+                    for field_id, status, quality, value, reason in zip(
                         before_ids,
                         before_statuses,
                         before_qualities,
+                        before_values,
                         before_reasons,
                         strict=True,
                     )
                 }
                 after_fields = {
-                    field_id: (status, quality, reason)
-                    for field_id, status, quality, reason in zip(
+                    field_id: (status, quality, value or None, reason)
+                    for field_id, status, quality, value, reason in zip(
                         after_ids,
                         after_statuses,
                         after_qualities,
+                        after_values,
                         after_reasons,
                         strict=True,
                     )
                 }
-                row["profile_field_changes"] = [
-                    {
-                        "field_id": field_id,
-                        "before_status": before_value[0],
-                        "after_status": after_value[0],
-                        "before_quality": before_value[1],
-                        "after_quality": after_value[1],
-                        "before_reason": before_value[2] or None,
-                        "after_reason": after_value[2] or None,
-                    }
-                    for field_id, before_value in before_fields.items()
-                    if before_value[:2] != (after_value := after_fields[field_id])[:2]
-                ]
+                field_changes: list[dict[str, Any]] = []
+                for field_id, bv in before_fields.items():
+                    av = after_fields[field_id]
+                    both_obs = bv[1] == "OBSERVED" and av[1] == "OBSERVED"
+                    enum_changed = both_obs and bv[2] != av[2]
+                    qual_changed = bv[1] != av[1]
+                    stat_changed = bv[0] != av[0]
+                    if not (enum_changed or qual_changed or stat_changed):
+                        continue
+                    if enum_changed:
+                        change_kind = "ENUM_TRANSITION"
+                    elif qual_changed and av[1] == "OBSERVED":
+                        change_kind = "QUALITY_RECOVERED"
+                    elif qual_changed and bv[1] == "OBSERVED":
+                        change_kind = "QUALITY_DEGRADED"
+                    elif qual_changed:
+                        change_kind = "QUALITY_CHANGED"
+                    else:
+                        change_kind = "STATUS_CHANGED"
+                    field_changes.append(
+                        {
+                            "field_id": field_id,
+                            "change_kind": change_kind,
+                            "before_status": bv[0],
+                            "after_status": av[0],
+                            "before_quality": bv[1],
+                            "after_quality": av[1],
+                            "before_value": bv[2],
+                            "after_value": av[2],
+                            "before_reason": bv[3] or None,
+                            "after_reason": av[3] or None,
+                        }
+                    )
+                row["profile_field_changes"] = field_changes
         row["core_quality_changes"] = [
             {
                 "field_id": field_id,

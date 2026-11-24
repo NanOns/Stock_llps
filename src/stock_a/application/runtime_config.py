@@ -231,6 +231,14 @@ def _validate_config(config: Any) -> None:
         )
         for module, path in PROFILE_SEMANTIC_MODULES
     )
+    expected.add(
+        (
+            "contracts/market-reference-indices.json",
+            "BUSINESS_SOURCE_CONTRACT",
+            "STOCK-A-MARKET-REFERENCE-INDICES/R1",
+            "stock_a.contracts.loader.load_market_reference_indices_contract",
+        )
+    )
     if not isinstance(registered, list):
         raise DiagnosticError(
             "CONFIG_INVALID", "configuration_policy.public_files必须是登记清单"

@@ -120,31 +120,89 @@ def _raw_market_label(
 
 def reduce_market_environment_display_series(
     observations: Iterable[dict[str, Any]],
+    *,
+    official_sessions: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """按 §11.4 规则将有序官方会话上的 raw 复合研究标签归约为显示状态序列。
 
     规则：
+    - 传入 official_sessions 时，强制校验官方会话严格递增无重复；缺失会话自动以 UNKNOWN 插入
+      （触发 STALE 并清空滞后转换计数），杜绝跨缺日误确认；
     - 首次已知 raw 标签直接显示并标记 FIRST_OBSERVED；
-    - 规则版本切换单独标记 RULE_VERSION_CHANGED 并重起滞后计数；
+    - 规则版本或主参考指数切换单独标记 RULE_VERSION_CHANGED 并重起滞后计数；
     - DEFENSIVE 立即显示，无需 2 日确认；
     - 其余标签转换需连续 2 个相邻已知相同 raw 会话确认；
     - 遇到 UNKNOWN 暂停切换、保留 last_known 并标 STALE，同时清空转换计数。
     """
+    obs_list = list(observations)
+    if official_sessions is not None:
+        ordered_sessions = [
+            s.isoformat() if hasattr(s, "isoformat") else str(s)
+            for s in official_sessions
+        ]
+        if not ordered_sessions:
+            raise ValueError("OFFICIAL_SESSIONS_EMPTY")
+        for prev_s, cur_s in zip(ordered_sessions, ordered_sessions[1:]):
+            if cur_s <= prev_s:
+                raise ValueError("OFFICIAL_SESSIONS_MUST_BE_STRICTLY_INCREASING")
+        by_session: dict[str, dict[str, Any]] = {}
+        for item in obs_list:
+            raw_s = item.get("session")
+            key = raw_s.isoformat() if hasattr(raw_s, "isoformat") else str(raw_s)
+            if key in by_session:
+                raise ValueError(f"DUPLICATE_MARKET_ENVIRONMENT_SESSION:{key}")
+            if key not in set(ordered_sessions):
+                raise ValueError(f"SESSION_NOT_IN_OFFICIAL_CALENDAR:{key}")
+            by_session[key] = item
+        default_rule = (
+            str(obs_list[0].get("rule_version") or "MARKET_PRESENTATION_R1")
+            if obs_list
+            else "MARKET_PRESENTATION_R1"
+        )
+        default_primary = obs_list[0].get("primary_index_symbol") if obs_list else None
+        aligned_obs: list[dict[str, Any]] = []
+        last_rule = default_rule
+        last_primary = default_primary
+        for sess in ordered_sessions:
+            found = by_session.get(sess)
+            if found is not None:
+                last_rule = str(found.get("rule_version") or last_rule)
+                if "primary_index_symbol" in found:
+                    last_primary = found.get("primary_index_symbol")
+                aligned_obs.append(found)
+            else:
+                aligned_obs.append(
+                    {
+                        "session": sess,
+                        "raw_status": "UNKNOWN",
+                        "raw_label": None,
+                        "rule_version": last_rule,
+                        "primary_index_symbol": last_primary,
+                    }
+                )
+        obs_list = aligned_obs
+
     displayed_label: str | None = None
-    active_rule_version: str | None = None
+    active_rule_key: tuple[str, str | None] | None = None
     pending_label: str | None = None
     pending_count = 0
     results: list[dict[str, Any]] = []
 
-    for item in observations:
-        session = item.get("session")
+    for item in obs_list:
+        raw_sess = item.get("session")
+        session = raw_sess.isoformat() if hasattr(raw_sess, "isoformat") else raw_sess
         raw_status = item.get("raw_status")
         raw_label = item.get("raw_label")
         rule_version = str(item.get("rule_version") or "MARKET_PRESENTATION_R1")
+        primary_index = item.get("primary_index_symbol")
+        rule_key = (
+            rule_version,
+            None if primary_index is None else str(primary_index),
+        )
 
-        # 规则切换单独列示并独立起算
-        if active_rule_version is not None and rule_version != active_rule_version:
-            active_rule_version = rule_version
+        # 规则版本或主参考指数切换单独列示并独立起算
+        if active_rule_key is not None and rule_key != active_rule_key:
+            active_rule_key = rule_key
             pending_label = None
             pending_count = 0
             if raw_status == "KNOWN" and isinstance(raw_label, str):
@@ -153,6 +211,7 @@ def reduce_market_environment_display_series(
                     {
                         "session": session,
                         "rule_version": rule_version,
+                        "primary_index_symbol": primary_index,
                         "raw_status": raw_status,
                         "raw_label": raw_label,
                         "displayed_label": displayed_label,
@@ -167,6 +226,7 @@ def reduce_market_environment_display_series(
                     {
                         "session": session,
                         "rule_version": rule_version,
+                        "primary_index_symbol": primary_index,
                         "raw_status": raw_status or "UNKNOWN",
                         "raw_label": None,
                         "displayed_label": None,
@@ -177,8 +237,8 @@ def reduce_market_environment_display_series(
                 )
             continue
 
-        if active_rule_version is None:
-            active_rule_version = rule_version
+        if active_rule_key is None:
+            active_rule_key = rule_key
 
         # 当日 raw 未知：暂停切换、清转换计数；已有显示则保留并标 STALE
         if raw_status != "KNOWN" or not isinstance(raw_label, str):

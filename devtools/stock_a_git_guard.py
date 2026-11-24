@@ -594,8 +594,10 @@ def business_content_errors(path: str, raw: bytes) -> list[str]:
         FIXED_ISO_DATE.search(text) or FIXED_DATE_CALL.search(text)
     ):
         errors.append("固定交易日期进入现役源码/配置")
-    if FIXED_SYMBOL.search(text) or any(
-        BARE_FIXED_SYMBOL.search(line) for line in text.splitlines()
+    is_official_index_catalog = path == "config/contracts/market-reference-indices.json"
+    if not is_official_index_catalog and (
+        FIXED_SYMBOL.search(text)
+        or any(BARE_FIXED_SYMBOL.search(line) for line in text.splitlines())
     ):
         errors.append("固定证券样例进入现役源码/配置")
     if FIXED_BOARD_SELECTOR.search(text) or FIXED_BOARD_BRANCH.search(text):

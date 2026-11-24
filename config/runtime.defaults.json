@@ -105,6 +105,12 @@
         "role": "PRICE_PROFILE_SEMANTICS_MODULE",
         "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R2",
         "consumer": "stock_a.contracts.load_price_profile_contract（fields-profile）"
+      },
+      {
+        "path": "contracts/market-reference-indices.json",
+        "role": "BUSINESS_SOURCE_CONTRACT",
+        "contract": "STOCK-A-MARKET-REFERENCE-INDICES/R1",
+        "consumer": "stock_a.contracts.loader.load_market_reference_indices_contract"
       }
     ],
     "private_files": {
@@ -164,7 +170,7 @@
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
     "business_login": "stock_a",
-    "migration_version": 72,
+    "migration_version": 73,
     "project_id": 1,
     "deployment_instance_id": 1
   }

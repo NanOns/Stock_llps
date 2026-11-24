@@ -219,48 +219,93 @@ def read_market_limit_up_ladder_summary(
     *,
     target_session: date,
     source_capture_id: int,
+    calendar_revision: str | None = None,
     research_eligible_only: bool = True,
 ) -> dict[str, Any]:
-    """只读查询目标交易日全市场日线连板梯队汇总（未落库时诚实返回 NOT_COMPUTED）。"""
+    """只读查询目标交易日全市场日线连板梯队汇总。
+
+    强制绑定精确 calendar_revision（防止多日历修订重复计数），并与同日同捕获的
+    source_price_limit_day_facts 目标证券集合逐一核对完整度；未落库返回 NOT_COMPUTED，
+    残缺返回 INCOMPLETE，完整闭合才返回 AVAILABLE。
+    """
+    if calendar_revision is None:
+        _, _, calendar_revision, _ = _load_calendar(target_session)
+
     with _transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
         _,
     ):
-        sql = """SELECT streak_status, exact_streak, lower_bound_streak,
-                        is_first_board, close_limit_up, touched_limit_up, one_word_limit_up
-                 FROM stock.source_limit_up_streak_day_facts
-                 WHERE target_session = %s
-                   AND source_capture_id = %s
-                   AND contract_version = %s"""
-        params: list[Any] = [
-            target_session,
-            source_capture_id,
-            LIMIT_UP_LADDER_CONTRACT_VERSION,
-        ]
-        if research_eligible_only:
-            sql += " AND research_eligible = TRUE"
-        cursor.execute(sql, params)
+        eligible_clause = (
+            " AND research_eligible = TRUE" if research_eligible_only else ""
+        )
+        cursor.execute(
+            f"""SELECT source_symbol, streak_status, exact_streak, lower_bound_streak,
+                       is_first_board, close_limit_up, touched_limit_up, one_word_limit_up
+                FROM stock.source_limit_up_streak_day_facts
+                WHERE target_session = %s
+                  AND source_capture_id = %s
+                  AND contract_version = %s
+                  AND calendar_revision = %s{eligible_clause}""",
+            (
+                target_session,
+                source_capture_id,
+                LIMIT_UP_LADDER_CONTRACT_VERSION,
+                calendar_revision,
+            ),
+        )
         rows = cursor.fetchall()
+
+        cursor.execute(
+            f"""SELECT source_symbol
+                FROM stock.source_price_limit_day_facts
+                WHERE target_session = %s
+                  AND source_capture_id = %s
+                  AND contract_version = %s
+                  AND calendar_revision = %s{eligible_clause}""",
+            (
+                target_session,
+                source_capture_id,
+                PRICE_LIMIT_CONTRACT_VERSION,
+                calendar_revision,
+            ),
+        )
+        expected_symbols = {r[0] for r in cursor.fetchall()}
 
     if not rows:
         return {
             "status": "NOT_COMPUTED",
             "target_session": target_session.isoformat(),
             "source_capture_id": source_capture_id,
+            "calendar_revision": calendar_revision,
             "contract_version": LIMIT_UP_LADDER_CONTRACT_VERSION,
             "reason": "LIMIT_UP_STREAK_FACTS_NOT_PERSISTED",
         }
 
+    actual_symbols = {r[0] for r in rows}
+    if expected_symbols and actual_symbols != expected_symbols:
+        return {
+            "status": "INCOMPLETE",
+            "target_session": target_session.isoformat(),
+            "source_capture_id": source_capture_id,
+            "calendar_revision": calendar_revision,
+            "contract_version": LIMIT_UP_LADDER_CONTRACT_VERSION,
+            "expected_symbol_count": len(expected_symbols),
+            "actual_symbol_count": len(actual_symbols),
+            "missing_symbol_count": len(expected_symbols - actual_symbols),
+            "extra_symbol_count": len(actual_symbols - expected_symbols),
+            "reason": "LIMIT_UP_STREAK_TARGET_SYMBOL_SET_INCOMPLETE",
+        }
+
     items = [
         {
-            "streak_status": r[0],
-            "exact_streak": r[1],
-            "lower_bound_streak": r[2],
-            "is_first_board": r[3],
-            "close_limit_up": r[4],
-            "touched_limit_up": r[5],
-            "one_word_limit_up": r[6],
+            "streak_status": r[1],
+            "exact_streak": r[2],
+            "lower_bound_streak": r[3],
+            "is_first_board": r[4],
+            "close_limit_up": r[5],
+            "touched_limit_up": r[6],
+            "one_word_limit_up": r[7],
         }
         for r in rows
     ]
@@ -270,5 +315,6 @@ def read_market_limit_up_ladder_summary(
     )
     summary["status"] = "AVAILABLE"
     summary["source_capture_id"] = source_capture_id
+    summary["calendar_revision"] = calendar_revision
     summary["research_eligible_only"] = research_eligible_only
     return summary

@@ -307,3 +307,83 @@ def load_price_profile_contract(
         document=document,
         module_paths=tuple(loaded_paths),
     )
+
+
+def load_market_reference_indices_contract(
+    configuration_root: Path,
+) -> dict[str, Any]:
+    """加载并严格校验唯一正式市场参考指数目录合同（必须有且仅有1条启用的PRIMARY_MARKET）。"""
+    resolved_root = configuration_root.resolve()
+    target = (resolved_root / "contracts" / "market-reference-indices.json").resolve()
+    try:
+        target.relative_to(resolved_root)
+    except ValueError as error:
+        raise PriceProfileContractError(
+            "INDEX_CONTRACT_OUTSIDE_ROOT", "参考指数目录配置路径跳出固定配置根"
+        ) from error
+    if not target.is_file():
+        raise PriceProfileContractError(
+            "INDEX_CONTRACT_MISSING", "缺少正式市场参考指数目录配置"
+        )
+    document = json.loads(target.read_text(encoding="utf-8"))
+    if (
+        not isinstance(document, dict)
+        or document.get("contract") != "STOCK-A-MARKET-REFERENCE-INDICES/R1"
+        or document.get("price_coordinate") != "RAW_UNADJUSTED"
+        or document.get("price_unit") != "INDEX_POINT"
+    ):
+        raise PriceProfileContractError(
+            "INDEX_CONTRACT_INVALID", "市场参考指数目录合同头或单位定义非法"
+        )
+    indices = document.get("indices")
+    if not isinstance(indices, list) or not indices:
+        raise PriceProfileContractError("INDEX_CONTRACT_EMPTY", "市场参考指数目录为空")
+    seen_official: set[str] = set()
+    seen_source: set[str] = set()
+    primary_enabled: list[str] = []
+    for item in indices:
+        if not isinstance(item, dict):
+            raise PriceProfileContractError("INDEX_ENTRY_INVALID", "指数条目必须为对象")
+        official = item.get("official_code")
+        source_sym = item.get("source_symbol")
+        role = item.get("role")
+        enabled = item.get("enabled")
+        if (
+            not isinstance(official, str)
+            or not official
+            or role not in {"PRIMARY_MARKET", "OBSERVATION_BENCHMARK"}
+            or type(enabled) is not bool
+        ):
+            raise PriceProfileContractError(
+                "INDEX_ENTRY_FIELDS_INVALID", f"指数条目字段非法：{official}"
+            )
+        if official in seen_official:
+            raise PriceProfileContractError(
+                "INDEX_OFFICIAL_CODE_DUPLICATE", f"重复官方指数代码：{official}"
+            )
+        seen_official.add(official)
+        if source_sym is not None:
+            if not isinstance(source_sym, str) or source_sym in seen_source:
+                raise PriceProfileContractError(
+                    "INDEX_SOURCE_SYMBOL_INVALID",
+                    f"供应方指数代码非法或重复：{source_sym}",
+                )
+            seen_source.add(source_sym)
+        if enabled and source_sym is None:
+            raise PriceProfileContractError(
+                "INDEX_ENABLED_WITHOUT_SOURCE_SYMBOL",
+                f"启用指数必须绑定供应方代码：{official}",
+            )
+        if role == "PRIMARY_MARKET":
+            if not enabled or not source_sym:
+                raise PriceProfileContractError(
+                    "PRIMARY_MARKET_INDEX_NOT_ENABLED",
+                    "PRIMARY_MARKET 主参考指数必须启用且绑定供应方代码",
+                )
+            primary_enabled.append(source_sym)
+    if len(primary_enabled) != 1:
+        raise PriceProfileContractError(
+            "PRIMARY_MARKET_COUNT_INVALID",
+            f"PRIMARY_MARKET 主参考指数必须有且仅有1条，当前={len(primary_enabled)}",
+        )
+    return document

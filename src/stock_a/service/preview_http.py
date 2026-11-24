@@ -4668,25 +4668,57 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         getattr(error, "code", "MARKET_PARTICIPATION_READ_FAILED"),
                         str(error),
                     ) from error
+                from stock_a.contracts.loader import (
+                    load_market_reference_indices_contract,
+                )
                 from stock_a.storage.postgres.limit_up_ladder import (
                     read_market_limit_up_ladder_summary,
                 )
                 from stock_a.storage.postgres.market_breadth import (
                     read_market_breadth_change,
                 )
+                from stock_a.storage.postgres.market_indices import (
+                    read_market_environment_display,
+                    read_market_indices_and_style_summary,
+                )
 
                 capture_id_val = _capture_id(values["source_capture_id"])
+                cal_rev = market.calendar["calendar_revision"]
                 breadth_change = read_market_breadth_change(
                     self.preview_server.state.config,
                     target_session=target,
                     source_capture_id=capture_id_val,
-                    calendar_revision=market.calendar["calendar_revision"],
+                    calendar_revision=cal_rev,
                     contract_version=market.calculation.contract_version,
                 )
                 limit_up_ladder = read_market_limit_up_ladder_summary(
                     self.preview_server.state.config,
                     target_session=target,
                     source_capture_id=capture_id_val,
+                    calendar_revision=cal_rev,
+                )
+                idx_contract = load_market_reference_indices_contract(
+                    Path(
+                        self.preview_server.state.config["paths"]["configuration_root"]
+                    )
+                )
+                primary_idx_sym = next(
+                    item["source_symbol"]
+                    for item in idx_contract["indices"]
+                    if item["role"] == "PRIMARY_MARKET"
+                )
+                index_observations = read_market_indices_and_style_summary(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    calendar_revision=cal_rev,
+                    index_contract=idx_contract,
+                )
+                environment_display = read_market_environment_display(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    stock_capture_id=capture_id_val,
+                    primary_index_symbol=primary_idx_sym,
+                    calendar_revision=cal_rev,
                 )
                 self._send_json(
                     200,
@@ -4698,6 +4730,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             breadth_change=breadth_change,
                         ),
                         "limit_up_ladder": limit_up_ladder,
+                        "index_observations": index_observations,
+                        "environment_display": environment_display,
                     },
                 )
                 return

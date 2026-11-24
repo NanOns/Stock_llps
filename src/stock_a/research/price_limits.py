@@ -9,13 +9,18 @@ from typing import Any
 
 PRICE_LIMIT_CONTRACT_VERSION = "STOCK_A_PRICE_LIMIT_ENGINE_R1"
 _TICK = Decimal("0.01")
-_BOARD_LIMIT_RULES: dict[str, tuple[Decimal, str]] = {
-    "MAIN_BOARD": (Decimal("0.1000"), "CN_MAIN_NON_ST_10PCT_R1"),
-    "GEM": (Decimal("0.2000"), "CN_GEM_NON_ST_20PCT_R1"),
-    "STAR_BOARD": (Decimal("0.2000"), "CN_STAR_NON_ST_20PCT_R1"),
+# 非 ST 普通股票涨跌幅制度生效分段表：(生效起日元组(Y,M,D)或None, 涨跌幅比例, 规则ID)
+_NON_ST_LIMIT_REGIMES: dict[
+    str, tuple[tuple[tuple[int, int, int] | None, Decimal, str], ...]
+] = {
+    "MAIN_BOARD": ((None, Decimal("0.1000"), "CN_MAIN_NON_ST_10PCT_R1"),),
+    "GEM": (
+        ((2020, 8, 24), Decimal("0.2000"), "CN_GEM_NON_ST_20PCT_R1"),
+        (None, Decimal("0.1000"), "CN_GEM_NON_ST_10PCT_PRE_20200824_R1"),
+    ),
+    "STAR_BOARD": (((2019, 7, 22), Decimal("0.2000"), "CN_STAR_NON_ST_20PCT_R1"),),
 }
-# 交易所风险警示股票（ST/*ST）涨跌幅制度生效分段表：(生效起日元组(Y,M,D)或None, 涨跌幅比例, 规则ID)
-# 按生效起日降序排列，命中首条 target_ymd >= effective_from 即为当日有效制度。
+# 交易所风险警示股票（ST/*ST）涨跌幅制度生效分段表
 _ST_LIMIT_REGIMES: dict[
     str, tuple[tuple[tuple[int, int, int] | None, Decimal, str], ...]
 ] = {
@@ -23,16 +28,27 @@ _ST_LIMIT_REGIMES: dict[
         ((2026, 7, 6), Decimal("0.1000"), "CN_MAIN_ST_10PCT_20260706_R1"),
         (None, Decimal("0.0500"), "CN_MAIN_ST_5PCT_PRE_20260706_R1"),
     ),
-    "GEM": (((2020, 8, 24), Decimal("0.2000"), "CN_GEM_ST_20PCT_R1"),),
-    "STAR_BOARD": ((None, Decimal("0.2000"), "CN_STAR_ST_20PCT_R1"),),
+    "GEM": (
+        ((2020, 8, 24), Decimal("0.2000"), "CN_GEM_ST_20PCT_R1"),
+        (None, Decimal("0.0500"), "CN_GEM_ST_5PCT_PRE_20200824_R1"),
+    ),
+    "STAR_BOARD": (((2019, 7, 22), Decimal("0.2000"), "CN_STAR_ST_20PCT_R1"),),
+}
+# 注册制首次公开发行前5个交易日无涨跌幅限制的各板块生效起日（Y,M,D）
+_IPO_NO_LIMIT_5D_EFFECTIVE: dict[str, tuple[int, int, int]] = {
+    "STAR_BOARD": (2019, 7, 22),
+    "GEM": (2020, 8, 24),
+    "MAIN_BOARD": (2023, 4, 10),
 }
 
 
-def _resolve_st_limit_rule(
-    board: str, target_session: date
+def _resolve_regime_rule(
+    table: dict[str, tuple[tuple[tuple[int, int, int] | None, Decimal, str], ...]],
+    board: str,
+    target_session: date,
 ) -> tuple[Decimal, str] | None:
-    """按日期有效交易所风险警示股票涨跌幅制度表解析 ST/*ST 限价规则。"""
-    regimes = _ST_LIMIT_REGIMES.get(board)
+    """按日期有效交易所制度分段表解析当日限价规则。"""
+    regimes = table.get(board)
     if regimes is None:
         return None
     target_ymd = (target_session.year, target_session.month, target_session.day)
@@ -108,6 +124,8 @@ def evaluate_daily_price_limit(
     raw_high: Any,
     raw_low: Any,
     raw_close: Any,
+    ipo_date: date | None = None,
+    listing_session_ordinal: int | None = None,
 ) -> dict[str, Any]:
     """按日期有效板别、ST、停牌、上市阶段与RAW参考价计算日线涨跌停可判定事实。"""
     if price_coordinate != "RAW_UNADJUSTED":
@@ -152,7 +170,7 @@ def evaluate_daily_price_limit(
             reason="IS_ST_STATUS_UNKNOWN",
         )
     if raw_is_st_value == "1":
-        board_rule = _resolve_st_limit_rule(board, target_session)
+        board_rule = _resolve_regime_rule(_ST_LIMIT_REGIMES, board, target_session)
         if board_rule is None:
             return _unknown_result(
                 source_symbol=source_symbol,
@@ -163,7 +181,7 @@ def evaluate_daily_price_limit(
                 reason="ST_LIMIT_REGIME_UNVERIFIED",
             )
     else:
-        board_rule = _BOARD_LIMIT_RULES.get(board)
+        board_rule = _resolve_regime_rule(_NON_ST_LIMIT_REGIMES, board, target_session)
         if board_rule is None:
             return _unknown_result(
                 source_symbol=source_symbol,
@@ -174,7 +192,61 @@ def evaluate_daily_price_limit(
                 reason="BOARD_LIMIT_REGIME_UNSUPPORTED",
             )
     limit_pct, rule_id = board_rule
-    if type(history_present_count) is not int or history_present_count < 6:
+
+    # 上市特殊期判定：优先依据权威 ipo_date 与官方交易会话序号；无 ipo_date 时保留左截尾保护
+    if ipo_date is not None:
+        if target_session < ipo_date:
+            return _unknown_result(
+                source_symbol=source_symbol,
+                market=market,
+                board=board,
+                target_session=target_session,
+                rule_id="UNKNOWN_PRE_LISTING",
+                reason="TARGET_SESSION_BEFORE_IPO_DATE",
+            )
+        ipo_ymd = (ipo_date.year, ipo_date.month, ipo_date.day)
+        reg_eff = _IPO_NO_LIMIT_5D_EFFECTIVE.get(board)
+        if listing_session_ordinal is not None:
+            if type(listing_session_ordinal) is not int or listing_session_ordinal < 1:
+                return _unknown_result(
+                    source_symbol=source_symbol,
+                    market=market,
+                    board=board,
+                    target_session=target_session,
+                    rule_id="UNKNOWN_IPO_ORDINAL",
+                    reason="LISTING_SESSION_ORDINAL_INVALID",
+                )
+            if listing_session_ordinal <= 5:
+                if reg_eff is not None and ipo_ymd >= reg_eff:
+                    return _unknown_result(
+                        source_symbol=source_symbol,
+                        market=market,
+                        board=board,
+                        target_session=target_session,
+                        rule_id="CN_IPO_FIRST_5_SESSIONS_NO_LIMIT_R1",
+                        reason="IPO_FIRST_5_SESSIONS_NO_PRICE_LIMIT",
+                        limit_status="NA_NO_PRICE_LIMIT",
+                        flag_value="NA",
+                        quality="NA_NO_PRICE_LIMIT",
+                    )
+                return _unknown_result(
+                    source_symbol=source_symbol,
+                    market=market,
+                    board=board,
+                    target_session=target_session,
+                    rule_id="UNKNOWN_LEGACY_IPO_REGIME",
+                    reason="IPO_SPECIAL_REGIME_PRE_REGISTRATION_UNVERIFIED",
+                )
+        elif (target_session - ipo_date).days < 14:
+            return _unknown_result(
+                source_symbol=source_symbol,
+                market=market,
+                board=board,
+                target_session=target_session,
+                rule_id="LEFT_CENSORED_HISTORY_UNKNOWN",
+                reason="IPO_ORDINAL_REQUIRED_FOR_RECENT_LISTING",
+            )
+    elif type(history_present_count) is not int or history_present_count < 6:
         return _unknown_result(
             source_symbol=source_symbol,
             market=market,
@@ -183,6 +255,7 @@ def evaluate_daily_price_limit(
             rule_id="LEFT_CENSORED_HISTORY_UNKNOWN",
             reason="IPO_DATE_NOT_STORED_AND_HISTORY_WINDOW_INSUFFICIENT",
         )
+
     preclose = _to_decimal(raw_preclose)
     if preclose is None:
         return _unknown_result(
@@ -193,16 +266,9 @@ def evaluate_daily_price_limit(
             rule_id="UNKNOWN_PRECLOSE_MISSING",
             reason="RAW_PRECLOSE_MISSING_OR_NON_POSITIVE",
         )
-    prev_close = _to_decimal(prev_raw_close)
-    if prev_close is None or prev_close != preclose:
-        return _unknown_result(
-            source_symbol=source_symbol,
-            market=market,
-            board=board,
-            target_session=target_session,
-            rule_id="UNKNOWN_EX_RIGHTS_REFERENCE",
-            reason="EX_RIGHTS_OR_LEFT_CENSORED_REFERENCE_UNVERIFIED",
-        )
+    # 按用户决定与 R3 裁定：直接消费同日同捕获合格 RAW preclose（除权日为供应方调整后前收），
+    # 不要求等于上一日真实收盘 prev_raw_close（prev_raw_close 仅保留作诊断参考）。
+    _ = prev_raw_close
 
     upper_limit = (preclose * (Decimal("1") + limit_pct)).quantize(
         _TICK, rounding=ROUND_HALF_UP

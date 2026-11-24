@@ -1,0 +1,130 @@
+{
+  "contract": "STOCK-A-MARKET-REFERENCE-INDICES/R1",
+  "version": "R1",
+  "price_coordinate": "RAW_UNADJUSTED",
+  "price_unit": "INDEX_POINT",
+  "indices": [
+    {
+      "official_code": "399317",
+      "source_symbol": "SZ.399317",
+      "name": "国证A股指数",
+      "role": "PRIMARY_MARKET",
+      "category": "BROAD_MARKET",
+      "enabled": true,
+      "probe_status": "REPORTED_AVAILABLE_60D",
+      "notes": "R3最终裁定唯一市场趋势主轴参考基准（沪深北广域A股自由流通市值加权，排除ST/*ST）。"
+    },
+    {
+      "official_code": "000001",
+      "source_symbol": "SH.000001",
+      "name": "上证综合指数",
+      "role": "OBSERVATION_BENCHMARK",
+      "category": "BROAD_MARKET",
+      "enabled": true,
+      "probe_status": "REPORTED_AVAILABLE_60D",
+      "notes": "沪市整体方向观察基准。"
+    },
+    {
+      "official_code": "399001",
+      "source_symbol": "SZ.399001",
+      "name": "深证成份指数",
+      "role": "OBSERVATION_BENCHMARK",
+      "category": "BROAD_MARKET",
+      "enabled": true,
+      "probe_status": "REPORTED_AVAILABLE_60D",
+      "notes": "深市代表与沪深分化观察基准。"
+    },
+    {
+      "official_code": "399006",
+      "source_symbol": "SZ.399006",
+      "name": "创业板指数",
+      "role": "OBSERVATION_BENCHMARK",
+      "category": "GROWTH_BOARD",
+      "enabled": true,
+      "probe_status": "REPORTED_AVAILABLE_60D",
+      "notes": "创业板与成长风格观察基准。"
+    },
+    {
+      "official_code": "000300",
+      "source_symbol": "SH.000300",
+      "name": "沪深300指数",
+      "role": "OBSERVATION_BENCHMARK",
+      "category": "SIZE_LARGE",
+      "enabled": true,
+      "probe_status": "REPORTED_AVAILABLE_60D",
+      "notes": "大盘权重风格观察基准。"
+    },
+    {
+      "official_code": "000905",
+      "source_symbol": "SH.000905",
+      "name": "中证500指数",
+      "role": "OBSERVATION_BENCHMARK",
+      "category": "SIZE_MID",
+      "enabled": true,
+      "probe_status": "REPORTED_AVAILABLE_60D",
+      "notes": "中盘规模风格观察基准。"
+    },
+    {
+      "official_code": "000852",
+      "source_symbol": "SH.000852",
+      "name": "中证1000指数",
+      "role": "OBSERVATION_BENCHMARK",
+      "category": "SIZE_SMALL",
+      "enabled": true,
+      "probe_status": "REPORTED_AVAILABLE_60D",
+      "notes": "中小盘规模风格观察基准。"
+    },
+    {
+      "official_code": "399986",
+      "source_symbol": null,
+      "name": "中证银行指数",
+      "role": "OBSERVATION_BENCHMARK",
+      "category": "STYLE_SECTOR",
+      "enabled": false,
+      "probe_status": "UNVERIFIED_PENDING_PROBE",
+      "notes": "银行权重行业观察候选；BaoStock供应方代码与可用性待获准后实测，缺失时保持NOT_AVAILABLE，不阻断主流程。"
+    },
+    {
+      "official_code": "000860",
+      "source_symbol": null,
+      "name": "中证央企结构调整指数",
+      "role": "OBSERVATION_BENCHMARK",
+      "category": "STYLE_THEME",
+      "enabled": false,
+      "probe_status": "UNVERIFIED_PENDING_PROBE",
+      "notes": "央企主题观察候选（不代表全部国企）；BaoStock供应方代码与可用性待获准后实测，缺失时保持NOT_AVAILABLE。"
+    }
+  ],
+  "style_spread_pairs": [
+    {
+      "pair_id": "LARGE_VS_SMALL_300_1000",
+      "label": "沪深300-中证1000（大盘vs小盘）",
+      "left_official_code": "000300",
+      "right_official_code": "000852"
+    },
+    {
+      "pair_id": "LARGE_VS_MID_300_500",
+      "label": "沪深300-中证500（大盘vs中盘）",
+      "left_official_code": "000300",
+      "right_official_code": "000905"
+    },
+    {
+      "pair_id": "MAIN_VS_GROWTH_SH_CYB",
+      "label": "上证综指-创业板指（沪市权重vs成长）",
+      "left_official_code": "000001",
+      "right_official_code": "399006"
+    },
+    {
+      "pair_id": "BANK_VS_BROAD_399986_399317",
+      "label": "中证银行-国证A指（金融权重vs全A）",
+      "left_official_code": "399986",
+      "right_official_code": "399317"
+    },
+    {
+      "pair_id": "SOE_VS_BROAD_000860_399317",
+      "label": "央企结构调整-国证A指（央企主题vs全A）",
+      "left_official_code": "000860",
+      "right_official_code": "399317"
+    }
+  ]
+}

@@ -200,6 +200,7 @@ def _build_profile_preview(
     price_coordinate: str,
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     raw_period_trends: Mapping[str, Any] | None = None,
+    cross_section_fields: Mapping[str, FieldValue] | None = None,
     source_snapshot_role: str = "BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
     selected_fields: frozenset[str] | None = None,
 ) -> dict[str, Any]:
@@ -263,7 +264,17 @@ def _build_profile_preview(
     target_close = _qfq_target_close_field(target_bar)
 
     components: list[dict[str, Any]] = []
-    for rule_id, rule in rules.items():
+    # 二阶基础画像（profile.relative 依赖同层 profile.compression / profile.ma_structure）排在最后求值
+    ordered_rules = sorted(
+        rules.items(),
+        key=lambda kv: (
+            1
+            if isinstance(kv[1], dict) and kv[1].get("field_id") == "profile.relative"
+            else 0
+        ),
+    )
+    evaluated_profile_values: dict[str, FieldValue] = {}
+    for rule_id, rule in ordered_rules:
         field_id = rule.get("field_id") if isinstance(rule, dict) else None
         if not isinstance(field_id, str):
             raise ResearchEntryError(
@@ -272,6 +283,12 @@ def _build_profile_preview(
         if selected_fields is not None and field_id not in selected_fields:
             continue
         unavailable = _PROFILE_PERIOD_INPUTS.get(field_id)
+        if (
+            unavailable is not None
+            and field_id == "profile.relative"
+            and isinstance(cross_section_fields, Mapping)
+        ):
+            unavailable = None
         if unavailable is not None:
             period_field_id = unavailable["missing_inputs"][0]
             supplied_period_bars = (
@@ -403,6 +420,58 @@ def _build_profile_preview(
                         else []
                     ),
                 }
+            elif input_id.startswith("cross."):
+                source_field_id = input_id
+                source_producer = (
+                    "stock_a.research.cross_section:calculate_cross_section_batch"
+                )
+                if (
+                    not isinstance(cross_section_fields, Mapping)
+                    or input_id not in cross_section_fields
+                ):
+                    raise ResearchEntryError(
+                        "PROFILE_PREVIEW_CROSS_FIELD_MISSING",
+                        "本次全市场横截面结果缺少画像输入：" + input_id,
+                    )
+                input_value = cross_section_fields[input_id]
+                window_contract = field_registry.get("window_contract", "NONE")
+                if window_contract != "NONE":
+                    first_ep = history[0].session if history else target_session
+                    selected_sess = tuple(row.session for row in history) or (
+                        target_session,
+                    )
+                    window_identity = WindowIdentity(
+                        contract=window_contract,
+                        first_endpoint=first_ep,
+                        last_endpoint=target_session,
+                        selected_sessions=selected_sess,
+                        calendar_revision=calendar_revision,
+                        status_revision="BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
+                    )
+                    expected_windows[input_id] = window_identity
+                    input_window = {
+                        "contract": window_contract,
+                        "first_endpoint": first_ep.isoformat(),
+                        "last_endpoint": target_session.isoformat(),
+                        "requested_sessions": len(selected_sess),
+                        "selected_session_count": len(selected_sess),
+                        "selected_sessions": [s.isoformat() for s in selected_sess],
+                        "calendar_revision": calendar_revision,
+                        "status_revision": "BAOSTOCK_QFQ_NO_BAR_UNKNOWN_STATUS_R2",
+                        "input_quality": input_value.quality,
+                    }
+                else:
+                    input_window = None
+            elif input_id.startswith("profile."):
+                source_field_id = input_id
+                source_producer = "stock_a.research.profile:evaluate_profile_kernel"
+                if input_id not in evaluated_profile_values:
+                    raise ResearchEntryError(
+                        "PROFILE_PREVIEW_UPSTREAM_PROFILE_MISSING",
+                        "二阶画像缺少前置一阶基础画像结果：" + input_id,
+                    )
+                input_value = evaluated_profile_values[input_id]
+                input_window = None
             else:
                 source_field_id = input_id
                 source_producer = "stock_a.research.core:calculate_core"
@@ -463,6 +532,14 @@ def _build_profile_preview(
                     contexts[dependency] = (
                         f"BAOSTOCK_ADJUSTFLAG_2_{price_coordinate}_NON_PIT_R2"
                     )
+                elif dependency in {
+                    "context.universe_ref",
+                    "context.universe_ref_with_each_exact_endpoint",
+                    "context.start_session_universe_ref",
+                }:
+                    contexts[dependency] = (
+                        f"CROSS_SECTION_UNIVERSE|{target_session.isoformat()}|{calendar_revision}"
+                    )
                 else:
                     raise ResearchEntryError(
                         "PROFILE_PREVIEW_CONTEXT_UNBOUND",
@@ -521,6 +598,7 @@ def _build_profile_preview(
             runtime_producers=runtime_producers,
         )
         result = evaluate_profile_kernel(field_id, handoff, rules, used_registry)
+        evaluated_profile_values[field_id] = result
         components.append(
             {
                 "field_id": field_id,

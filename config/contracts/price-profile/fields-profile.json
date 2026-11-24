@@ -1815,7 +1815,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -1854,7 +1855,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -1893,7 +1895,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -1929,7 +1932,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -1968,7 +1972,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -2007,7 +2012,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -2043,7 +2049,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -2079,7 +2086,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -2115,7 +2123,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
@@ -2151,7 +2160,8 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "window_identity_ref": "profile_price_history_policy"
+        "window_identity_ref": "profile_price_history_policy",
+        "producer_symbol": "stock_a.research.cross_section:calculate_cross_section_batch"
       }
     },
     {
