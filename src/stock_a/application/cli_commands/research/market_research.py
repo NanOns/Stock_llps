@@ -99,6 +99,9 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
                 category="ARGUMENT",
             )
         if args.persist:
+            from stock_a.application.source_market_context import (
+                prepare_source_market_breadth_change,
+            )
             from stock_a.storage.postgres.market_breadth import persist_market_breadth
 
             targets = [target_session]
@@ -129,7 +132,17 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
                     research_cutoff=research_cutoff,
                     source_package_id=args.source_package_id,
                 )
-                _emit({"ok": True, **persist_market_breadth(config, calculated)})
+                breadth_change = prepare_source_market_breadth_change(
+                    config, calculated
+                )
+                _emit(
+                    {
+                        "ok": True,
+                        **persist_market_breadth(
+                            config, calculated, breadth_change=breadth_change
+                        ),
+                    }
+                )
             return _EXIT_OK
         market_read = read_source_market_context(
             config,

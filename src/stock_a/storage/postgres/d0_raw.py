@@ -276,7 +276,19 @@ def _read_history_grid(
                       r.raw_open,r.raw_high,r.raw_low,r.raw_close,
                       r.price_quality,r.price_reason,r.raw_preclose,r.raw_preclose_quality,
                       r.raw_preclose_reason,r.qfq_open,r.qfq_high,r.qfq_low,r.qfq_close,
-                      r.qfq_price_quality,r.qfq_price_reason,r.raw_amount,
+                      r.qfq_open_quality,r.qfq_open_reason,
+                      r.qfq_high_quality,r.qfq_high_reason,
+                      r.qfq_low_quality,r.qfq_low_reason,
+                      r.qfq_close_quality,r.qfq_close_reason,
+                      r.qfq_price_quality,r.qfq_price_reason,
+                      r.qfq_response_session_date,r.qfq_response_source_code,
+                      r.qfq_adjustflag,r.qfq_response_fields,
+                      q.adjustment_flag AS adjustment_flag,
+                      q.request_status AS qfq_request_status,
+                      q.eligible_start_session AS qfq_eligible_start_session,
+                      q.eligible_end_session AS qfq_eligible_end_session,
+                      q.completed_through_session AS qfq_completed_through_session,
+                      r.raw_amount,
                       r.raw_amount_quality,r.raw_amount_reason,r.amount_quality,
                       r.amount_reason,r.amount_unit_status,r.raw_volume,
                       r.raw_volume_quality,r.raw_volume_reason,r.volume_quality,
@@ -296,6 +308,9 @@ def _read_history_grid(
                LEFT JOIN stock.source_raw_daily r
                  ON r.source_symbol=p.source_symbol AND r.session_date=d.session_date
                 AND r.source_capture_id=%s
+               LEFT JOIN stock.source_capture_requests q
+                 ON q.capture_id=r.source_capture_id
+                AND q.source_code=r.source_code AND q.adjustment_flag='2'
                LEFT JOIN stock.source_captures c ON c.capture_id=r.source_capture_id
                ORDER BY p.source_symbol COLLATE "C",d.session_date""",
             (
@@ -333,6 +348,20 @@ def _read_history_grid(
             and row["unit_contract_version"] == source_version["unit_contract_version"]
             and row["registered_clock_role"] == "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
             and row["source_available_at"] is None
+            and row["adjustment_flag"] in (2, "2")
+            and row["qfq_adjustflag"] in (2, "2")
+            and row["qfq_response_session_date"] == session
+            and isinstance(row["qfq_response_source_code"], str)
+            and row["qfq_response_source_code"].upper() == symbol
+            and {"date", "code", "close"}.issubset(
+                set(row["qfq_response_fields"] or ())
+            )
+            and row["qfq_request_status"] in {"COMPLETED", "NO_DATA"}
+            and row["qfq_eligible_start_session"] is not None
+            and row["qfq_eligible_end_session"] is not None
+            and row["qfq_eligible_start_session"]
+            <= session
+            <= row["qfq_eligible_end_session"]
             and row["bar_status"] in source_raw._BAR_STATUSES
             and row["price_quality"] in source_raw._QUALITY
             and row["qfq_price_quality"]
@@ -340,7 +369,7 @@ def _read_history_grid(
         )
         row["raw_price_coordinate"] = "RAW_UNADJUSTED"
         row["qfq_price_coordinate"] = "FORWARD_ADJUSTED"
-        row["price_coordinate"] = "RAW_UNADJUSTED"
+        row["price_coordinate"] = "FORWARD_ADJUSTED"
         row["time_role"] = "NON_PIT_RETROSPECTIVE"
         row["source_symbol"] = symbol
         row["session_date"] = session

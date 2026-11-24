@@ -7,6 +7,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import date
+from fractions import Fraction
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -24,6 +25,98 @@ class DataJobError(Exception):
         self.code = code
         self.status = status
         super().__init__(message)
+
+
+def _market_breadth_symbol_readback_mismatches(
+    expected: Any, actual: Any
+) -> tuple[str, ...]:
+    """逐代码核对QFQ宽度计算与跨事务PG Reader读取的全部typed值。"""
+    fields = (
+        "ret1_t",
+        "ret1_t_minus_3",
+        "positive_t",
+        "positive_t_minus_3",
+        "delta_indicator",
+        "classification",
+        "primary_unknown_reason",
+        "unknown_reason_detail",
+    )
+    expected_rows = {row.source_symbol: row for row in getattr(expected, "symbols", ())}
+    actual_rows = {row.source_symbol: row for row in getattr(actual, "symbols", ())}
+    if not expected_rows or set(expected_rows) != set(actual_rows):
+        return ("source_symbol_set",)
+    mismatches = set()
+    for symbol, expected_row in expected_rows.items():
+        actual_row = actual_rows[symbol]
+        mismatches.update(
+            field
+            for field in fields
+            if getattr(expected_row, field) != getattr(actual_row, field)
+        )
+    return tuple(sorted(mismatches))
+
+
+def _market_breadth_change_readback_mismatches(
+    expected: Mapping[str, Any], actual: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """核对相邻宽度事实的精确身份、集合、计数和有理数。"""
+    scalar_fields = (
+        "before_session",
+        "target_session",
+        "before_source_capture_id",
+        "target_source_capture_id",
+        "before_calendar_id",
+        "target_calendar_id",
+        "before_calendar_revision",
+        "target_calendar_revision",
+        "before_contract_version",
+        "target_contract_version",
+        "before_price_coordinate",
+        "target_price_coordinate",
+        "comparison_status",
+        "reason_code",
+        "source_sets_equal",
+        "eligible_sets_equal",
+        "unknown_sets_equal",
+        "unknown_reason_mismatch_count",
+        "source_count_before",
+        "source_count_target",
+        "common_source_count",
+        "eligible_count_before",
+        "eligible_count_target",
+        "common_eligible_count",
+        "unknown_count_before",
+        "unknown_count_target",
+        "breadth_direction",
+        "improved_symbol_count",
+        "deteriorated_symbol_count",
+        "unchanged_symbol_count",
+        "unknown_symbol_count",
+        "source_set_sha256_before",
+        "source_set_sha256_target",
+        "eligible_set_sha256_before",
+        "eligible_set_sha256_target",
+    )
+    mismatches = {
+        name for name in scalar_fields if actual.get(name) != expected.get(name)
+    }
+    for name in ("breadth_before", "breadth_target", "breadth_delta"):
+        ratio = expected.get(name)
+        numerator = actual.get(f"{name}_numerator")
+        denominator = actual.get(f"{name}_denominator")
+        if ratio is None:
+            if numerator is not None or denominator is not None:
+                mismatches.add(name)
+            continue
+        if (
+            not isinstance(ratio, Fraction)
+            or numerator is None
+            or denominator is None
+            or int(numerator) != ratio.numerator
+            or int(denominator) != ratio.denominator
+        ):
+            mismatches.add(name)
+    return tuple(sorted(mismatches))
 
 
 _MAX_SESSION_COUNT = 32767
@@ -44,6 +137,7 @@ _STAGE_TABLES = {
     "MARKET_BREADTH": (
         "stock.source_market_breadth_days",
         "stock.source_market_breadth_symbols",
+        "stock.source_market_breadth_change_days",
     ),
     "MARKET_PARTICIPATION": (
         "stock.source_market_participation_days",
@@ -5728,12 +5822,16 @@ def _execute_shared_production_chain(
     if "MARKET_BREADTH" in base_modules:
         from stock_a.application.source_market_context import (
             compute_source_market_context,
+            prepare_source_market_breadth_change,
             read_source_market_context,
         )
         from stock_a.research.source_market_breadth import (
             SOURCE_MARKET_BREADTH_CONTRACT,
         )
-        from stock_a.storage.postgres.market_breadth import persist_market_breadth
+        from stock_a.storage.postgres.market_breadth import (
+            persist_market_breadth,
+            read_market_breadth_change,
+        )
 
         target_days = tuple(
             date.fromisoformat(day)
@@ -5757,7 +5855,10 @@ def _execute_shared_production_chain(
                     research_cutoff=cutoff,
                     source_capture_id=source_capture_id,
                 )
-                persisted = persist_market_breadth(config, market)
+                breadth_change = prepare_source_market_breadth_change(config, market)
+                persisted = persist_market_breadth(
+                    config, market, breadth_change=breadth_change
+                )
                 readback = read_source_market_context(
                     config,
                     target_session=day,
@@ -5765,6 +5866,21 @@ def _execute_shared_production_chain(
                     source_capture_id=source_capture_id,
                     include_symbols=True,
                 )
+                change_readback = read_market_breadth_change(
+                    config,
+                    target_session=day,
+                    source_capture_id=source_capture_id,
+                    calendar_revision=market.calendar["calendar_revision"],
+                    contract_version=SOURCE_MARKET_BREADTH_CONTRACT,
+                )
+                stored_change = change_readback.get("change") or {}
+                symbol_readback_mismatches = _market_breadth_symbol_readback_mismatches(
+                    market.calculation, readback.calculation
+                )
+                change_readback_mismatches = _market_breadth_change_readback_mismatches(
+                    breadth_change, stored_change
+                )
+
                 if (
                     readback.pg_result.get("storage_status") != "SAVED"
                     or readback.cohort.source_capture_id != source_capture_id
@@ -5772,10 +5888,15 @@ def _execute_shared_production_chain(
                     or readback.calculation.counts != market.calculation.counts
                     or readback.calculation.b_fixed_source
                     != market.calculation.b_fixed_source
+                    or symbol_readback_mismatches
+                    or change_readback.get("storage_status") != "SAVED"
+                    or change_readback_mismatches
                 ):
                     raise DataJobError(
                         "MARKET_BREADTH_CROSS_TRANSACTION_READBACK_MISMATCH",
-                        "市场宽度QFQ事实独立读取与本次计算不一致。",
+                        "市场宽度或跨日变化事实独立读回与本次计算不一致："
+                        f"逐股={symbol_readback_mismatches}，"
+                        f"变化={change_readback_mismatches}。",
                         status=409,
                     )
                 for unit in day_units:
@@ -5791,12 +5912,21 @@ def _execute_shared_production_chain(
                     )
                     expected_rows = (
                         1
-                        if table == "stock.source_market_breadth_days"
+                        if table
+                        in {
+                            "stock.source_market_breadth_days",
+                            "stock.source_market_breadth_change_days",
+                        }
                         else market.calculation.n_source
                     )
                     inserted_rows = (
                         int(persisted.get("status") == "WRITTEN")
                         if table == "stock.source_market_breadth_days"
+                        else int(
+                            persisted.get("breadth_change", {}).get("inserted_rows", 0)
+                            or 0
+                        )
+                        if table == "stock.source_market_breadth_change_days"
                         else int(persisted.get("inserted_rows", 0) or 0)
                     )
                     if actual_rows != expected_rows:
@@ -5815,9 +5945,19 @@ def _execute_shared_production_chain(
                         d1_history_session_count=None,
                         expected_rows=expected_rows,
                         inserted_rows=inserted_rows,
-                        quality_status="COMPLETE_QFQ_CAPTURE_READBACK",
-                        no_change=persisted.get("status")
-                        == "IDEMPOTENT_ALREADY_PRESENT",
+                        quality_status=(
+                            persisted.get("breadth_change", {}).get(
+                                "comparison_status", "NOT_COMPUTED"
+                            )
+                            if table == "stock.source_market_breadth_change_days"
+                            else "COMPLETE_QFQ_CAPTURE_READBACK"
+                        ),
+                        no_change=(
+                            persisted.get("breadth_change", {}).get("status")
+                            == "IDEMPOTENT_ALREADY_PRESENT"
+                            if table == "stock.source_market_breadth_change_days"
+                            else persisted.get("status") == "IDEMPOTENT_ALREADY_PRESENT"
+                        ),
                         calendar_revision=market.calendar["calendar_revision"],
                         producer_version=SOURCE_MARKET_BREADTH_CONTRACT,
                     )

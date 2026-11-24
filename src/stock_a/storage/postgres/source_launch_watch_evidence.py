@@ -255,6 +255,9 @@ def read_source_launch_watch_evidence(
     if _scope_symbol is not None and (len(symbols) != 1 or symbols[0] != _scope_symbol):
         raise ValueError("有界研究证据范围必须只含绑定的单一来源代码")
     scoped_source_count = 1 if _scope_symbol is not None else expected_source_count
+    from stock_a.research.entry_context.sessions import _load_calendar
+
+    target_calendar_revision = _load_calendar(target_session)[2]
 
     with source_raw._transaction(
         config,
@@ -1575,16 +1578,22 @@ def _read_single_symbol_context(
     )
     launch_rows = cursor.fetchall()
     # 相邻日转移事实可使用跨年日历修订；逐日情景按所属年度日历保存。
+    from stock_a.research.entry_context.sessions import _load_calendar
+
+    target_calendar_revision = _load_calendar(target_session)[2]
     launch_matches = [
         row
         for row in launch_rows
         if (
-            "LAUNCH_CONFIRM" not in scenario_scopes
-            or (row[3], row[17], row[18])
-            == (
-                scenario_scopes["LAUNCH_CONFIRM"][0],
-                scenario_scopes["LAUNCH_CONFIRM"][2],
-                scenario_scopes["LAUNCH_CONFIRM"][3],
+            row[16] == target_calendar_revision
+            and (
+                "LAUNCH_CONFIRM" not in scenario_scopes
+                or (row[3], row[17], row[18])
+                == (
+                    scenario_scopes["LAUNCH_CONFIRM"][0],
+                    scenario_scopes["LAUNCH_CONFIRM"][2],
+                    scenario_scopes["LAUNCH_CONFIRM"][3],
+                )
             )
         )
     ]
@@ -2076,6 +2085,9 @@ def read_source_launch_watch_page(
     if invalid_fields:
         raise ValueError("来源观察PG分页键无效：" + "、".join(invalid_fields))
 
+    from stock_a.research.entry_context.sessions import _load_calendar
+
+    target_calendar_revision = _load_calendar(target_session)[2]
     started = time.perf_counter()
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
@@ -2087,6 +2099,7 @@ def read_source_launch_watch_page(
     SELECT %s::date AS before_session, %s::date AS target_session,
            %s::bigint AS source_capture_id, %s::bigint AS before_capture_id,
            %s::bigint AS target_capture_id, %s::bigint AS expected_source_count,
+           %s::text AS calendar_revision,
            %s::smallint AS d1_history_session_count,
            %s::smallint AS selected_history_session_count,
            %s::text AS selected_profile_revision,
@@ -2115,6 +2128,7 @@ def read_source_launch_watch_page(
       AND d.before_capture_id=p.before_capture_id
       AND d.target_capture_id=p.target_capture_id
       AND d.producer_version='STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5'
+      AND d.calendar_revision=p.calendar_revision
     GROUP BY d.producer_version, d.algorithm_contract, d.session_contract,
              d.calendar_revision
 ), d0_scope_status AS (
@@ -2583,6 +2597,7 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
                 before_capture_id,
                 target_capture_id,
                 expected_source_count,
+                target_calendar_revision,
                 d1_history_session_count,
                 selected_history_session_count,
                 selected_profile_revision,
@@ -2689,6 +2704,9 @@ def read_source_launch_watch_d0_boards(
     ):
         raise ValueError("D0板块摘要读取范围无效")
 
+    from stock_a.research.entry_context.sessions import _load_calendar
+
+    target_calendar_revision = _load_calendar(target_session)[2]
     started = time.perf_counter()
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
@@ -2700,6 +2718,7 @@ def read_source_launch_watch_d0_boards(
     SELECT %s::date AS before_session,%s::date AS target_session,
            %s::bigint AS source_capture_id,%s::bigint AS before_capture_id,
            %s::bigint AS target_capture_id,%s::bigint AS expected_source_count,
+           %s::text AS calendar_revision,
            %s::bigint AS industry_snapshot_id,%s::bigint AS concept_snapshot_id
 ), scope_candidates AS MATERIALIZED (
     SELECT d.producer_version,d.algorithm_contract,d.session_contract,
@@ -2715,6 +2734,7 @@ def read_source_launch_watch_d0_boards(
       AND d.before_capture_id=p.before_capture_id
       AND d.target_capture_id=p.target_capture_id
       AND d.producer_version='STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5'
+      AND d.calendar_revision=p.calendar_revision
     GROUP BY d.producer_version,d.algorithm_contract,d.session_contract,
              d.calendar_revision
 ), scope_status AS (
@@ -2785,6 +2805,7 @@ SELECT (SELECT status FROM scope_status),
                 before_capture_id,
                 target_capture_id,
                 expected_source_count,
+                target_calendar_revision,
                 industry_snapshot_id,
                 concept_snapshot_id,
             ),

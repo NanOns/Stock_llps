@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, localcontext
 from fractions import Fraction
+import hashlib
 import re
 from typing import Any, Mapping, Sequence
 
@@ -562,11 +563,272 @@ def read_source_market_context(
     )
 
 
+def prepare_source_market_breadth_change(
+    config: Mapping[str, Any], market: SourceMarketContextRead
+) -> dict[str, Any]:
+    """只比较已存前态与本次目标宽度；集合或版本不兼容时拒绝差值。"""
+    from stock_a.application.source_relative_position import market_changes
+    from stock_a.storage.postgres.market_breadth import read_market_breadth
+
+    calculation = market.calculation
+    target_session = market.target_session
+    before_session = calculation.session_window[3]
+    source_capture_id = market.cohort.source_capture_id
+    calendar_id = market.calendar["calendar_id"]
+    calendar_revision = market.calendar["calendar_revision"]
+    contract_version = calculation.contract_version
+    target_by_symbol = {item.source_symbol: item for item in calculation.symbols}
+    target_symbols = set(target_by_symbol)
+    target_eligible = {
+        symbol
+        for symbol, item in target_by_symbol.items()
+        if item.classification != "UNKNOWN"
+    }
+    target_unknown = target_symbols - target_eligible
+
+    def set_digest(symbols: set[str]) -> str:
+        payload = "\n".join(sorted(symbols)).encode("ascii")
+        return hashlib.sha256(payload).hexdigest()
+
+    change: dict[str, Any] = {
+        "before_session": before_session,
+        "target_session": target_session,
+        "before_source_capture_id": None,
+        "target_source_capture_id": source_capture_id,
+        "before_calendar_id": None,
+        "target_calendar_id": calendar_id,
+        "before_calendar_revision": None,
+        "target_calendar_revision": calendar_revision,
+        "before_contract_version": None,
+        "target_contract_version": contract_version,
+        "before_price_coordinate": None,
+        "target_price_coordinate": market.cohort.price_coordinate,
+        "comparison_status": "NOT_COMPUTED",
+        "reason_code": "PREVIOUS_BREADTH_NOT_COMPUTED",
+        "source_sets_equal": False,
+        "eligible_sets_equal": False,
+        "unknown_sets_equal": False,
+        "unknown_reason_mismatch_count": 0,
+        "source_count_before": 0,
+        "source_count_target": calculation.n_source,
+        "common_source_count": 0,
+        "eligible_count_before": 0,
+        "eligible_count_target": calculation.n_eligible,
+        "common_eligible_count": 0,
+        "unknown_count_before": 0,
+        "unknown_count_target": len(target_unknown),
+        "breadth_before": None,
+        "breadth_target": calculation.b_fixed_source,
+        "breadth_delta": None,
+        "breadth_direction": None,
+        "improved_symbol_count": 0,
+        "deteriorated_symbol_count": 0,
+        "unchanged_symbol_count": 0,
+        "unknown_symbol_count": calculation.n_source,
+        "source_set_sha256_before": None,
+        "source_set_sha256_target": set_digest(target_symbols),
+        "eligible_set_sha256_before": None,
+        "eligible_set_sha256_target": set_digest(target_eligible),
+    }
+    if (
+        type(before_session) is not date
+        or calculation.session_window[-1] != target_session
+        or calculation.session_window[-2] != before_session
+        or source_capture_id <= 0
+        or calculation.n_source != len(target_symbols)
+    ):
+        raise SourceMarketContextError(
+            "TARGET_BREADTH_PARTITION_INVALID",
+            "目标市场宽度证券分区或官方相邻会话不完整",
+            category="DATA_OR_CONTRACT",
+        )
+
+    saved = read_market_breadth(
+        config,
+        target_session=before_session,
+        source_capture_id=source_capture_id,
+        calendar_revision=calendar_revision,
+        contract_version=contract_version,
+        include_symbols=True,
+    )
+    if saved.get("storage_status") == "NOT_COMPUTED":
+        return change
+    if saved.get("storage_status") != "SAVED":
+        raise SourceMarketContextError(
+            "PREVIOUS_BREADTH_INCOMPLETE",
+            "前一会话已存市场宽度分区不完整，拒绝生成变化事实",
+            category="DATA_OR_CONTRACT",
+        )
+
+    before_day = saved["day"]
+    before_rows = saved["symbols"]
+    before_by_symbol = {row["source_symbol"]: row for row in before_rows}
+    before_symbols = set(before_by_symbol)
+    before_eligible = {
+        symbol
+        for symbol, row in before_by_symbol.items()
+        if row["classification"] != "UNKNOWN"
+    }
+    before_unknown = before_symbols - before_eligible
+    before_reasons = {
+        symbol: row["primary_unknown_reason"]
+        for symbol, row in before_by_symbol.items()
+        if row["classification"] == "UNKNOWN"
+    }
+    target_reasons = {
+        symbol: item.primary_unknown_reason
+        for symbol, item in target_by_symbol.items()
+        if item.classification == "UNKNOWN"
+    }
+    common_unknown = before_unknown & target_unknown
+    unknown_reason_mismatch_count = sum(
+        before_reasons.get(symbol) != target_reasons.get(symbol)
+        for symbol in common_unknown
+    )
+    change.update(
+        {
+            "before_source_capture_id": before_day["source_capture_id"],
+            "before_calendar_id": before_day["calendar_id"],
+            "before_calendar_revision": before_day["calendar_revision"],
+            "before_contract_version": before_day["contract_version"],
+            "before_price_coordinate": before_day["price_coordinate"],
+            "source_count_before": before_day["source_count"],
+            "common_source_count": len(before_symbols & target_symbols),
+            "eligible_count_before": before_day["eligible_count"],
+            "common_eligible_count": len(before_eligible & target_eligible),
+            "unknown_count_before": len(before_unknown),
+            "source_sets_equal": before_symbols == target_symbols,
+            "eligible_sets_equal": before_eligible == target_eligible,
+            "unknown_sets_equal": before_unknown == target_unknown,
+            "unknown_reason_mismatch_count": unknown_reason_mismatch_count,
+            "source_set_sha256_before": set_digest(before_symbols),
+            "eligible_set_sha256_before": set_digest(before_eligible),
+        }
+    )
+    before_width = None
+    if before_day["eligible_count"] > 0:
+        before_numerator = sum(
+            int(row["delta_indicator"])
+            for row in before_rows
+            if row["delta_indicator"] is not None
+        )
+        before_width = Fraction(before_numerator, before_day["eligible_count"])
+    change["breadth_before"] = before_width
+
+    if before_day["source_capture_id"] != source_capture_id:
+        reason = "SOURCE_CAPTURE_MISMATCH"
+    elif (
+        before_day["price_coordinate"] != market.cohort.price_coordinate
+        or market.cohort.price_coordinate != "FORWARD_ADJUSTED"
+    ):
+        reason = "PRICE_COORDINATE_MISMATCH"
+    elif (
+        before_day["calendar_id"] != calendar_id
+        or before_day["calendar_revision"] != calendar_revision
+    ):
+        reason = "CALENDAR_REVISION_MISMATCH"
+    elif before_day["contract_version"] != contract_version:
+        reason = "ALGORITHM_CONTRACT_MISMATCH"
+    elif before_symbols != target_symbols:
+        reason = "SOURCE_SYMBOL_SET_MISMATCH"
+    elif before_eligible != target_eligible:
+        reason = "ELIGIBLE_SYMBOL_SET_MISMATCH"
+    elif before_unknown != target_unknown:
+        reason = "UNKNOWN_SYMBOL_SET_MISMATCH"
+    elif unknown_reason_mismatch_count:
+        reason = "UNKNOWN_REASON_MISMATCH"
+    elif before_width is None or calculation.b_fixed_source is None:
+        change["comparison_status"] = "UNKNOWN"
+        change["reason_code"] = "NO_ELIGIBLE_SECURITIES"
+        return change
+    else:
+        reason = None
+
+    if reason is not None:
+        change["comparison_status"] = "NOT_COMPARABLE"
+        change["reason_code"] = reason
+        return change
+
+    def market_day(
+        session: date,
+        width: Fraction,
+        counts: Mapping[str, int],
+        source_count: int,
+        eligible_count: int,
+        unknown_count: int,
+    ) -> dict[str, Any]:
+        return {
+            "session": session.isoformat(),
+            "market": {
+                "metric": {"exact": {"fraction": str(width)}},
+                "denominator": {
+                    "N_source": source_count,
+                    "N_eligible": eligible_count,
+                    "UNKNOWN": unknown_count,
+                    "counts": dict(counts),
+                },
+            },
+        }
+
+    before_counts = dict(saved["counts"])
+    target_counts = dict(calculation.counts)
+    change_result = market_changes(
+        [
+            market_day(
+                before_session,
+                before_width,
+                before_counts,
+                before_day["source_count"],
+                before_day["eligible_count"],
+                len(before_unknown),
+            ),
+            market_day(
+                target_session,
+                calculation.b_fixed_source,
+                target_counts,
+                calculation.n_source,
+                calculation.n_eligible,
+                len(target_unknown),
+            ),
+        ]
+    )[-1]
+    breadth_delta = Fraction(change_result["breadth_delta"])
+    if breadth_delta != calculation.b_fixed_source - before_width:
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_CHANGE_ORACLE_MISMATCH",
+            "市场宽度变化聚合器与精确Fraction端点不一致",
+            category="DATA_OR_CONTRACT",
+        )
+    improved = deteriorated = unchanged = 0
+    for symbol in before_eligible:
+        delta = int(target_by_symbol[symbol].delta_indicator) - int(
+            before_by_symbol[symbol]["delta_indicator"]
+        )
+        if delta > 0:
+            improved += 1
+        elif delta < 0:
+            deteriorated += 1
+        else:
+            unchanged += 1
+    return {
+        **change,
+        "comparison_status": "COMPARABLE",
+        "reason_code": None,
+        "breadth_delta": breadth_delta,
+        "breadth_direction": change_result["breadth_direction"],
+        "improved_symbol_count": improved,
+        "deteriorated_symbol_count": deteriorated,
+        "unchanged_symbol_count": unchanged,
+        "unknown_symbol_count": len(target_unknown),
+    }
+
+
 def source_market_context_payload(
     market: SourceMarketContextRead,
     *,
     market_participation: Mapping[str, Any] | None = None,
     pressure_axis: Mapping[str, Any] | None = None,
+    breadth_change: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """输出市场宽度摘要，不暴露逐来源代码计算明细。"""
     calculation = market.calculation
@@ -628,7 +890,75 @@ def source_market_context_payload(
     composite["reason"] = (
         "按冻结有序规则枚举未知轴的所有合法补全；仅当所有补全标签唯一时才报告综合标签。"
     )
-    return {
+    change = dict(breadth_change or {})
+    stored_change = change.get("change")
+    if isinstance(stored_change, Mapping):
+        change = dict(stored_change)
+        change_storage_status = breadth_change.get("storage_status")
+    else:
+        change_storage_status = change.get("storage_status")
+    comparison_status = (
+        change.get("comparison_status")
+        if change_storage_status == "SAVED"
+        else change_storage_status or "NOT_COMPUTED"
+    )
+
+    def change_fraction(name: str) -> dict[str, Any] | None:
+        value = change.get(name)
+        if isinstance(value, Fraction):
+            return fraction_payload(value)
+        numerator = change.get(f"{name}_numerator")
+        denominator = change.get(f"{name}_denominator")
+        if numerator is None or denominator is None:
+            return None
+        try:
+            return fraction_payload(Fraction(int(numerator), int(denominator)))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    breadth_change_payload = {
+        "status": comparison_status,
+        "reason_code": change.get("reason_code")
+        or (breadth_change or {}).get("reason_code"),
+        "before_session": (
+            change["before_session"].isoformat()
+            if isinstance(change.get("before_session"), date)
+            else change.get("before_session") or window[3].isoformat()
+        ),
+        "target_session": (
+            change["target_session"].isoformat()
+            if isinstance(change.get("target_session"), date)
+            else change.get("target_session", market.target_session.isoformat())
+        ),
+        "breadth_before": change_fraction("breadth_before"),
+        "breadth_target": change_fraction("breadth_target"),
+        "breadth_delta": change_fraction("breadth_delta"),
+        "direction": change.get("breadth_direction"),
+        "source_count_before": change.get("source_count_before"),
+        "source_count_target": change.get("source_count_target", calculation.n_source),
+        "common_source_count": change.get("common_source_count"),
+        "eligible_count_before": change.get("eligible_count_before"),
+        "eligible_count_target": change.get(
+            "eligible_count_target", calculation.n_eligible
+        ),
+        "common_eligible_count": change.get("common_eligible_count"),
+        "unknown_count_before": change.get("unknown_count_before"),
+        "unknown_count_target": change.get(
+            "unknown_count_target", calculation.counts["UNKNOWN"]
+        ),
+        "source_sets_equal": change.get("source_sets_equal"),
+        "eligible_sets_equal": change.get("eligible_sets_equal"),
+        "unknown_sets_equal": change.get("unknown_sets_equal"),
+        "unknown_reason_mismatch_count": change.get("unknown_reason_mismatch_count"),
+        "improved_symbol_count": change.get("improved_symbol_count"),
+        "deteriorated_symbol_count": change.get("deteriorated_symbol_count"),
+        "unchanged_symbol_count": change.get("unchanged_symbol_count"),
+        "unknown_symbol_count": change.get("unknown_symbol_count"),
+        "source_scope": "SOURCE_SYMBOL_ONLY",
+        "price_coordinate": "FORWARD_ADJUSTED",
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+    }
+    payload = {
         "status": status,
         "contract_version": calculation.contract_version,
         "analysis_scope": "SOURCE_SYMBOL_COHORT_FIXED_AT_T",
@@ -733,6 +1063,9 @@ def source_market_context_payload(
             "dml_rows_affected": 0,
         },
     }
+    if breadth_change is not None:
+        payload["breadth_change"] = breadth_change_payload
+    return payload
 
 
 def _clock_identity(value: Any) -> str | None:

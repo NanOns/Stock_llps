@@ -160,9 +160,11 @@ def _window_source_row(
     if row.get("qfq_adjustflag") not in (2, "2"):
         return row, "QFQ_ADJUSTFLAG_MISMATCH"
     response_session = row.get("qfq_response_session_date")
+    response_source_code = row.get("qfq_response_source_code")
     if (
         response_session not in (session, session.isoformat())
-        or row.get("qfq_response_source_code") != source_symbol
+        or not isinstance(response_source_code, str)
+        or response_source_code.upper() != source_symbol
     ):
         return row, "QFQ_RESPONSE_IDENTITY_MISMATCH"
     response_fields = row.get("qfq_response_fields")

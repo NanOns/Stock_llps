@@ -57,6 +57,7 @@ _MODULE_PROGRESS_TABLES = {
         {
             "stock.source_market_breadth_days",
             "stock.source_market_breadth_symbols",
+            "stock.source_market_breadth_change_days",
         }
     ),
     "MARKET_PARTICIPATION": frozenset(
@@ -121,7 +122,13 @@ _CLEANUP_MODULES = {
     "MARKET_BREADTH": {
         "parent_table": "stock.source_market_breadth_days",
         "child_table": "stock.source_market_breadth_symbols",
+        "cleanup_tables": (
+            "stock.source_market_breadth_change_days",
+            "stock.source_market_breadth_symbols",
+            "stock.source_market_breadth_days",
+        ),
         "progress_tables": (
+            "stock.source_market_breadth_change_days",
             "stock.source_market_breadth_symbols",
             "stock.source_market_breadth_days",
         ),
@@ -1067,7 +1074,7 @@ def _cleanup_version_rows(
                         d.calendar_revision,d.contract_version""",
             (list(target_sessions), cutoff),
         )
-        return [
+        versions = [
             {
                 "target_session": row[0],
                 "source_version": {"source_capture_id": int(row[1])},
@@ -1083,6 +1090,39 @@ def _cleanup_version_rows(
             }
             for row in cursor.fetchall()
         ]
+        for version in versions:
+            target = version["target_session"]
+            capture_id = version["source_version"]["source_capture_id"]
+            revision = version["calendar_revision"]
+            contract = version["algorithm_version"]
+            cursor.execute(
+                """SELECT count(*)::bigint,
+                          coalesce(array_agg(DISTINCT target_session
+                                             ORDER BY target_session),'{}'::date[])
+                   FROM stock.source_market_breadth_change_days
+                   WHERE (target_session=%s AND target_source_capture_id=%s
+                          AND target_calendar_revision=%s
+                          AND target_contract_version=%s)
+                      OR (before_session=%s AND before_source_capture_id=%s
+                          AND before_calendar_revision=%s
+                          AND before_contract_version=%s)""",
+                (
+                    target,
+                    capture_id,
+                    revision,
+                    contract,
+                    target,
+                    capture_id,
+                    revision,
+                    contract,
+                ),
+            )
+            dependent_count, dependent_targets = cursor.fetchone()
+            version["dependent_rows"] = {
+                "stock.source_market_breadth_change_days": int(dependent_count)
+            }
+            version["dependent_target_sessions"] = tuple(dependent_targets or ())
+        return versions
 
     if module_code == "D1":
         cursor.execute(
@@ -1993,6 +2033,36 @@ def clear_derived_module(
                 ] += cursor.rowcount
             elif module_code == "MARKET_BREADTH":
                 cursor.execute(
+                    """DELETE FROM stock.source_market_breadth_change_days
+                       WHERE (target_session=%s AND target_source_capture_id=%s
+                              AND target_calendar_revision=%s
+                              AND target_contract_version=%s)
+                          OR (before_session=%s AND before_source_capture_id=%s
+                              AND before_calendar_revision=%s
+                              AND before_contract_version=%s)
+                       RETURNING target_session""",
+                    (
+                        target_session,
+                        key["source_capture_id"],
+                        key["calendar_revision"],
+                        key["contract_version"],
+                        target_session,
+                        key["source_capture_id"],
+                        key["calendar_revision"],
+                        key["contract_version"],
+                    ),
+                )
+                changed_market_sessions = [row[0] for row in cursor.fetchall()]
+                deleted_rows["stock.source_market_breadth_change_days"] += len(
+                    changed_market_sessions
+                )
+                for changed_session in changed_market_sessions:
+                    session_counts = deleted_by_session.setdefault(
+                        changed_session.isoformat(),
+                        {table: 0 for table in spec["progress_tables"]},
+                    )
+                    session_counts["stock.source_market_breadth_change_days"] += 1
+                cursor.execute(
                     """DELETE FROM stock.source_market_breadth_symbols s
                        USING stock.source_market_breadth_days d
                        WHERE s.breadth_day_id=d.id AND d.target_session=%s
@@ -2890,6 +2960,13 @@ def read_business_table_count(
                  AND contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R3'""",
             lambda: (target_session, source_capture_id, calendar_revision),
         ),
+        "stock.source_market_breadth_change_days": (
+            """SELECT count(*) FROM stock.source_market_breadth_change_days
+               WHERE target_session=%s AND target_source_capture_id=%s
+                 AND target_calendar_revision=%s
+                 AND target_contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R3'""",
+            lambda: (target_session, source_capture_id, calendar_revision),
+        ),
         "stock.source_market_breadth_symbols": (
             """SELECT count(*) FROM stock.source_market_breadth_symbols
                WHERE target_session=%s AND source_capture_id=%s
@@ -3041,6 +3118,7 @@ def read_business_table_count(
         "stock.source_t0_early_observation_facts",
         "stock.source_market_breadth_days",
         "stock.source_market_breadth_symbols",
+        "stock.source_market_breadth_change_days",
         "stock.source_market_participation_days",
         "stock.source_market_participation_unknown_reasons",
         "stock.source_sector_cross_period_pulse_facts",
@@ -3191,6 +3269,7 @@ def read_business_table_count(
         in {
             "stock.source_market_breadth_days",
             "stock.source_market_breadth_symbols",
+            "stock.source_market_breadth_change_days",
         }
         and not calendar_revision
     ):
@@ -3990,6 +4069,9 @@ def mark_progress_cleared(
         ),
         "stock.source_market_breadth_days": (
             "SELECT count(*) FROM stock.source_market_breadth_days WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.source_market_breadth_change_days": (
+            "SELECT count(*) FROM stock.source_market_breadth_change_days WHERE target_session=%s AND target_session<=%s",
         ),
         "stock.source_market_breadth_symbols": (
             "SELECT count(*) FROM stock.source_market_breadth_symbols WHERE target_session=%s AND target_session<=%s",

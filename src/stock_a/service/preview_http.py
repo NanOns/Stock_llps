@@ -4668,12 +4668,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         getattr(error, "code", "MARKET_PARTICIPATION_READ_FAILED"),
                         str(error),
                     ) from error
+                from stock_a.storage.postgres.market_breadth import (
+                    read_market_breadth_change,
+                )
+
+                breadth_change = read_market_breadth_change(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    source_capture_id=_capture_id(values["source_capture_id"]),
+                    calendar_revision=market.calendar["calendar_revision"],
+                    contract_version=market.calculation.contract_version,
+                )
                 self._send_json(
                     200,
                     {
                         "ok": True,
                         **source_market_context_payload(
-                            market, market_participation=participation
+                            market,
+                            market_participation=participation,
+                            breadth_change=breadth_change,
                         ),
                     },
                 )

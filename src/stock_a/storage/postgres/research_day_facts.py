@@ -32,64 +32,77 @@ _STRUCTURE_TYPES = (
 )
 _STRUCTURE_TYPE_SET = frozenset(_STRUCTURE_TYPES)
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
+_D0_LAUNCH_ALGORITHM_CONTRACT = "ALG-28 + §11.6 D0_SCENARIO_FACTS_R3"
+_D0_SESSION_CONTRACT = "D0_SESSION_R2"
 _D1_PRODUCER_VERSION = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 
 
-def _calendar_revision_matches_target_year(
-    revision: str, *, target_year: int, target_revision: str
-) -> bool:
-    """允许D1复合修订中与D0目标日相同的年度日历组件。"""
-    if revision == target_revision:
-        return True
-    components: dict[int, str] = {}
-    for item in revision.split("+"):
-        year_text, separator, annual_revision = item.partition(":")
-        if separator and year_text.isdecimal() and annual_revision:
-            components[int(year_text)] = annual_revision
-    return components.get(target_year) == target_revision
-
-
-def _select_target_year_d0_scope(
+def _select_verified_d0_scope(
     scopes: Sequence[Sequence[Any]],
     *,
     target_session: date,
     before_session: date,
-    d1_calendar_revision: str,
+    calendar_revision: str,
+    source_capture_id: int,
+    expected_source_count: int,
 ) -> Sequence[Any]:
-    """优先选D0目标年度修订；仅在其缺失时接受唯一兼容的D1复合链。"""
+    """按同一官方日历链、相邻窗口和完整来源分母唯一选取D0事实。"""
     from stock_a.research.entry_context.sessions import _load_calendar
 
-    payload = _load_calendar(target_session)[0]
-    target_year_revision = payload.get("revision")
-    if not isinstance(target_year_revision, str) or not target_year_revision:
+    payload, _metadata, revision_chain, sessions = _load_calendar(target_session)
+    if (
+        not isinstance(calendar_revision, str)
+        or not calendar_revision
+        or calendar_revision != revision_chain
+    ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_D0_CALENDAR_REVISION_INVALID",
-            "官方日历缺少目标年度修订，拒绝选择D0版本",
+            "D1/Home读取日历修订与目标日官方日历链不一致",
         )
-    prior_scopes = [scope for scope in scopes if scope[17] == before_session]
-    preferred = [scope for scope in prior_scopes if scope[10] == target_year_revision]
-    if len(preferred) == 1:
-        return preferred[0]
-    if len(preferred) > 1:
+    try:
+        target_index = sessions.index(target_session)
+        before_index = sessions.index(before_session)
+    except ValueError as error:
         raise ResearchDayPgError(
-            "RESEARCH_DAY_D0_SCOPE_MISSING_OR_AMBIGUOUS",
-            "目标年度D0日历修订对应多个冻结事实范围",
+            "RESEARCH_DAY_D0_SESSION_INVALID",
+            "D0前态或目标日不在完整官方日历链内",
+        ) from error
+    if target_index < 20 or before_index != target_index - 1:
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_D0_SESSION_INVALID",
+            "D0目标日必须紧邻前态且具备完整20个前态会话",
         )
+    before_window_start = sessions[before_index - 20]
+    target_window_start = sessions[target_index - 20]
     compatible = [
         scope
-        for scope in prior_scopes
-        if _calendar_revision_matches_target_year(
-            d1_calendar_revision,
-            target_year=target_session.year,
-            target_revision=scope[10],
-        )
+        for scope in scopes
+        if len(scope) >= 18
+        and scope[0] == source_capture_id
+        and scope[1] == _D0_LAUNCH_PRODUCER_VERSION
+        and scope[2] == _D0_LAUNCH_ALGORITHM_CONTRACT
+        and scope[3] == _D0_SESSION_CONTRACT
+        and scope[5] == expected_source_count
+        and scope[7] == before_window_start
+        and scope[8] == target_window_start
+        and scope[9] == payload.get("calendar_id")
+        and scope[10] == revision_chain
+        and scope[14] == "NON_PIT_RETROSPECTIVE"
+        and scope[15] == "FORWARD_ADJUSTED"
+        and scope[16] == source_capture_id
+        and scope[17] == before_session
     ]
     if len(compatible) == 1:
         return compatible[0]
+    if not compatible:
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_D0_SCOPE_NOT_COMPARABLE",
+            "没有D0事实同时满足捕获、算法、官方日历链、相邻窗口和目标分母",
+        )
     raise ResearchDayPgError(
-        "RESEARCH_DAY_D0_SCOPE_MISSING_OR_AMBIGUOUS",
-        "目标年度D0修订缺失，且D1复合日历链没有唯一兼容的前态范围",
+        "RESEARCH_DAY_D0_SCOPE_AMBIGUOUS",
+        "同一精确捕获、算法、官方日历链和窗口对应多个D0事实范围",
     )
 
 
@@ -1968,11 +1981,13 @@ def read_source_research_day(
         d0_scopes = cursor.fetchall()
         if not d0_scopes:
             return incomplete_result("精确目标D0事实缺失")
-        d0_scope = _select_target_year_d0_scope(
+        d0_scope = _select_verified_d0_scope(
             d0_scopes,
             target_session=target_session,
             before_session=before_session,
-            d1_calendar_revision=calendar_revision,
+            calendar_revision=calendar_revision,
+            source_capture_id=source_capture_id,
+            expected_source_count=d1_source_count,
         )
         if d0_scope[16] != source_capture_id:
             return incomplete_result(
@@ -1980,14 +1995,7 @@ def read_source_research_day(
                 d0_source_capture_id=d0_scope[16],
                 d1_source_capture_id=source_capture_id,
             )
-        if (
-            not _calendar_revision_matches_target_year(
-                calendar_revision,
-                target_year=target_session.year,
-                target_revision=d0_scope[10],
-            )
-            or d0_scope[17] != before_session
-        ):
+        if d0_scope[10] != calendar_revision or d0_scope[17] != before_session:
             return incomplete_result(
                 "D0与D1目标日、前态或官方日历上下文不一致",
                 d0_before_session=_json_value(d0_scope[17]),
@@ -2605,10 +2613,15 @@ def read_source_board_comparison(
 
         cursor.execute(
             "SELECT DISTINCT before_capture_id,producer_version,algorithm_contract,"
-            "session_contract,calendar_revision FROM source_d0_launch_day_facts "
+            "session_contract,before_source_count,target_source_count,"
+            "union_source_count,before_window_start,target_window_start,calendar_id,"
+            "calendar_revision,source_time_quality,source_clock_role,"
+            "source_available_at,research_mode,price_coordinate,source_capture_id,"
+            "before_session FROM source_d0_launch_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s "
             "AND producer_version=%s "
-            "ORDER BY before_capture_id,producer_version,algorithm_contract",
+            "ORDER BY before_capture_id,producer_version,algorithm_contract,"
+            "session_contract,calendar_revision",
             (
                 target_session,
                 source_capture_id,
@@ -2619,8 +2632,34 @@ def read_source_board_comparison(
         d0_scopes = cursor.fetchall()
         d0_by_symbol: dict[str, tuple[str | None, str | None]] = {}
         d0_status = "NOT_COMPUTED"
-        if len(d0_scopes) == 1:
-            d0_scope = d0_scopes[0]
+        d0_scope = None
+        if d0_scopes:
+            from stock_a.research.entry_context.sessions import _load_calendar
+
+            _payload, _metadata, calendar_revision, sessions = _load_calendar(
+                target_session
+            )
+            target_index = sessions.index(target_session)
+            before_session = sessions[target_index - 1] if target_index > 0 else None
+            if before_session is None:
+                d0_status = "NOT_COMPARABLE"
+            else:
+                try:
+                    d0_scope = _select_verified_d0_scope(
+                        d0_scopes,
+                        target_session=target_session,
+                        before_session=before_session,
+                        calendar_revision=calendar_revision,
+                        source_capture_id=source_capture_id,
+                        expected_source_count=source_symbol_count,
+                    )
+                except ResearchDayPgError as error:
+                    d0_status = (
+                        "AMBIGUOUS"
+                        if error.code == "RESEARCH_DAY_D0_SCOPE_AMBIGUOUS"
+                        else "NOT_COMPARABLE"
+                    )
+        if d0_scope is not None:
             d0_predicate = (
                 "target_session=%s AND source_capture_id=%s "
                 "AND before_capture_id=%s AND target_capture_id=%s "
@@ -2635,7 +2674,7 @@ def read_source_board_comparison(
                 d0_scope[1],
                 d0_scope[2],
                 d0_scope[3],
-                d0_scope[4],
+                d0_scope[10],
             )
             cursor.execute(
                 "SELECT source_symbol,transition,after_state "

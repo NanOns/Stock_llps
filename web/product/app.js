@@ -146,10 +146,11 @@ function marketStatusText(value) {
   return (
     {
       COMPLETE: "完整",
+      COMPARABLE: "可比较",
       PARTIAL_WITH_UNKNOWN: "部分可评价，含 UNKNOWN",
       UNKNOWN_ZERO_EVALUABLE: "无可评价比值",
       NOT_COMPUTED: "未计算",
-      NOT_COMPARABLE: "版本不可比较",
+      NOT_COMPARABLE: "不可比较",
       INCOMPLETE: "事实不完整",
       UNKNOWN: "未知",
     }[value] ||
@@ -186,6 +187,18 @@ function marketBreadthReasonText(reasons) {
   return Object.entries(reasons || {})
     .map(([reason, count]) => `${labels[reason] || reason} ${count}`)
     .join(" · ");
+}
+function marketBreadthChangeText(change) {
+  if (!change) return "NOT_COMPUTED · 没有已保存的相邻日比较事实。";
+  const status = change.status || "NOT_COMPUTED";
+  const reason = change.reason_code ? ` · ${change.reason_code}` : "";
+  if (status !== "COMPARABLE")
+    return `${marketStatusText(status)}${reason} · 前态 ${change.before_session || "未知"} · 目标 ${change.target_session || "未知"}。`;
+  const direction =
+    { UP: "改善", DOWN: "转弱", UNCHANGED: "不变" }[change.direction] ||
+    change.direction ||
+    "未知";
+  return `${change.before_session}→${change.target_session} · ${change.breadth_before?.fraction || "未知"}→${change.breadth_target?.fraction || "未知"} · Δ ${change.breadth_delta?.fraction || "未知"}（${direction}） · 来源集合 ${change.common_source_count}/${change.source_count_target} 一致 · 可评价集合 ${change.common_eligible_count}/${change.eligible_count_target} 一致 · UNKNOWN ${change.unknown_count_before}→${change.unknown_count_target} · 改善 ${change.improved_symbol_count} / 转弱 ${change.deteriorated_symbol_count} / 不变 ${change.unchanged_symbol_count}。`;
 }
 function pulseHistoryStateText(value) {
   return (
@@ -7662,6 +7675,7 @@ async function loadExtra(page) {
           "宽度未知原因",
           marketBreadthReasonText(data.denominator.unknown_reason_counts),
         ],
+        ["市场宽度跨日变化", marketBreadthChangeText(data.breadth_change)],
         [
           "成交参与中位数",
           data.market_axes?.participation?.metric?.exact

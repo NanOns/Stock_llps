@@ -79,6 +79,7 @@ _MIGRATION_FILES = (
     "0065_r01_close_01_data_jobs_stage_modules.sql",
     "0066_r07_r08_key_quality_forward_keys_and_price_fields.sql",
     "0067_r1_audit_close_seed_qfq_target_close_comments.sql",
+    "0068_r02_market_breadth_change.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -137,6 +138,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R01_CLOSE_01_REAL_PG_CONSUMER_REPAIR_R1_20261122": frozenset({64, 65}),
     "PG66_APPLY_SCOPED_01_R1_20261123": frozenset({66}),
     "AUDIT_CLOSE_101Q23_01_R1_20261123": frozenset({67}),
+    "R02_CLOSE_02_D0_MARKET_CHANGE_R1": frozenset({68}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -339,6 +341,9 @@ _RELATIONS_BY_MIGRATION_COUNT[64] = _RELATIONS_BY_MIGRATION_COUNT[63] | {
 _RELATIONS_BY_MIGRATION_COUNT[65] = _RELATIONS_BY_MIGRATION_COUNT[64]
 _RELATIONS_BY_MIGRATION_COUNT[66] = _RELATIONS_BY_MIGRATION_COUNT[65]
 _RELATIONS_BY_MIGRATION_COUNT[67] = _RELATIONS_BY_MIGRATION_COUNT[66]
+_RELATIONS_BY_MIGRATION_COUNT[68] = _RELATIONS_BY_MIGRATION_COUNT[67] | {
+    "source_market_breadth_change_days",
+}
 
 
 class BindingRefused(Exception):
