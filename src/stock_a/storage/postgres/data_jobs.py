@@ -5818,11 +5818,18 @@ def mark_progress_verified(
                          AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE','CLEARED',
                                           'SKIPPED_BY_USER','SKIPPED_NOT_IMPLEMENTED')
                    ),
-                   source_capture_id=coalesce(j.source_capture_id,%s),
+                   source_capture_id=CASE
+                       WHEN %s=ANY(ARRAY[
+                           'stock.source_baostock_stock_basic'::text,
+                           'stock.source_baostock_session_directory'::text,
+                           'stock.source_market_index_daily'::text
+                       ]) THEN j.source_capture_id
+                       ELSE coalesce(j.source_capture_id,%s)
+                   END,
 
                    updated_at=clock_timestamp()
                WHERE j.job_id=%s AND j.status='RUNNING'""",
-            (source_capture_id, job_id),
+            (business_table, source_capture_id, job_id),
         )
 
 
