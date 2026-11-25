@@ -546,6 +546,9 @@ def resolve_date_effective_universe(
                 basic_by_symbol[str(sym)] = (str(sec_type), ipo_d, out_d, str(fq))
 
     members: list[str] = []
+    quarantined_symbols: list[str] = []
+    partial_unknown_symbols: list[str] = []
+    missing_basic_symbols: list[str] = []
     trade_status_by_symbol: dict[str, str] = {}
     excluded_by_date_bounds = 0
     for sym, _market, board, _name, trade_status in dir_rows:
@@ -557,13 +560,20 @@ def resolve_date_effective_universe(
             sec_type, ipo_d, out_d, fq = basic_info
             if research_eligible_only and sec_type != "STOCK":
                 continue
-            if fq != "CONFLICT_QUARANTINED":
-                if ipo_d is not None and session_date < ipo_d:
-                    excluded_by_date_bounds += 1
-                    continue
-                if out_d is not None and session_date >= out_d:
-                    excluded_by_date_bounds += 1
-                    continue
+            if fq == "CONFLICT_QUARANTINED":
+                # B02：日期冲突隔离证券不得静默冒充正常核实成员，单列隔离清单供消费者感知
+                quarantined_symbols.append(symbol)
+                continue
+            if fq == "PARTIAL_UNKNOWN":
+                partial_unknown_symbols.append(symbol)
+            if ipo_d is not None and session_date < ipo_d:
+                excluded_by_date_bounds += 1
+                continue
+            if out_d is not None and session_date >= out_d:
+                excluded_by_date_bounds += 1
+                continue
+        else:
+            missing_basic_symbols.append(symbol)
         members.append(symbol)
         trade_status_by_symbol[symbol] = str(trade_status)
 
@@ -581,6 +591,9 @@ def resolve_date_effective_universe(
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "members": tuple(members),
         "member_count": len(members),
+        "quarantined_symbols": tuple(quarantined_symbols),
+        "partial_unknown_symbols": tuple(partial_unknown_symbols),
+        "missing_basic_symbols": tuple(missing_basic_symbols),
         "trade_status_by_symbol": trade_status_by_symbol,
         "excluded_by_date_bounds": excluded_by_date_bounds,
     }

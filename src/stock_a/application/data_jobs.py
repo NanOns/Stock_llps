@@ -123,6 +123,11 @@ _BAOSTOCK_SOURCE_BOARDS = frozenset(
 )
 _STAGE_TABLES = {
     "SOURCE_BAOSTOCK_PRICES": ("stock.source_raw_daily",),
+    "SOURCE_BAOSTOCK_UNIVERSE": (
+        "stock.source_baostock_stock_basic",
+        "stock.source_baostock_session_directory",
+    ),
+    "SOURCE_BAOSTOCK_MARKET_INDICES": ("stock.source_market_index_daily",),
     "SOURCE_SECTOR_MEMBERS": (
         "stock.tdx_sector_source_snapshots",
         "stock.tdx_sector_catalog",
@@ -143,6 +148,10 @@ _STAGE_TABLES = {
     "MARKET_PARTICIPATION": (
         "stock.source_market_participation_days",
         "stock.source_market_participation_unknown_reasons",
+    ),
+    "MARKET_INDICES_ENV": (
+        "stock.source_market_index_day_facts",
+        "stock.source_market_environment_day_facts",
     ),
     "STATIC_RESEARCH": (
         "stock.source_d0_scenario_day_facts",
@@ -174,6 +183,8 @@ _STAGE_TABLES = {
 _STAGE_ORDER = {
     "BUSINESS_RESET": 1,
     "SOURCE_BAOSTOCK_PRICES": 1,
+    "SOURCE_BAOSTOCK_UNIVERSE": 1,
+    "SOURCE_BAOSTOCK_MARKET_INDICES": 1,
     "SOURCE_SECTOR_MEMBERS": 2,
     "PRICE_LIMITS": 2,
     "LIMIT_UP_LADDER": 3,
@@ -181,6 +192,7 @@ _STAGE_ORDER = {
     "MARKET_BREADTH": 3,
     "CORE_PROFILE": 4,
     "MARKET_PARTICIPATION": 5,
+    "MARKET_INDICES_ENV": 6,
     "D0_D1": 6,
     "STATIC_RESEARCH": 7,
     "FOCUS_FORMAL": 8,
@@ -197,6 +209,8 @@ _RAW_JOB_SCOPE = "STOCK_A_R08_BIZ08_DATA_JOB_RAW_IMPORT_R1"
 
 _MODULES = {
     "BAOSTOCK_PRICES": ("SOURCE", "BaoStock股票日线价格", True, True),
+    "BAOSTOCK_UNIVERSE": ("SOURCE", "BaoStock证券主资料与逐日名录", True, True),
+    "BAOSTOCK_MARKET_INDICES": ("SOURCE", "BaoStock通用参考指数日线", True, True),
     "TDX_SECTOR_MEMBERS": ("SOURCE", "行业与GN概念成员来源", True, True),
     "CORE_PROFILE": ("BASE", "Core / Profile", True, True),
     "CROSS_SECTION": ("BASE", "全市场横截面10因子", True, True),
@@ -204,6 +218,7 @@ _MODULES = {
     "LIMIT_UP_LADDER": ("BASE", "连板梯队", True, True),
     "MARKET_BREADTH": ("BASE", "市场宽度", True, True),
     "MARKET_PARTICIPATION": ("BASE", "成交参与", True, True),
+    "MARKET_INDICES_ENV": ("BASE", "参考指数因子与市场复合环境", True, True),
     "D0": ("RESEARCH", "D0 / Seed研究", True, True),
     "D1": ("RESEARCH", "D1结构与材料变化", True, True),
     "FOCUS_FORMAL": ("RESEARCH", "Focus正式准入", True, True),
@@ -974,6 +989,7 @@ def build_data_job_plan(
                     "LIMIT_UP_LADDER",
                     "MARKET_BREADTH",
                     "MARKET_PARTICIPATION",
+                    "MARKET_INDICES_ENV",
                     "SECTOR_PULSE",
                     "SECTOR_TRANSITION",
                     "SECTOR_FOLLOWUP",
@@ -1172,12 +1188,24 @@ def build_data_job_plan(
         "PRICE_LIMITS",
         "LIMIT_UP_LADDER",
         "CROSS_SECTION",
+        "MARKET_INDICES_ENV",
         "FORWARD_PATH",
         "COHORT_STATS",
         "FEP_BASELINE",
         "OBSERVATION_SEGMENTS",
     ):
         required_raw_sessions.update(module_output_sessions.get(module, ()))
+    # C03：单选 CROSS_SECTION 时自动纳入最多 24 个官方会话预热（覆盖 rps20_delta3 = target - 23）
+    if "CROSS_SECTION" in selected_base_modules:
+        official_through_cutoff = tuple(
+            session for session in all_sessions if session <= cutoff
+        )
+        for cs_day in module_output_sessions.get("CROSS_SECTION", ()):
+            if cs_day in official_through_cutoff:
+                cs_idx = official_through_cutoff.index(cs_day)
+                required_raw_sessions.update(
+                    official_through_cutoff[max(0, cs_idx - 23) : cs_idx + 1]
+                )
     if "FORWARD_PATH" in selected_research_modules:
         official_through_cutoff = tuple(
             session for session in all_sessions if session <= cutoff
@@ -1666,6 +1694,22 @@ def build_data_job_plan(
                 target_session=target,
                 business_table=table,
             )
+    if "BAOSTOCK_UNIVERSE" in selected_source_modules:
+        for table in _STAGE_TABLES["SOURCE_BAOSTOCK_UNIVERSE"]:
+            _unit(
+                units,
+                stage="SOURCE_BAOSTOCK_UNIVERSE",
+                target_session=target,
+                business_table=table,
+            )
+    if "BAOSTOCK_MARKET_INDICES" in selected_source_modules:
+        for table in _STAGE_TABLES["SOURCE_BAOSTOCK_MARKET_INDICES"]:
+            _unit(
+                units,
+                stage="SOURCE_BAOSTOCK_MARKET_INDICES",
+                target_session=target,
+                business_table=table,
+            )
     for day in module_output_sessions.get("PRICE_LIMITS", ()):
         _unit(
             units,
@@ -1688,6 +1732,16 @@ def build_data_job_plan(
             _unit(
                 units,
                 stage="CROSS_SECTION",
+                target_session=day_obj,
+                business_table=table,
+                status="NOT_STARTED",
+            )
+    for day in module_output_sessions.get("MARKET_INDICES_ENV", ()):
+        day_obj = date.fromisoformat(day) if isinstance(day, str) else day
+        for table in _STAGE_TABLES["MARKET_INDICES_ENV"]:
+            _unit(
+                units,
+                stage="MARKET_INDICES_ENV",
                 target_session=day_obj,
                 business_table=table,
                 status="NOT_STARTED",
@@ -3991,6 +4045,7 @@ def _prepare_reset_source_inputs(
             (target_text,),
             timeout_seconds=float(budget["query_timeout_seconds"]),
             max_total_seconds=float(budget["max_identity_total_seconds"]),
+            config=config,
         )
     except Exception as error:
         raise DataJobError(
@@ -5132,6 +5187,7 @@ def _execute_baostock_source_stage(
             (target_text,),
             timeout_seconds=query_timeout,
             max_total_seconds=float(budget["max_identity_total_seconds"]),
+            config=config,
         )
         resolved = _baostock_universe_from_identity(identity, sessions)
         universe = resolved["source_symbols"]
@@ -5764,10 +5820,15 @@ def _execute_shared_production_chain(
         plan["_paired_source_capture_id"] = source_capture_id
 
     if not base_modules and not research_modules:
-        if selected_sources - {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}:
+        if selected_sources - {
+            "BAOSTOCK_PRICES",
+            "BAOSTOCK_UNIVERSE",
+            "BAOSTOCK_MARKET_INDICES",
+            "TDX_SECTOR_MEMBERS",
+        }:
             raise DataJobError(
                 "DATA_JOB_SOURCE_MODULE_INVALID",
-                "来源层只能选择BaoStock价格和TDX行业/GN成员关系。",
+                "来源层只能选择BaoStock价格、主资料/名录、参考指数和TDX行业/GN成员关系。",
                 status=409,
             )
         return
@@ -5962,11 +6023,12 @@ def _execute_shared_production_chain(
                         calendar_revision=report["calendar_revision"],
                         producer_version=CROSS_SECTION_CONTRACT_VERSION,
                         research_cutoff=cutoff,
+                        universe_version=report["universe_version"],
                     )
-                    if actual_rows < expected_rows:
+                    if actual_rows != expected_rows:
                         raise DataJobError(
                             "CROSS_SECTION_READBACK_MISMATCH",
-                            f"全市场横截面({day}, {table})独立PG读回行数({actual_rows})小于预期({expected_rows})。",
+                            f"全市场横截面({day}, {table}, {report['universe_version']})独立PG读回行数({actual_rows})与预期({expected_rows})不一致。",
                             status=409,
                         )
                     progress_callback(
@@ -5998,7 +6060,6 @@ def _execute_shared_production_chain(
                         f"全市场横截面({day})未闭合：{str(error)[:300]}",
                     )
                 )
-    # 市场宽度先绑定paired capture的QFQ历史坐标，保留既有B_fixed_source分类公式。
     if "MARKET_BREADTH" in base_modules:
         from stock_a.application.source_market_context import (
             compute_source_market_context,
@@ -6601,6 +6662,123 @@ def _execute_shared_production_chain(
                     )
                 )
 
+    if "MARKET_INDICES_ENV" in base_modules:
+        from stock_a.research.market_indices import MARKET_INDEX_CONTRACT_VERSION
+        from stock_a.storage.postgres.market_indices import (
+            persist_market_indices_and_environment_for_session,
+        )
+        from stock_a.storage.postgres.source_raw import _transaction as _raw_tx
+
+        env_days = tuple(
+            sorted(
+                date.fromisoformat(day)
+                for day in plan.get("module_output_sessions", {}).get(
+                    "MARKET_INDICES_ENV", ()
+                )
+            )
+        )
+        for day in env_days:
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "MARKET_INDICES_ENV"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                with _raw_tx(config, write=False, statement_timeout_ms=10000) as (
+                    _,
+                    cur,
+                    _,
+                ):
+                    cur.execute(
+                        """SELECT MAX(source_capture_id)
+                           FROM stock.source_market_index_daily
+                           WHERE session_date = %s""",
+                        (day,),
+                    )
+                    idx_cap_row = cur.fetchone()
+                    idx_capture_id = (
+                        int(idx_cap_row[0])
+                        if idx_cap_row and idx_cap_row[0] is not None
+                        else None
+                    )
+                if idx_capture_id is None:
+                    raise DataJobError(
+                        "MARKET_INDEX_DAILY_NOT_AVAILABLE",
+                        f"参考指数与市场环境({day})缺少已落库的通用参考指数日线捕获。",
+                        status=409,
+                    )
+                report = persist_market_indices_and_environment_for_session(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    stock_capture_id=source_capture_id,
+                    index_capture_id=idx_capture_id,
+                )
+                expected_by_table = {
+                    "stock.source_market_index_day_facts": (
+                        report["index_factor_rows"],
+                        idx_capture_id,
+                        MARKET_INDEX_CONTRACT_VERSION,
+                    ),
+                    "stock.source_market_environment_day_facts": (
+                        report["environment_rows"],
+                        source_capture_id,
+                        "MARKET_PRESENTATION_R1",
+                    ),
+                }
+                for unit in day_units:
+                    table = unit["business_table"]
+                    exp_rows, cap_val, prod_ver = expected_by_table[table]
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=table,
+                        target_session=day,
+                        source_capture_id=cap_val,
+                        calendar_revision=report["calendar_revision"],
+                        producer_version=prod_ver,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows != exp_rows:
+                        raise DataJobError(
+                            "MARKET_INDICES_ENV_READBACK_MISMATCH",
+                            f"市场指数与环境({day}, {table})独立PG读回行数({actual_rows})与预期({exp_rows})不一致。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="MARKET_INDICES_ENV",
+                        target_session=day,
+                        business_table=table,
+                        source_capture_id=cap_val,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=exp_rows,
+                        inserted_rows=exp_rows,
+                        quality_status="COMPLETE_INDEX_ENV_CROSS_TRANSACTION_READBACK",
+                        no_change=(report.get("status") == "NO_CHANGE"),
+                        producer_version=prod_ver,
+                        calendar_revision=report["calendar_revision"],
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="MARKET_INDICES_ENV",
+                    error=error,
+                    message_prefix="参考指数因子与市场复合环境未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"市场指数与环境({day})未闭合：{str(error)[:300]}",
+                    )
+                )
+    # 市场宽度先绑定paired capture的QFQ历史坐标，保留既有B_fixed_source分类公式。
     if "FOCUS_FORMAL" in research_modules:
         from stock_a.application.source_formal_admission_production import (
             run_source_formal_admission_range_from_saved,

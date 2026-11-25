@@ -136,26 +136,60 @@ def persist_source_cross_section_for_session(
     qfq_close_by_session: dict[date, dict[str, Decimal]] = {
         sess: {} for sess in price_sessions
     }
+    session_status_by_session: dict[date, dict[str, str]] = {
+        sess: {} for sess in price_sessions
+    }
     with _transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
         _,
     ):
         cursor.execute(
-            """SELECT session_date, source_symbol, qfq_close, qfq_bar_status, qfq_close_quality
+            """SELECT session_date, source_symbol,
+                      qfq_close, qfq_bar_status, qfq_close_quality,
+                      raw_tradestatus_value, raw_tradestatus_quality
                FROM stock.source_raw_daily
                WHERE source_capture_id = %s
                  AND session_date = ANY(%s)
                  AND source_symbol = ANY(%s)""",
             (source_capture_id, price_sessions, sorted(all_symbols)),
         )
-        for sess, sym, qfq_close, qfq_status, qfq_quality in cursor.fetchall():
+        for (
+            sess,
+            sym,
+            qfq_close,
+            qfq_status,
+            qfq_quality,
+            raw_ts_val,
+            raw_ts_qual,
+        ) in cursor.fetchall():
+            symbol = str(sym)
+            # C02：严格区分 ACTUAL / CONFIRMED_SUSPENSION / UNKNOWN，不以缺bar推断停牌、不以停牌保留价当ACTUAL
+            if raw_ts_qual == "OBSERVED" and raw_ts_val == "0":
+                session_status_by_session[sess][symbol] = "CONFIRMED_SUSPENSION"
+                continue
             if (
-                qfq_status == "TARGET_PRESENT"
+                raw_ts_qual == "OBSERVED"
+                and raw_ts_val == "1"
+                and qfq_status == "TARGET_PRESENT"
                 and qfq_quality == "OBSERVED"
                 and qfq_close is not None
+                and Decimal(qfq_close) > 0
             ):
-                qfq_close_by_session[sess][str(sym)] = Decimal(qfq_close)
+                qfq_close_by_session[sess][symbol] = Decimal(qfq_close)
+                session_status_by_session[sess][symbol] = "ACTUAL"
+            else:
+                session_status_by_session[sess][symbol] = "UNKNOWN"
+
+    # 若逐日名录有确证停牌且 RAW 行缺失，补充为 CONFIRMED_SUSPENSION（优先以同源 RAW tradestatus 为准）
+    for u_date, u_info in universe_info_by_date.items():
+        if u_date not in session_status_by_session:
+            continue
+        ts_map = u_info.get("trade_status_by_symbol") or {}
+        day_status = session_status_by_session[u_date]
+        for sym, ts in ts_map.items():
+            if sym not in day_status and ts == "SUSPENDED":
+                day_status[sym] = "CONFIRMED_SUSPENSION"
 
     # 3. 构造共同目标坐标身份与各 ReturnEndpoint（每个端点只算一次）
     coord_rev = f"BAOSTOCK_CAPTURE:{source_capture_id}:FORWARD_ADJUSTED"
@@ -197,13 +231,29 @@ def persist_source_cross_section_for_session(
         win_statuses: dict[str, tuple[str, ...]] = {}
         coords_map: dict[str, PriceCoordinate] = {}
         for sym in members:
-            returns_map[sym] = _compute_return_fraction(
-                ep_close_map.get(sym), start_close_map.get(sym)
-            )
-            win_statuses[sym] = tuple(
-                "ACTUAL" if sym in qfq_close_by_session.get(d, {}) else "UNKNOWN"
+            statuses = tuple(
+                session_status_by_session.get(d, {}).get(sym, "UNKNOWN")
                 for d in window_days
             )
+            win_statuses[sym] = statuses
+            # C01：先校验逐日窗口状态（两端必须 ACTUAL，内部仅允许 ACTUAL/CONFIRMED_SUSPENSION），
+            # 缺口局部降级为 UNKNOWN，绝不向纯核传入非法已知收益导致整批失败
+            endpoints_actual = (
+                len(statuses) >= 2
+                and statuses[0] == "ACTUAL"
+                and statuses[-1] == "ACTUAL"
+            )
+            interior_valid = all(
+                s in {"ACTUAL", "CONFIRMED_SUSPENSION"} for s in statuses[1:-1]
+            )
+            if endpoints_actual and interior_valid:
+                returns_map[sym] = _compute_return_fraction(
+                    ep_close_map.get(sym), start_close_map.get(sym)
+                )
+            elif not endpoints_actual:
+                returns_map[sym] = unknown("CROSS_ENDPOINT_NOT_ACTUAL")
+            else:
+                returns_map[sym] = unknown("CROSS_INTERIOR_SESSION_UNKNOWN")
             coords_map[sym] = target_coordinates[sym]
         return ReturnEndpoint(
             endpoint_date=ep_date,

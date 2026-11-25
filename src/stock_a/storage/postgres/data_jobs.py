@@ -109,6 +109,12 @@ _MODULE_PROGRESS_TABLES = {
             "stock.source_cross_section_endpoints",
         }
     ),
+    "MARKET_INDICES_ENV": frozenset(
+        {
+            "stock.source_market_index_day_facts",
+            "stock.source_market_environment_day_facts",
+        }
+    ),
     "FORWARD_PATH": frozenset({"stock.source_forward_path_facts"}),
     "COHORT_STATS": frozenset({"stock.source_cohort_group_stats"}),
     "FEP_BASELINE": frozenset({"stock.source_fep_baseline_facts"}),
@@ -276,6 +282,34 @@ _CLEANUP_MODULES = {
         "progress_tables": ("stock.source_limit_up_streak_day_facts",),
         "algorithm_column": "contract_version",
         "algorithm_label": "日线连板梯队合同版本",
+    },
+    "CROSS_SECTION": {
+        "parent_table": "stock.source_cross_section_day_facts",
+        "child_table": "stock.source_cross_section_endpoints",
+        "cleanup_tables": (
+            "stock.source_cross_section_endpoints",
+            "stock.source_cross_section_day_facts",
+        ),
+        "progress_tables": (
+            "stock.source_cross_section_day_facts",
+            "stock.source_cross_section_endpoints",
+        ),
+        "algorithm_column": "contract_version",
+        "algorithm_label": "全市场横截面10因子合同版本",
+    },
+    "MARKET_INDICES_ENV": {
+        "parent_table": "stock.source_market_environment_day_facts",
+        "child_table": "stock.source_market_index_day_facts",
+        "cleanup_tables": (
+            "stock.source_market_environment_day_facts",
+            "stock.source_market_index_day_facts",
+        ),
+        "progress_tables": (
+            "stock.source_market_index_day_facts",
+            "stock.source_market_environment_day_facts",
+        ),
+        "algorithm_column": "rule_version",
+        "algorithm_label": "市场复合环境展示规则版本",
     },
     "FORWARD_PATH": {
         "parent_table": "stock.source_forward_path_facts",
@@ -1536,6 +1570,106 @@ def _cleanup_version_rows(
             for row in cursor.fetchall()
         ]
 
+    if module_code == "CROSS_SECTION":
+        cursor.execute(
+            """SELECT target_session, price_capture_id, universe_version,
+                      contract_version, calendar_revision, count(*)
+               FROM stock.source_cross_section_day_facts
+               WHERE target_session=ANY(%s) AND target_session<=%s
+               GROUP BY target_session, price_capture_id, universe_version,
+                        contract_version, calendar_revision
+               ORDER BY target_session, price_capture_id, universe_version,
+                        contract_version, calendar_revision""",
+            (list(target_sessions), cutoff),
+        )
+        cs_versions = []
+        for row in cursor.fetchall():
+            cursor.execute(
+                """SELECT count(*)
+                   FROM stock.source_cross_section_endpoints
+                   WHERE target_session=%s AND price_capture_id=%s
+                     AND universe_version=%s AND contract_version=%s
+                     AND calendar_revision=%s""",
+                (row[0], int(row[1]), str(row[2]), str(row[3]), str(row[4])),
+            )
+            ep_rows = int(cursor.fetchone()[0])
+            cs_versions.append(
+                {
+                    "target_session": row[0],
+                    "source_version": {
+                        "source_capture_id": int(row[1]),
+                        "universe_version": str(row[2]),
+                    },
+                    "algorithm_version": str(row[3]),
+                    "parent_rows": int(row[5]),
+                    "child_rows": ep_rows,
+                    "table_counts": {
+                        "stock.source_cross_section_day_facts": int(row[5]),
+                        "stock.source_cross_section_endpoints": ep_rows,
+                    },
+                    "version_key": {
+                        "price_capture_id": int(row[1]),
+                        "universe_version": str(row[2]),
+                        "contract_version": str(row[3]),
+                        "calendar_revision": str(row[4]),
+                    },
+                }
+            )
+        return cs_versions
+
+    if module_code == "MARKET_INDICES_ENV":
+        cursor.execute(
+            """SELECT target_session, stock_capture_id, index_capture_id,
+                      primary_index_symbol, index_config_version,
+                      rule_version, calendar_revision, count(*)
+               FROM stock.source_market_environment_day_facts
+               WHERE target_session=ANY(%s) AND target_session<=%s
+               GROUP BY target_session, stock_capture_id, index_capture_id,
+                        primary_index_symbol, index_config_version,
+                        rule_version, calendar_revision
+               ORDER BY target_session, stock_capture_id, index_capture_id,
+                        rule_version, calendar_revision""",
+            (list(target_sessions), cutoff),
+        )
+        env_versions = []
+        for row in cursor.fetchall():
+            idx_cap = int(row[2]) if row[2] is not None else None
+            idx_rows = 0
+            if idx_cap is not None:
+                cursor.execute(
+                    """SELECT count(*)
+                       FROM stock.source_market_index_day_facts
+                       WHERE target_session=%s AND index_capture_id=%s
+                         AND config_version=%s AND calendar_revision=%s""",
+                    (row[0], idx_cap, str(row[4]), str(row[6])),
+                )
+                idx_rows = int(cursor.fetchone()[0])
+            env_versions.append(
+                {
+                    "target_session": row[0],
+                    "source_version": {
+                        "stock_capture_id": int(row[1]),
+                        "index_capture_id": idx_cap,
+                    },
+                    "algorithm_version": str(row[5]),
+                    "parent_rows": int(row[7]),
+                    "child_rows": idx_rows,
+                    "table_counts": {
+                        "stock.source_market_environment_day_facts": int(row[7]),
+                        "stock.source_market_index_day_facts": idx_rows,
+                    },
+                    "version_key": {
+                        "stock_capture_id": int(row[1]),
+                        "index_capture_id": idx_cap,
+                        "primary_index_symbol": str(row[3]),
+                        "index_config_version": str(row[4]),
+                        "rule_version": str(row[5]),
+                        "calendar_revision": str(row[6]),
+                    },
+                }
+            )
+        return env_versions
+
     if module_code == "FORWARD_PATH":
         cursor.execute(
             """SELECT target_session,source_capture_id,path_rule_version,calendar_revision,count(*)
@@ -2213,13 +2347,16 @@ def clear_derived_module(
                 "DATA_JOB_CLEANUP_PREVIEW_STALE",
                 "预览后来源版本、事实行数或依赖发生变化；未删除任何事实，请重新预览",
             )
+        cleanup_count_tables = tuple(
+            dict.fromkeys((*spec["cleanup_tables"], *spec["progress_tables"]))
+        )
         cursor.execute(
             """SELECT count(*) FROM stock.data_job_progress
                WHERE target_session=ANY(%s) AND business_table=ANY(%s)
                  AND status='RUNNING' AND (%s::uuid IS NULL OR job_id<>%s)""",
             (
                 list(sessions),
-                list(spec["progress_tables"]),
+                list(cleanup_count_tables),
                 current_job_id,
                 current_job_id,
             ),
@@ -2229,10 +2366,6 @@ def clear_derived_module(
                 "DATA_JOB_CLEANUP_BUSY",
                 "目标模块日期存在正在运行的生产单元；未删除任何事实",
             )
-
-        cleanup_count_tables = tuple(
-            dict.fromkeys((*spec["cleanup_tables"], *spec["progress_tables"]))
-        )
         deleted_rows: dict[str, int] = {table: 0 for table in cleanup_count_tables}
         deleted_by_session = {
             session.isoformat(): {table: 0 for table in cleanup_count_tables}
@@ -2638,6 +2771,79 @@ def clear_derived_module(
                 deleted_by_session[target_session.isoformat()][
                     "stock.source_limit_up_streak_day_facts"
                 ] += cursor.rowcount
+            elif module_code == "CROSS_SECTION":
+                cursor.execute(
+                    """DELETE FROM stock.source_cross_section_endpoints
+                       WHERE target_session=%s AND price_capture_id=%s
+                         AND universe_version=%s AND contract_version=%s
+                         AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["price_capture_id"],
+                        key["universe_version"],
+                        key["contract_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_cross_section_endpoints"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_cross_section_endpoints"
+                ] += cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM stock.source_cross_section_day_facts
+                       WHERE target_session=%s AND price_capture_id=%s
+                         AND universe_version=%s AND contract_version=%s
+                         AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["price_capture_id"],
+                        key["universe_version"],
+                        key["contract_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_cross_section_day_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_cross_section_day_facts"
+                ] += cursor.rowcount
+            elif module_code == "MARKET_INDICES_ENV":
+                cursor.execute(
+                    """DELETE FROM stock.source_market_environment_day_facts
+                       WHERE target_session=%s AND stock_capture_id=%s
+                         AND primary_index_symbol=%s AND calendar_revision=%s
+                         AND rule_version=%s""",
+                    (
+                        target_session,
+                        key["stock_capture_id"],
+                        key["primary_index_symbol"],
+                        key["calendar_revision"],
+                        key["rule_version"],
+                    ),
+                )
+                deleted_rows["stock.source_market_environment_day_facts"] += (
+                    cursor.rowcount
+                )
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_market_environment_day_facts"
+                ] += cursor.rowcount
+                if key.get("index_capture_id") is not None:
+                    cursor.execute(
+                        """DELETE FROM stock.source_market_index_day_facts
+                           WHERE target_session=%s AND index_capture_id=%s
+                             AND config_version=%s AND calendar_revision=%s""",
+                        (
+                            target_session,
+                            key["index_capture_id"],
+                            key["index_config_version"],
+                            key["calendar_revision"],
+                        ),
+                    )
+                    deleted_rows["stock.source_market_index_day_facts"] += (
+                        cursor.rowcount
+                    )
+                    deleted_by_session[target_session.isoformat()][
+                        "stock.source_market_index_day_facts"
+                    ] += cursor.rowcount
             elif module_code == "FORWARD_PATH":
                 cursor.execute(
                     """DELETE FROM stock.source_forward_path_facts
@@ -2781,7 +2987,7 @@ def clear_derived_module(
                RETURNING job_id""",
             (
                 list(sessions),
-                list(spec["progress_tables"]),
+                list(cleanup_count_tables),
                 current_job_id,
                 current_job_id,
             ),
@@ -2971,6 +3177,7 @@ def read_business_table_count(
     sector_snapshot_ids: Mapping[str, int] | None = None,
     followup_target_sessions: Sequence[date] | None = None,
     research_cutoff: date | None = None,
+    universe_version: str | None = None,
 ) -> int:
     """按唯一来源捕获键和实际业务维度独立读回已提交行数。"""
     if (
@@ -3233,6 +3440,34 @@ def read_business_table_count(
         "stock.source_cross_section_day_facts": (
             """SELECT count(*) FROM stock.source_cross_section_day_facts
                WHERE target_session=%s AND price_capture_id=%s
+                 AND contract_version=%s AND calendar_revision=%s
+                 AND (%s::text IS NULL OR universe_version=%s)""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+                universe_version,
+                universe_version,
+            ),
+        ),
+        "stock.source_cross_section_endpoints": (
+            """SELECT count(*) FROM stock.source_cross_section_endpoints
+               WHERE target_session=%s AND price_capture_id=%s
+                 AND contract_version=%s AND calendar_revision=%s
+                 AND (%s::text IS NULL OR universe_version=%s)""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+                universe_version,
+                universe_version,
+            ),
+        ),
+        "stock.source_market_index_day_facts": (
+            """SELECT count(*) FROM stock.source_market_index_day_facts
+               WHERE target_session=%s AND index_capture_id=%s
                  AND contract_version=%s AND calendar_revision=%s""",
             lambda: (
                 target_session,
@@ -3241,10 +3476,10 @@ def read_business_table_count(
                 calendar_revision,
             ),
         ),
-        "stock.source_cross_section_endpoints": (
-            """SELECT count(*) FROM stock.source_cross_section_endpoints
-               WHERE target_session=%s AND price_capture_id=%s
-                 AND contract_version=%s AND calendar_revision=%s""",
+        "stock.source_market_environment_day_facts": (
+            """SELECT count(*) FROM stock.source_market_environment_day_facts
+               WHERE target_session=%s AND stock_capture_id=%s
+                 AND rule_version=%s AND calendar_revision=%s""",
             lambda: (
                 target_session,
                 source_capture_id,
@@ -4373,6 +4608,18 @@ def mark_progress_cleared(
         ),
         "stock.source_limit_up_streak_day_facts": (
             "SELECT count(*) FROM stock.source_limit_up_streak_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.source_cross_section_day_facts": (
+            "SELECT count(*) FROM stock.source_cross_section_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.source_cross_section_endpoints": (
+            "SELECT count(*) FROM stock.source_cross_section_endpoints WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.source_market_index_day_facts": (
+            "SELECT count(*) FROM stock.source_market_index_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.source_market_environment_day_facts": (
+            "SELECT count(*) FROM stock.source_market_environment_day_facts WHERE target_session=%s AND target_session<=%s",
         ),
         "stock.source_forward_path_facts": (
             "SELECT count(*) FROM stock.source_forward_path_facts WHERE target_session=%s AND target_session<=%s",

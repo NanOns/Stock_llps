@@ -650,20 +650,41 @@ def compute_source_pool_seed(
         universe_version=None,
         calendar_revision=revision,
     )
-    if cross_bundle.get("status") == "AVAILABLE":
-        cross_by_entity = cross_bundle.get("by_entity", {})
-        for symbol, symbol_facts in rps["facts"].items():
-            cs_fields = cross_by_entity.get(symbol)
-            if not isinstance(cs_fields, Mapping):
-                continue
-            for rps_key, cs_key in (
-                ("rps5", "cross.rps5"),
-                ("rps5_delta3_pp", "cross.rps5_delta3_pp"),
-                ("rps20", "cross.rps20"),
-                ("rps20_delta3_pp", "cross.rps20_delta3_pp"),
-            ):
-                if cs_key in cs_fields:
-                    symbol_facts[rps_key] = cs_fields[cs_key]
+    # D03：禁止在旧来源池中半截局部覆盖单股新值；仅当新横截面完整闭合且整批覆盖同一总体时才整批切换并同步元数据
+    cross_by_entity = (
+        cross_bundle.get("by_entity", {})
+        if cross_bundle.get("status") == "AVAILABLE"
+        else {}
+    )
+    if (
+        cross_bundle.get("status") == "AVAILABLE"
+        and cross_by_entity
+        and set(rps["facts"]).issubset(set(cross_by_entity))
+    ):
+        replaced_facts: dict[str, dict[str, Any]] = {}
+        for symbol in rps["facts"]:
+            cs_fields = cross_by_entity[symbol]
+            replaced_facts[symbol] = {
+                "rps5": cs_fields.get("cross.rps5", unknown("CROSS_RPS5_MISSING")),
+                "rps5_delta3_pp": cs_fields.get(
+                    "cross.rps5_delta3_pp", unknown("CROSS_RPS5_DELTA3_MISSING")
+                ),
+                "rps20": cs_fields.get("cross.rps20", unknown("CROSS_RPS20_MISSING")),
+                "rps20_delta3_pp": cs_fields.get(
+                    "cross.rps20_delta3_pp", unknown("CROSS_RPS20_DELTA3_MISSING")
+                ),
+            }
+        rps["facts"] = replaced_facts
+        rps["scope"] = f"PG_CROSS_SECTION:{cross_bundle['universe_version']}"
+        rps["formal_research_universe"] = True
+        rps["endpoint_counts"] = {
+            "rank_endpoints": len(cross_bundle.get("rank_metadata", {})),
+            "relative_endpoints": len(cross_bundle.get("relative_metadata", {})),
+            "universe_version": cross_bundle.get("universe_version"),
+        }
+        rps["rps_source"] = "PG_CROSS_SECTION_DAY_FACTS"
+    else:
+        rps["rps_source"] = "SOURCE_RELATIVE_POSITION_FALLBACK"
     profile_offset = 0
     profiles = {}
     profile_snapshot_missing = False

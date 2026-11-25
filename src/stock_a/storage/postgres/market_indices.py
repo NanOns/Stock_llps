@@ -144,6 +144,7 @@ def persist_market_environment_series(
     calendar_id: str,
     calendar_revision: str,
     rule_version: str = "MARKET_PRESENTATION_R1",
+    initial_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """按严格官方相邻会话离线归约市场复合环境展示状态并幂等持久化。"""
     raw_obs = []
@@ -169,7 +170,11 @@ def persist_market_environment_series(
         )
 
     reduced = reduce_market_environment_display_series(
-        raw_obs, official_sessions=official_sessions
+        raw_obs,
+        official_sessions=official_sessions,
+        initial_state=dict(initial_state)
+        if isinstance(initial_state, Mapping)
+        else None,
     )
     inserted = 0
     unchanged = 0
@@ -699,27 +704,6 @@ def persist_market_indices_and_environment_for_session(
                 bar_status=str(bs),
             )
 
-        # 读取同 stock_capture_id 在目标日已落库的宽度/参与/压力轴（缺则保持 UNKNOWN）
-        cursor.execute(
-            """SELECT breadth_target_numerator, breadth_target_denominator
-               FROM stock.source_market_breadth_change_days
-               WHERE target_session = %s
-                 AND target_source_capture_id = %s
-                 AND target_calendar_revision = %s
-                 AND breadth_target_numerator IS NOT NULL
-                 AND breadth_target_denominator IS NOT NULL
-                 AND breadth_target_denominator > 0
-               ORDER BY id DESC
-               LIMIT 1""",
-            (target_session, stock_capture_id, calendar_revision),
-        )
-        breadth_row = cursor.fetchone()
-        breadth_axis = (
-            classify_market_breadth(Fraction(int(breadth_row[0]), int(breadth_row[1])))
-            if breadth_row is not None
-            else "UNKNOWN"
-        )
-
         cursor.execute(
             """SELECT classification, status
                FROM stock.source_market_participation_days
@@ -738,6 +722,55 @@ def persist_market_indices_and_environment_for_session(
             and part_row[0] in {"EXPANDING", "NORMAL", "THIN"}
             else "UNKNOWN"
         )
+
+        # E02：读取紧邻前一官方交易日的已存环境状态作为 initial_state，保障跨日两日确认/UNKNOWN保留语义
+        target_idx = calendar_sessions.index(target_session)
+        prior_env_state: dict[str, Any] | None = None
+        if target_idx > 0:
+            prev_session = calendar_sessions[target_idx - 1]
+            cursor.execute(
+                """SELECT displayed_label, pending_label, pending_count,
+                          rule_version, primary_index_symbol
+                   FROM stock.source_market_environment_day_facts
+                   WHERE target_session = %s
+                     AND stock_capture_id = %s
+                     AND calendar_revision = %s
+                   ORDER BY (primary_index_symbol = %s AND rule_version = %s) DESC,
+                            id DESC
+                   LIMIT 1""",
+                (
+                    prev_session,
+                    stock_capture_id,
+                    calendar_revision,
+                    primary_symbol,
+                    rule_version,
+                ),
+            )
+            prev_row = cursor.fetchone()
+            if prev_row is not None:
+                prior_env_state = {
+                    "displayed_label": prev_row[0],
+                    "pending_label": prev_row[1],
+                    "pending_count": int(prev_row[2]),
+                    "rule_version": str(prev_row[3]),
+                    "primary_index_symbol": str(prev_row[4]),
+                }
+
+    # E03：直接从主宽度事实（read_source_market_context）读取 B_fixed_source，不依赖相邻变化表
+    breadth_axis = "UNKNOWN"
+    try:
+        from stock_a.application.source_market_context import read_source_market_context
+
+        mkt_ctx = read_source_market_context(
+            config,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            source_capture_id=stock_capture_id,
+            include_symbols=False,
+        )
+        breadth_axis = classify_market_breadth(mkt_ctx.calculation.b_fixed_source)
+    except Exception:  # noqa: BLE001
+        breadth_axis = "UNKNOWN"
 
     from stock_a.storage.postgres.price_limits import read_market_pressure_summary
 
@@ -782,7 +815,7 @@ def persist_market_indices_and_environment_for_session(
         )
     idx_report = persist_market_index_day_facts(config, records=factor_records)
 
-    # 3. 落库目标日四轴复合市场环境展示状态
+    # 3. 落库目标日四轴复合市场环境展示状态（严格继承紧邻前一官方交易日前态）
     env_report = persist_market_environment_series(
         config,
         official_sessions=(target_session,),
@@ -802,6 +835,7 @@ def persist_market_indices_and_environment_for_session(
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
         rule_version=rule_version,
+        initial_state=prior_env_state,
     )
     return {
         "status": "PERSISTED"

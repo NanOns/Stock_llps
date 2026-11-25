@@ -673,6 +673,7 @@ def _query_daily_rows_impl(
             "retry_count": 0,
         },
         "captured_sdk_output_chars": len(output_capture.getvalue()),
+        "query_calls": 1 if query_code is not None else 0,
         "verified_source_capture_id": verified_capture.capture_id
         if verified_capture
         else None,
@@ -680,6 +681,36 @@ def _query_daily_rows_impl(
 
 
 def query_identity_reference(
+    target_sessions: tuple[str, ...],
+    *,
+    target_symbol: str | None = None,
+    timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
+    max_total_seconds: float = 25.0,
+    max_rows_per_query: int = 10000,
+    transport: object | None = None,
+    config: Mapping[str, Any] | None = None,
+    enforce_quota: bool = False,
+) -> dict[str, Any]:
+    """一次登录内有限读取单证券基本资料及最多两个目标日名录；在线路径经全局串行锁与日配额护栏。"""
+    planned = (len(target_sessions) if isinstance(target_sessions, tuple) else 1) + 1
+    return _run_with_baostock_guard(
+        config=config,
+        planned_calls=max(1, planned),
+        api_name="query_all_stock",
+        injected_transport=transport is not None,
+        enforce_quota=enforce_quota,
+        action=lambda: _query_identity_reference_impl(
+            target_sessions,
+            target_symbol=target_symbol,
+            timeout_seconds=timeout_seconds,
+            max_total_seconds=max_total_seconds,
+            max_rows_per_query=max_rows_per_query,
+            transport=transport,
+        ),
+    )
+
+
+def _query_identity_reference_impl(
     target_sessions: tuple[str, ...],
     *,
     target_symbol: str | None = None,
@@ -1765,8 +1796,12 @@ def _run_with_baostock_guard(
     enforce_quota: bool,
     action: Any,
 ) -> dict[str, Any]:
-    """在线 BaoStock 入口统一护栏：PG 进程串行锁 + 日配额预检 + 实耗扣减。"""
-    if config is None or (injected_transport and not enforce_quota):
+    """在线 BaoStock 入口统一护栏：PG 进程串行锁 + 日配额预检 + 请求前短事务预扣。"""
+    if enforce_quota and config is None:
+        raise ContractError("BAOSTOCK_QUOTA_CONFIG_REQUIRED")
+    if not injected_transport and config is None:
+        raise ContractError("BAOSTOCK_ONLINE_GUARD_CONFIG_REQUIRED")
+    if injected_transport and not enforce_quota:
         return action()
     from stock_a.storage.postgres.baostock_quota import (
         baostock_serial_lock,
@@ -1776,38 +1811,56 @@ def _run_with_baostock_guard(
 
     with baostock_serial_lock(config):
         preflight_baostock_api_quota(config, planned_calls=planned_calls)
-        result = action()
-        used_calls = int(result.get("query_calls") or 0)
-        if used_calls > 0:
-            failed = (
-                used_calls
-                if result.get("status")
-                not in {"RESPONSE_RECEIVED", "OK", "PARTIAL_RESPONSE"}
-                else 0
-            )
-            consume_baostock_api_quota(
-                config,
-                api_name=api_name,
-                count=used_calls,
-                failed=failed,
-            )
-        return result
+        # 严格遵守 R3 裁定：发送请求前先通过独立短事务扣减计划调用数，防止中途中断漏记账
+        consume_baostock_api_quota(
+            config,
+            api_name=api_name,
+            count=planned_calls,
+            failed=0,
+        )
+        return action()
 
 
 def _collect_sdk_rows(
-    result_set: Any, *, max_rows: int
-) -> tuple[list[str], list[dict[str, str]]]:
-    fields = list(getattr(result_set, "fields", ()) or ())
-    rows: list[dict[str, str]] = []
-    while len(rows) < max_rows and result_set.next():
-        raw_row = result_set.get_row_data()
-        rows.append(
-            {
-                str(fields[idx]): str(raw_row[idx]) if idx < len(raw_row) else ""
-                for idx in range(len(fields))
-            }
+    result_set: Any,
+    *,
+    max_rows: int,
+    required_fields: tuple[str, ...] = (),
+) -> tuple[list[str], list[dict[str, str]], bool, str | None]:
+    """严格校验字段完整性、迭代错误、行宽匹配及截断检测，不静默补空或吞截断。"""
+    raw_fields = list(getattr(result_set, "fields", ()) or ())
+    fields = [str(f).strip() for f in raw_fields]
+    if not fields or len(fields) != len(set(fields)):
+        return (fields, [], False, "SDK_RESPONSE_FIELDS_INVALID_OR_DUPLICATE")
+    missing_req = [f for f in required_fields if f not in fields]
+    if missing_req:
+        return (
+            fields,
+            [],
+            False,
+            f"SDK_RESPONSE_MISSING_FIELDS:{','.join(missing_req)}",
         )
-    return (fields, rows)
+
+    rows: list[dict[str, str]] = []
+    while len(rows) < max_rows:
+        has_next = bool(result_set.next())
+        err_code = _code(result_set)
+        if err_code not in (None, "0"):
+            return (fields, rows, False, f"SDK_ITERATION_ERROR:{err_code}")
+        if not has_next:
+            return (fields, rows, True, None)
+        raw_row = result_set.get_row_data()
+        if not isinstance(raw_row, (list, tuple)) or len(raw_row) != len(fields):
+            return (fields, rows, False, "SDK_ROW_FIELD_COUNT_MISMATCH")
+        rows.append({fields[idx]: str(raw_row[idx]) for idx in range(len(fields))})
+
+    # 达到 max_rows 后探查是否还有剩余行，防止静默截断被当成完整总体
+    if bool(result_set.next()):
+        return (fields, rows, False, "SDK_RESPONSE_TRUNCATED_AT_MAX_ROWS")
+    err_code = _code(result_set)
+    if err_code not in (None, "0"):
+        return (fields, rows, False, f"SDK_ITERATION_ERROR:{err_code}")
+    return (fields, rows, True, None)
 
 
 def query_stock_basic_catalog(
@@ -1832,6 +1885,7 @@ def query_stock_basic_catalog(
         if _code(login_res) != "0":
             return {
                 "status": "LOGIN_FAILED",
+                "complete": False,
                 "query_calls": 0,
                 "rows": [],
                 "reason": _error_message(login_res),
@@ -1841,18 +1895,32 @@ def query_stock_basic_catalog(
             if _code(rs) != "0":
                 return {
                     "status": "QUERY_FAILED",
+                    "complete": False,
                     "query_calls": 1,
                     "rows": [],
                     "reason": _error_message(rs),
                 }
-            fields, rows = _collect_sdk_rows(rs, max_rows=max_rows)
+            fields, rows, complete, err_reason = _collect_sdk_rows(
+                rs,
+                max_rows=max_rows,
+                required_fields=(
+                    "code",
+                    "code_name",
+                    "ipoDate",
+                    "outDate",
+                    "type",
+                    "status",
+                ),
+            )
             return {
-                "status": "RESPONSE_RECEIVED",
+                "status": "RESPONSE_RECEIVED" if complete else "RESPONSE_INCOMPLETE",
+                "complete": complete,
                 "query_calls": 1,
                 "request_started_at": started_at,
                 "request_completed_at": _timestamp(),
                 "response_fields": fields,
                 "rows": rows,
+                "reason": err_reason,
             }
         finally:
             try:
@@ -1898,6 +1966,7 @@ def query_session_directory_rows(
         if _code(login_res) != "0":
             return {
                 "status": "LOGIN_FAILED",
+                "complete": False,
                 "query_calls": 0,
                 "rows_by_session": {},
                 "reason": _error_message(login_res),
@@ -1911,18 +1980,33 @@ def query_session_directory_rows(
                 if _code(rs) != "0":
                     return {
                         "status": "QUERY_FAILED",
+                        "complete": False,
                         "query_calls": calls,
                         "rows_by_session": rows_by_session,
                         "reason": _error_message(rs),
                     }
-                _, rows = _collect_sdk_rows(rs, max_rows=max_rows_per_day)
+                _, rows, complete, err_reason = _collect_sdk_rows(
+                    rs,
+                    max_rows=max_rows_per_day,
+                    required_fields=("code", "tradeStatus", "code_name"),
+                )
+                if not complete:
+                    return {
+                        "status": "RESPONSE_INCOMPLETE",
+                        "complete": False,
+                        "query_calls": calls,
+                        "rows_by_session": rows_by_session,
+                        "reason": f"{day_text}:{err_reason}",
+                    }
                 rows_by_session[day_text] = rows
             return {
                 "status": "RESPONSE_RECEIVED",
+                "complete": True,
                 "query_calls": calls,
                 "request_started_at": started_at,
                 "request_completed_at": _timestamp(),
                 "rows_by_session": rows_by_session,
+                "reason": None,
             }
         finally:
             try:
@@ -1975,6 +2059,7 @@ def query_index_daily_range(
         if _code(login_res) != "0":
             return {
                 "status": "LOGIN_FAILED",
+                "complete": False,
                 "query_calls": 0,
                 "rows_by_symbol": {},
                 "reason": _error_message(login_res),
@@ -1996,18 +2081,41 @@ def query_index_daily_range(
                 if _code(rs) != "0":
                     return {
                         "status": "QUERY_FAILED",
+                        "complete": False,
                         "query_calls": calls,
                         "rows_by_symbol": rows_by_symbol,
                         "reason": _error_message(rs),
                     }
-                _, rows = _collect_sdk_rows(rs, max_rows=max_rows_per_symbol)
+                _, rows, complete, err_reason = _collect_sdk_rows(
+                    rs,
+                    max_rows=max_rows_per_symbol,
+                    required_fields=(
+                        "date",
+                        "code",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "preclose",
+                    ),
+                )
+                if not complete:
+                    return {
+                        "status": "RESPONSE_INCOMPLETE",
+                        "complete": False,
+                        "query_calls": calls,
+                        "rows_by_symbol": rows_by_symbol,
+                        "reason": f"{sym}:{err_reason}",
+                    }
                 rows_by_symbol[sym] = rows
             return {
                 "status": "RESPONSE_RECEIVED",
+                "complete": True,
                 "query_calls": calls,
                 "request_started_at": started_at,
                 "request_completed_at": _timestamp(),
                 "rows_by_symbol": rows_by_symbol,
+                "reason": None,
             }
         finally:
             try:

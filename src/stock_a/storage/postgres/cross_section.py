@@ -380,6 +380,8 @@ def read_cross_section_day_bundle(
     ):
         selected_universe_version = universe_version
         if selected_universe_version is None:
+            # C04：按 universe_capture_id 数值与真实落库顺序（MAX(id)）选最新单版本，
+            # 严禁按 universe_version 文本字典序（防止 BASIC_9 > BASIC_10 倒选旧版）
             cursor.execute(
                 """SELECT universe_version
                    FROM stock.source_cross_section_day_facts
@@ -387,8 +389,9 @@ def read_cross_section_day_bundle(
                      AND price_capture_id = %s
                      AND calendar_revision = %s
                      AND contract_version = %s
+                   GROUP BY universe_version, universe_capture_id
                    ORDER BY universe_capture_id DESC NULLS LAST,
-                            universe_version DESC
+                            MAX(id) DESC
                    LIMIT 1""",
                 (
                     target_session,
@@ -530,8 +533,17 @@ def read_cross_section_day_bundle(
         else:
             rel_meta[str(ep_key)] = payload
 
+    # A03：不仅检查 by_entity 非空，必须同时核实日级共享 10 端点（6 RANK + 4 RELATIVE）完整落库
+    endpoints_complete = len(rank_meta) == 6 and len(rel_meta) == 4
+    if not by_entity:
+        bundle_status = "NOT_COMPUTED"
+    elif not endpoints_complete:
+        bundle_status = "INCOMPLETE"
+    else:
+        bundle_status = "AVAILABLE"
+
     return {
-        "status": "AVAILABLE" if by_entity else "NOT_COMPUTED",
+        "status": bundle_status,
         "target_session": target_session,
         "price_capture_id": price_capture_id,
         "universe_capture_id": universe_capture_id_val,

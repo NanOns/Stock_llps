@@ -726,6 +726,8 @@ def _pool_candidate_result(
     calendar_revision: str,
     history_inputs=None,
     core_previews_by_session: Mapping[date, Mapping[str, Any]] | None = None,
+    rel_market_1: FieldValue | None = None,
+    include_impulse: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], int, int, int]:
     symbol = candidate["source_symbol"]
     history_inputs_reused = history_inputs is not None
@@ -930,6 +932,9 @@ def _pool_candidate_result(
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
         core_previous=previous_core,
+        core_today=core_at(target_index) if include_impulse else None,
+        rel_market_1=rel_market_1 if include_impulse else None,
+        include_impulse=include_impulse,
         prior_range_results=prior_range_results,
         prior_range_states=prior_range_states,
         prior_range_anchors=prior_range_anchors,
@@ -1445,6 +1450,7 @@ def discover_source_d1_structures(
     include_source_symbol_change_summary: bool = False,
     include_source_symbol_d1_details: bool = False,
     include_source_symbol_structure_results: bool = False,
+    include_impulse: bool = False,
 ) -> dict[str, Any]:
     """一遍完整扫描目标日Raw池，统计五种D1结构并按事件分页。"""
     started_wall = time.perf_counter()
@@ -1469,7 +1475,7 @@ def discover_source_d1_structures(
         or type(include_source_symbol_d1_details) is not bool
         or type(include_source_symbol_structure_results) is not bool
         or (include_source_symbol_d1_details and not structure_changes)
-        or (structure_type is not None and structure_type not in STRUCTURE_TYPES)
+        or (structure_type is not None and structure_type not in ALL_STRUCTURE_TYPES)
         or (
             material_change_reason is not None
             and material_change_reason not in MATERIAL_CHANGE_REASONS
@@ -1526,13 +1532,34 @@ def discover_source_d1_structures(
     structure_preview_context = (
         prepare_source_d1_preview_context(days) if structure_changes else None
     )
+    active_structure_types = ALL_STRUCTURE_TYPES if include_impulse else STRUCTURE_TYPES
+    rel_market_1_by_session_symbol: dict[date, dict[str, FieldValue]] = {}
+    if include_impulse:
+        from stock_a.storage.postgres.cross_section import read_cross_section_day_bundle
+
+        query_days = days if structure_changes else (target_session,)
+        for q_day in query_days:
+            bundle = read_cross_section_day_bundle(
+                config,
+                target_session=q_day,
+                price_capture_id=source_capture_id,
+                universe_version=None,
+                calendar_revision=target_calendar_revision,
+            )
+            if bundle.get("status") == "AVAILABLE":
+                rel_market_1_by_session_symbol[q_day] = {
+                    sym: flds.get(
+                        "cross.rel_market_1", unknown("CROSS_REL_MARKET_1_UNAVAILABLE")
+                    )
+                    for sym, flds in bundle.get("by_entity", {}).items()
+                }
     counts = {
         kind: {"GENERATED": 0, "NOT_GENERATED": 0, "UNKNOWN": 0}
-        for kind in STRUCTURE_TYPES
+        for kind in active_structure_types
     }
     reason_counts = {
         kind: {"not_generated": Counter(), "unknown": Counter()}
-        for kind in STRUCTURE_TYPES
+        for kind in active_structure_types
     }
     events: list[dict[str, Any]] = []
     selected_detail = None
@@ -1554,11 +1581,11 @@ def discover_source_d1_structures(
     change_status_counts: Counter[str] = Counter()
     material_change_status_counts: Counter[str] = Counter()
     material_change_status_counts_by_type = {
-        kind: Counter() for kind in STRUCTURE_TYPES
+        kind: Counter() for kind in active_structure_types
     }
     material_change_reason_anchor_counts: Counter[str] = Counter()
     material_change_reason_anchor_counts_by_type = {
-        kind: Counter() for kind in STRUCTURE_TYPES
+        kind: Counter() for kind in active_structure_types
     }
     material_change_reason_source_symbols = {
         reason: set() for reason in MATERIAL_CHANGE_REASONS
@@ -1679,6 +1706,14 @@ def discover_source_d1_structures(
                 structure_core_preview_count += len(core_previews)
             else:
                 history_decode_passes += 1
+            target_rel_m1 = (
+                rel_market_1_by_session_symbol.get(target_session, {}).get(
+                    candidate["source_symbol"],
+                    unknown("CROSS_REL_MARKET_1_UNAVAILABLE"),
+                )
+                if include_impulse
+                else None
+            )
             result, decoded_count, core_count, range_check_count = (
                 _pool_candidate_result(
                     candidate=candidate,
@@ -1689,6 +1724,8 @@ def discover_source_d1_structures(
                     calendar_revision=target_calendar_revision,
                     history_inputs=history_inputs,
                     core_previews_by_session=core_previews,
+                    rel_market_1=target_rel_m1,
+                    include_impulse=include_impulse,
                 )
             )
             history_rows_decoded += decoded_count
@@ -1733,6 +1770,17 @@ def discover_source_d1_structures(
                         "D1_STRUCTURE_CHANGE_CONTEXT_UNAVAILABLE",
                         "全池结构变化缺少相邻会话Core上下文",
                     )
+                sym_rel_by_day = (
+                    {
+                        q_day: rel_market_1_by_session_symbol.get(q_day, {}).get(
+                            candidate["source_symbol"],
+                            unknown("CROSS_REL_MARKET_1_UNAVAILABLE"),
+                        )
+                        for q_day in days
+                    }
+                    if include_impulse
+                    else None
+                )
                 timeline = evaluate_source_d1_structure_timeline(
                     symbol=candidate["source_symbol"],
                     sessions=days,
@@ -1740,6 +1788,8 @@ def discover_source_d1_structures(
                     source_capture_id=source_capture_id,
                     core_previews_by_session=core_previews,
                     history_inputs=history_inputs,
+                    rel_market_1_by_session=sym_rel_by_day,
+                    include_impulse=include_impulse,
                 )
                 candidate_changes = _structure_timeline_changes(
                     timeline=timeline,
@@ -2540,6 +2590,8 @@ def discover_source_d1_prior_support_reference(
     history_rows: Sequence[Mapping[str, Any]],
     source_capture_id: int,
     price_coordinate: str = "FORWARD_ADJUSTED",
+    rel_market_1_by_session: Mapping[date, FieldValue] | None = None,
+    include_impulse: bool = False,
 ) -> dict[str, Any]:
     """按单股历史生成截至窗口末会话已可见的来源支撑参考。"""
     days = tuple(sessions)
@@ -2576,9 +2628,17 @@ def discover_source_d1_prior_support_reference(
         source_capture_id=source_capture_id,
         core_previews_by_session=core_previews,
         history_inputs=history_inputs,
+        rel_market_1_by_session=rel_market_1_by_session,
+        include_impulse=include_impulse,
     )
     prior_session = days[-1]
-    supported_types = {"PIVOT_LOW", "RANGE_FLOOR", "GAP_ZONE"}
+    supported_types = {
+        "PIVOT_LOW",
+        "RANGE_FLOOR",
+        "GAP_ZONE",
+        "IMPULSE_BODY",
+        "IMPULSE_LOW",
+    }
     references = []
     for event in timeline["events"]:
         if (

@@ -122,6 +122,7 @@ def reduce_market_environment_display_series(
     observations: Iterable[dict[str, Any]],
     *,
     official_sessions: Iterable[Any] | None = None,
+    initial_state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """按 §11.4 规则将有序官方会话上的 raw 复合研究标签归约为显示状态序列。
 
@@ -186,6 +187,17 @@ def reduce_market_environment_display_series(
     active_rule_key: tuple[str, str | None] | None = None
     pending_label: str | None = None
     pending_count = 0
+    if isinstance(initial_state, dict):
+        displayed_label = initial_state.get("displayed_label")
+        pending_label = initial_state.get("pending_label")
+        pending_count = int(initial_state.get("pending_count") or 0)
+        init_rv = initial_state.get("rule_version")
+        init_pi = initial_state.get("primary_index_symbol")
+        if init_rv is not None:
+            active_rule_key = (
+                str(init_rv),
+                None if init_pi is None else str(init_pi),
+            )
     results: list[dict[str, Any]] = []
 
     for item in obs_list:

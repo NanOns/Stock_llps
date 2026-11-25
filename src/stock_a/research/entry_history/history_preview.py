@@ -947,6 +947,7 @@ def research_stock_pg_history_preview(
             raw_period_trends=raw_period_trends,
             cross_section_fields=cross_section_fields,
             cross_section_metadata=cross_section_meta,
+            official_sessions=all_calendar_sessions,
             source_snapshot_role="BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
         )
         components = profile_preview.get("components", [])

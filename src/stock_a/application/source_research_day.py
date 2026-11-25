@@ -76,6 +76,10 @@ _D1_STRUCTURE_TYPES = {
     "RANGE_CEILING",
     "GAP_ZONE",
 }
+_D1_STRUCTURE_TYPES_WITH_IMPULSE = _D1_STRUCTURE_TYPES | {
+    "IMPULSE_BODY",
+    "IMPULSE_LOW",
+}
 
 
 class SourceResearchDayError(ValueError):
@@ -999,13 +1003,18 @@ def _prepare_d1_facts(
             raise SourceResearchDayError(
                 "D1_TYPE_SUMMARY_INVALID", "D1缺少五类结构结果"
             )
+        expected_d1_types = (
+            _D1_STRUCTURE_TYPES_WITH_IMPULSE
+            if set(type_results) == _D1_STRUCTURE_TYPES_WITH_IMPULSE
+            else _D1_STRUCTURE_TYPES
+        )
         if (
-            set(type_results) != _D1_STRUCTURE_TYPES
-            or not set(anchor_counts).issubset(_D1_STRUCTURE_TYPES)
-            or set(status_counts) != _D1_STRUCTURE_TYPES
+            set(type_results) != expected_d1_types
+            or not set(anchor_counts).issubset(expected_d1_types)
+            or set(status_counts) != expected_d1_types
         ):
             raise SourceResearchDayError(
-                "D1_TYPE_SUMMARY_INVALID", "D1结构类型不符合现役五类合同"
+                "D1_TYPE_SUMMARY_INVALID", "D1结构类型不符合现役五类或七类合同"
             )
         detail_rows = symbol_details.get(symbol, [])
         if not isinstance(detail_rows, list):
