@@ -323,14 +323,16 @@ def compute_endpoint_board_primitives(
             seed_u += 1
 
     quote_cov = Fraction(actual_count, n) if n > 0 and membership_complete else None
-    safety = tri_and(
-        tri(
-            membership_complete
-            and n >= 5
-            and actual_count >= 5
-            and 5 * actual_count >= 4 * n,
+    quote_gate = (
+        tri(None, "MEMBERSHIP_INCOMPLETE")
+        if not membership_complete
+        else tri(
+            n >= 5 and actual_count >= 5 and 5 * actual_count >= 4 * n,
             "QUOTE_COVERAGE_OR_SIZE_UNMET",
-        ),
+        )
+    )
+    safety = tri_and(
+        quote_gate,
         tri(coordinate_ready, "COORDINATE_NOT_READY"),
     )
 
@@ -352,15 +354,33 @@ def compute_endpoint_board_primitives(
     )
     amr20_val = Fraction(median(amr20_vals)) if amr_ok else None
 
-    wilson = compute_wilson_interval(
-        seed_k, seed_f, seed_u, threshold=Fraction(1, 20)
-    )
-    raw_amounts = {
-        slot.entity_id: observations[slot.entity_id].get("raw_amount")
-        for slot in norm_members
-        if slot.entity_id is not None and slot.entity_id in observations
-    }
-    concentration = compute_concentration(norm_members, raw_amounts)
+    if membership_complete:
+        wilson = compute_wilson_interval(
+            seed_k, seed_f, seed_u, threshold=Fraction(1, 20)
+        )
+        raw_amounts = {
+            slot.entity_id: observations[slot.entity_id].get("raw_amount")
+            for slot in norm_members
+            if slot.entity_id is not None and slot.entity_id in observations
+        }
+        concentration = compute_concentration(norm_members, raw_amounts)
+    else:
+        wilson = {
+            "n": n,
+            "k": seed_k,
+            "f": seed_f,
+            "u": seed_u,
+            "point_value": None,
+            "lower": None,
+            "upper": None,
+            "meets_threshold": tri(None, "MEMBERSHIP_INCOMPLETE"),
+        }
+        concentration = {
+            "status": "UNKNOWN",
+            "top1_concentration": None,
+            "top3_concentration": None,
+            "reason": "MEMBERSHIP_INCOMPLETE",
+        }
 
     return {
         "board_id": board_id,
@@ -393,22 +413,22 @@ def compute_endpoint_board_primitives(
 
 
 def rank_endpoint_boards(
-    endpoint_boards: Mapping[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
+    endpoint_boards: Mapping[Any, dict[str, Any]],
+) -> dict[Any, dict[str, Any]]:
     """对同日同类型合格板块全集独立计算 RS5_pct 与 RS20_pct（ALG-21）。"""
     by_kind: dict[str, list[dict[str, Any]]] = {}
     for board in endpoint_boards.values():
         if board["safety"]["state"] == "TRUE":
             by_kind.setdefault(board["board_kind"], []).append(board)
 
-    ranked: dict[str, dict[str, Any]] = {}
-    for board_id, board in endpoint_boards.items():
+    ranked: dict[Any, dict[str, Any]] = {}
+    for board_key, board in endpoint_boards.items():
         copied = dict(board)
         if board["safety"]["state"] != "TRUE":
             copied["rs5_pct"] = None
             copied["rs20_pct"] = None
             copied["peer_count"] = 0
-            ranked[board_id] = copied
+            ranked[board_key] = copied
             continue
         peers = by_kind.get(board["board_kind"], [])
         rs5_peers = [p["rs5"]["value"] for p in peers if p["rs5"]["value"] is not None]
@@ -424,7 +444,7 @@ def rank_endpoint_boards(
             _midrank_percentile(rs20_peers, own20) if own20 is not None else None
         )
         copied["peer_count"] = len(peers)
-        ranked[board_id] = copied
+        ranked[board_key] = copied
     return ranked
 
 
@@ -594,8 +614,16 @@ def advance_sector_maturity_and_health(
     prev_display = (
         previous_state.get("display_maturity") if previous_state else None
     )
+    prev_last_known = (
+        previous_state.get("last_known_maturity") if previous_state else None
+    )
+    if prev_last_known is None and prev_display in {"NONE", "PREWATCH", "WARM", "CONFIRMED"}:
+        prev_last_known = prev_display
     prev_downgrade_streak = int(
         previous_state.get("downgrade_streak", 0) if previous_state else 0
+    )
+    prev_downgrade_target = (
+        previous_state.get("downgrade_target") if previous_state else None
     )
     prev_prewatch_age = int(
         previous_state.get("prewatch_no_improve_count", 0) if previous_state else 0
@@ -603,45 +631,76 @@ def advance_sector_maturity_and_health(
     prev_dq5_base = _to_fraction(
         previous_state.get("prewatch_dq5_baseline") if previous_state else None
     )
+    prev_prewatch_exited = bool(
+        previous_state.get("prewatch_exited", False) if previous_state else False
+    )
 
     if effective_maturity == "UNKNOWN":
         return {
             "effective_maturity": "UNKNOWN",
             "maturity_lower": lower,
             "maturity_upper": upper,
-            "display_maturity": prev_display or "UNKNOWN",
-            "display_quality": "STALE" if prev_display else "UNKNOWN",
+            "display_maturity": prev_last_known or "UNKNOWN",
+            "last_known_maturity": prev_last_known,
+            "display_quality": "STALE" if prev_last_known else "UNKNOWN",
             "downgrade_streak": 0,
+            "downgrade_target": None,
             "prewatch_no_improve_count": prev_prewatch_age,
             "prewatch_dq5_baseline": prev_dq5_base,
+            "prewatch_exited": prev_prewatch_exited,
             "health": health,
         }
 
+    # 若昨日因 PREWATCH 10日无改善退出且今日仍仅达 PREWATCH，当日不重入
+    prewatch_exited = False
+    if prev_prewatch_exited and effective_maturity == "PREWATCH":
+        effective_maturity = "NONE"
+        prewatch_exited = True
+
     if prev_display is None or prev_display == "UNKNOWN":
-        display_maturity = effective_maturity
-        downgrade_streak = 0
-        display_quality = "FIRST_OBSERVED"
+        if prev_last_known is not None and _MATURITY_ORDER[effective_maturity] < _MATURITY_ORDER[prev_last_known]:
+            # 从 UNKNOWN 恢复后降级重新从 1 计数
+            display_maturity = prev_last_known
+            downgrade_streak = 1
+            downgrade_target = effective_maturity
+            display_quality = "OBSERVED"
+        else:
+            display_maturity = effective_maturity
+            downgrade_streak = 0
+            downgrade_target = None
+            display_quality = "FIRST_OBSERVED" if prev_last_known is None else "OBSERVED"
     elif _MATURITY_ORDER[effective_maturity] > _MATURITY_ORDER[prev_display]:
         display_maturity = effective_maturity
         downgrade_streak = 0
+        downgrade_target = None
         display_quality = "OBSERVED"
     elif _MATURITY_ORDER[effective_maturity] < _MATURITY_ORDER[prev_display]:
-        downgrade_streak = prev_downgrade_streak + 1
+        if (
+            prev_downgrade_streak >= 1
+            and prev_downgrade_target in _MATURITY_ORDER
+            and _MATURITY_ORDER[effective_maturity] <= _MATURITY_ORDER[prev_downgrade_target]
+        ):
+            downgrade_streak = prev_downgrade_streak + 1
+        else:
+            downgrade_streak = 1
         if downgrade_streak >= 2:
             display_maturity = effective_maturity
             downgrade_streak = 0
+            downgrade_target = None
         else:
             display_maturity = prev_display
+            downgrade_target = effective_maturity
         display_quality = "OBSERVED"
     else:
         display_maturity = prev_display
         downgrade_streak = 0
+        downgrade_target = None
         display_quality = "OBSERVED"
 
     # PREWATCH 10 日无改善（同版 dq5 相对归零基准 < 3pp）退出
     prewatch_no_improve_count = 0
     prewatch_dq5_baseline = None
-    if display_maturity == "PREWATCH":
+    if display_maturity == "PREWATCH" and not prewatch_exited:
         if prev_display != "PREWATCH" or prev_dq5_base is None:
             prewatch_dq5_baseline = dq5
             prewatch_no_improve_count = 0
@@ -653,18 +712,23 @@ def advance_sector_maturity_and_health(
             prewatch_no_improve_count = prev_prewatch_age + 1
             if prewatch_no_improve_count >= 10:
                 display_maturity = "NONE"
+                effective_maturity = "NONE"
                 prewatch_no_improve_count = 0
                 prewatch_dq5_baseline = None
+                prewatch_exited = True
 
     return {
         "effective_maturity": effective_maturity,
         "maturity_lower": lower,
         "maturity_upper": upper,
         "display_maturity": display_maturity,
+        "last_known_maturity": effective_maturity,
         "display_quality": display_quality,
         "downgrade_streak": downgrade_streak,
+        "downgrade_target": downgrade_target,
         "prewatch_no_improve_count": prewatch_no_improve_count,
         "prewatch_dq5_baseline": prewatch_dq5_baseline,
+        "prewatch_exited": prewatch_exited,
         "health": health,
     }
 
@@ -675,14 +739,14 @@ def compute_sector_exhaustion_risk(
     dq5: Fraction | None,
     breadth_delta3: Fraction | None,
 ) -> dict[str, Any]:
-    """按 §9.4 计算板块 exhaustion 风险，高优先可能成立且未知时不降判。"""
-    if rs20_pct is not None and rs20_pct < Fraction(80):
-        return {"level": "LOW", "reason": "RS20_PCT_BELOW_80"}
-    if rs20_pct is None:
-        return {"level": "UNKNOWN", "reason": "RS20_PCT_UNKNOWN"}
-
-    # 至此 rs20_pct >= 80 已确定
+    """按 §9.4 计算板块 exhaustion 风险，完整 Kleene 归约：高优先可能成立且未知时不降判，已排除则继续。"""
+    rs20_ge_80 = (
+        tri(rs20_pct >= Fraction(80), "RS20_PCT_BELOW_80")
+        if rs20_pct is not None
+        else tri(None, "RS20_PCT_UNKNOWN")
+    )
     high = tri_and(
+        rs20_ge_80,
         tri(dq5 <= Fraction(-5), "DQ5_ABOVE_NEG5")
         if dq5 is not None
         else tri(None, "DQ5_UNKNOWN"),
@@ -695,11 +759,17 @@ def compute_sector_exhaustion_risk(
     if high["state"] == "UNKNOWN":
         return {"level": "UNKNOWN", "reason": high["reason"]}
 
-    if dq5 is None:
-        return {"level": "UNKNOWN", "reason": "DQ5_UNKNOWN"}
-    if dq5 < Fraction(0):
+    med = tri_and(
+        rs20_ge_80,
+        tri(dq5 < Fraction(0), "DQ5_NON_NEGATIVE")
+        if dq5 is not None
+        else tri(None, "DQ5_UNKNOWN"),
+    )
+    if med["state"] == "TRUE":
         return {"level": "MEDIUM", "reason": None}
-    return {"level": "LOW", "reason": None}
+    if med["state"] == "UNKNOWN":
+        return {"level": "UNKNOWN", "reason": med["reason"]}
+    return {"level": "LOW", "reason": med.get("reason")}
 
 
 def compute_sector_emergence(
@@ -754,12 +824,19 @@ def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[st
     non_rankable: list[dict[str, Any]] = []
     for board in boards:
         safety_state = board["raw_qualification"]["safety"]["state"]
-        if safety_state == "FALSE":
+        eff_mat = board.get("lifecycle", {}).get("effective_maturity")
+        prewatch_exited = bool(board.get("lifecycle", {}).get("prewatch_exited", False))
+        if safety_state == "FALSE" or prewatch_exited:
             non_rankable.append(
                 {
+                    "board_kind": board["board_kind"],
                     "board_id": board["board_id"],
                     "priority_status": "EXCLUDED",
-                    "reason": board["raw_qualification"]["safety"].get("reason"),
+                    "reason": (
+                        "PREWATCH_EXITED_TODAY"
+                        if prewatch_exited
+                        else board["raw_qualification"]["safety"].get("reason")
+                    ),
                     "sort_key": None,
                 }
             )
@@ -774,6 +851,7 @@ def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[st
 
         if (
             safety_state != "TRUE"
+            or eff_mat == "UNKNOWN"
             or emg["rank"] is None
             or exh["level"] not in _EXHAUSTION_RANK
             or dq5 is None
@@ -783,6 +861,7 @@ def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[st
         ):
             non_rankable.append(
                 {
+                    "board_kind": board["board_kind"],
                     "board_id": board["board_id"],
                     "priority_status": "UNKNOWN",
                     "reason": "PRIORITY_KEY_INCOMPLETE",
@@ -802,6 +881,7 @@ def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[st
         )
         rankable.append(
             {
+                "board_kind": board["board_kind"],
                 "board_id": board["board_id"],
                 "priority_status": "RANKABLE",
                 "reason": None,
@@ -817,31 +897,37 @@ def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[st
     return rankable + non_rankable
 
 
+def _board_key(board: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(board["board_kind"]), str(board["board_id"]))
+
+
 def compute_sector_native_day(
     *,
     boards_t: Sequence[Mapping[str, Any]],
-    boards_t1: Mapping[str, Mapping[str, Any]],
-    boards_t3: Mapping[str, Mapping[str, Any]],
-    previous_states: Mapping[str, Mapping[str, Any]] | None = None,
+    boards_t1: Mapping[Any, Mapping[str, Any]],
+    boards_t3: Mapping[Any, Mapping[str, Any]],
+    previous_states: Mapping[Any, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """串联 ALG-21/22/23/30/31/32 计算单日全板块正式 Native、资格、前态、风险与 Priority。"""
     ranked_t = rank_endpoint_boards(
         {
-            b["board_id"]: compute_endpoint_board_primitives(**b)
+            _board_key(b): compute_endpoint_board_primitives(**b)
             for b in boards_t
         }
     )
     ranked_t3 = rank_endpoint_boards(
         {
-            bid: compute_endpoint_board_primitives(**b)
-            for bid, b in boards_t3.items()
+            _board_key(b): compute_endpoint_board_primitives(**b)
+            for b in boards_t3.values()
         }
     )
+    t1_by_key = {_board_key(b): b for b in boards_t1.values()}
 
     results: list[dict[str, Any]] = []
-    for board_id, nt in ranked_t.items():
-        nt3 = ranked_t3.get(board_id)
-        nt1 = boards_t1.get(board_id)
+    for bkey, nt in ranked_t.items():
+        board_kind, board_id = bkey
+        nt3 = ranked_t3.get(bkey)
+        nt1 = t1_by_key.get(bkey)
         dq5 = (
             nt["rs5_pct"] - nt3["rs5_pct"]
             if nt["rs5_pct"] is not None
@@ -888,10 +974,13 @@ def compute_sector_native_day(
             breadth_delta3=bd3_info["delta"],
             ma20_delta3=md3_info["delta"],
         )
+        prev_state = None
+        if previous_states:
+            prev_state = previous_states.get(bkey) or previous_states.get(board_id)
         lifecycle = advance_sector_maturity_and_health(
             raw_qual,
             dq5=dq5,
-            previous_state=(previous_states or {}).get(board_id),
+            previous_state=prev_state,
         )
         exhaustion = compute_sector_exhaustion_risk(
             rs20_pct=nt["rs20_pct"],
@@ -904,13 +993,17 @@ def compute_sector_native_day(
             breadth_delta3=bd3_info["delta"],
             seed_wilson_point=sw_point,
         )
+        m_delta = bd3_info.get("membership_delta") or {}
         results.append(
             {
                 **nt,
+                "rs5_pct_t3": nt3["rs5_pct"] if nt3 is not None else None,
                 "dq5": dq5,
                 "breadth_delta1": bd1_info["delta"],
                 "breadth_delta3": bd3_info["delta"],
                 "ma20_delta3": md3_info["delta"],
+                "joined_count": len(m_delta.get("joined_entity_ids", ())),
+                "exited_count": len(m_delta.get("exited_entity_ids", ())),
                 "raw_qualification": raw_qual,
                 "lifecycle": lifecycle,
                 "exhaustion": exhaustion,
@@ -919,10 +1012,10 @@ def compute_sector_native_day(
         )
 
     priority_map = {
-        p["board_id"]: p for p in compute_sector_priority(results)
+        (p["board_kind"], p["board_id"]): p for p in compute_sector_priority(results)
     }
     for row in results:
-        row["priority"] = priority_map[row["board_id"]]
+        row["priority"] = priority_map[(row["board_kind"], row["board_id"])]
     return results
 
 
@@ -930,20 +1023,35 @@ def compute_sector_loo_and_support(
     *,
     target_entity_id: str,
     boards_t: Sequence[Mapping[str, Any]],
-    boards_t1: Mapping[str, Mapping[str, Any]],
-    boards_t3: Mapping[str, Mapping[str, Any]],
+    boards_t1: Mapping[Any, Mapping[str, Any]],
+    boards_t3: Mapping[Any, Mapping[str, Any]],
     primary_industry_id: str | None = None,
+    board_kind: str | None = None,
+    membership_known: bool = True,
 ) -> dict[str, Any]:
     """ALG-25 LOO：从所有同类型 peer 剔除目标证券后完整重算并确定算法支持板块。"""
+    if not membership_known:
+        return {
+            "target_entity_id": target_entity_id,
+            "primary_industry_id": primary_industry_id,
+            "algorithm_support_board_id": None,
+            "support_status": "UNKNOWN",
+            "reason": "MEMBERSHIP_SOURCE_MISSING",
+            "loo_boards": [],
+        }
+
+    scoped_t = [
+        b for b in boards_t if board_kind is None or str(b["board_kind"]) == board_kind
+    ]
     reduced_t = []
-    member_board_ids: set[str] = set()
-    for b in boards_t:
+    member_keys: set[tuple[str, str]] = set()
+    for b in scoped_t:
         slots = [s for s in b["members"] if s.entity_id != target_entity_id]
         if len(slots) != len(b["members"]):
-            member_board_ids.add(b["board_id"])
+            member_keys.add(_board_key(b))
         reduced_t.append({**b, "members": slots})
 
-    if not member_board_ids:
+    if not member_keys:
         return {
             "target_entity_id": target_entity_id,
             "primary_industry_id": primary_industry_id,
@@ -954,18 +1062,20 @@ def compute_sector_loo_and_support(
         }
 
     reduced_t1 = {
-        bid: {
+        k: {
             **b,
             "members": [s for s in b["members"] if s.entity_id != target_entity_id],
         }
-        for bid, b in boards_t1.items()
+        for k, b in boards_t1.items()
+        if board_kind is None or str(b["board_kind"]) == board_kind
     }
     reduced_t3 = {
-        bid: {
+        k: {
             **b,
             "members": [s for s in b["members"] if s.entity_id != target_entity_id],
         }
-        for bid, b in boards_t3.items()
+        for k, b in boards_t3.items()
+        if board_kind is None or str(b["board_kind"]) == board_kind
     }
 
     recomputed = compute_sector_native_day(
@@ -973,53 +1083,79 @@ def compute_sector_loo_and_support(
         boards_t1=reduced_t1,
         boards_t3=reduced_t3,
     )
-    candidates = [r for r in recomputed if r["board_id"] in member_board_ids]
+    candidates = [r for r in recomputed if _board_key(r) in member_keys]
 
-    # 按 ALG-25 / S09 确定性选择算法支持板块（最高 LOO 原始资格 → emergence → Seed 宽度 → stable_id）
-    def _qual_rank(row: Mapping[str, Any]) -> int | None:
+    def _qual_bounds(row: Mapping[str, Any]) -> tuple[int, int]:
         rq = row["raw_qualification"]
-        if rq["confirmed_raw"]["state"] == "TRUE":
-            return 3
-        if rq["warm_raw"]["state"] == "TRUE":
-            return 2
-        if rq["prewatch_raw"]["state"] == "TRUE":
-            return 1
-        if (
-            rq["confirmed_raw"]["state"] == "FALSE"
-            and rq["warm_raw"]["state"] == "FALSE"
-            and rq["prewatch_raw"]["state"] == "FALSE"
-        ):
-            return 0
-        return None
+        c_st = rq["confirmed_raw"]["state"]
+        w_st = rq["warm_raw"]["state"]
+        p_st = rq["prewatch_raw"]["state"]
+        lower = 3 if c_st == "TRUE" else 2 if w_st == "TRUE" else 1 if p_st == "TRUE" else 0
+        upper = 3 if c_st != "FALSE" else 2 if w_st != "FALSE" else 1 if p_st != "FALSE" else 0
+        return lower, upper
 
     qualified_candidates = []
+    max_known_lower = 0
+    max_possible_upper = 0
     for c in candidates:
-        qr = _qual_rank(c)
-        if qr is not None and qr > 0:
-            qualified_candidates.append((qr, c))
+        lo, up = _qual_bounds(c)
+        if lo > max_known_lower:
+            max_known_lower = lo
+        if up > max_possible_upper:
+            max_possible_upper = up
+        if lo == up and lo > 0:
+            qualified_candidates.append((lo, c))
 
-    if not qualified_candidates:
-        has_unknown = any(_qual_rank(c) is None for c in candidates)
+    # 若存在可能达到或超过已知最高档的未知候选，禁止用低档覆盖
+    ambiguous_higher = any(
+        lo != up and up >= max(1, max_known_lower)
+        for lo, up in (_qual_bounds(c) for c in candidates)
+    )
+    if ambiguous_higher:
         return {
             "target_entity_id": target_entity_id,
             "primary_industry_id": primary_industry_id,
             "algorithm_support_board_id": None,
-            "support_status": "UNKNOWN" if has_unknown else "NA",
-            "reason": "LOO_QUALIFICATION_UNKNOWN"
-            if has_unknown
-            else "NO_QUALIFIED_LOO_BOARD",
+            "support_status": "UNKNOWN",
+            "reason": "LOO_QUALIFICATION_UNKNOWN",
             "loo_boards": candidates,
         }
 
-    qualified_candidates.sort(
-        key=lambda item: (
-            -item[0],
-            -(item[1]["emergence"]["rank"] or 0),
-            -(_to_fraction(item[1]["seed_wilson"].get("point_value")) or Fraction(0)),
-            str(item[1]["board_id"]),
+    if not qualified_candidates:
+        return {
+            "target_entity_id": target_entity_id,
+            "primary_industry_id": primary_industry_id,
+            "algorithm_support_board_id": None,
+            "support_status": "NA",
+            "reason": "NO_QUALIFIED_LOO_BOARD",
+            "loo_boards": candidates,
+        }
+
+    top_tier = [c for qr, c in qualified_candidates if qr == max_known_lower]
+    if len(top_tier) > 1:
+        # 多个最高档候选并列时，若任一候选的 emergence 或 Seed 点值未知，无法确定唯一赢家 -> UNKNOWN
+        if any(
+            c["emergence"]["rank"] is None
+            or _to_fraction(c["seed_wilson"].get("point_value")) is None
+            for c in top_tier
+        ):
+            return {
+                "target_entity_id": target_entity_id,
+                "primary_industry_id": primary_industry_id,
+                "algorithm_support_board_id": None,
+                "support_status": "UNKNOWN",
+                "reason": "LOO_TIEBREAK_KEY_UNKNOWN",
+                "loo_boards": candidates,
+            }
+        top_tier.sort(
+            key=lambda c: (
+                -int(c["emergence"]["rank"]),
+                -_to_fraction(c["seed_wilson"].get("point_value")),  # type: ignore[operator]
+                str(c["board_id"]),
+            )
         )
-    )
-    best = qualified_candidates[0][1]
+
+    best = top_tier[0]
     return {
         "target_entity_id": target_entity_id,
         "primary_industry_id": primary_industry_id,

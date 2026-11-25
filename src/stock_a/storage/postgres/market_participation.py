@@ -345,16 +345,17 @@ def _market_clock(value: Any) -> str | None:
     return parsed.isoformat()
 
 
-def read_market_participation(
+def _read_market_participation_core(
     config: Mapping[str, Any],
     *,
-    market: Any,
+    target_session: date,
+    capture_id: int,
+    calendar_id: str,
+    calendar_revision: str,
+    market: Any | None = None,
     profile_revision: str | None = None,
     producer_version: str | None = None,
 ) -> dict[str, Any]:
-    """只读指定BaoStock捕获与日历下唯一已保存成交参与结果。"""
-    target_session = market.target_session
-    capture_id = market.cohort.source_capture_id
     if (
         profile_revision is not None
         and (not isinstance(profile_revision, str) or not profile_revision)
@@ -393,11 +394,13 @@ ORDER BY profile_revision, producer_version""",
             if not rows:
                 return {
                     "status": "NOT_COMPUTED",
+                    "classification": "UNKNOWN",
                     "reason": "此精确日期和BaoStock捕获尚无已保存成交参与事实。",
                 }
             if len(rows) != 1:
                 return {
                     "status": "INCOMPLETE",
+                    "classification": "UNKNOWN",
                     "reason": "同一市场来源范围存在多个画像修订或生产版本的成交参与结果。",
                 }
             parent_id = int(rows[0][0])
@@ -411,32 +414,48 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
     except source_raw.RawSourcePgError:
         raise
 
-    calculation = market.calculation
-    cohort = market.cohort
-    if (
-        day["target_session"] != target_session
-        or day["source_capture_id"] != capture_id
-        or day["source_pool_count"] != calculation.n_source
-        or day["source_time_quality"] != cohort.source_time_quality
-        or _market_clock(day["source_available_at"])
-        != _market_clock(cohort.source_available_at)
-        or day["source_clock_role"] != cohort.source_clock_role
-        or day["calendar_id"] != market.calendar["calendar_id"]
-        or day["calendar_revision"] != market.calendar["calendar_revision"]
-        or day["price_coordinate"] != "FORWARD_ADJUSTED"
-        or day["pit_status"] != "NON_PIT_RETROSPECTIVE"
-        or not _history_calendar_covers_target(
-            day["profile_history_calendar_id"],
-            day["profile_history_calendar_revision"],
-            calendar_id=market.calendar["calendar_id"],
-            calendar_revision=market.calendar["calendar_revision"],
-            target_session=target_session,
-        )
-    ):
-        return {
-            "status": "NOT_COMPARABLE",
-            "reason": "已保存成交参与结果与当前宽度的来源捕获、日历或质量绑定不一致。",
-        }
+    if market is not None:
+        calculation = market.calculation
+        cohort = market.cohort
+        if (
+            day["target_session"] != target_session
+            or day["source_capture_id"] != capture_id
+            or day["source_pool_count"] != calculation.n_source
+            or day["source_time_quality"] != cohort.source_time_quality
+            or _market_clock(day["source_available_at"])
+            != _market_clock(cohort.source_available_at)
+            or day["source_clock_role"] != cohort.source_clock_role
+            or day["calendar_id"] != calendar_id
+            or day["calendar_revision"] != calendar_revision
+            or day["price_coordinate"] != "FORWARD_ADJUSTED"
+            or day["pit_status"] != "NON_PIT_RETROSPECTIVE"
+            or not _history_calendar_covers_target(
+                day["profile_history_calendar_id"],
+                day["profile_history_calendar_revision"],
+                calendar_id=calendar_id,
+                calendar_revision=calendar_revision,
+                target_session=target_session,
+            )
+        ):
+            return {
+                "status": "NOT_COMPARABLE",
+                "classification": "UNKNOWN",
+                "reason": "已保存成交参与结果与当前宽度的来源捕获、日历或质量绑定不一致。",
+            }
+    else:
+        if (
+            day["target_session"] != target_session
+            or day["source_capture_id"] != capture_id
+            or day["calendar_id"] != calendar_id
+            or day["calendar_revision"] != calendar_revision
+            or day["price_coordinate"] != "FORWARD_ADJUSTED"
+            or day["pit_status"] != "NON_PIT_RETROSPECTIVE"
+        ):
+            return {
+                "status": "NOT_COMPARABLE",
+                "classification": "UNKNOWN",
+                "reason": "已保存成交参与结果与目标日期的来源捕获或日历绑定不一致。",
+            }
 
     source_count = int(day["source_pool_count"])
     profile_count = int(day["profile_count"])
@@ -452,6 +471,7 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
     ):
         return {
             "status": "INCOMPLETE",
+            "classification": "UNKNOWN",
             "reason": "成交参与画像、UNKNOWN原因或来源池分母未闭合。",
         }
 
@@ -462,6 +482,7 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
         if day["median_denominator"] is None or int(day["median_denominator"]) <= 0:
             return {
                 "status": "INCOMPLETE",
+                "classification": "UNKNOWN",
                 "reason": "已保存成交参与中位数的精确分母无效。",
             }
         median = Fraction(int(day["median_numerator"]), int(day["median_denominator"]))
@@ -472,11 +493,13 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
         }:
             return {
                 "status": "INCOMPLETE",
+                "classification": "UNKNOWN",
                 "reason": "已保存成交参与数值域或分类非法。",
             }
         if day["classification"] != _participation_class(median):
             return {
                 "status": "INCOMPLETE",
+                "classification": "UNKNOWN",
                 "reason": "已保存分类与精确中位数不一致。",
             }
         with localcontext() as context:
@@ -487,11 +510,13 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
         ) > Decimal("1e-22"):
             return {
                 "status": "INCOMPLETE",
+                "classification": "UNKNOWN",
                 "reason": "已保存中位数NUMERIC与精确有理数不一致。",
             }
 
     return {
         "status": day["status"],
+        "classification": day["classification"],
         "contract_version": day["contract_version"],
         "target_session": target_session.isoformat(),
         "analysis_scope": "SOURCE_SYMBOL_COHORT_FIXED_AT_T",
@@ -550,6 +575,49 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
             "amount_unit_status": day["amount_unit_status"],
         },
     }
+
+
+def read_market_participation(
+    config: Mapping[str, Any],
+    *,
+    market: Any,
+    profile_revision: str | None = None,
+    producer_version: str | None = None,
+) -> dict[str, Any]:
+    """只读指定BaoStock捕获与日历下唯一已保存成交参与结果。"""
+    return _read_market_participation_core(
+        config,
+        target_session=market.target_session,
+        capture_id=market.cohort.source_capture_id,
+        calendar_id=market.calendar["calendar_id"],
+        calendar_revision=market.calendar["calendar_revision"],
+        market=market,
+        profile_revision=profile_revision,
+        producer_version=producer_version,
+    )
+
+
+def read_market_participation_standalone(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_capture_id: int,
+    calendar_id: str,
+    calendar_revision: str,
+    profile_revision: str | None = None,
+    producer_version: str | None = None,
+) -> dict[str, Any]:
+    """无市场宽度对象时，按独立日期/捕获/日历只读已保存成交参与事实。"""
+    return _read_market_participation_core(
+        config,
+        target_session=target_session,
+        capture_id=source_capture_id,
+        calendar_id=calendar_id,
+        calendar_revision=calendar_revision,
+        market=None,
+        profile_revision=profile_revision,
+        producer_version=producer_version,
+    )
 
 
 def _participation_class(value: Fraction) -> str:

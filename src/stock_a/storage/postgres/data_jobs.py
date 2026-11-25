@@ -295,10 +295,12 @@ _CLEANUP_MODULES = {
         "child_table": "stock.r03_sector_rotation_day_states",
         "cleanup_tables": (
             "stock.r03_sector_rotation_day_states",
+            "stock.r03_sector_rotation_basket_members",
             "stock.r03_sector_rotation_episodes",
         ),
         "progress_tables": (
             "stock.r03_sector_rotation_episodes",
+            "stock.r03_sector_rotation_basket_members",
             "stock.r03_sector_rotation_day_states",
         ),
         "algorithm_column": "contract_version",
@@ -306,17 +308,29 @@ _CLEANUP_MODULES = {
     },
     "R03_SECTOR_OVERLAP": {
         "parent_table": "stock.r03_sector_overlap_clusters",
-        "child_table": None,
-        "cleanup_tables": ("stock.r03_sector_overlap_clusters",),
-        "progress_tables": ("stock.r03_sector_overlap_clusters",),
+        "child_table": "stock.r03_sector_overlap_board_facts",
+        "cleanup_tables": (
+            "stock.r03_sector_overlap_board_facts",
+            "stock.r03_sector_overlap_clusters",
+        ),
+        "progress_tables": (
+            "stock.r03_sector_overlap_clusters",
+            "stock.r03_sector_overlap_board_facts",
+        ),
         "algorithm_column": "contract_version",
         "algorithm_label": "R03正式Overlap聚类合同版本",
     },
     "R03_SECTOR_LOO": {
         "parent_table": "stock.r03_sector_loo_support_facts",
-        "child_table": None,
-        "cleanup_tables": ("stock.r03_sector_loo_support_facts",),
-        "progress_tables": ("stock.r03_sector_loo_support_facts",),
+        "child_table": "stock.r03_sector_loo_candidate_facts",
+        "cleanup_tables": (
+            "stock.r03_sector_loo_candidate_facts",
+            "stock.r03_sector_loo_support_facts",
+        ),
+        "progress_tables": (
+            "stock.r03_sector_loo_support_facts",
+            "stock.r03_sector_loo_candidate_facts",
+        ),
         "algorithm_column": "contract_version",
         "algorithm_label": "R03正式LOO支持板块合同版本",
     },
@@ -2207,6 +2221,136 @@ def _cleanup_version_rows(
             )
         return versions
 
+    if module_code == "R03_SECTOR_NATIVE":
+        cursor.execute(
+            """SELECT trade_date, scope_key, member_version, contract_version, count(*)
+               FROM stock.r03_sector_native_day_facts
+               WHERE trade_date=ANY(%s) AND trade_date<=%s
+               GROUP BY trade_date, scope_key, member_version, contract_version
+               ORDER BY trade_date, scope_key, member_version, contract_version""",
+            (list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"scope_key": str(row[1])},
+                "algorithm_version": str(row[3]),
+                "parent_rows": int(row[4]),
+                "child_rows": 0,
+                "version_key": {
+                    "scope_key": str(row[1]),
+                    "member_version": str(row[2]),
+                    "contract_version": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
+    if module_code == "R03_SECTOR_OVERLAP":
+        cursor.execute(
+            """SELECT trade_date, scope_key, member_version, contract_version, count(*)
+               FROM stock.r03_sector_overlap_clusters
+               WHERE trade_date=ANY(%s) AND trade_date<=%s
+               GROUP BY trade_date, scope_key, member_version, contract_version
+               ORDER BY trade_date, scope_key, member_version, contract_version""",
+            (list(target_sessions), cutoff),
+        )
+        versions = []
+        for row in cursor.fetchall():
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_overlap_board_facts
+                   WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                (row[0], row[1], row[2], row[3]),
+            )
+            child_cnt = int(cursor.fetchone()[0])
+            versions.append(
+                {
+                    "target_session": row[0],
+                    "source_version": {"scope_key": str(row[1])},
+                    "algorithm_version": str(row[3]),
+                    "parent_rows": int(row[4]),
+                    "child_rows": child_cnt,
+                    "version_key": {
+                        "scope_key": str(row[1]),
+                        "member_version": str(row[2]),
+                        "contract_version": str(row[3]),
+                    },
+                }
+            )
+        return versions
+
+    if module_code == "R03_SECTOR_LOO":
+        cursor.execute(
+            """SELECT f.trade_date, f.scope_key, f.member_version, f.contract_version,
+                      count(DISTINCT f.id), count(c.id)
+               FROM stock.r03_sector_loo_support_facts f
+               LEFT JOIN stock.r03_sector_loo_candidate_facts c ON c.loo_fact_id=f.id
+               WHERE f.trade_date=ANY(%s) AND f.trade_date<=%s
+               GROUP BY f.trade_date, f.scope_key, f.member_version, f.contract_version
+               ORDER BY f.trade_date, f.scope_key, f.member_version, f.contract_version""",
+            (list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"scope_key": str(row[1])},
+                "algorithm_version": str(row[3]),
+                "parent_rows": int(row[4]),
+                "child_rows": int(row[5]),
+                "version_key": {
+                    "scope_key": str(row[1]),
+                    "member_version": str(row[2]),
+                    "contract_version": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
+    if module_code == "R03_SECTOR_ROTATION":
+        cursor.execute(
+            """SELECT s.trade_date, e.scope_key, e.member_version, e.contract_version,
+                      count(DISTINCT e.id) FILTER (
+                          WHERE e.t0_session=s.trade_date
+                            AND NOT EXISTS (
+                                SELECT 1 FROM stock.r03_sector_rotation_day_states s2
+                                WHERE s2.episode_id=e.id AND NOT (s2.trade_date=ANY(%s))
+                            )
+                      ),
+                      count(DISTINCT s.id),
+                      count(DISTINCT bm.id) FILTER (
+                          WHERE e.t0_session=s.trade_date
+                            AND NOT EXISTS (
+                                SELECT 1 FROM stock.r03_sector_rotation_day_states s2
+                                WHERE s2.episode_id=e.id AND NOT (s2.trade_date=ANY(%s))
+                            )
+                      )
+               FROM stock.r03_sector_rotation_day_states s
+               JOIN stock.r03_sector_rotation_episodes e ON e.id = s.episode_id
+               LEFT JOIN stock.r03_sector_rotation_basket_members bm ON bm.episode_id=e.id
+               WHERE s.trade_date=ANY(%s) AND s.trade_date<=%s
+               GROUP BY s.trade_date, e.scope_key, e.member_version, e.contract_version
+               ORDER BY s.trade_date, e.scope_key, e.member_version, e.contract_version""",
+            (list(target_sessions), list(target_sessions), list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {"scope_key": str(row[1])},
+                "algorithm_version": str(row[3]),
+                "parent_rows": int(row[4]),
+                "child_rows": int(row[5]),
+                "dependent_rows": {
+                    "stock.r03_sector_rotation_basket_members": int(row[6]),
+                },
+                "version_key": {
+                    "scope_key": str(row[1]),
+                    "member_version": str(row[2]),
+                    "contract_version": str(row[3]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
+
     if module_code == "SECTOR_PULSE":
         cursor.execute(
             """SELECT target_session,source_capture_id,profile_revision,
@@ -2935,6 +3079,37 @@ def _cleanup_preview_in_cursor(
                             ),
                         }
                     )
+    if module_code == "R03_SECTOR_NATIVE":
+        for version in versions:
+            scope_k = version["version_key"]["scope_key"]
+            t_day = version["target_session"]
+            for dep_table, sql in (
+                (
+                    "stock.r03_sector_rotation_day_states",
+                    """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
+                       JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
+                       WHERE s.trade_date=%s AND e.scope_key=%s""",
+                ),
+                (
+                    "stock.r03_sector_overlap_clusters",
+                    "SELECT count(*) FROM stock.r03_sector_overlap_clusters WHERE trade_date=%s AND scope_key=%s",
+                ),
+                (
+                    "stock.r03_sector_loo_support_facts",
+                    "SELECT count(*) FROM stock.r03_sector_loo_support_facts WHERE trade_date=%s AND scope_key=%s",
+                ),
+            ):
+                cursor.execute(sql, (t_day, scope_k))
+                dep_rows = int(cursor.fetchone()[0])
+                if dep_rows:
+                    blockers.append(
+                        {
+                            "referenced_table": spec["parent_table"],
+                            "dependent_table": dep_table,
+                            "constraint": "业务依赖：R03后继事实依赖同日期同scope的Native事实",
+                            "reason": f"先清理同日期与scope的R03后继模块，再清理R03_SECTOR_NATIVE（PG读回到{dep_rows}条）",
+                        }
+                    )
     if module_code == "SECTOR_PULSE":
         for version in versions:
             source_version = version["source_version"]
@@ -3606,6 +3781,140 @@ def clear_derived_module(
                 )
                 deleted_by_session[target_session.isoformat()][
                     "stock.source_d0_formal_admission_day_facts"
+                ] += cursor.rowcount
+            elif module_code == "R03_SECTOR_NATIVE":
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_native_day_facts
+                       WHERE trade_date=%s AND scope_key=%s AND member_version=%s
+                         AND contract_version=%s""",
+                    (
+                        target_session,
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_native_day_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_native_day_facts"
+                ] += cursor.rowcount
+            elif module_code == "R03_SECTOR_ROTATION":
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_day_states s
+                       USING stock.r03_sector_rotation_episodes e
+                       WHERE s.episode_id=e.id AND s.trade_date=%s
+                         AND e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s""",
+                    (
+                        target_session,
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_rotation_day_states"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_rotation_day_states"
+                ] += cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_basket_members bm
+                       USING stock.r03_sector_rotation_episodes e
+                       WHERE bm.episode_id=e.id
+                         AND e.scope_key=%s AND e.member_version=%s
+                         AND e.contract_version=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                             WHERE s.episode_id=e.id
+                         )""",
+                    (
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_rotation_basket_members"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_rotation_basket_members"
+                ] += cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_episodes e
+                       WHERE e.scope_key=%s AND e.member_version=%s
+                         AND e.contract_version=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                             WHERE s.episode_id=e.id
+                         )""",
+                    (
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_rotation_episodes"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_rotation_episodes"
+                ] += cursor.rowcount
+            elif module_code == "R03_SECTOR_OVERLAP":
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_overlap_board_facts
+                       WHERE trade_date=%s AND scope_key=%s AND member_version=%s
+                         AND contract_version=%s""",
+                    (
+                        target_session,
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_overlap_board_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_overlap_board_facts"
+                ] += cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_overlap_clusters
+                       WHERE trade_date=%s AND scope_key=%s AND member_version=%s
+                         AND contract_version=%s""",
+                    (
+                        target_session,
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_overlap_clusters"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_overlap_clusters"
+                ] += cursor.rowcount
+            elif module_code == "R03_SECTOR_LOO":
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_loo_candidate_facts c
+                       USING stock.r03_sector_loo_support_facts f
+                       WHERE c.loo_fact_id=f.id AND f.trade_date=%s AND f.scope_key=%s
+                         AND f.member_version=%s AND f.contract_version=%s""",
+                    (
+                        target_session,
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_loo_candidate_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_loo_candidate_facts"
+                ] += cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_loo_support_facts
+                       WHERE trade_date=%s AND scope_key=%s AND member_version=%s
+                         AND contract_version=%s""",
+                    (
+                        target_session,
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_loo_support_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_loo_support_facts"
                 ] += cursor.rowcount
             elif module_code == "SECTOR_PULSE":
                 cursor.execute(
@@ -4912,6 +5221,27 @@ def read_business_table_count(
                 producer_version,
             ),
         ),
+        "stock.r03_sector_native_day_facts": (
+            """SELECT count(*) FROM stock.r03_sector_native_day_facts
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
+        ),
+        "stock.r03_sector_rotation_day_states": (
+            """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
+               JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
+               WHERE s.trade_date=%s AND e.contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
+        ),
+        "stock.r03_sector_overlap_clusters": (
+            """SELECT count(*) FROM stock.r03_sector_overlap_clusters
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
+        ),
+        "stock.r03_sector_loo_support_facts": (
+            """SELECT count(*) FROM stock.r03_sector_loo_support_facts
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
+        ),
         "stock.source_sector_cross_period_pulse_facts": (
             """SELECT count(*) FROM stock.source_sector_cross_period_pulse_facts p
                JOIN stock.tdx_sector_catalog c ON c.id=p.catalog_id
@@ -5928,6 +6258,27 @@ def mark_progress_cleared(
                FROM stock.source_research_enrollments e
                JOIN stock.source_d0_launch_day_facts d ON d.id=e.d0_fact_id
                WHERE d.target_session=%s AND d.target_session<=%s""",
+        ),
+        "stock.r03_sector_native_day_facts": (
+            """SELECT count(*) FROM stock.r03_sector_native_day_facts
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
+        ),
+        "stock.r03_sector_rotation_day_states": (
+            """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
+               JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
+               WHERE s.trade_date=%s AND e.contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
+        ),
+        "stock.r03_sector_overlap_clusters": (
+            """SELECT count(*) FROM stock.r03_sector_overlap_clusters
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
+        ),
+        "stock.r03_sector_loo_support_facts": (
+            """SELECT count(*) FROM stock.r03_sector_loo_support_facts
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
         ),
         "stock.source_sector_cross_period_pulse_facts": (
             "SELECT count(*) FROM stock.source_sector_cross_period_pulse_facts WHERE target_session=%s AND target_session<=%s",

@@ -866,7 +866,7 @@ def read_retrospective_rotation(
                 if current is not None
                 else (
                     "CONFIRMED_SUSPENSION"
-                    if bar is not None and bar.state == "SUSPENDED"
+                    if bar is not None and bar.state == "CONFIRMED_SUSPENSION"
                     else "UNKNOWN"
                 )
             )

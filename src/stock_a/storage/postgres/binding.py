@@ -91,6 +91,7 @@ _MIGRATION_FILES = (
     "0077_r02_cross_section_scope_binding.sql",
     "0078_r02_d1_cross_section_scope.sql",
     "0079_r02_register_coordinator_source_modules.sql",
+    "0080_r03_formal_sector_rotation_overlap.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -137,6 +138,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R08_BIZ11_RESET_SOURCE_PREFLIGHT_R1": frozenset({51}),
     "R00_ADJUSTED_PRICE_PG_CLOSURE_R1": frozenset({52, 53}),
     "R02_FINAL_CLOSURE_20261125": frozenset({77, 78, 79}),
+    "R03_COMPLETE_PHASE_REPAIR_20261125": frozenset({80}),
     "SOURCE_SWITCH_01_BAOSTOCK_PRICE_PG_RESET_E2E_R1_20261119": frozenset(
         {54, 55, 56, 57, 58, 59}
     ),
@@ -387,6 +389,16 @@ _RELATIONS_BY_MIGRATION_COUNT[76] = _RELATIONS_BY_MIGRATION_COUNT[75]
 _RELATIONS_BY_MIGRATION_COUNT[77] = _RELATIONS_BY_MIGRATION_COUNT[76]
 _RELATIONS_BY_MIGRATION_COUNT[78] = _RELATIONS_BY_MIGRATION_COUNT[77]
 _RELATIONS_BY_MIGRATION_COUNT[79] = _RELATIONS_BY_MIGRATION_COUNT[78]
+_RELATIONS_BY_MIGRATION_COUNT[80] = _RELATIONS_BY_MIGRATION_COUNT[79] | {
+    "r03_sector_native_day_facts",
+    "r03_sector_rotation_episodes",
+    "r03_sector_rotation_basket_members",
+    "r03_sector_rotation_day_states",
+    "r03_sector_overlap_clusters",
+    "r03_sector_overlap_board_facts",
+    "r03_sector_loo_support_facts",
+    "r03_sector_loo_candidate_facts",
+}
 
 
 class BindingRefused(Exception):

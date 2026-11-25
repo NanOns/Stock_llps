@@ -320,84 +320,119 @@ def step_rotation_state_machine(
             "preserve_prior": True,
         }
 
-    active = (
+    raw_prev_state = previous_episode_state.get("state") if previous_episode_state else None
+    effective_prev_state = (
+        previous_episode_state.get("last_known_state")
+        if raw_prev_state == "UNKNOWN" and previous_episode_state is not None
+        else raw_prev_state
+    )
+    has_active_basket = (
         previous_episode_state is not None
-        and previous_episode_state.get("state")
-        not in {None, "NONE", "FAILED", "OUT"}
+        and effective_prev_state not in {None, "NONE", "FAILED", "OUT"}
+        and basket_metrics is not None
     )
 
-    if not active:
+    if not has_active_basket:
         # 终态后需 armed 才允许新 child；初次或已 armed 且满足 PULSE raw -> 出生 PULSE
-        armed = (
-            True
-            if previous_episode_state is None
-            or previous_episode_state.get("state") in {None, "NONE"}
-            else bool(previous_episode_state.get("armed", False))
+        prev_market_age = (
+            int(previous_episode_state.get("market_age", 0))
+            if previous_episode_state is not None
+            else 0
         )
-        if not armed and previous_episode_state is not None:
+        if effective_prev_state in {"FAILED", "OUT"}:
+            armed = bool(previous_episode_state.get("armed", False))  # type: ignore[union-attr]
+        else:
+            armed = True
+        if not armed and effective_prev_state in {"FAILED", "OUT"}:
             if pulse_raw["state"] == "FALSE":
                 return {
-                    "state": previous_episode_state["state"],
+                    "state": effective_prev_state,
+                    "last_known_state": effective_prev_state,
+                    "stale": False,
                     "armed": True,
-                    "eval_age": previous_episode_state.get("eval_age", 0),
-                    "accepted_once": previous_episode_state.get(
-                        "accepted_once", False
-                    ),
+                    "market_age": prev_market_age + 1,
+                    "eval_age": previous_episode_state.get("eval_age", 0),  # type: ignore[union-attr]
+                    "accepted_once": previous_episode_state.get("accepted_once", False),  # type: ignore[union-attr]
                     "out_neg_streak": 0,
+                    "prev_mature_true": False,
+                    "dq5": dq5,
                     "reason": "REARMED_BY_CONFIRMED_FALSE_PULSE",
                 }
             return {
-                "state": previous_episode_state["state"],
+                "state": effective_prev_state,
+                "last_known_state": effective_prev_state,
+                "stale": False,
                 "armed": False,
-                "eval_age": previous_episode_state.get("eval_age", 0),
-                "accepted_once": previous_episode_state.get("accepted_once", False),
+                "market_age": prev_market_age + 1,
+                "eval_age": previous_episode_state.get("eval_age", 0),  # type: ignore[union-attr]
+                "accepted_once": previous_episode_state.get("accepted_once", False),  # type: ignore[union-attr]
                 "out_neg_streak": 0,
+                "prev_mature_true": False,
+                "dq5": dq5,
                 "reason": "TERMINATED_WAITING_FOR_FALSE_PULSE_REARM",
             }
 
         if pulse_raw["state"] == "TRUE":
             return {
                 "state": "PULSE",
+                "last_known_state": "PULSE",
+                "stale": False,
                 "armed": False,
+                "market_age": 0,
                 "eval_age": 0,
                 "accepted_once": False,
                 "out_neg_streak": 0,
+                "prev_mature_true": False,
+                "dq5": dq5,
                 "reason": None,
             }
         if pulse_raw["state"] == "FALSE":
             return {
                 "state": "NONE",
+                "last_known_state": "NONE",
+                "stale": False,
                 "armed": True,
+                "market_age": 0,
                 "eval_age": 0,
                 "accepted_once": False,
                 "out_neg_streak": 0,
+                "prev_mature_true": False,
+                "dq5": dq5,
                 "reason": None,
             }
         return {
             "state": "UNKNOWN",
-            "last_known_state": (
-                previous_episode_state.get("state")
-                if previous_episode_state
-                else None
-            ),
-            "stale": previous_episode_state is not None,
+            "last_known_state": effective_prev_state,
+            "stale": effective_prev_state is not None,
             "armed": armed,
+            "market_age": (prev_market_age + 1) if previous_episode_state else 0,
             "eval_age": 0,
             "accepted_once": False,
             "out_neg_streak": 0,
+            "prev_mature_true": False,
+            "dq5": None,
             "reason": pulse_raw.get("reason"),
         }
 
     # 活动 episode 推进
     assert previous_episode_state is not None
     assert basket_metrics is not None
-    prev_state = str(previous_episode_state["state"])
+    prev_state = str(effective_prev_state)
+    prev_was_unknown = raw_prev_state == "UNKNOWN"
     prev_age = int(previous_episode_state.get("eval_age", 0))
+    prev_market_age = int(previous_episode_state.get("market_age", prev_age))
     next_age = prev_age + 1
+    next_market_age = prev_market_age + 1
     accepted_once = bool(previous_episode_state.get("accepted_once", False))
-    prev_out_streak = int(previous_episode_state.get("out_neg_streak", 0))
-    prev_mature_true = bool(previous_episode_state.get("mature_true", False))
-    prev_dq5 = previous_episode_state.get("dq5")
+    prev_out_streak = (
+        0 if prev_was_unknown else int(previous_episode_state.get("out_neg_streak", 0))
+    )
+    prev_mature_true = (
+        False
+        if prev_was_unknown
+        else bool(previous_episode_state.get("prev_mature_true", previous_episode_state.get("mature_true", False)))
+    )
+    prev_dq5 = None if prev_was_unknown else previous_episode_state.get("dq5")
 
     form_r = basket_metrics["formation_r"]
     early = basket_metrics["early"]
@@ -410,137 +445,223 @@ def step_rotation_state_machine(
             "last_known_state": prev_state,
             "stale": True,
             "armed": False,
+            "market_age": next_market_age,
             "eval_age": prev_age,
             "accepted_once": accepted_once,
             "out_neg_streak": 0,
+            "prev_mature_true": prev_mature_true,
+            "dq5": prev_dq5,
             "reason": reason,
         }
 
-    # 2. 后继第 1..5 可评估日：formation_R <= 0 且 breadth_delta1 <= -0.05 -> FAILED
+    # 2. 后继第 1..5 可评估日：formation_R <= 0 且 breadth_delta1 <= -0.05 -> FAILED（Kleene 归约）
     if 1 <= next_age <= 5:
-        if form_r is None or breadth_delta1 is None:
-            return _stale_unknown("FAIL_CHECK_INPUT_UNKNOWN")
-        if form_r <= Fraction(0) and breadth_delta1 <= Fraction(-5, 100):
+        fail_pred = tri_and(
+            tri(form_r <= Fraction(0), "FORM_R_POSITIVE")
+            if form_r is not None
+            else tri(None, "FORM_R_UNKNOWN"),
+            tri(breadth_delta1 <= Fraction(-5, 100), "BREADTH_DELTA1_ABOVE_NEG0_05")
+            if breadth_delta1 is not None
+            else tri(None, "BREADTH_DELTA1_UNKNOWN"),
+        )
+        if fail_pred["state"] == "TRUE":
             return {
                 "state": "FAILED",
+                "last_known_state": "FAILED",
+                "stale": False,
                 "armed": False,
+                "market_age": next_market_age,
                 "eval_age": next_age,
                 "accepted_once": accepted_once,
                 "out_neg_streak": 0,
+                "prev_mature_true": False,
+                "dq5": dq5,
                 "reason": "EARLY_FAILURE_THRESHOLD_HIT",
             }
+        if fail_pred["state"] == "UNKNOWN":
+            return _stale_unknown("FAIL_CHECK_INPUT_UNKNOWN")
 
     # 3. OUT：t-1 已接受板块 D2 为 WARM/CONFIRMED 且 dq5 < 0 与 breadth_delta1 < 0 连续 2 个相邻可评估会话
     out_streak = prev_out_streak
-    if t_minus_1_d2_maturity is None or t_minus_1_d2_maturity == "UNKNOWN":
-        return _stale_unknown("T_MINUS_1_D2_MATURITY_UNKNOWN")
-    if t_minus_1_d2_maturity in {"WARM", "CONFIRMED"}:
-        if dq5 is None or breadth_delta1 is None:
-            return _stale_unknown("OUT_INPUT_UNKNOWN")
-        if dq5 < Fraction(0) and breadth_delta1 < Fraction(0):
-            out_streak = prev_out_streak + 1
-            if out_streak >= 2:
-                return {
-                    "state": "OUT",
-                    "armed": False,
-                    "eval_age": next_age,
-                    "accepted_once": accepted_once,
-                    "out_neg_streak": out_streak,
-                    "reason": "TWO_SESSION_ROTATION_OUT",
-                }
-        else:
-            out_streak = 0
-    else:
+    d2_is_warm_or_conf = (
+        tri(True)
+        if t_minus_1_d2_maturity in {"WARM", "CONFIRMED"}
+        else tri(False, "D2_NOT_WARM_OR_CONFIRMED")
+        if t_minus_1_d2_maturity in {"NONE", "PREWATCH"}
+        else tri(None, "T_MINUS_1_D2_MATURITY_UNKNOWN")
+    )
+    out_neg_today = tri_and(
+        d2_is_warm_or_conf,
+        tri(dq5 < Fraction(0), "DQ5_NON_NEGATIVE")
+        if dq5 is not None
+        else tri(None, "DQ5_UNKNOWN"),
+        tri(breadth_delta1 < Fraction(0), "BREADTH_DELTA1_NON_NEGATIVE")
+        if breadth_delta1 is not None
+        else tri(None, "BREADTH_DELTA1_UNKNOWN"),
+    )
+    if out_neg_today["state"] == "TRUE":
+        out_streak = prev_out_streak + 1
+        if out_streak >= 2:
+            return {
+                "state": "OUT",
+                "last_known_state": "OUT",
+                "stale": False,
+                "armed": False,
+                "market_age": next_market_age,
+                "eval_age": next_age,
+                "accepted_once": accepted_once,
+                "out_neg_streak": out_streak,
+                "prev_mature_true": False,
+                "dq5": dq5,
+                "reason": "TWO_SESSION_ROTATION_OUT",
+            }
+    elif out_neg_today["state"] == "FALSE":
         out_streak = 0
+    else:
+        return _stale_unknown(str(out_neg_today.get("reason") or "OUT_INPUT_UNKNOWN"))
 
     # 4. 尚未 accepted_once 且当前后继有效计数 >= 6 -> FAILED
     if not accepted_once and next_age >= 6:
         return {
             "state": "FAILED",
+            "last_known_state": "FAILED",
+            "stale": False,
             "armed": False,
+            "market_age": next_market_age,
             "eval_age": next_age,
             "accepted_once": False,
             "out_neg_streak": out_streak,
+            "prev_mature_true": False,
+            "dq5": dq5,
             "reason": "NOT_ACCEPTED_BY_SESSION_6",
         }
 
-    # 5. REACCELERATING
+    # 5. REACCELERATING：前状态在成熟集合、前相邻会话 mature TRUE 且 prev_dq5 <= 0，今 pulse 和 mature TRUE
     if (
-        prev_state in {"ACCEPTED", "EXPANDING", "REACCELERATING"}
+        not prev_was_unknown
+        and prev_state in {"ACCEPTED", "EXPANDING", "REACCELERATING"}
         and prev_mature_true
         and prev_dq5 is not None
         and prev_dq5 <= Fraction(0)
+        and mature["state"] != "NA"
     ):
-        if pulse_raw["state"] == "UNKNOWN" or mature["state"] == "UNKNOWN":
-            return _stale_unknown("REACCELERATING_INPUT_UNKNOWN")
-        if pulse_raw["state"] == "TRUE" and mature["state"] == "TRUE":
+        reaccel_pred = tri_and(
+            pulse_raw,
+            tri(
+                True
+                if mature["state"] == "TRUE"
+                else False
+                if mature["state"] == "FALSE"
+                else None,
+                "MATURE_NOT_TRUE",
+            ),
+        )
+        if reaccel_pred["state"] == "TRUE":
             return {
                 "state": "REACCELERATING",
+                "last_known_state": "REACCELERATING",
+                "stale": False,
                 "armed": False,
+                "market_age": next_market_age,
                 "eval_age": next_age,
                 "accepted_once": True,
                 "out_neg_streak": out_streak,
-                "mature_true": True,
+                "prev_mature_true": True,
                 "dq5": dq5,
                 "reason": None,
             }
+        if reaccel_pred["state"] == "UNKNOWN":
+            return _stale_unknown("REACCELERATING_INPUT_UNKNOWN")
 
-    # 6. EXPANDING：后继计数 >= 2，mature TRUE 且 diffusion TRUE
-    if next_age >= 2 and mature["state"] != "NA":
-        if mature["state"] == "UNKNOWN" or diffusion["state"] == "UNKNOWN":
-            return _stale_unknown("EXPANDING_INPUT_UNKNOWN")
-        if mature["state"] == "TRUE" and diffusion["state"] == "TRUE":
+    # 6. EXPANDING：后继计数 >= 2、前状态在成熟集合（IN 不可直接 EXPANDING）、今 mature 与 diffusion TRUE
+    if (
+        next_age >= 2
+        and prev_state in {"ACCEPTED", "EXPANDING", "REACCELERATING"}
+        and mature["state"] != "NA"
+    ):
+        exp_pred = tri_and(
+            tri(
+                True
+                if mature["state"] == "TRUE"
+                else False
+                if mature["state"] == "FALSE"
+                else None,
+                "MATURE_NOT_TRUE",
+            ),
+            diffusion,
+        )
+        if exp_pred["state"] == "TRUE":
             return {
                 "state": "EXPANDING",
+                "last_known_state": "EXPANDING",
+                "stale": False,
                 "armed": False,
+                "market_age": next_market_age,
                 "eval_age": next_age,
                 "accepted_once": True,
                 "out_neg_streak": out_streak,
-                "mature_true": True,
+                "prev_mature_true": True,
                 "dq5": dq5,
                 "reason": None,
             }
+        if exp_pred["state"] == "UNKNOWN":
+            return _stale_unknown("EXPANDING_INPUT_UNKNOWN")
 
     # 7. ACCEPTED：后继计数 >= 2，early TRUE 且 breadth_delta1 >= -0.05
     if next_age >= 2:
-        if early["state"] == "UNKNOWN" or breadth_delta1 is None:
-            return _stale_unknown("ACCEPTED_INPUT_UNKNOWN")
-        if early["state"] == "TRUE" and breadth_delta1 >= Fraction(-5, 100):
+        acc_pred = tri_and(
+            early,
+            tri(breadth_delta1 >= Fraction(-5, 100), "BREADTH_DELTA1_BELOW_NEG0_05")
+            if breadth_delta1 is not None
+            else tri(None, "BREADTH_DELTA1_UNKNOWN"),
+        )
+        if acc_pred["state"] == "TRUE":
             return {
                 "state": "ACCEPTED",
+                "last_known_state": "ACCEPTED",
+                "stale": False,
                 "armed": False,
+                "market_age": next_market_age,
                 "eval_age": next_age,
                 "accepted_once": True,
                 "out_neg_streak": out_streak,
-                "mature_true": mature["state"] == "TRUE",
+                "prev_mature_true": mature["state"] == "TRUE",
                 "dq5": dq5,
                 "reason": None,
             }
+        if acc_pred["state"] == "UNKNOWN":
+            return _stale_unknown("ACCEPTED_INPUT_UNKNOWN")
 
     # 8. IN：后继计数 >= 1 且 early TRUE
     if next_age >= 1:
-        if early["state"] == "UNKNOWN":
-            return _stale_unknown("IN_INPUT_UNKNOWN")
         if early["state"] == "TRUE":
             return {
                 "state": "IN",
+                "last_known_state": "IN",
+                "stale": False,
                 "armed": False,
+                "market_age": next_market_age,
                 "eval_age": next_age,
                 "accepted_once": accepted_once,
                 "out_neg_streak": out_streak,
-                "mature_true": mature["state"] == "TRUE",
+                "prev_mature_true": mature["state"] == "TRUE",
                 "dq5": dq5,
                 "reason": None,
             }
+        if early["state"] == "UNKNOWN":
+            return _stale_unknown("IN_INPUT_UNKNOWN")
 
     # 10. 保原状态
     return {
         "state": prev_state,
+        "last_known_state": prev_state,
+        "stale": False,
         "armed": False,
+        "market_age": next_market_age,
         "eval_age": next_age,
         "accepted_once": accepted_once,
         "out_neg_streak": out_streak,
-        "mature_true": mature["state"] == "TRUE",
+        "prev_mature_true": mature["state"] == "TRUE",
         "dq5": dq5,
         "reason": None,
     }

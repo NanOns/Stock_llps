@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Mapping, Sequence
 from fractions import Fraction
-import hashlib
 from typing import Any
 
 
@@ -30,8 +29,8 @@ def compute_jaccard(
 
 
 def _cluster_id(board_kind: str, board_ids: Sequence[str]) -> str:
-    payload = f"{board_kind}:" + ",".join(sorted(board_ids))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    """按类型与稳定排序成员集合生成确定性业务簇标识（禁止使用 SHA）。"""
+    return f"{board_kind}:" + "+".join(sorted(board_ids))
 
 
 def compute_sector_overlap(
@@ -42,7 +41,9 @@ def compute_sector_overlap(
     jaccard_threshold: Fraction = Fraction(3, 5),
 ) -> dict[str, Any]:
     """按同类型合格板块计算 unique_share、连通分量簇、parent 追溯、代表及展示摘要。"""
-    prio_by_id = {str(p["board_id"]): p for p in priority_rows}
+    prio_by_key = {
+        (str(p.get("board_kind", "")), str(p["board_id"])): p for p in priority_rows
+    }
     by_kind: dict[str, list[Mapping[str, Any]]] = {"INDUSTRY": [], "CONCEPT": []}
     for b in boards:
         if b["raw_qualification"]["safety"]["state"] == "TRUE":
@@ -169,13 +170,14 @@ def compute_sector_overlap(
 
             # 按 Priority 选择代表；若存在 UNKNOWN Priority 候选则代表 UNKNOWN
             rankable_members = [
-                prio_by_id[bid]
+                prio_by_key[(kind, bid)]
                 for bid in comp
-                if bid in prio_by_id
-                and prio_by_id[bid]["priority_status"] == "RANKABLE"
+                if (kind, bid) in prio_by_key
+                and prio_by_key[(kind, bid)]["priority_status"] == "RANKABLE"
             ]
             has_unknown_prio = any(
-                bid in prio_by_id and prio_by_id[bid]["priority_status"] == "UNKNOWN"
+                (kind, bid) in prio_by_key
+                and prio_by_key[(kind, bid)]["priority_status"] == "UNKNOWN"
                 for bid in comp
             )
             if has_unknown_prio:
@@ -205,7 +207,8 @@ def compute_sector_overlap(
         ordered_kind = [
             p
             for p in priority_rows
-            if str(p["board_id"]) in set(board_ids)
+            if str(p.get("board_kind", kind)) == kind
+            and str(p["board_id"]) in set(board_ids)
             and p["priority_status"] == "RANKABLE"
         ]
         ordered_kind.sort(key=lambda p: p["sort_key"])

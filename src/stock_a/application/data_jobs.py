@@ -346,8 +346,12 @@ _STAGE_ORDER = {
     "FOCUS_FORMAL": 8,
     "FOCUS_RESEARCH_CONTEXT": 8,
     "SECTOR_PULSE": 9,
+    "R03_SECTOR_NATIVE": 9,
     "SECTOR_TRANSITION": 10,
+    "R03_SECTOR_ROTATION": 10,
+    "R03_SECTOR_OVERLAP": 10,
     "SECTOR_FOLLOWUP": 11,
+    "R03_SECTOR_LOO": 11,
     "FORWARD_PATH": 12,
     "COHORT_STATS": 13,
     "FEP_BASELINE": 14,
@@ -373,6 +377,10 @@ _MODULES = {
     "SECTOR_PULSE": ("RESEARCH", "行业 / GN概念PULSE", True, True),
     "SECTOR_TRANSITION": ("RESEARCH", "行业 / GN概念相邻变化", True, True),
     "SECTOR_FOLLOWUP": ("RESEARCH", "板块跨日跟踪", True, True),
+    "R03_SECTOR_NATIVE": ("RESEARCH", "R03正式板块Native与资格", True, True),
+    "R03_SECTOR_ROTATION": ("RESEARCH", "R03正式Rotation生命周期", True, True),
+    "R03_SECTOR_OVERLAP": ("RESEARCH", "R03正式Overlap簇与代表", True, True),
+    "R03_SECTOR_LOO": ("RESEARCH", "R03正式LOO与支持板块", True, True),
     "FORWARD_PATH": ("RESEARCH", "Forward路径", True, True),
     "COHORT_STATS": ("RESEARCH", "Cohort分组统计", True, True),
     "FEP_BASELINE": ("RESEARCH", "FEP条件基线", True, True),
@@ -1147,6 +1155,10 @@ def build_data_job_plan(
                     "SECTOR_PULSE",
                     "SECTOR_TRANSITION",
                     "SECTOR_FOLLOWUP",
+                    "R03_SECTOR_NATIVE",
+                    "R03_SECTOR_ROTATION",
+                    "R03_SECTOR_OVERLAP",
+                    "R03_SECTOR_LOO",
                     "FOCUS_FORMAL",
                     "D0",
                     "D1",
@@ -2555,6 +2567,10 @@ class DataJobCoordinator:
             "SECTOR_PULSE",
             "SECTOR_TRANSITION",
             "SECTOR_FOLLOWUP",
+            "R03_SECTOR_NATIVE",
+            "R03_SECTOR_ROTATION",
+            "R03_SECTOR_OVERLAP",
+            "R03_SECTOR_LOO",
             "FOCUS_FORMAL",
         } & set(request["selected_modules"]):
             from stock_a.application.source_sector_pulse import (
@@ -3054,6 +3070,41 @@ class DataJobCoordinator:
                         "message": "行业与GN概念来源快照对不可用。",
                     }
                 )
+        _R03_TABLE_BY_MODULE = {
+            "R03_SECTOR_NATIVE": "stock.r03_sector_native_day_facts",
+            "R03_SECTOR_ROTATION": "stock.r03_sector_rotation_day_states",
+            "R03_SECTOR_OVERLAP": "stock.r03_sector_overlap_clusters",
+            "R03_SECTOR_LOO": "stock.r03_sector_loo_support_facts",
+        }
+        for r03_mod, r03_table in _R03_TABLE_BY_MODULE.items():
+            if r03_mod in request["selected_modules"]:
+                sector_source_will_generate = (
+                    "TDX_SECTOR_MEMBERS" in request["source_modules"]
+                )
+                for day in plan.get("module_output_sessions", {}).get(r03_mod, ()):
+                    day_status = (
+                        "NOT_COMPUTED"
+                        if (
+                            sector_pair.get("status") != "AVAILABLE"
+                            and not sector_source_will_generate
+                        )
+                        or day in set(plan.get("raw_input_unavailable_sessions", ()))
+                        else "NOT_STARTED"
+                    )
+                    _unit(
+                        plan["stage_units"],
+                        stage=r03_mod,
+                        target_session=date.fromisoformat(day),
+                        business_table=r03_table,
+                        status=day_status,
+                        error_code=sector_pair.get("reason_code")
+                        if day_status == "NOT_COMPUTED"
+                        else None,
+                        error_message="行业与GN概念来源快照对不可用；保留未计算。"
+                        if day_status == "NOT_COMPUTED"
+                        else None,
+                    )
+                plan["planned_unit_count"] = len(plan["stage_units"])
         if "SECTOR_FOLLOWUP" in request["selected_modules"]:
             due_by_session = plan.get("sector_followup_due_targets", {})
             insufficient = set(plan.get("sector_followup_insufficient_sessions", ()))
@@ -8045,7 +8096,15 @@ def _execute_shared_production_chain_impl(
         return 0
 
     snapshot_ids = None
-    if {"SECTOR_PULSE", "SECTOR_TRANSITION", "SECTOR_FOLLOWUP"} & research_modules:
+    if {
+        "SECTOR_PULSE",
+        "SECTOR_TRANSITION",
+        "SECTOR_FOLLOWUP",
+        "R03_SECTOR_NATIVE",
+        "R03_SECTOR_ROTATION",
+        "R03_SECTOR_OVERLAP",
+        "R03_SECTOR_LOO",
+    } & research_modules:
         snapshot_ids = paired_sector_snapshots()
 
     if "SECTOR_PULSE" in research_modules:
@@ -8662,6 +8721,123 @@ def _execute_shared_production_chain_impl(
                     (
                         str(getattr(error, "code", type(error).__name__)),
                         f"PULSE后继({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    r03_selected = research_modules & {
+        "R03_SECTOR_NATIVE",
+        "R03_SECTOR_ROTATION",
+        "R03_SECTOR_OVERLAP",
+        "R03_SECTOR_LOO",
+    }
+    if r03_selected:
+        from stock_a.application.r03_formal_sector import (
+            R03_CONTRACT_VERSION,
+            run_r03_formal_sector_for_session,
+        )
+
+        all_r03_days = sorted(
+            {
+                day_text
+                for mod in r03_selected
+                for day_text in plan.get("module_output_sessions", {}).get(mod, ())
+            }
+        )
+        for day_text in all_r03_days:
+            day = date.fromisoformat(day_text)
+            day_modules = {
+                mod
+                for mod in r03_selected
+                if day_text in plan.get("module_output_sessions", {}).get(mod, ())
+            }
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") in day_modules
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            try:
+                profile_revision = profile_revision_for_session(day)
+                idx_day = sessions.index(day) if day in sessions else -1
+                t1_day = sessions[idx_day - 1] if idx_day >= 1 else None
+                t3_day = sessions[idx_day - 3] if idx_day >= 3 else None
+                r03_res = run_r03_formal_sector_for_session(
+                    config,
+                    target_session=day,
+                    t1_session=t1_day,
+                    t3_session=t3_day,
+                    source_capture_id=source_capture_id,
+                    profile_revision=profile_revision,
+                    snapshot_ids=snapshot_ids,
+                    modules=day_modules,
+                    allow_revision=operation in {"RECOMPUTE", "CLEAR_AND_REGENERATE"},
+                )
+                for unit in day_units:
+                    mod = unit["stage_code"]
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        profile_revision=profile_revision,
+                        sector_snapshot_ids=snapshot_ids,
+                        research_cutoff=cutoff,
+                    )
+                    if mod == "R03_SECTOR_NATIVE":
+                        ins = int(r03_res["native_pg"]["inserted"]) + int(
+                            r03_res["native_pg"]["updated"]
+                        )
+                        no_chg = ins == 0 and int(r03_res["native_pg"]["skipped"]) > 0
+                    elif mod == "R03_SECTOR_ROTATION":
+                        ins = int(r03_res["rotation_pg"]["states_inserted"]) + int(
+                            r03_res["rotation_pg"]["states_updated"]
+                        )
+                        no_chg = (
+                            ins == 0 and int(r03_res["rotation_pg"]["states_skipped"]) > 0
+                        )
+                    elif mod == "R03_SECTOR_OVERLAP":
+                        ins = int(r03_res["overlap_pg"]["clusters_inserted"]) + int(
+                            r03_res["overlap_pg"]["clusters_updated"]
+                        )
+                        no_chg = (
+                            ins == 0
+                            and int(r03_res["overlap_pg"]["clusters_skipped"]) > 0
+                        )
+                    else:
+                        ins = int(r03_res["loo_written"])
+                        no_chg = ins == 0
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code=mod,
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=actual_rows,
+                        inserted_rows=inserted_count(ins),
+                        quality_status="COMPLETE_R03_FORMAL_SECTOR",
+                        no_change=no_chg,
+                        profile_revision=profile_revision,
+                        producer_version=R03_CONTRACT_VERSION,
+                        calendar_revision=calendar_revision,
+                        sector_snapshot_ids=snapshot_ids,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code=",".join(sorted(day_modules)),
+                    error=error,
+                    message_prefix="R03正式板块生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"R03正式板块({day_text})未闭合：{str(error)[:300]}",
                     )
                 )
 

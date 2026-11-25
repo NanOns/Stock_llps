@@ -4673,21 +4673,30 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 else:
                     from stock_a.application.source_market_context import (
                         SOURCE_MARKET_BREADTH_CONTRACT,
+                        _load_calendar,
                     )
-                    from stock_a.research.entry_context.sessions import (
-                        load_official_calendar,
+                    from stock_a.storage.postgres.market_participation import (
+                        read_market_participation_standalone,
                     )
 
-                    cal_payload, _meta, _revs, _sessions = load_official_calendar(
-                        target.year
-                    )
+                    cal_payload, _meta, _revs, _sessions = _load_calendar(target)
+                    cal_id = str(cal_payload["calendar_id"])
                     cal_rev = str(cal_payload["revision"])
                     breadth_contract_ver = SOURCE_MARKET_BREADTH_CONTRACT
-                    participation = {
-                        "status": "NOT_COMPUTED",
-                        "classification": "UNKNOWN",
-                        "reason": "市场宽度未就绪，参与度按独立轴降级返回。",
-                    }
+                    try:
+                        participation = read_market_participation_standalone(
+                            self.preview_server.state.config,
+                            target_session=target,
+                            source_capture_id=_capture_id(values["source_capture_id"]),
+                            calendar_id=cal_id,
+                            calendar_revision=cal_rev,
+                        )
+                    except (MarketParticipationPgError, RawSourcePgError) as error:
+                        raise PreviewHttpError(
+                            503,
+                            getattr(error, "code", "MARKET_PARTICIPATION_READ_FAILED"),
+                            str(error),
+                        ) from error
                 from stock_a.contracts.loader import (
                     load_market_reference_indices_contract,
                 )
@@ -4761,16 +4770,75 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         breadth_change=breadth_change,
                         environment_display=environment_display,
                     )
+                    axes_map = base_payload.get("market_axes") or {}
+                    pressure_for_risk = axes_map.get("pressure")
+                    breadth_for_risk = axes_map.get("breadth")
                 else:
+                    from stock_a.application.source_market_context import (
+                        market_environment_label,
+                    )
+                    from stock_a.storage.postgres.price_limits import (
+                        read_market_pressure_summary,
+                    )
+
+                    standalone_pressure = read_market_pressure_summary(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        source_capture_id=capture_id_val,
+                        calendar_revision=cal_rev,
+                    )
+                    p_cls = (
+                        standalone_pressure.get("classification")
+                        if standalone_pressure.get("status") == "OBSERVED"
+                        else None
+                    )
+                    part_cls = (
+                        (participation.get("metric") or {}).get(
+                            "classification", participation.get("classification")
+                        )
+                        if participation.get("status")
+                        not in {"NOT_COMPUTED", "NOT_COMPARABLE", "INCOMPLETE"}
+                        else None
+                    )
+                    trend_cls = (
+                        (environment_display.get("axes") or {}).get("trend")
+                        if environment_display.get("status") == "AVAILABLE"
+                        else None
+                    )
+                    if trend_cls not in {"STRONG", "NEUTRAL", "WEAK"}:
+                        trend_cls = None
+                    composite = market_environment_label(
+                        trend_cls,
+                        None,
+                        part_cls,
+                        p_cls,
+                    )
+                    trend_axis = {
+                        "status": "OBSERVED" if trend_cls else "NOT_COMPUTED",
+                        "classification": trend_cls or "UNKNOWN",
+                    }
+                    breadth_axis = {
+                        **(breadth_error_payload or {}),
+                        "classification": "UNKNOWN",
+                    }
                     base_payload = {
                         **(breadth_error_payload or {}),
-                        "breadth": breadth_error_payload,
+                        "breadth": breadth_axis,
                         "participation": participation,
                         "breadth_change": breadth_change,
+                        "market_axes": {
+                            "breadth": breadth_axis,
+                            "participation": participation,
+                            "trend": trend_axis,
+                            "pressure": standalone_pressure,
+                            "composite": composite,
+                        },
                     }
+                    pressure_for_risk = standalone_pressure
+                    breadth_for_risk = breadth_axis
                 market_risk = compute_market_risk_projection(
-                    pressure_axis=base_payload.get("pressure"),
-                    breadth_axis=base_payload.get("breadth"),
+                    pressure_axis=pressure_for_risk,
+                    breadth_axis=breadth_for_risk,
                     participation_axis=participation,
                 )
                 self._send_json(
@@ -4784,6 +4852,109 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "market_risk": market_risk,
                     },
                 )
+                return
+            if parsed.path == "/api/product/r03-sectors":
+                allowed = {
+                    "trade_date",
+                    "scope_key",
+                    "member_version",
+                    "contract_version",
+                    "board_kind",
+                    "limit",
+                    "offset",
+                }
+                required = {"trade_date", "scope_key", "member_version", "contract_version"}
+                values = _query(self.path, allowed)
+                if not required.issubset(set(values)):
+                    raise PreviewHttpError(
+                        400, "QUERY_REQUIRED", "须提供trade_date、scope_key、member_version与contract_version"
+                    )
+                trade_d = _iso_date(values["trade_date"])
+                from stock_a.storage.postgres.r03_formal_sector import (
+                    read_r03_native_day_facts,
+                    read_r03_overlap_day,
+                )
+
+                limit_val = int(values["limit"]) if "limit" in values else 50
+                offset_val = int(values["offset"]) if "offset" in values else 0
+                native_res = read_r03_native_day_facts(
+                    self.preview_server.state.config,
+                    trade_date=trade_d,
+                    scope_key=values["scope_key"],
+                    member_version=values["member_version"],
+                    contract_version=values["contract_version"],
+                    board_kind=values.get("board_kind"),
+                    limit=limit_val,
+                    offset=offset_val,
+                )
+                overlap_res = read_r03_overlap_day(
+                    self.preview_server.state.config,
+                    trade_date=trade_d,
+                    scope_key=values["scope_key"],
+                    member_version=values["member_version"],
+                    contract_version=values["contract_version"],
+                    board_kind=values.get("board_kind"),
+                )
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "trade_date": trade_d.isoformat(),
+                        "scope_key": values["scope_key"],
+                        "native": native_res,
+                        "overlap": overlap_res,
+                    },
+                )
+                return
+            if parsed.path == "/api/product/r03-sector-rotation":
+                required = {"board_kind", "board_id", "scope_key", "contract_version"}
+                values = _query(self.path, required)
+                if set(values) != required:
+                    raise PreviewHttpError(
+                        400, "QUERY_REQUIRED", "须提供board_kind、board_id、scope_key与contract_version"
+                    )
+                from stock_a.storage.postgres.r03_formal_sector import (
+                    read_r03_rotation_timeline,
+                )
+
+                rot_res = read_r03_rotation_timeline(
+                    self.preview_server.state.config,
+                    board_kind=values["board_kind"],
+                    board_id=values["board_id"],
+                    scope_key=values["scope_key"],
+                    contract_version=values["contract_version"],
+                )
+                self._send_json(200, {"ok": True, **rot_res})
+                return
+            if parsed.path == "/api/product/r03-sector-loo":
+                required = {
+                    "trade_date",
+                    "target_entity_id",
+                    "board_kind",
+                    "scope_key",
+                    "member_version",
+                    "contract_version",
+                }
+                values = _query(self.path, required)
+                if set(values) != required:
+                    raise PreviewHttpError(
+                        400, "QUERY_REQUIRED", "须提供完整LOO查询参数"
+                    )
+                trade_d = _iso_date(values["trade_date"])
+                from stock_a.storage.postgres.r03_formal_sector import (
+                    read_r03_loo_support_fact,
+                )
+
+                loo_res = read_r03_loo_support_fact(
+                    self.preview_server.state.config,
+                    trade_date=trade_d,
+                    target_entity_id=values["target_entity_id"],
+                    board_kind=values["board_kind"],
+                    scope_key=values["scope_key"],
+                    member_version=values["member_version"],
+                    contract_version=values["contract_version"],
+                )
+                self._send_json(200, {"ok": True, **loo_res})
                 return
             if parsed.path == "/api/product/sector-pulse-history":
                 allowed = {
