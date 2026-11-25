@@ -53,6 +53,25 @@ IMPULSE_STRUCTURE_TYPES = (
     "IMPULSE_LOW",
 )
 ALL_STRUCTURE_TYPES = STRUCTURE_TYPES + IMPULSE_STRUCTURE_TYPES
+D1_PRODUCER_VERSION_5 = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
+D1_PRODUCER_VERSION_7 = "STOCK_A_D1_BAOSTOCK_QFQ_R4"
+D1_SUPPORTED_PRODUCER_VERSIONS = (D1_PRODUCER_VERSION_5, D1_PRODUCER_VERSION_7)
+
+
+def expected_d1_structure_types_for_version(
+    producer_version: str,
+) -> tuple[str, ...]:
+    """按D1生产者版本返回合同期望结构类型集合，不把缺行的新版降级为旧版。"""
+    if producer_version == D1_PRODUCER_VERSION_7:
+        return ALL_STRUCTURE_TYPES
+    if producer_version == D1_PRODUCER_VERSION_5:
+        return STRUCTURE_TYPES
+    raise PgResearchBindingError(
+        "D1_PRODUCER_VERSION_UNSUPPORTED",
+        f"不支持的D1生产者版本: {producer_version}",
+    )
+
+
 MATERIAL_CHANGE_REASONS = (
     "SUPPORT_STATE_TRANSITION",
     "SUPPORT_ACCEPTANCE_TRANSITION",
@@ -1451,6 +1470,7 @@ def discover_source_d1_structures(
     include_source_symbol_d1_details: bool = False,
     include_source_symbol_structure_results: bool = False,
     include_impulse: bool = False,
+    cross_section_universe_version: str | None = None,
 ) -> dict[str, Any]:
     """一遍完整扫描目标日Raw池，统计五种D1结构并按事件分页。"""
     started_wall = time.perf_counter()
@@ -1543,7 +1563,7 @@ def discover_source_d1_structures(
                 config,
                 target_session=q_day,
                 price_capture_id=source_capture_id,
-                universe_version=None,
+                universe_version=cross_section_universe_version,
                 calendar_revision=target_calendar_revision,
             )
             if bundle.get("status") == "AVAILABLE":
@@ -1592,7 +1612,7 @@ def discover_source_d1_structures(
     }
     material_change_reason_source_symbols_by_type = {
         kind: {reason: set() for reason in MATERIAL_CHANGE_REASONS}
-        for kind in STRUCTURE_TYPES
+        for kind in active_structure_types
     }
     support_status_counts: Counter[str] = Counter()
     changed_source_symbols: set[str] = set()
@@ -1812,11 +1832,11 @@ def discover_source_d1_structures(
                     "material_change_anchor_counts_by_type": Counter(),
                     "material_change_status_counts": Counter(),
                     "material_change_status_counts_by_type": {
-                        kind: Counter() for kind in STRUCTURE_TYPES
+                        kind: Counter() for kind in active_structure_types
                     },
                     "material_change_reason_anchor_counts": Counter(),
                     "material_change_reason_anchor_counts_by_type": {
-                        kind: Counter() for kind in STRUCTURE_TYPES
+                        kind: Counter() for kind in active_structure_types
                     },
                 }
                 for change in candidate_changes:
@@ -1955,7 +1975,7 @@ def discover_source_d1_structures(
         raise PgResearchBindingError(
             "D1_STRUCTURE_POOL_INCOMPLETE", "目标日来源池未完全评价"
         )
-    for kind in STRUCTURE_TYPES:
+    for kind in active_structure_types:
         if sum(counts[kind].values()) != source_pool_total:
             raise PgResearchBindingError(
                 "D1_STRUCTURE_TYPE_PARTITION_INCOMPLETE",
@@ -2016,11 +2036,11 @@ def discover_source_d1_structures(
                     "material_change_anchor_counts_by_type": Counter(),
                     "material_change_status_counts": Counter(),
                     "material_change_status_counts_by_type": {
-                        kind: Counter() for kind in STRUCTURE_TYPES
+                        kind: Counter() for kind in active_structure_types
                     },
                     "material_change_reason_anchor_counts": Counter(),
                     "material_change_reason_anchor_counts_by_type": {
-                        kind: Counter() for kind in STRUCTURE_TYPES
+                        kind: Counter() for kind in active_structure_types
                     },
                 },
             )
@@ -2058,7 +2078,7 @@ def discover_source_d1_structures(
                             ].items()
                         )
                     )
-                    for kind in STRUCTURE_TYPES
+                    for kind in active_structure_types
                 },
                 "material_change_reason_anchor_counts": dict(
                     sorted(summary["material_change_reason_anchor_counts"].items())
@@ -2071,7 +2091,7 @@ def discover_source_d1_structures(
                             ].items()
                         )
                     )
-                    for kind in STRUCTURE_TYPES
+                    for kind in active_structure_types
                 },
             }
     return {
@@ -2080,8 +2100,12 @@ def discover_source_d1_structures(
         if structure_changes
         else "SOURCE_LEVEL_D1_MULTI_STRUCTURE_DISCOVERY",
         "contract": STRUCTURE_CONTRACT,
-        "producer_version": "STOCK_A_D1_BAOSTOCK_QFQ_R3",
-        "scope": "FIVE_SOURCE_LEVEL_RESEARCH_TYPES_NOT_FORMAL_D1_TEN_TYPE_CLOSURE",
+        "producer_version": D1_PRODUCER_VERSION_7
+        if include_impulse
+        else D1_PRODUCER_VERSION_5,
+        "scope": "SEVEN_SOURCE_LEVEL_RESEARCH_TYPES_NOT_FORMAL_D1_TEN_TYPE_CLOSURE"
+        if include_impulse
+        else "FIVE_SOURCE_LEVEL_RESEARCH_TYPES_NOT_FORMAL_D1_TEN_TYPE_CLOSURE",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "source_capture_id": source_capture_id,
@@ -2111,7 +2135,7 @@ def discover_source_d1_structures(
                 ),
                 "partition_closed": sum(counts[kind].values()) == source_pool_total,
             }
-            for kind in STRUCTURE_TYPES
+            for kind in active_structure_types
         },
         "generated_event_total": len(events),
         "historical_anchor_changes": {
@@ -2129,7 +2153,7 @@ def discover_source_d1_structures(
             "effective_old_anchor_count": sum(historical_anchor_count_by_type.values()),
             "effective_old_anchor_count_by_type": {
                 kind: historical_anchor_count_by_type.get(kind, 0)
-                for kind in STRUCTURE_TYPES
+                for kind in active_structure_types
             },
             "support_comparable_anchor_count": support_status_counts.get("CHANGED", 0)
             + support_status_counts.get("UNCHANGED", 0),
@@ -2141,7 +2165,7 @@ def discover_source_d1_structures(
             ),
             "material_change_status_counts_by_type": {
                 kind: dict(sorted(material_change_status_counts_by_type[kind].items()))
-                for kind in STRUCTURE_TYPES
+                for kind in active_structure_types
             },
             "material_change_reason_anchor_counts": dict(
                 sorted(material_change_reason_anchor_counts.items())
@@ -2150,7 +2174,7 @@ def discover_source_d1_structures(
                 kind: dict(
                     sorted(material_change_reason_anchor_counts_by_type[kind].items())
                 )
-                for kind in STRUCTURE_TYPES
+                for kind in active_structure_types
             },
             "material_change_reason_distinct_source_symbol_counts": {
                 reason: len(symbols)
@@ -2165,7 +2189,7 @@ def discover_source_d1_structures(
                         material_change_reason_source_symbols_by_type[kind].items()
                     )
                 }
-                for kind in STRUCTURE_TYPES
+                for kind in active_structure_types
             },
             "material_change_count": material_change_status_counts.get(
                 "MATERIAL_CHANGE", 0
@@ -2545,7 +2569,9 @@ def evaluate_source_d1_structure_timeline(
     )
     return {
         "contract": STRUCTURE_CONTRACT,
-        "producer_version": "STOCK_A_D1_BAOSTOCK_QFQ_R3",
+        "producer_version": D1_PRODUCER_VERSION_7
+        if enable_impulse
+        else D1_PRODUCER_VERSION_5,
         "status": "SOURCE_SYMBOL_D1_STRUCTURE_HISTORY",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",

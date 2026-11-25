@@ -624,6 +624,7 @@ def compute_source_pool_seed(
     include_rps_read: bool = False,
     allow_qfq_profile_recompute: bool = False,
     worker_count: int = 1,
+    cross_section_universe_version: str | None = None,
 ) -> dict[str, Any]:
     """按现役Core/Profile公式从已存PG原始行计算Seed，供初始化生产使用。"""
     validate_seed_worker_count(worker_count)
@@ -647,20 +648,29 @@ def compute_source_pool_seed(
         config,
         target_session=target_session,
         price_capture_id=source_capture_id,
-        universe_version=None,
+        universe_version=cross_section_universe_version,
         calendar_revision=revision,
     )
-    # D03：禁止在旧来源池中半截局部覆盖单股新值；仅当新横截面完整闭合且整批覆盖同一总体时才整批切换并同步元数据
+    # R05/D03：严格区分同总体切换、更大排名池子集评价与显式回退，绝不用 issubset 冒充同一正式总体
     cross_by_entity = (
         cross_bundle.get("by_entity", {})
         if cross_bundle.get("status") == "AVAILABLE"
         else {}
     )
-    if (
+    old_symbols = set(rps["facts"])
+    new_symbols = set(cross_by_entity)
+    exact_match = (
         cross_bundle.get("status") == "AVAILABLE"
-        and cross_by_entity
-        and set(rps["facts"]).issubset(set(cross_by_entity))
-    ):
+        and bool(new_symbols)
+        and old_symbols == new_symbols
+    )
+    ranking_superset = (
+        cross_bundle.get("status") == "AVAILABLE"
+        and bool(new_symbols)
+        and bool(old_symbols)
+        and old_symbols < new_symbols
+    )
+    if exact_match or ranking_superset:
         replaced_facts: dict[str, dict[str, Any]] = {}
         for symbol in rps["facts"]:
             cs_fields = cross_by_entity[symbol]
@@ -675,16 +685,62 @@ def compute_source_pool_seed(
                 ),
             }
         rps["facts"] = replaced_facts
-        rps["scope"] = f"PG_CROSS_SECTION:{cross_bundle['universe_version']}"
-        rps["formal_research_universe"] = True
+        rank_meta = cross_bundle.get("rank_metadata", {})
+        rel_meta = cross_bundle.get("relative_metadata", {})
         rps["endpoint_counts"] = {
-            "rank_endpoints": len(cross_bundle.get("rank_metadata", {})),
-            "relative_endpoints": len(cross_bundle.get("relative_metadata", {})),
+            "rank_endpoints": len(rank_meta),
+            "relative_endpoints": len(rel_meta),
             "universe_version": cross_bundle.get("universe_version"),
+            "rank_endpoint_details": {
+                k: {
+                    "endpoint_date": v.get("endpoint_date"),
+                    "universe_member_count": v.get("universe_member_count"),
+                    "evaluable_count": v.get("evaluable_count"),
+                    "quality": v.get("quality"),
+                }
+                for k, v in rank_meta.items()
+                if isinstance(v, Mapping)
+            },
+            "relative_endpoint_details": {
+                k: {
+                    "endpoint_date": v.get("endpoint_date"),
+                    "universe_member_count": v.get("universe_member_count"),
+                    "evaluable_count": v.get("evaluable_count"),
+                    "quality": v.get("quality"),
+                }
+                for k, v in rel_meta.items()
+                if isinstance(v, Mapping)
+            },
         }
-        rps["rps_source"] = "PG_CROSS_SECTION_DAY_FACTS"
+        rps["ranking_universe_count"] = len(new_symbols)
+        rps["evaluation_universe_count"] = len(old_symbols)
+        rps["cross_section_universe_version"] = cross_bundle.get("universe_version")
+        if exact_match:
+            rps["scope"] = f"PG_CROSS_SECTION:{cross_bundle['universe_version']}"
+            rps["formal_research_universe"] = True
+            rps["rps_source"] = "PG_CROSS_SECTION_DAY_FACTS"
+            rps["universe_match_status"] = "EXACT_MATCH"
+        else:
+            rps["scope"] = (
+                f"PG_CROSS_SECTION_RANKING_SUPERSET:{cross_bundle['universe_version']}"
+            )
+            rps["formal_research_universe"] = False
+            rps["ranking_universe_is_formal"] = True
+            rps["rps_source"] = "PG_CROSS_SECTION_RANKING_SUPERSET"
+            rps["universe_match_status"] = "EVALUATION_SUBSET_OF_RANKING"
     else:
         rps["rps_source"] = "SOURCE_RELATIVE_POSITION_FALLBACK"
+        rps["formal_research_universe"] = False
+        rps["universe_match_status"] = (
+            "FALLBACK_UNIVERSE_MISMATCH"
+            if cross_by_entity
+            else "FALLBACK_CROSS_SECTION_UNAVAILABLE"
+        )
+        rps["ranking_universe_count"] = len(old_symbols)
+        rps["evaluation_universe_count"] = len(old_symbols)
+        rps["cross_section_universe_version"] = (
+            cross_bundle.get("universe_version") if cross_by_entity else None
+        )
     profile_offset = 0
     profiles = {}
     profile_snapshot_missing = False
@@ -1057,6 +1113,11 @@ def compute_source_pool_seed(
         if profile_snapshot_missing
         else "AVAILABLE",
         "scope": rps["scope"],
+        "rps_source": rps["rps_source"],
+        "universe_match_status": rps["universe_match_status"],
+        "ranking_universe_count": rps["ranking_universe_count"],
+        "evaluation_universe_count": rps["evaluation_universe_count"],
+        "cross_section_universe_version": rps.get("cross_section_universe_version"),
         "price_coordinate": rps["coordinate"],
         "corporate_action_continuity": rps["corporate_action_continuity"],
         "formal_research_universe": rps["formal_research_universe"],

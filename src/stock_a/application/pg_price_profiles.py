@@ -509,6 +509,7 @@ def run_source_symbol_price_profile(
     session_count: int,
     page_size: int,
     profile_contract: dict[str, Any],
+    cross_section_universe_version: str | None = None,
 ) -> dict[str, Any]:
     """按精确Raw包和捕获读取价格，复用Core43/Profile11并保存typed画像。"""
     if scope != SOURCE_SYMBOL_PROFILE_SCOPE:
@@ -603,7 +604,7 @@ def run_source_symbol_price_profile(
             config,
             target_session=target_session,
             price_capture_id=source_capture_id,
-            universe_version=None,
+            universe_version=cross_section_universe_version,
             calendar_revision=calendar_revision,
         )
         if cross_section_bundle.get("status") != "AVAILABLE":

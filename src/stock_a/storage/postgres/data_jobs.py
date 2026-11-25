@@ -45,6 +45,13 @@ _SECTOR_SNAPSHOT_PROGRESS_TABLES = frozenset(
 
 _MODULE_PROGRESS_TABLES = {
     "BAOSTOCK_PRICES": frozenset({"stock.source_raw_daily"}),
+    "BAOSTOCK_UNIVERSE": frozenset(
+        {
+            "stock.source_baostock_stock_basic",
+            "stock.source_baostock_session_directory",
+        }
+    ),
+    "BAOSTOCK_MARKET_INDICES": frozenset({"stock.source_market_index_daily"}),
     "TDX_SECTOR_MEMBERS": frozenset(
         {
             "stock.tdx_sector_source_snapshots",
@@ -2969,6 +2976,60 @@ def clear_derived_module(
                 "清理影响行数与预览不一致；事务回滚并保留原事实",
             )
 
+        invalidated_tables = list(cleanup_count_tables)
+        invalidated_sessions = list(sessions)
+        downstream_invalidated_tables: list[str] = []
+        downstream_existing_fact_counts: dict[str, int] = {}
+        downstream_subsequent_sessions: list[str] = []
+        if module_code == "CROSS_SECTION" and sessions:
+            downstream_tables = (
+                "stock.source_symbol_price_profiles",
+                "stock.source_pool_seed_day_facts",
+                "stock.source_d1_structure_day_facts",
+                "stock.source_d1_material_anchor_day_facts",
+            )
+            downstream_invalidated_tables = list(downstream_tables)
+            for ds_table in downstream_tables:
+                if ds_table not in invalidated_tables:
+                    invalidated_tables.append(ds_table)
+            for ds_table, count_sql in (
+                (
+                    "stock.source_symbol_price_profiles",
+                    "SELECT count(*) FROM stock.source_symbol_price_profiles WHERE target_session=ANY(%s)",
+                ),
+                (
+                    "stock.source_pool_seed_day_facts",
+                    "SELECT count(*) FROM stock.source_pool_seed_day_facts WHERE target_session=ANY(%s)",
+                ),
+                (
+                    "stock.source_d1_structure_day_facts",
+                    "SELECT count(*) FROM stock.source_d1_structure_day_facts WHERE target_session=ANY(%s)",
+                ),
+            ):
+                cursor.execute(count_sql, (list(sessions),))
+                downstream_existing_fact_counts[ds_table] = int(cursor.fetchone()[0])
+        elif module_code == "MARKET_INDICES_ENV" and sessions:
+            min_cleared_session = min(sessions)
+            cursor.execute(
+                """SELECT DISTINCT target_session
+                   FROM stock.source_market_environment_day_facts
+                   WHERE target_session > %s
+                   ORDER BY target_session""",
+                (min_cleared_session,),
+            )
+            subsequent = [row[0] for row in cursor.fetchall()]
+            if subsequent:
+                downstream_subsequent_sessions = [d.isoformat() for d in subsequent]
+                downstream_invalidated_tables = [
+                    "stock.source_market_environment_day_facts"
+                ]
+                invalidated_sessions = sorted(
+                    set(invalidated_sessions) | set(subsequent)
+                )
+                downstream_existing_fact_counts[
+                    "stock.source_market_environment_day_facts_subsequent"
+                ] = len(subsequent)
+
         cursor.execute(
             """UPDATE stock.data_job_progress
                SET status='NOT_COMPUTED',completed_units=0,expected_rows=NULL,
@@ -2978,22 +3039,25 @@ def clear_derived_module(
                    profile_history_session_count=NULL,d1_history_session_count=NULL,
                    calendar_revision=NULL,industry_snapshot_id=NULL,concept_snapshot_id=NULL,
                    quality_status=NULL,error_code='DERIVED_RESULT_CLEARED',
-                error_message='对应派生结果已按模块、来源版本及日期范围清理；需重新生成。',
+                error_message='对应派生结果或其依赖的上游横截面/前态已清理；需按依赖重新生成。',
                    deleted_rows=0,
                    updated_at=clock_timestamp(),completed_at=NULL,verified_at=NULL
                WHERE target_session=ANY(%s) AND business_table=ANY(%s)
                  AND status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
                  AND (%s::uuid IS NULL OR job_id<>%s)
-               RETURNING job_id""",
+               RETURNING job_id, business_table""",
             (
-                list(sessions),
-                list(cleanup_count_tables),
+                invalidated_sessions,
+                invalidated_tables,
                 current_job_id,
                 current_job_id,
             ),
         )
         invalidated_rows = cursor.fetchall()
         invalidated_job_ids = {row[0] for row in invalidated_rows}
+        downstream_invalidated_progress_count = sum(
+            1 for row in invalidated_rows if row[1] in downstream_invalidated_tables
+        )
         for invalidated_job_id in invalidated_job_ids:
             cursor.execute(
                 """UPDATE stock.data_jobs j
@@ -3016,6 +3080,10 @@ def clear_derived_module(
             "status": "CLEARED" if preview["affected_rows"] else "NO_CHANGE",
             "deleted_rows_by_table": deleted_rows,
             "deleted_rows_by_session": deleted_by_session,
+            "downstream_invalidated_tables": downstream_invalidated_tables,
+            "downstream_invalidated_progress_count": downstream_invalidated_progress_count,
+            "downstream_existing_fact_counts": downstream_existing_fact_counts,
+            "downstream_subsequent_sessions": downstream_subsequent_sessions,
             "invalidated_progress_units": len(invalidated_rows),
             "database_write_attempted": True,
             "source_io_attempted": False,
@@ -3396,7 +3464,7 @@ def read_business_table_count(
                      WHERE d.target_session=%s AND d.source_capture_id=%s
                        AND d.d1_history_session_count=%s
                        AND d.calendar_revision=%s
-                       AND d.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R3'
+                       AND d.producer_version IN ('STOCK_A_D1_BAOSTOCK_QFQ_R3', 'STOCK_A_D1_BAOSTOCK_QFQ_R4')
                        AND d.research_mode='NON_PIT_RETROSPECTIVE'
                        AND d.price_coordinate='FORWARD_ADJUSTED'
                      HAVING count(DISTINCT d.history_window_start)=1
@@ -3436,6 +3504,21 @@ def read_business_table_count(
                 producer_version,
                 calendar_revision,
             ),
+        ),
+        "stock.source_baostock_stock_basic": (
+            """SELECT count(*) FROM stock.source_baostock_stock_basic
+               WHERE source_capture_id=%s""",
+            lambda: (source_capture_id,),
+        ),
+        "stock.source_baostock_session_directory": (
+            """SELECT count(*) FROM stock.source_baostock_session_directory
+               WHERE source_capture_id=%s AND session_date<=%s""",
+            lambda: (source_capture_id, target_session),
+        ),
+        "stock.source_market_index_daily": (
+            """SELECT count(*) FROM stock.source_market_index_daily
+               WHERE source_capture_id=%s AND session_date<=%s""",
+            lambda: (source_capture_id, target_session),
         ),
         "stock.source_cross_section_day_facts": (
             """SELECT count(*) FROM stock.source_cross_section_day_facts
@@ -4608,6 +4691,15 @@ def mark_progress_cleared(
         ),
         "stock.source_limit_up_streak_day_facts": (
             "SELECT count(*) FROM stock.source_limit_up_streak_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.source_baostock_stock_basic": (
+            "SELECT count(*) FROM stock.source_baostock_stock_basic WHERE %s<=%s",
+        ),
+        "stock.source_baostock_session_directory": (
+            "SELECT count(*) FROM stock.source_baostock_session_directory WHERE session_date=%s AND session_date<=%s",
+        ),
+        "stock.source_market_index_daily": (
+            "SELECT count(*) FROM stock.source_market_index_daily WHERE session_date=%s AND session_date<=%s",
         ),
         "stock.source_cross_section_day_facts": (
             "SELECT count(*) FROM stock.source_cross_section_day_facts WHERE target_session=%s AND target_session<=%s",

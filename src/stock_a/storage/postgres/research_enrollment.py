@@ -16,6 +16,10 @@ from stock_a.storage.postgres.source_raw import _transaction
 
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 _D1_PRODUCER_VERSION = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
+_D1_SUPPORTED_PRODUCER_VERSIONS = (
+    "STOCK_A_D1_BAOSTOCK_QFQ_R3",
+    "STOCK_A_D1_BAOSTOCK_QFQ_R4",
+)
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _POOL_RULE_IDS = (
     "LAUNCH_CONFIRM",
@@ -146,9 +150,9 @@ def _read_rule_day_contexts(
                   count(*),count(DISTINCT source_symbol),count(DISTINCT structure_type)
            FROM source_d1_structure_day_facts
            WHERE target_session=ANY(%s) AND source_capture_id=%s
-             AND producer_version=%s
+             AND producer_version=ANY(%s)
            GROUP BY 1,2,3,4,5,6,7,8,9,10 ORDER BY 1,2,3""",
-        (list(selected), source_capture_id, _D1_PRODUCER_VERSION),
+        (list(selected), source_capture_id, list(_D1_SUPPORTED_PRODUCER_VERSIONS)),
     )
     d1_rows = cursor.fetchall()
     cursor.execute(
@@ -215,6 +219,12 @@ def _read_rule_day_contexts(
         profile_scopes = by_table["profiles"][session]
         seed_scopes = by_table["seeds"][session]
         d1_scopes = by_table["d1"][session]
+        if len(d1_scopes) > 1:
+            r4_d1_scopes = [
+                row for row in d1_scopes if row[7] == "STOCK_A_D1_BAOSTOCK_QFQ_R4"
+            ]
+            if r4_d1_scopes:
+                d1_scopes = r4_d1_scopes
         if not (
             raw_count > 0
             and raw_count == raw_symbols == expected_count == complete_requests
@@ -271,14 +281,15 @@ def _read_rule_day_contexts(
             d1_symbols,
             structure_count,
         ) = d1
+        expected_d1_type_count = 7 if d1_version == "STOCK_A_D1_BAOSTOCK_QFQ_R4" else 5
         revision_context = _profile_revision_context(profile_revision, history_count)
         inputs_complete = (
             profile_capture == seed_capture == d1_capture == capture
             and profile_count == profile_symbols == raw_count
             and seed_count == seed_symbols == research_raw_count
-            and d1_count == research_raw_count * 5
+            and d1_count == research_raw_count * expected_d1_type_count
             and d1_symbols == research_raw_count
-            and structure_count == 5
+            and structure_count == expected_d1_type_count
             and requested_count == history_count
             and 0 <= minimum_stored_count <= maximum_stored_count <= requested_count
             and profile_start == seed_start
@@ -1141,13 +1152,32 @@ def persist_existing_enrollments(
         if cursor.fetchone() != (raw_count, raw_count):
             raise ValueError("Seed与规则的来源、画像或完整分母不一致")
         cursor.execute(
-            """SELECT count(*),count(DISTINCT source_symbol),count(DISTINCT structure_type)
+            """SELECT producer_version, count(*), count(DISTINCT source_symbol),
+                      count(DISTINCT structure_type)
                FROM source_d1_structure_day_facts
                WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s
-                 AND d1_history_session_count=%s AND calendar_revision=%s""",
-            (target, source_capture_id, source_capture_id, d1_count, calendar_revision),
+                 AND d1_history_session_count=%s AND calendar_revision=%s
+                 AND producer_version=ANY(%s)
+               GROUP BY producer_version""",
+            (
+                target,
+                source_capture_id,
+                source_capture_id,
+                d1_count,
+                calendar_revision,
+                list(_D1_SUPPORTED_PRODUCER_VERSIONS),
+            ),
         )
-        if cursor.fetchone() != (raw_count * 5, raw_count, 5):
+        d1_version_rows = cursor.fetchall()
+        if not any(
+            (
+                row[1]
+                == raw_count * (7 if row[0] == "STOCK_A_D1_BAOSTOCK_QFQ_R4" else 5)
+                and row[2] == raw_count
+                and row[3] == (7 if row[0] == "STOCK_A_D1_BAOSTOCK_QFQ_R4" else 5)
+            )
+            for row in d1_version_rows
+        ):
             raise ValueError("D1结构与规则的日历或完整分母不一致")
         if d0_calendar != calendar_revision:
             raise ValueError("D0与规则日历修订不一致")

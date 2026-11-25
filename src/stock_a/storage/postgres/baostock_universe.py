@@ -561,9 +561,9 @@ def resolve_date_effective_universe(
             if research_eligible_only and sec_type != "STOCK":
                 continue
             if fq == "CONFLICT_QUARANTINED":
-                # B02：日期冲突隔离证券不得静默冒充正常核实成员，单列隔离清单供消费者感知
+                # R04/B02：目录已确证在市且研究板别/STOCK资格合法时，不因日期字段冲突静默缩小正式排名总体；
+                # 冲突日期已清空为 NULL（不用于日期边界排除），并单列 quarantined_symbols 供下游质量摘要消费。
                 quarantined_symbols.append(symbol)
-                continue
             if fq == "PARTIAL_UNKNOWN":
                 partial_unknown_symbols.append(symbol)
             if ipo_d is not None and session_date < ipo_d:

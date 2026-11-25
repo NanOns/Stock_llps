@@ -23,21 +23,55 @@ from stock_a.storage.postgres import source_raw
 
 
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
-_STRUCTURE_TYPES = (
+_STRUCTURE_TYPES_5 = (
     "PIVOT_LOW",
     "PIVOT_HIGH",
     "RANGE_FLOOR",
     "RANGE_CEILING",
     "GAP_ZONE",
+)
+_STRUCTURE_TYPES_7 = _STRUCTURE_TYPES_5 + (
     "IMPULSE_BODY",
     "IMPULSE_LOW",
 )
+_STRUCTURE_TYPES = _STRUCTURE_TYPES_7
 _STRUCTURE_TYPE_SET = frozenset(_STRUCTURE_TYPES)
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _D0_LAUNCH_ALGORITHM_CONTRACT = "ALG-28 + §11.6 D0_SCENARIO_FACTS_R3"
 _D0_SESSION_CONTRACT = "D0_SESSION_R2"
-_D1_PRODUCER_VERSION = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
+_D1_PRODUCER_VERSION_5 = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
+_D1_PRODUCER_VERSION_7 = "STOCK_A_D1_BAOSTOCK_QFQ_R4"
+_D1_PRODUCER_VERSION = _D1_PRODUCER_VERSION_5
+_D1_SUPPORTED_PRODUCER_VERSIONS = (
+    _D1_PRODUCER_VERSION_5,
+    _D1_PRODUCER_VERSION_7,
+)
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+
+
+def _expected_d1_structure_types(producer_version: str) -> tuple[str, ...]:
+    """按已存或待写入D1生产者版本返回精确结构类型集合。"""
+    if producer_version == _D1_PRODUCER_VERSION_7:
+        return _STRUCTURE_TYPES_7
+    if producer_version == _D1_PRODUCER_VERSION_5:
+        return _STRUCTURE_TYPES_5
+    raise ResearchDayPgError(
+        "RESEARCH_DAY_D1_PRODUCER_VERSION_INVALID",
+        f"不支持的D1生产者版本: {producer_version}",
+    )
+
+
+def _select_preferred_d1_scopes(
+    scopes: Sequence[Sequence[Any]], *, version_index: int
+) -> list[Sequence[Any]]:
+    """同键并存旧5类R3与新7类R4时优先选中R4，同版本多条仍保留以报歧义。"""
+    items = list(scopes)
+    if len(items) <= 1:
+        return items
+    r4_items = [row for row in items if row[version_index] == _D1_PRODUCER_VERSION_7]
+    if r4_items:
+        return r4_items
+    return items
 
 
 def _select_verified_d0_scope(
@@ -552,6 +586,10 @@ def _validate_facts(
         raise ResearchDayPgError(
             "RESEARCH_DAY_D0_PARTITION_OPEN", "D0三态事实与前后总体分母未闭合"
         )
+    expected_d1_types = (
+        _expected_d1_structure_types(facts.d1_producer_version) if include_d1 else ()
+    )
+    expected_d1_type_set = frozenset(expected_d1_types)
     structures_by_symbol: dict[str, set[str]] = {}
     for item in facts.d1_structure_facts if include_d1 else ():
         key = (item.source_symbol, item.structure_type)
@@ -574,7 +612,7 @@ def _validate_facts(
             or item.market not in {"SH", "SZ"}
             or item.source_symbol[:2] != item.market
             or item.board not in {"MAIN_BOARD", "GEM"}
-            or item.structure_type not in _STRUCTURE_TYPE_SET
+            or item.structure_type not in expected_d1_type_set
             or item.generation_state not in {"GENERATED", "NOT_GENERATED", "UNKNOWN"}
             or item.history_row_count < 1
             or item.historical_anchor_count < 0
@@ -585,13 +623,15 @@ def _validate_facts(
                 "RESEARCH_DAY_D1_FACT_INVALID", "D1结构、质量或分母字段无效"
             )
     if include_d1 and (
-        len(facts.d1_structure_facts) != facts.d1_source_count * len(_STRUCTURE_TYPES)
+        len(facts.d1_structure_facts) != facts.d1_source_count * len(expected_d1_types)
         or any(
-            set(kinds) != _STRUCTURE_TYPE_SET for kinds in structures_by_symbol.values()
+            set(kinds) != expected_d1_type_set
+            for kinds in structures_by_symbol.values()
         )
     ):
         raise ResearchDayPgError(
-            "RESEARCH_DAY_D1_PARTITION_OPEN", "D1逐股五类结构事实未完整闭合"
+            "RESEARCH_DAY_D1_PARTITION_OPEN",
+            f"D1逐股{len(expected_d1_types)}类结构事实未完整闭合",
         )
     detail_counts: dict[tuple[str, str], int] = {}
     anchor_keys = set()
@@ -1259,6 +1299,7 @@ def _read_selected_board_observation(
     board_native_id: str,
     offset: int,
     limit: int,
+    expected_d1_structure_count: int = len(_STRUCTURE_TYPES_5),
 ) -> dict[str, Any]:
     """同一只读快照读取一个当前板块的成员、重叠及已保存研究事实。"""
     selected_snapshot = next(
@@ -1581,10 +1622,10 @@ def _read_selected_board_observation(
             )
             d1_view = {
                 "status": "AVAILABLE"
-                if int(d1[0]) == len(_STRUCTURE_TYPES)
+                if int(d1[0]) == expected_d1_structure_count
                 else "PARTIAL",
                 "structure_rows": int(d1[0]),
-                "expected_structure_rows": len(_STRUCTURE_TYPES),
+                "expected_structure_rows": expected_d1_structure_count,
                 "target_price_quality": price_quality,
                 "material_change_members": int(int(d1[1] or 0) > 0),
                 "material_anchor_count": anchors_for_member,
@@ -1593,7 +1634,7 @@ def _read_selected_board_observation(
             d1_view = {
                 "status": "NOT_COMPUTED",
                 "structure_rows": 0,
-                "expected_structure_rows": len(_STRUCTURE_TYPES),
+                "expected_structure_rows": expected_d1_structure_count,
                 "target_price_quality": "UNKNOWN",
                 "material_change_members": 0,
                 "material_anchor_count": 0,
@@ -1690,7 +1731,8 @@ def _read_selected_board_observation(
                 if member["source_pool_status"] == "IN_TARGET_SOURCE_POOL"
             )
             and all(
-                int(item[0]) == len(_STRUCTURE_TYPES) for item in d1_by_symbol.values()
+                int(item[0]) == expected_d1_structure_count
+                for item in d1_by_symbol.values()
             )
             else "PARTIAL",
             "material_change_members": d1_anchor_members,
@@ -1818,17 +1860,17 @@ def read_source_research_day(
             "producer_contract, producer_version, material_change_contract "
             "FROM source_d1_structure_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s "
-            "AND producer_version=%s AND d1_history_session_count=%s "
+            "AND producer_version=ANY(%s) AND d1_history_session_count=%s "
             "ORDER BY target_capture_id, calendar_revision, "
             "producer_contract, producer_version, material_change_contract",
             (
                 target_session,
                 source_capture_id,
-                _D1_PRODUCER_VERSION,
+                list(_D1_SUPPORTED_PRODUCER_VERSIONS),
                 d1_history_session_count,
             ),
         )
-        d1_scopes = cursor.fetchall()
+        d1_scopes = _select_preferred_d1_scopes(cursor.fetchall(), version_index=3)
         if not d1_scopes:
             return {
                 "storage_status": "NOT_COMPUTED",
@@ -1920,14 +1962,15 @@ def read_source_research_day(
                 "D1逐股事实绑定多个来源数据包",
                 distinct_source_package_count=d1_context[13],
             )
+        expected_d1_types = _expected_d1_structure_types(d1_producer_version)
         d1_source_count = d1_context[-2]
         d1_row_count = d1_context[-1]
-        if d1_row_count != d1_source_count * len(_STRUCTURE_TYPES):
+        if d1_row_count != d1_source_count * len(expected_d1_types):
             return incomplete_result(
-                "D1逐股五类结构行数不闭合",
+                f"D1逐股{len(expected_d1_types)}类结构行数不闭合",
                 source_symbol_count=d1_source_count,
                 observed_structure_rows=d1_row_count,
-                expected_structure_rows=d1_source_count * len(_STRUCTURE_TYPES),
+                expected_structure_rows=d1_source_count * len(expected_d1_types),
             )
         cursor.execute(
             f"SELECT structure_type, count(*), count(DISTINCT source_symbol) "
@@ -1936,12 +1979,12 @@ def read_source_research_day(
             d1_params,
         )
         type_counts = cursor.fetchall()
-        if {row[0] for row in type_counts} != set(_STRUCTURE_TYPES) or any(
+        if {row[0] for row in type_counts} != set(expected_d1_types) or any(
             row[1] != d1_source_count or row[2] != d1_source_count
             for row in type_counts
         ):
             return incomplete_result(
-                "D1五类结构逐股分母不一致",
+                f"D1{len(expected_d1_types)}类结构逐股分母不一致",
                 structure_type_counts=[list(row) for row in type_counts],
                 source_symbol_count=d1_source_count,
             )
@@ -2312,6 +2355,7 @@ def read_source_research_day(
                 board_native_id=board_native_id,
                 offset=offset,
                 limit=limit,
+                expected_d1_structure_count=len(expected_d1_types),
             )
         return {
             "storage_status": "SAVED",
@@ -2411,12 +2455,12 @@ def read_source_research_day_scope(
             "calendar_revision, producer_contract, producer_version, "
             "material_change_contract FROM source_d1_structure_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s "
-            "AND producer_version=%s "
+            "AND producer_version=ANY(%s) "
             "ORDER BY d1_history_session_count, target_capture_id, calendar_revision, "
             "producer_contract, producer_version, material_change_contract",
-            (target_session, source_capture_id, _D1_PRODUCER_VERSION),
+            (target_session, source_capture_id, list(_D1_SUPPORTED_PRODUCER_VERSIONS)),
         )
-        scopes = cursor.fetchall()
+        scopes = _select_preferred_d1_scopes(cursor.fetchall(), version_index=4)
     if not scopes:
         return {
             "status": "NOT_COMPUTED",
@@ -2783,17 +2827,17 @@ def read_source_board_comparison(
             "producer_contract,producer_version,material_change_contract,"
             "research_mode,price_coordinate FROM source_d1_structure_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s "
-            "AND producer_version=%s AND d1_history_session_count=%s "
+            "AND producer_version=ANY(%s) AND d1_history_session_count=%s "
             "ORDER BY calendar_revision,producer_contract,producer_version",
             (
                 target_session,
                 source_capture_id,
                 target_capture_id,
-                _D1_PRODUCER_VERSION,
+                list(_D1_SUPPORTED_PRODUCER_VERSIONS),
                 d1_history_session_count,
             ),
         )
-        d1_scopes = cursor.fetchall()
+        d1_scopes = _select_preferred_d1_scopes(cursor.fetchall(), version_index=3)
         d1_by_symbol: dict[str, tuple[str, int, int]] = {}
         d1_status = "NOT_COMPUTED"
         if len(d1_scopes) == 1:
@@ -2833,11 +2877,14 @@ def read_source_board_comparison(
                     )
                     for row in rows
                 }
+                expected_compare_d1_count = len(
+                    _expected_d1_structure_types(d1_scope[3])
+                )
                 d1_status = (
                     "AVAILABLE"
                     if len(d1_by_symbol) == source_symbol_count
                     and all(
-                        item[2] == len(_STRUCTURE_TYPES)
+                        item[2] == expected_compare_d1_count
                         for item in d1_by_symbol.values()
                     )
                     else "INCOMPLETE"

@@ -27,8 +27,11 @@ from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
 )
 from stock_a.application.source_d1_structures import (
+    ALL_STRUCTURE_TYPES,
+    D1_PRODUCER_VERSION_5,
     STRUCTURE_TYPES,
     discover_source_d1_structures,
+    expected_d1_structure_types_for_version,
 )
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.entry_history.history_timeline import post_signal_price_facts
@@ -979,6 +982,14 @@ def _d1_material_board_summaries(
     *,
     material_change_reason: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+    has_impulse = any(
+        any(
+            kind in item.get("material_change_status_counts_by_type", {})
+            for kind in ("IMPULSE_BODY", "IMPULSE_LOW")
+        )
+        for item in symbol_summaries.values()
+    )
+    active_structure_types = ALL_STRUCTURE_TYPES if has_impulse else STRUCTURE_TYPES
     source_symbols = set(symbol_summaries)
     board_rows = []
     mapped_by_kind: dict[str, set[str]] = {}
@@ -991,7 +1002,7 @@ def _d1_material_board_summaries(
             in_source = members & source_symbols
             group_counts: Counter[str] = Counter()
             status_counts: Counter[str] = Counter()
-            status_counts_by_type = {name: Counter() for name in STRUCTURE_TYPES}
+            status_counts_by_type = {name: Counter() for name in active_structure_types}
             anchor_counts_by_type: Counter[str] = Counter()
             material_anchor_counts_by_type: Counter[str] = Counter()
             selected_reason_anchor_count = 0
@@ -1160,9 +1171,21 @@ def _d1_material_scope_summaries(
     *,
     structure_type: str | None,
     material_change_reason: str | None,
+    active_structure_types: tuple[str, ...] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """按结构与既有原因把完整D1锚摘要投影到一个股票范围。"""
-    selected_types = (structure_type,) if structure_type else STRUCTURE_TYPES
+    if active_structure_types is None:
+        has_impulse = any(
+            any(
+                kind in item.get("material_change_status_counts_by_type", {})
+                for kind in ("IMPULSE_BODY", "IMPULSE_LOW")
+            )
+            for item in source_symbol_summaries.values()
+        )
+        active_types = ALL_STRUCTURE_TYPES if has_impulse else STRUCTURE_TYPES
+    else:
+        active_types = active_structure_types
+    selected_types = (structure_type,) if structure_type else active_types
     result = {}
     for symbol, source_summary in source_symbol_summaries.items():
         anchors_by_type = source_summary["anchor_counts_by_type"]
@@ -1171,7 +1194,7 @@ def _d1_material_scope_summaries(
         statuses_by_type = source_summary["material_change_status_counts_by_type"]
         selected_anchor_counts = {
             kind: anchors_by_type.get(kind, 0) if kind in selected_types else 0
-            for kind in STRUCTURE_TYPES
+            for kind in active_types
         }
         selected_material_counts = {
             kind: (
@@ -1181,13 +1204,13 @@ def _d1_material_scope_summaries(
             )
             if kind in selected_types
             else 0
-            for kind in STRUCTURE_TYPES
+            for kind in active_types
         }
         selected_status_counts_by_type = {
             kind: Counter(statuses_by_type.get(kind, {}))
             if kind in selected_types
             else Counter()
-            for kind in STRUCTURE_TYPES
+            for kind in active_types
         }
         status_counts = Counter()
         reason_counts: Counter[str] = Counter()
@@ -1234,7 +1257,7 @@ def _d1_material_scope_summaries(
                     if kind in selected_types
                     else {}
                 )
-                for kind in STRUCTURE_TYPES
+                for kind in active_types
             },
             "selected_structure_type": structure_type or "ALL",
             "selected_material_change_reason": material_change_reason or "ALL",
@@ -1247,15 +1270,27 @@ def _d1_material_scope_totals(
     *,
     structure_type: str | None,
     material_change_reason: str | None,
+    active_structure_types: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """计算投影后的锚、材料变化股票和互斥股票组分母。"""
+    if active_structure_types is None:
+        has_impulse = any(
+            any(
+                kind in item.get("material_change_status_counts_by_type", {})
+                for kind in ("IMPULSE_BODY", "IMPULSE_LOW")
+            )
+            for item in source_symbol_summaries.values()
+        )
+        active_types = ALL_STRUCTURE_TYPES if has_impulse else STRUCTURE_TYPES
+    else:
+        active_types = active_structure_types
     status_counts: Counter[str] = Counter()
     anchor_counts_by_type: Counter[str] = Counter()
     material_anchor_counts_by_type: Counter[str] = Counter()
     reason_anchor_counts: Counter[str] = Counter()
     reason_symbol_counts: Counter[str] = Counter()
-    reason_anchor_counts_by_type = {kind: Counter() for kind in STRUCTURE_TYPES}
-    status_counts_by_type = {kind: Counter() for kind in STRUCTURE_TYPES}
+    reason_anchor_counts_by_type = {kind: Counter() for kind in active_types}
+    status_counts_by_type = {kind: Counter() for kind in active_types}
     group_counts: Counter[str] = Counter()
     for item in source_symbol_summaries.values():
         group_counts[item["group"]] += 1
@@ -1276,7 +1311,7 @@ def _d1_material_scope_totals(
             "material_change_reason_anchor_counts_by_type"
         ].items():
             reason_anchor_counts_by_type[kind].update(counts)
-    for kind in STRUCTURE_TYPES:
+    for kind in active_types:
         anchor_counts_by_type.setdefault(kind, 0)
         material_anchor_counts_by_type.setdefault(kind, 0)
     selected_reason_anchor_count = (
@@ -1593,6 +1628,8 @@ def prepare_d1_material_observation(
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
     include_source_symbol_structure_results: bool = False,
+    include_impulse: bool = True,
+    cross_section_universe_version: str | None = None,
 ) -> dict[str, Any]:
     """一次只读准备全池D1与成员事实，供同进程筛选分页复用。"""
     _target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1614,6 +1651,8 @@ def prepare_d1_material_observation(
         include_source_symbol_structure_results=(
             include_source_symbol_structure_results
         ),
+        include_impulse=include_impulse,
+        cross_section_universe_version=cross_section_universe_version,
     )
     snapshots = [
         read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)
@@ -1663,13 +1702,20 @@ def prepare_saved_d1_material_observation(
         raise SourceObservationError("PG已存D1事实坐标与BaoStock QFQ请求不一致")
     rows = saved.get("results") or []
     source_count = saved.get("d1", {}).get("source_symbol_count")
+    d1_producer_version = saved.get("d1_producer_version") or D1_PRODUCER_VERSION_5
+    active_structure_types = expected_d1_structure_types_for_version(
+        d1_producer_version
+    )
     if (
         type(source_count) is not int
         or len(rows) != source_count
         or saved.get("pagination", {}).get("total_count") != source_count
-        or any(len(item.get("structures", [])) != len(STRUCTURE_TYPES) for item in rows)
+        or any(
+            len(item.get("structures", [])) != len(active_structure_types)
+            for item in rows
+        )
     ):
-        raise SourceObservationError("PG D1逐股五类事实没有闭合到完整来源分母")
+        raise SourceObservationError("PG D1逐股结构事实没有闭合到完整来源分母")
     started = time.perf_counter()
     by_symbol: dict[str, dict[str, Any]] = {}
     details: dict[str, list[dict[str, Any]]] = {}
@@ -1708,7 +1754,7 @@ def prepare_saved_d1_material_observation(
             }
             statuses_by_type[kind] = statuses
             aggregate_statuses.update(statuses)
-        reasons_by_type = {kind: Counter() for kind in STRUCTURE_TYPES}
+        reasons_by_type = {kind: Counter() for kind in active_structure_types}
         detail_rows = []
         for anchor in stock.get("material_anchors", []):
             item = dict(anchor)
@@ -1717,7 +1763,9 @@ def prepare_saved_d1_material_observation(
             if item.get("material_change_classification") == "MATERIAL_CHANGE":
                 for reason in set(item.get("material_change_reasons") or ()):
                     reasons_by_type[item["structure_type"]][reason] += 1
-        reason_by_type = {kind: dict(reasons_by_type[kind]) for kind in STRUCTURE_TYPES}
+        reason_by_type = {
+            kind: dict(reasons_by_type[kind]) for kind in active_structure_types
+        }
         reason_counts: Counter[str] = Counter()
         for counts in reason_by_type.values():
             reason_counts.update(counts)
@@ -1732,17 +1780,23 @@ def prepare_saved_d1_material_observation(
         details[symbol] = detail_rows
 
     summaries = _d1_material_scope_summaries(
-        by_symbol, structure_type=None, material_change_reason=None
+        by_symbol,
+        structure_type=None,
+        material_change_reason=None,
+        active_structure_types=active_structure_types,
     )
     totals = _d1_material_scope_totals(
-        summaries, structure_type=None, material_change_reason=None
+        summaries,
+        structure_type=None,
+        material_change_reason=None,
+        active_structure_types=active_structure_types,
     )
     group_counts = Counter(item["group"] for item in summaries.values())
     if len(summaries) != source_count or sum(group_counts.values()) != source_count:
         raise SourceObservationError("PG D1股票互斥分组没有闭合到来源分母")
     first_structure = rows[0]["structures"][0]
     structure_counts = {}
-    for kind in STRUCTURE_TYPES:
+    for kind in active_structure_types:
         type_rows = [
             structure
             for stock in rows
@@ -1761,6 +1815,7 @@ def prepare_saved_d1_material_observation(
         "ok": True,
         "status": "SOURCE_LEVEL_D1_STRUCTURE_CHANGE_DISCOVERY",
         "contract": "SOURCE_D1_STRUCTURE_R1",
+        "producer_version": d1_producer_version,
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "price_coordinate": "FORWARD_ADJUSTED",
         "target_session": target_session.isoformat(),
@@ -1783,7 +1838,7 @@ def prepare_saved_d1_material_observation(
         "evaluated_source_symbol_count": source_count,
         "source_pool_partition_closed": True,
         "structure_type_counts": {
-            kind: structure_counts[kind] for kind in STRUCTURE_TYPES
+            kind: structure_counts[kind] for kind in active_structure_types
         },
         "historical_anchor_changes": {
             "status": "COMPLETE_FULL_POOL_ADJACENT_SESSION_SCAN",

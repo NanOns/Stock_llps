@@ -1807,18 +1807,66 @@ def _run_with_baostock_guard(
         baostock_serial_lock,
         consume_baostock_api_quota,
         preflight_baostock_api_quota,
+        settle_baostock_api_quota,
     )
 
-    with baostock_serial_lock(config):
+    with baostock_serial_lock(config) as verify_lock_alive:
+        verify_lock_alive()
         preflight_baostock_api_quota(config, planned_calls=planned_calls)
-        # 严格遵守 R3 裁定：发送请求前先通过独立短事务扣减计划调用数，防止中途中断漏记账
+        # 严格遵守 R3/R08 裁定：发送请求前先通过独立短事务预扣计划调用数，返回后按实际发送与失败次数结算
         consume_baostock_api_quota(
             config,
             api_name=api_name,
             count=planned_calls,
             failed=0,
         )
-        return action()
+        verify_lock_alive()
+        try:
+            result = action()
+        except Exception:
+            settle_baostock_api_quota(
+                config,
+                api_name=api_name,
+                planned_calls=planned_calls,
+                actual_calls=0,
+                failed_calls=1,
+            )
+            raise
+        actual_calls = (
+            int(result["query_calls"])
+            if isinstance(result, Mapping)
+            and isinstance(result.get("query_calls"), int)
+            and result["query_calls"] >= 0
+            else planned_calls
+        )
+        status = str(result.get("status") or "") if isinstance(result, Mapping) else ""
+        is_failed = isinstance(result, Mapping) and (
+            result.get("complete") is False
+            or status
+            in {"LOGIN_FAILED", "QUERY_FAILED", "RESPONSE_INCOMPLETE", "SDK_ERROR"}
+        )
+        failed_calls = (
+            max(1, int(result.get("failed_calls", 0)))
+            if is_failed
+            else int(result.get("failed_calls", 0))
+            if isinstance(result, Mapping)
+            else 0
+        )
+        settlement = settle_baostock_api_quota(
+            config,
+            api_name=api_name,
+            planned_calls=planned_calls,
+            actual_calls=actual_calls,
+            failed_calls=failed_calls,
+        )
+        if isinstance(result, dict):
+            result["quota_settlement"] = {
+                "planned_calls": planned_calls,
+                "actual_calls": actual_calls,
+                "failed_calls": failed_calls,
+                "delta_calls": settlement["delta_calls"],
+            }
+        return result
 
 
 def _collect_sdk_rows(

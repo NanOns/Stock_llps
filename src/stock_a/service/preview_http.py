@@ -34,6 +34,7 @@ from stock_a.application.source_market_observation import (
     read_d1_material_observation,
 )
 from stock_a.application.source_d1_structures import (
+    ALL_STRUCTURE_TYPES,
     MATERIAL_CHANGE_REASONS,
     STRUCTURE_TYPES,
 )
@@ -3512,7 +3513,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         if structure_type == "ALL":
             structure_type = None
         if structure_type is not None and (
-            not isinstance(structure_type, str) or structure_type not in STRUCTURE_TYPES
+            not isinstance(structure_type, str)
+            or structure_type not in ALL_STRUCTURE_TYPES
         ):
             raise PreviewHttpError(
                 400, "D1_MATERIAL_STRUCTURE_TYPE_INVALID", "D1结构类型筛选值无效"
@@ -4397,9 +4399,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400, "BOARD_KIND_INVALID", "板块类型须为INDUSTRY或CONCEPT"
                     )
-                if values.get("structure_type") not in {None, *STRUCTURE_TYPES}:
+                if values.get("structure_type") not in {None, *ALL_STRUCTURE_TYPES}:
                     raise PreviewHttpError(
-                        400, "STRUCTURE_TYPE_INVALID", "D1结构类型不是现役五类之一"
+                        400, "STRUCTURE_TYPE_INVALID", "D1结构类型不在现役合同枚举中"
                     )
                 if values.get("material_change_reason") not in {
                     None,

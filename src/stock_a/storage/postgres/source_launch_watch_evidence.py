@@ -33,12 +33,27 @@ _D1_STRUCTURE_TYPES = (
     "RANGE_CEILING",
     "GAP_ZONE",
 )
+_D1_STRUCTURE_TYPES_7 = _D1_STRUCTURE_TYPES + (
+    "IMPULSE_BODY",
+    "IMPULSE_LOW",
+)
 _VALID_STATES = frozenset({"TRUE", "FALSE", "UNKNOWN"})
 _D0_SCENARIOS = ("LAUNCH_CONFIRM", "RECOVERY_TURN")
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _D0_RECOVERY_PRODUCER_VERSION = "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R5"
 _D1_STRUCTURE_PRODUCER_VERSION = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
+_D1_STRUCTURE_PRODUCER_VERSION_7 = "STOCK_A_D1_BAOSTOCK_QFQ_R4"
+_D1_SUPPORTED_PRODUCER_VERSIONS = (
+    _D1_STRUCTURE_PRODUCER_VERSION,
+    _D1_STRUCTURE_PRODUCER_VERSION_7,
+)
+
+
+def _expected_d1_types(producer_version: str | None) -> tuple[str, ...]:
+    if producer_version == _D1_STRUCTURE_PRODUCER_VERSION_7:
+        return _D1_STRUCTURE_TYPES_7
+    return _D1_STRUCTURE_TYPES
 
 
 def _scope_status(rows: Sequence[tuple[Any, ...]], expected_count: int) -> str:
@@ -357,8 +372,8 @@ def read_source_launch_watch_evidence(
         d1_symbol_clause = " AND source_symbol=%s" if _scope_symbol else ""
         if _scope_symbol:
             d1_scope_params += (_scope_symbol,)
-        d1_version_clause = " AND producer_version=%s"
-        d1_scope_params += (_D1_STRUCTURE_PRODUCER_VERSION,)
+        d1_version_clause = " AND producer_version=ANY(%s)"
+        d1_scope_params += (list(_D1_SUPPORTED_PRODUCER_VERSIONS),)
         d1_count_clause = ""
         if d1_history_session_count is not None:
             d1_count_clause = " AND d1_history_session_count=%s"
@@ -379,6 +394,12 @@ def read_source_launch_watch_evidence(
             d1_scope_params,
         )
         d1_scopes = cursor.fetchall()
+        if len(d1_scopes) > 1:
+            r4_scopes = [
+                row for row in d1_scopes if row[3] == _D1_STRUCTURE_PRODUCER_VERSION_7
+            ]
+            if r4_scopes:
+                d1_scopes = r4_scopes
         d1_scope_status = _scope_status(d1_scopes, scoped_source_count)
         d1_scope = d1_scopes[0] if len(d1_scopes) == 1 else None
 
@@ -687,6 +708,9 @@ def read_source_launch_watch_evidence(
             rules_status = "AVAILABLE"
             rule_reason_codes = []
 
+        expected_d1_types = _expected_d1_types(
+            d1_scope[3] if d1_scope is not None else None
+        )
         structures = d1_by_symbol.get(symbol, [])
         if not structures:
             d1_fact: dict[str, Any] = {
@@ -695,8 +719,8 @@ def read_source_launch_watch_evidence(
                 else "UNKNOWN",
                 "reason_codes": ["D1_STRUCTURE_FACT_NOT_SAVED_FOR_EXACT_INPUT"],
                 "structure_fact_count": 0,
-                "expected_structure_fact_count": len(_D1_STRUCTURE_TYPES),
-                "missing_structure_types": list(_D1_STRUCTURE_TYPES),
+                "expected_structure_fact_count": len(expected_d1_types),
+                "missing_structure_types": list(expected_d1_types),
                 "target_price_quality": "UNKNOWN",
                 "target_price_reasons": [],
                 "generation_state_counts": {},
@@ -706,7 +730,7 @@ def read_source_launch_watch_evidence(
             }
         else:
             structure_types = {str(row[0]) for row in structures}
-            missing_structure_types = sorted(set(_D1_STRUCTURE_TYPES) - structure_types)
+            missing_structure_types = sorted(set(expected_d1_types) - structure_types)
             price_qualities = {str(row[1] or "UNKNOWN") for row in structures}
             target_price_quality = (
                 "OBSERVED"
@@ -724,7 +748,7 @@ def read_source_launch_watch_evidence(
                 if d1_scope_status == "AVAILABLE" and not missing_structure_types
                 else "PARTIAL",
                 "structure_fact_count": len(structures),
-                "expected_structure_fact_count": len(_D1_STRUCTURE_TYPES),
+                "expected_structure_fact_count": len(expected_d1_types),
                 "missing_structure_types": missing_structure_types,
                 "target_price_quality": target_price_quality,
                 "target_price_reasons": sorted(
@@ -2275,10 +2299,18 @@ def read_source_launch_watch_page(
       AND d.target_capture_id=p.target_capture_id
       AND (p.d1_history_session_count IS NULL
            OR d.d1_history_session_count=p.d1_history_session_count)
-      AND d.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R3'
+      AND d.producer_version IN ('STOCK_A_D1_BAOSTOCK_QFQ_R3', 'STOCK_A_D1_BAOSTOCK_QFQ_R4')
     GROUP BY d.d1_history_session_count, d.calendar_revision,
              d.producer_contract, d.producer_version,
              d.material_change_contract, d.research_mode, d.price_coordinate
+), d1_scope_preferred AS MATERIALIZED (
+    SELECT c.*
+    FROM d1_scope_candidates c
+    WHERE c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4'
+       OR NOT EXISTS (
+           SELECT 1 FROM d1_scope_candidates r4
+           WHERE r4.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4'
+       )
 ), d1_scope_status AS (
     SELECT CASE
         WHEN count(*)=0 THEN 'NOT_COMPUTED'
@@ -2288,9 +2320,12 @@ def read_source_launch_watch_page(
             THEN 'AVAILABLE'
         ELSE 'INCOMPLETE'
     END AS status
-    FROM d1_scope_candidates
+    FROM d1_scope_preferred
 ), d1_scope AS (
-    SELECT c.* FROM d1_scope_candidates c
+    SELECT c.*,
+           CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN 7 ELSE 5 END
+               AS expected_structure_count
+    FROM d1_scope_preferred c
     WHERE (SELECT status FROM d1_scope_status)='AVAILABLE'
 ), d1_by_symbol AS (
     SELECT d.source_symbol, count(DISTINCT d.structure_type)::integer AS structure_count,
@@ -2317,6 +2352,8 @@ def read_source_launch_watch_page(
                 ELSE (SELECT status FROM rule_scope_status)
            END AS rules,
            (SELECT status FROM d1_scope_status) AS d1,
+           COALESCE((SELECT expected_structure_count FROM d1_scope LIMIT 1), 5)
+               AS d1_expected_structure_count,
            CASE WHEN (SELECT status FROM seed_scope_status)='AVAILABLE'
                   AND (SELECT status FROM rule_scope_status)='AVAILABLE'
                   AND (SELECT status FROM d1_scope_status)='AVAILABLE'
@@ -2342,6 +2379,7 @@ def read_source_launch_watch_page(
            x.unknown_price AS d1_unknown_price,
            g.d0 AS d0_scope_status, g.seed AS seed_scope_status,
            g.rules AS rule_scope_status, g.d1 AS d1_scope_status,
+           g.d1_expected_structure_count,
            g.rules_match_seed,
            COALESCE(s.source_seed_state='TRUE' OR s.s1_state='TRUE'
                     OR s.s2_state='TRUE' OR r.has_true, FALSE) AS has_seed_rule,
@@ -2360,7 +2398,8 @@ def read_source_launch_watch_page(
              OR g.rules<>'AVAILABLE' OR NOT g.rules_match_seed
              OR r.fact_count IS DISTINCT FROM (SELECT cardinality(rule_ids) FROM params)
              OR COALESCE(r.has_unknown, TRUE)
-             OR g.d1<>'AVAILABLE' OR x.structure_count IS DISTINCT FROM 5
+             OR g.d1<>'AVAILABLE'
+             OR x.structure_count IS DISTINCT FROM g.d1_expected_structure_count
              OR COALESCE(x.unknown_price, TRUE)) AS has_unknown_evidence
     FROM target_pool p
     LEFT JOIN d0_by_symbol d ON d.source_symbol=p.source_symbol
@@ -2385,7 +2424,8 @@ def read_source_launch_watch_page(
                CASE WHEN rule_scope_status<>'AVAILABLE' OR NOT rules_match_seed
                          OR rule_fact_count IS DISTINCT FROM (SELECT cardinality(rule_ids) FROM params)
                     THEN 'RULE_SCOPE_OR_SYMBOL_FACT_INCOMPLETE' END,
-               CASE WHEN d1_scope_status<>'AVAILABLE' OR d1_structure_count IS DISTINCT FROM 5
+               CASE WHEN d1_scope_status<>'AVAILABLE'
+                         OR d1_structure_count IS DISTINCT FROM d1_expected_structure_count
                     THEN 'D1_SCOPE_OR_STRUCTURE_FACT_INCOMPLETE' END,
                CASE WHEN d1_unknown_price THEN 'D1_TARGET_PRICE_UNKNOWN' END
            ]::text[], NULL) AS unknown_reason_codes

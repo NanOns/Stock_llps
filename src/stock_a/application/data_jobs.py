@@ -230,6 +230,14 @@ _MODULES = {
     "FEP_BASELINE": ("RESEARCH", "FEP条件基线", True, True),
     "OBSERVATION_SEGMENTS": ("RESEARCH", "观察持续分段", True, True),
 }
+_ALL_SOURCE_MODULES = frozenset(
+    {
+        "BAOSTOCK_PRICES",
+        "BAOSTOCK_UNIVERSE",
+        "BAOSTOCK_MARKET_INDICES",
+        "TDX_SECTOR_MEMBERS",
+    }
+)
 _UNCOORDINATED_RESEARCH_CONSUMERS: tuple[tuple[str, str, str], ...] = ()
 _CLEANUP_OPERATIONS = {"CLEAR_DERIVED", "CLEAR_AND_REGENERATE"}
 _OPERATIONS = {
@@ -433,16 +441,14 @@ def _request_fields(body: Any) -> dict[str, Any]:
             selections["base"]
             or selections["research"]
             or not selections["source"]
-            or not set(selections["source"]).issubset(
-                {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}
-            )
+            or not set(selections["source"]).issubset(_ALL_SOURCE_MODULES)
         ):
             raise DataJobError(
                 "DATA_JOB_SOURCE_ONLY_SCOPE_INVALID",
-                "SOURCE_ONLY只允许BaoStock价格和/或TDX行业成员来源，不得选择基础画像或研究模块。",
+                "SOURCE_ONLY只允许BaoStock价格、证券主资料/名录、参考指数和/或TDX行业成员来源，不得选择基础画像或研究模块。",
             )
     if mode == "MANUAL_DAILY" and daily_mode == "FULL_THREE_LAYERS":
-        required_sources = {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}
+        required_sources = set(_ALL_SOURCE_MODULES)
         required_base = {
             code
             for code, (layer, _label, implemented, available) in _MODULES.items()
@@ -460,7 +466,7 @@ def _request_fields(body: Any) -> dict[str, Any]:
         ):
             raise DataJobError(
                 "DATA_JOB_FULL_THREE_LAYERS_SCOPE_INVALID",
-                "完整三层日更必须选择全部现役基础画像与研究模块，以及BaoStock价格和TDX行业/GN成员来源。",
+                "完整三层日更必须选择全部现役基础画像与研究模块，以及BaoStock价格/主资料名录/参考指数和TDX行业/GN成员来源。",
             )
     if mode == "INITIALIZE":
         history_count = _positive_integer(
@@ -1989,10 +1995,7 @@ def build_data_job_plan(
             unit["error_message"] = None
 
     blockers: list[str] = []
-    source_io_required = (
-        "BAOSTOCK_PRICES" in selected_source_modules
-        or "TDX_SECTOR_MEMBERS" in selected_source_modules
-    )
+    source_io_required = bool(selected_source_modules & _ALL_SOURCE_MODULES)
     price_reader_required = (
         bool(raw_window) or "BAOSTOCK_PRICES" in selected_source_modules
     ) and not reset_preflight_required
@@ -2347,9 +2350,7 @@ class DataJobCoordinator:
                     "reason": reason,
                     "cleanup_allowed": cleanup_allowed,
                     "default_selected": (
-                        code in {"BAOSTOCK_PRICES", "TDX_SECTOR_MEMBERS"}
-                        if layer == "SOURCE"
-                        else True
+                        code in _ALL_SOURCE_MODULES if layer == "SOURCE" else True
                     ),
                     "default_output_session_count": 5,
                 }
@@ -5008,6 +5009,419 @@ def _baostock_universe_from_identity(
     }
 
 
+def _allocate_baostock_aux_capture(
+    config: Mapping[str, Any],
+    *,
+    job_id: UUID,
+    stage_kind: str,
+    range_start_session: date,
+    range_end_session: date,
+    requested_symbol_count: int,
+    parser_contract: str,
+) -> int:
+    """为BaoStock主资料/名录或参考指数来源阶段幂等分配真实source_capture_id。"""
+    from datetime import datetime, timezone
+    from uuid import NAMESPACE_URL, uuid5
+
+    from stock_a.sources.baostock.evidence import _UNITS as documented_units
+    from stock_a.storage.postgres.source_raw import _transaction as _raw_tx
+
+    capture_uuid = uuid5(
+        NAMESPACE_URL,
+        f"stock_a:{stage_kind}:{job_id}:{range_start_session.isoformat()}:{range_end_session.isoformat()}",
+    )
+    started = datetime.now(timezone.utc)
+    with _raw_tx(config, write=True, statement_timeout_ms=30000) as (_, cursor, _):
+        cursor.execute(
+            """SELECT capture_id FROM stock.source_captures
+               WHERE capture_uuid = %s""",
+            (capture_uuid,),
+        )
+        existing = cursor.fetchone()
+        if existing is not None:
+            return int(existing[0])
+        cursor.execute(
+            """INSERT INTO stock.source_captures
+                 (provider, capture_uuid, range_start_session, range_end_session,
+                  price_coordinates, parser_contract, read_started_at, validated_at,
+                  source_available_at, source_time_quality, source_clock_role,
+                  normalized_count, requested_symbol_count, unit_contract_version)
+               VALUES ('BAOSTOCK', %s, %s, %s, %s, %s, %s, %s, NULL,
+                       'NON_PIT_OBSERVED', %s, 0, %s, %s)
+               ON CONFLICT (capture_uuid) WHERE capture_uuid IS NOT NULL DO NOTHING
+               RETURNING capture_id""",
+            (
+                capture_uuid,
+                range_start_session,
+                range_end_session,
+                ["RAW_UNADJUSTED"],
+                parser_contract,
+                started,
+                started,
+                f"BAOSTOCK_{stage_kind}_OBSERVED_AT_CAPTURE",
+                max(1, int(requested_symbol_count)),
+                documented_units.version,
+            ),
+        )
+        row = cursor.fetchone()
+        if row is not None:
+            return int(row[0])
+        cursor.execute(
+            "SELECT capture_id FROM stock.source_captures WHERE capture_uuid = %s",
+            (capture_uuid,),
+        )
+        readback = cursor.fetchone()
+        if readback is None:
+            raise DataJobError(
+                "BAOSTOCK_AUX_CAPTURE_ALLOCATION_FAILED",
+                f"{stage_kind} 来源捕获记录写入后无法读回。",
+                status=500,
+            )
+        return int(readback[0])
+
+
+def _execute_baostock_universe_stage(
+    *,
+    config: Mapping[str, Any],
+    job_id: UUID,
+    plan: Mapping[str, Any],
+    official_sessions: Sequence[date],
+    progress_callback: Any,
+    begin_callback: Any,
+) -> dict[str, Any] | None:
+    """采集并持久化BaoStock证券基本资料与逐日全证券在市名录，独立完成不随研究失败回滚。"""
+    from stock_a.sources.baostock.client import (
+        query_session_directory_rows,
+        query_stock_basic_catalog,
+    )
+    from stock_a.storage.postgres.baostock_universe import (
+        persist_baostock_session_directory,
+        persist_baostock_stock_basic,
+    )
+
+    selected_sources = set(plan.get("selected_modules", {}).get("source", ()))
+    if "BAOSTOCK_UNIVERSE" not in selected_sources:
+        return None
+    stage_units = [
+        unit
+        for unit in plan.get("stage_units", ())
+        if unit.get("stage_code") == "SOURCE_BAOSTOCK_UNIVERSE"
+        and unit.get("status") == "NOT_STARTED"
+    ]
+    if not stage_units:
+        return None
+
+    target_day = date.fromisoformat(plan["target_session"])
+    cutoff = date.fromisoformat(plan["research_cutoff"])
+    eligible_sessions = [d for d in official_sessions if d <= min(target_day, cutoff)]
+    if not eligible_sessions:
+        raise DataJobError(
+            "BAOSTOCK_UNIVERSE_SESSION_EMPTY",
+            "BaoStock证券主资料与逐日名录没有合法官方会话范围。",
+            status=409,
+        )
+    raw_window = [
+        date.fromisoformat(d) if isinstance(d, str) else d
+        for d in plan.get("raw_window", ())
+    ]
+    if raw_window:
+        dir_sessions = tuple(sorted({d for d in raw_window if d <= cutoff}))
+    else:
+        # 至少覆盖目标日及前23个官方会话以支撑横截面20日窗口内部停牌确证
+        dir_sessions = tuple(eligible_sessions[-24:])
+    if target_day not in dir_sessions and target_day <= cutoff:
+        dir_sessions = tuple(sorted(set(dir_sessions) | {target_day}))
+
+    transport = plan.get("_baostock_transport")
+    capture_id = _allocate_baostock_aux_capture(
+        config,
+        job_id=job_id,
+        stage_kind="BAOSTOCK_UNIVERSE",
+        range_start_session=dir_sessions[0],
+        range_end_session=dir_sessions[-1],
+        requested_symbol_count=len(dir_sessions),
+        parser_contract="BAOSTOCK_UNIVERSE_BASIC_AND_DIRECTORY_R1",
+    )
+    begin_callback(job_id=job_id, units=stage_units)
+    basic_unit = next(
+        (
+            u
+            for u in stage_units
+            if u["business_table"] == "stock.source_baostock_stock_basic"
+        ),
+        None,
+    )
+    dir_unit = next(
+        (
+            u
+            for u in stage_units
+            if u["business_table"] == "stock.source_baostock_session_directory"
+        ),
+        None,
+    )
+
+    basic_res = query_stock_basic_catalog(
+        config=config,
+        transport=transport,
+        enforce_quota=True,
+    )
+    if not basic_res.get("complete") or basic_res.get("status") != "RESPONSE_RECEIVED":
+        raise DataJobError(
+            "BAOSTOCK_STOCK_BASIC_FETCH_FAILED",
+            f"BaoStock证券基本资料采集未完成: {basic_res.get('status')} ({basic_res.get('reason')})",
+            status=502,
+        )
+    basic_write = persist_baostock_stock_basic(
+        config,
+        source_capture_id=capture_id,
+        rows=basic_res.get("rows", ()),
+    )
+    if basic_unit is not None:
+        actual_basic = data_job_pg.read_business_table_count(
+            config,
+            business_table="stock.source_baostock_stock_basic",
+            target_session=target_day,
+            source_capture_id=capture_id,
+            calendar_revision=plan.get("calendar_revision") or "",
+            producer_version="BAOSTOCK_STOCK_BASIC_R1",
+            research_cutoff=cutoff,
+        )
+        progress_callback(
+            job_id=job_id,
+            stage_code="SOURCE_BAOSTOCK_UNIVERSE",
+            target_session=target_day,
+            business_table="stock.source_baostock_stock_basic",
+            source_capture_id=capture_id,
+            profile_history_session_count=None,
+            d1_history_session_count=None,
+            expected_rows=int(actual_basic),
+            inserted_rows=int(basic_write["row_count"]),
+            quality_status="NON_PIT_OBSERVED",
+            no_change=basic_write.get("status") == "NO_CHANGE",
+            producer_version="BAOSTOCK_STOCK_BASIC_R1",
+            calendar_revision=plan.get("calendar_revision") or "",
+        )
+
+    dir_res = query_session_directory_rows(
+        session_dates=tuple(d.isoformat() for d in dir_sessions),
+        config=config,
+        transport=transport,
+        enforce_quota=True,
+    )
+    if not dir_res.get("complete") or dir_res.get("status") != "RESPONSE_RECEIVED":
+        raise DataJobError(
+            "BAOSTOCK_SESSION_DIRECTORY_FETCH_FAILED",
+            f"BaoStock逐日名录采集未完成: {dir_res.get('status')} ({dir_res.get('reason')})",
+            status=502,
+        )
+    total_dir_rows = 0
+    all_dir_no_change = True
+    rows_by_day = dir_res.get("rows_by_session", {})
+    for sess in dir_sessions:
+        day_rows = rows_by_day.get(sess.isoformat(), ())
+        write_res = persist_baostock_session_directory(
+            config,
+            source_capture_id=capture_id,
+            session_date=sess,
+            rows=day_rows,
+        )
+        total_dir_rows += int(write_res["row_count"])
+        if write_res.get("status") != "NO_CHANGE":
+            all_dir_no_change = False
+    if dir_unit is not None:
+        actual_dir = data_job_pg.read_business_table_count(
+            config,
+            business_table="stock.source_baostock_session_directory",
+            target_session=target_day,
+            source_capture_id=capture_id,
+            calendar_revision=plan.get("calendar_revision") or "",
+            producer_version="BAOSTOCK_SESSION_DIRECTORY_R1",
+            research_cutoff=cutoff,
+        )
+        progress_callback(
+            job_id=job_id,
+            stage_code="SOURCE_BAOSTOCK_UNIVERSE",
+            target_session=target_day,
+            business_table="stock.source_baostock_session_directory",
+            source_capture_id=capture_id,
+            profile_history_session_count=None,
+            d1_history_session_count=None,
+            expected_rows=int(actual_dir),
+            inserted_rows=total_dir_rows,
+            quality_status="NON_PIT_OBSERVED",
+            no_change=all_dir_no_change,
+            producer_version="BAOSTOCK_SESSION_DIRECTORY_R1",
+            calendar_revision=plan.get("calendar_revision") or "",
+        )
+    return {
+        "status": "COMPLETED",
+        "source_capture_id": capture_id,
+        "basic_row_count": int(basic_write["row_count"]),
+        "directory_row_count": total_dir_rows,
+        "directory_sessions": [d.isoformat() for d in dir_sessions],
+    }
+
+
+def _execute_baostock_market_indices_stage(
+    *,
+    config: Mapping[str, Any],
+    job_id: UUID,
+    plan: Mapping[str, Any],
+    official_sessions: Sequence[date],
+    progress_callback: Any,
+    begin_callback: Any,
+) -> dict[str, Any] | None:
+    """采集并持久化配置启用的通用参考指数日线（INDEX_POINT），独立完成。"""
+    from pathlib import Path
+
+    from stock_a.contracts.loader import load_market_reference_indices_contract
+    from stock_a.sources.baostock.client import query_index_daily_range
+    from stock_a.storage.postgres.market_indices import persist_market_index_daily_bars
+
+    selected_sources = set(plan.get("selected_modules", {}).get("source", ()))
+    if "BAOSTOCK_MARKET_INDICES" not in selected_sources:
+        return None
+    stage_units = [
+        unit
+        for unit in plan.get("stage_units", ())
+        if unit.get("stage_code") == "SOURCE_BAOSTOCK_MARKET_INDICES"
+        and unit.get("status") == "NOT_STARTED"
+    ]
+    if not stage_units:
+        return None
+
+    target_day = date.fromisoformat(plan["target_session"])
+    cutoff = date.fromisoformat(plan["research_cutoff"])
+    eligible_sessions = [d for d in official_sessions if d <= min(target_day, cutoff)]
+    if not eligible_sessions:
+        raise DataJobError(
+            "BAOSTOCK_INDEX_SESSION_EMPTY",
+            "参考指数日线没有合法官方会话范围。",
+            status=409,
+        )
+    # 覆盖输出窗最早日前推至少29个官方会话（且至少30个会话）以支撑全窗MA20+5日斜率与ret20
+    raw_window = [
+        date.fromisoformat(d) if isinstance(d, str) else d
+        for d in plan.get("raw_window", ())
+    ]
+    start_idx = max(0, len(eligible_sessions) - 30)
+    if raw_window:
+        earliest_req = min(d for d in raw_window if d <= cutoff)
+        if earliest_req in eligible_sessions:
+            start_idx = min(
+                start_idx, max(0, eligible_sessions.index(earliest_req) - 29)
+            )
+    idx_window = tuple(eligible_sessions[start_idx:])
+    index_contract = load_market_reference_indices_contract(
+        Path(config["paths"]["configuration_root"])
+    )
+    enabled_indices = [
+        item for item in index_contract.get("indices", ()) if item.get("enabled")
+    ]
+    if not enabled_indices:
+        raise DataJobError(
+            "NO_ENABLED_MARKET_REFERENCE_INDICES",
+            "参考指数目录合同中没有启用的指数。",
+            status=409,
+        )
+    symbols = tuple(str(item["source_symbol"]) for item in enabled_indices)
+    official_code_by_sym = {
+        str(item["source_symbol"]): str(
+            item.get("official_code") or str(item["source_symbol"]).split(".")[-1]
+        )
+        for item in enabled_indices
+    }
+    capture_id = _allocate_baostock_aux_capture(
+        config,
+        job_id=job_id,
+        stage_kind="BAOSTOCK_MARKET_INDICES",
+        range_start_session=idx_window[0],
+        range_end_session=idx_window[-1],
+        requested_symbol_count=len(symbols),
+        parser_contract="BAOSTOCK_MARKET_INDEX_DAILY_R1",
+    )
+    begin_callback(job_id=job_id, units=stage_units)
+    transport = plan.get("_baostock_transport")
+    idx_res = query_index_daily_range(
+        symbols=symbols,
+        start_date=idx_window[0].isoformat(),
+        end_date=idx_window[-1].isoformat(),
+        config=config,
+        transport=transport,
+        enforce_quota=True,
+    )
+    if not idx_res.get("complete") or idx_res.get("status") != "RESPONSE_RECEIVED":
+        raise DataJobError(
+            "BAOSTOCK_MARKET_INDEX_FETCH_FAILED",
+            f"BaoStock通用参考指数日线采集未完成: {idx_res.get('status')} ({idx_res.get('reason')})",
+            status=502,
+        )
+    normalized_rows: list[dict[str, Any]] = []
+    for sym, raw_rows in idx_res.get("rows_by_symbol", {}).items():
+        official_code = official_code_by_sym.get(sym, sym.split(".")[-1])
+        for raw in raw_rows:
+            sess_text = str(raw.get("date") or "").strip()
+            if not sess_text:
+                continue
+            sess_day = date.fromisoformat(sess_text)
+            if sess_day > cutoff:
+                continue
+            normalized_rows.append(
+                {
+                    "source_symbol": sym,
+                    "official_code": official_code,
+                    "session_date": sess_day,
+                    "bar_status": "TARGET_PRESENT",
+                    "open_points": raw.get("open"),
+                    "high_points": raw.get("high"),
+                    "low_points": raw.get("low"),
+                    "close_points": raw.get("close"),
+                    "preclose_points": raw.get("preclose"),
+                    "volume_raw": raw.get("volume"),
+                    "amount_raw": raw.get("amount"),
+                    "pct_chg_reported": raw.get("pctChg"),
+                    "price_quality": "OBSERVED",
+                    "price_reason": None,
+                }
+            )
+    write_res = persist_market_index_daily_bars(
+        config,
+        source_capture_id=capture_id,
+        rows=normalized_rows,
+    )
+    actual_rows = data_job_pg.read_business_table_count(
+        config,
+        business_table="stock.source_market_index_daily",
+        target_session=target_day,
+        source_capture_id=capture_id,
+        calendar_revision=plan.get("calendar_revision") or "",
+        producer_version="BAOSTOCK_MARKET_INDEX_DAILY_R1",
+        research_cutoff=cutoff,
+    )
+    for unit in stage_units:
+        progress_callback(
+            job_id=job_id,
+            stage_code="SOURCE_BAOSTOCK_MARKET_INDICES",
+            target_session=target_day,
+            business_table="stock.source_market_index_daily",
+            source_capture_id=capture_id,
+            profile_history_session_count=None,
+            d1_history_session_count=None,
+            expected_rows=int(actual_rows),
+            inserted_rows=int(write_res["row_count"]),
+            quality_status="NON_PIT_OBSERVED",
+            no_change=write_res.get("status") == "NO_CHANGE",
+            producer_version="BAOSTOCK_MARKET_INDEX_DAILY_R1",
+            calendar_revision=plan.get("calendar_revision") or "",
+        )
+    return {
+        "status": "COMPLETED",
+        "source_capture_id": capture_id,
+        "row_count": int(write_res["row_count"]),
+        "symbols": list(symbols),
+    }
+
+
 def _execute_baostock_source_stage(
     *,
     config: Mapping[str, Any],
@@ -5660,7 +6074,28 @@ def _execute_shared_production_chain(
     progress_callback: Any,
     begin_callback: Any,
 ) -> None:
-    """运行唯一BaoStock paired capture、TDX成员和Core/Profile生产链。"""
+    """运行唯一BaoStock paired capture、TDX成员和Core/Profile生产链（整任务共享BaoStock配额预算）。"""
+    from stock_a.storage.postgres.baostock_quota import baostock_job_quota_scope
+
+    with baostock_job_quota_scope():
+        _execute_shared_production_chain_impl(
+            config=config,
+            job_id=job_id,
+            plan=plan,
+            progress_callback=progress_callback,
+            begin_callback=begin_callback,
+        )
+
+
+def _execute_shared_production_chain_impl(
+    *,
+    config: Mapping[str, Any],
+    job_id: UUID,
+    plan: Mapping[str, Any],
+    progress_callback: Any,
+    begin_callback: Any,
+) -> None:
+    """实际执行BaoStock来源、TDX成员、基础画像与研究全链路。"""
     from stock_a.application.pg_price_profiles import (
         SOURCE_SYMBOL_PROFILE_SCOPE,
         run_source_symbol_price_profile,
@@ -5769,15 +6204,52 @@ def _execute_shared_production_chain(
         prepared_snapshots=prepared_sector_snapshots,
     )
 
-    if "BAOSTOCK_PRICES" in selected_sources:
-        _calendar_id, _calendar_revision, official_sessions = _load_official_sessions(
-            date.fromisoformat(plan["research_cutoff"])
+    official_sessions_for_sources: Sequence[date] | None = None
+    if selected_sources & {
+        "BAOSTOCK_PRICES",
+        "BAOSTOCK_UNIVERSE",
+        "BAOSTOCK_MARKET_INDICES",
+    }:
+        _calendar_id, _calendar_revision, official_sessions_for_sources = (
+            _load_official_sessions(date.fromisoformat(plan["research_cutoff"]))
         )
+
+    if "BAOSTOCK_UNIVERSE" in selected_sources:
+        assert official_sessions_for_sources is not None
+        universe_result = _execute_baostock_universe_stage(
+            config=config,
+            job_id=job_id,
+            plan=plan,
+            official_sessions=official_sessions_for_sources,
+            progress_callback=progress_callback,
+            begin_callback=begin_callback,
+        )
+        if isinstance(universe_result, Mapping) and isinstance(plan, dict):
+            plan["_universe_source_capture_id"] = int(
+                universe_result["source_capture_id"]
+            )
+
+    if "BAOSTOCK_MARKET_INDICES" in selected_sources:
+        assert official_sessions_for_sources is not None
+        index_result = _execute_baostock_market_indices_stage(
+            config=config,
+            job_id=job_id,
+            plan=plan,
+            official_sessions=official_sessions_for_sources,
+            progress_callback=progress_callback,
+            begin_callback=begin_callback,
+        )
+        if isinstance(index_result, Mapping) and isinstance(plan, dict):
+            plan["_index_source_capture_id"] = int(index_result["source_capture_id"])
+
+    source_capture_id: int | None = None
+    if "BAOSTOCK_PRICES" in selected_sources:
+        assert official_sessions_for_sources is not None
         source_result = _execute_baostock_source_stage(
             config=config,
             job_id=job_id,
             plan=plan,
-            official_sessions=official_sessions,
+            official_sessions=official_sessions_for_sources,
             progress_callback=progress_callback,
             begin_callback=begin_callback,
         )
@@ -5797,7 +6269,7 @@ def _execute_shared_production_chain(
                 status=409,
             )
         source_capture_id = int(source_result["source_capture_id"])
-    else:
+    elif base_modules or research_modules:
         capture_inputs = plan.get("price_capture_inputs", ())
         capture_ids = {
             item.get("source_capture_id")
@@ -5816,22 +6288,18 @@ def _execute_shared_production_chain(
                 status=409,
             )
         source_capture_id = int(next(iter(capture_ids)))
-    if isinstance(plan, dict):
+    if isinstance(plan, dict) and source_capture_id is not None:
         plan["_paired_source_capture_id"] = source_capture_id
 
     if not base_modules and not research_modules:
-        if selected_sources - {
-            "BAOSTOCK_PRICES",
-            "BAOSTOCK_UNIVERSE",
-            "BAOSTOCK_MARKET_INDICES",
-            "TDX_SECTOR_MEMBERS",
-        }:
+        if selected_sources - _ALL_SOURCE_MODULES:
             raise DataJobError(
                 "DATA_JOB_SOURCE_MODULE_INVALID",
                 "来源层只能选择BaoStock价格、主资料/名录、参考指数和TDX行业/GN成员关系。",
                 status=409,
             )
         return
+    assert source_capture_id is not None
 
     cutoff = date.fromisoformat(plan["research_cutoff"])
     if "PRICE_LIMITS" in base_modules:
@@ -6002,12 +6470,19 @@ def _execute_shared_production_chain(
                 continue
             begin_callback(job_id=job_id, units=day_units)
             try:
+                selected_universe_capture_id = plan.get("_universe_source_capture_id")
                 report = persist_source_cross_section_for_session(
                     config,
                     target_session=day,
                     research_cutoff=cutoff,
                     source_capture_id=source_capture_id,
+                    directory_capture_id=selected_universe_capture_id,
+                    stock_basic_capture_id=selected_universe_capture_id,
                 )
+                if isinstance(plan, dict) and report.get("universe_version"):
+                    plan.setdefault("_cross_section_universe_version_by_day", {})[
+                        day.isoformat()
+                    ] = str(report["universe_version"])
                 expected_by_table = {
                     "stock.source_cross_section_day_facts": report["row_count"],
                     "stock.source_cross_section_endpoints": report["endpoint_count"],
@@ -6242,6 +6717,11 @@ def _execute_shared_production_chain(
             )
         )
         begin_callback(job_id=job_id, units=[unit])
+        day_cross_universe_version = (
+            plan.get("_cross_section_universe_version_by_day", {}).get(day_text)
+            if isinstance(plan.get("_cross_section_universe_version_by_day"), Mapping)
+            else None
+        )
         profile = run_source_symbol_price_profile(
             config,
             target_session=day,
@@ -6251,6 +6731,7 @@ def _execute_shared_production_chain(
             session_count=history_count,
             page_size=100,
             profile_contract=profile_contract,
+            cross_section_universe_version=day_cross_universe_version,
         )
         profile_revision = profile.get("profile_revision")
         if isinstance(profile_revision, str) and profile_revision:
@@ -6481,6 +6962,13 @@ def _execute_shared_production_chain(
             )
             begin_callback(job_id=job_id, units=day_units)
             try:
+                day_cross_universe_version = (
+                    plan.get("_cross_section_universe_version_by_day", {}).get(day_text)
+                    if isinstance(
+                        plan.get("_cross_section_universe_version_by_day"), Mapping
+                    )
+                    else None
+                )
                 report = run_source_research_day(
                     config,
                     target_session=day,
@@ -6494,6 +6982,7 @@ def _execute_shared_production_chain(
                     include_d0=include_d0,
                     include_d1=include_d1,
                     include_static=include_d0,
+                    cross_section_universe_version=day_cross_universe_version,
                 )
                 if report.get("status") != "PERSISTED":
                     raise DataJobError(
@@ -6689,23 +7178,25 @@ def _execute_shared_production_chain(
                 continue
             begin_callback(job_id=job_id, units=day_units)
             try:
-                with _raw_tx(config, write=False, statement_timeout_ms=10000) as (
-                    _,
-                    cur,
-                    _,
-                ):
-                    cur.execute(
-                        """SELECT MAX(source_capture_id)
-                           FROM stock.source_market_index_daily
-                           WHERE session_date = %s""",
-                        (day,),
-                    )
-                    idx_cap_row = cur.fetchone()
-                    idx_capture_id = (
-                        int(idx_cap_row[0])
-                        if idx_cap_row and idx_cap_row[0] is not None
-                        else None
-                    )
+                idx_capture_id = plan.get("_index_source_capture_id")
+                if idx_capture_id is None:
+                    with _raw_tx(config, write=False, statement_timeout_ms=10000) as (
+                        _,
+                        cur,
+                        _,
+                    ):
+                        cur.execute(
+                            """SELECT MAX(source_capture_id)
+                               FROM stock.source_market_index_daily
+                               WHERE session_date = %s""",
+                            (day,),
+                        )
+                        idx_cap_row = cur.fetchone()
+                        idx_capture_id = (
+                            int(idx_cap_row[0])
+                            if idx_cap_row and idx_cap_row[0] is not None
+                            else None
+                        )
                 if idx_capture_id is None:
                     raise DataJobError(
                         "MARKET_INDEX_DAILY_NOT_AVAILABLE",

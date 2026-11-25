@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
@@ -38,14 +39,22 @@ def persist_market_index_day_facts(
     config: Mapping[str, Any],
     *,
     records: Sequence[Mapping[str, Any]],
+    cursor: Any | None = None,
 ) -> dict[str, Any]:
-    """幂等写入通用参考指数日级因子（同键同内容 NO_CHANGE，异内容拒绝回滚）。"""
+    """幂等写入通用参考指数日级因子（同键同内容 NO_CHANGE，异内容拒绝回滚；支持复用外部写事务）。"""
     if not records:
         return {"status": "NO_CHANGE", "row_count": 0}
-    with _transaction(config, write=True, statement_timeout_ms=15000) as (
-        _,
-        cursor,
-        _,
+    tx_ctx = (
+        nullcontext((None, cursor, None))
+        if cursor is not None
+        else _transaction(config, write=True, statement_timeout_ms=15000)
+    )
+    with (
+        tx_ctx as (
+            _,
+            cursor,
+            _,
+        )
     ):
         inserted = 0
         unchanged = 0
@@ -145,6 +154,7 @@ def persist_market_environment_series(
     calendar_revision: str,
     rule_version: str = "MARKET_PRESENTATION_R1",
     initial_state: Mapping[str, Any] | None = None,
+    cursor: Any | None = None,
 ) -> dict[str, Any]:
     """按严格官方相邻会话离线归约市场复合环境展示状态并幂等持久化。"""
     raw_obs = []
@@ -179,10 +189,17 @@ def persist_market_environment_series(
     inserted = 0
     unchanged = 0
     try:
-        with _transaction(config, write=True, statement_timeout_ms=15000) as (
-            _,
-            cursor,
-            _,
+        tx_ctx = (
+            nullcontext((None, cursor, None))
+            if cursor is not None
+            else _transaction(config, write=True, statement_timeout_ms=15000)
+        )
+        with (
+            tx_ctx as (
+                _,
+                cursor,
+                _,
+            )
         ):
             for item in reduced:
                 sess_str = str(item["session"])
@@ -756,11 +773,15 @@ def persist_market_indices_and_environment_for_session(
                     "primary_index_symbol": str(prev_row[4]),
                 }
 
-    # E03：直接从主宽度事实（read_source_market_context）读取 B_fixed_source，不依赖相邻变化表
+    # E03/R07：直接从主宽度事实（read_source_market_context）读取 B_fixed_source；
+    # 仅在合法的宽度未计算/无记录业务异常时降级 UNKNOWN，严禁吞掉 SQL/代码/配置异常
     breadth_axis = "UNKNOWN"
-    try:
-        from stock_a.application.source_market_context import read_source_market_context
+    from stock_a.application.source_market_context import (
+        SourceMarketContextError,
+        read_source_market_context,
+    )
 
+    try:
         mkt_ctx = read_source_market_context(
             config,
             target_session=target_session,
@@ -769,8 +790,23 @@ def persist_market_indices_and_environment_for_session(
             include_symbols=False,
         )
         breadth_axis = classify_market_breadth(mkt_ctx.calculation.b_fixed_source)
-    except Exception:  # noqa: BLE001
-        breadth_axis = "UNKNOWN"
+    except SourceMarketContextError as ctx_err:
+        err_code = str(getattr(ctx_err, "code", "") or "")
+        if (
+            err_code
+            in {
+                "MARKET_CONTEXT_NOT_AVAILABLE",
+                "MARKET_BREADTH_NOT_COMPUTED",
+                "SOURCE_CAPTURE_NOT_AVAILABLE",
+                "RAW_NOT_AVAILABLE",
+                "MARKET_CONTEXT_SOURCE_UNAVAILABLE",
+            }
+            or "NOT_AVAILABLE" in err_code
+            or "NOT_COMPUTED" in err_code
+        ):
+            breadth_axis = "UNKNOWN"
+        else:
+            raise
 
     from stock_a.storage.postgres.price_limits import read_market_pressure_summary
 
@@ -813,30 +849,37 @@ def persist_market_indices_and_environment_for_session(
                 **evaluated,
             }
         )
-    idx_report = persist_market_index_day_facts(config, records=factor_records)
-
-    # 3. 落库目标日四轴复合市场环境展示状态（严格继承紧邻前一官方交易日前态）
-    env_report = persist_market_environment_series(
-        config,
-        official_sessions=(target_session,),
-        day_axis_inputs=(
-            {
-                "target_session": target_session,
-                "trend_axis": primary_trend_state,
-                "breadth_axis": breadth_axis,
-                "participation_axis": participation_axis,
-                "pressure_axis": pressure_axis,
-            },
-        ),
-        stock_capture_id=stock_capture_id,
-        index_capture_id=index_capture_id,
-        primary_index_symbol=primary_symbol,
-        index_config_version=config_version,
-        calendar_id=calendar_id,
-        calendar_revision=calendar_revision,
-        rule_version=rule_version,
-        initial_state=prior_env_state,
-    )
+    # R07：在同一写事务内原子落库指数日因子与复合市场环境，防止环境失败留下无父行孤儿指数因子
+    with _transaction(config, write=True, statement_timeout_ms=30000) as (
+        _,
+        write_cursor,
+        _,
+    ):
+        idx_report = persist_market_index_day_facts(
+            config, records=factor_records, cursor=write_cursor
+        )
+        env_report = persist_market_environment_series(
+            config,
+            official_sessions=(target_session,),
+            day_axis_inputs=(
+                {
+                    "target_session": target_session,
+                    "trend_axis": primary_trend_state,
+                    "breadth_axis": breadth_axis,
+                    "participation_axis": participation_axis,
+                    "pressure_axis": pressure_axis,
+                },
+            ),
+            stock_capture_id=stock_capture_id,
+            index_capture_id=index_capture_id,
+            primary_index_symbol=primary_symbol,
+            index_config_version=config_version,
+            calendar_id=calendar_id,
+            calendar_revision=calendar_revision,
+            rule_version=rule_version,
+            initial_state=prior_env_state,
+            cursor=write_cursor,
+        )
     return {
         "status": "PERSISTED"
         if (
@@ -849,6 +892,9 @@ def persist_market_indices_and_environment_for_session(
         "index_capture_id": index_capture_id,
         "config_version": config_version,
         "calendar_revision": calendar_revision,
+        "prior_state_status": "INHERITED_ADJACENT"
+        if prior_env_state is not None
+        else "MISSING_ADJACENT_INITIAL",
         "index_factor_rows": int(idx_report.get("inserted_count", 0))
         + int(idx_report.get("unchanged_count", 0)),
         "environment_rows": int(env_report.get("inserted_count", 0))

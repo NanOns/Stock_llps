@@ -139,6 +139,13 @@ def persist_source_cross_section_for_session(
     session_status_by_session: dict[date, dict[str, str]] = {
         sess: {} for sess in price_sessions
     }
+    raw_tradestatus_by_session: dict[date, dict[str, str]] = {
+        sess: {} for sess in price_sessions
+    }
+    directory_status_by_session: dict[date, dict[str, str]] = {
+        sess: {} for sess in price_sessions
+    }
+    effective_dir_capture_id = directory_capture_id or universe_capture_id
     with _transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
@@ -164,31 +171,75 @@ def persist_source_cross_section_for_session(
             raw_ts_qual,
         ) in cursor.fetchall():
             symbol = str(sym)
-            # C02：严格区分 ACTUAL / CONFIRMED_SUSPENSION / UNKNOWN，不以缺bar推断停牌、不以停牌保留价当ACTUAL
+            # C02/R04：严格区分 ACTUAL / CONFIRMED_SUSPENSION / UNKNOWN，保留 RAW tradestatus 证据供冲突检测
             if raw_ts_qual == "OBSERVED" and raw_ts_val == "0":
+                raw_tradestatus_by_session[sess][symbol] = "SUSPENDED"
                 session_status_by_session[sess][symbol] = "CONFIRMED_SUSPENSION"
                 continue
-            if (
-                raw_ts_qual == "OBSERVED"
-                and raw_ts_val == "1"
-                and qfq_status == "TARGET_PRESENT"
-                and qfq_quality == "OBSERVED"
-                and qfq_close is not None
-                and Decimal(qfq_close) > 0
-            ):
-                qfq_close_by_session[sess][symbol] = Decimal(qfq_close)
-                session_status_by_session[sess][symbol] = "ACTUAL"
+            if raw_ts_qual == "OBSERVED" and raw_ts_val == "1":
+                raw_tradestatus_by_session[sess][symbol] = "TRADING"
+                if (
+                    qfq_status == "TARGET_PRESENT"
+                    and qfq_quality == "OBSERVED"
+                    and qfq_close is not None
+                    and Decimal(qfq_close) > 0
+                ):
+                    qfq_close_by_session[sess][symbol] = Decimal(qfq_close)
+                    session_status_by_session[sess][symbol] = "ACTUAL"
+                else:
+                    session_status_by_session[sess][symbol] = "UNKNOWN"
             else:
+                # 含 TARGET_MISSING 占位或 raw_tradestatus 未知：暂标 UNKNOWN，允许后续用同会话名录确证停牌补充
                 session_status_by_session[sess][symbol] = "UNKNOWN"
 
-    # 若逐日名录有确证停牌且 RAW 行缺失，补充为 CONFIRMED_SUSPENSION（优先以同源 RAW tradestatus 为准）
+        # R04：一次性加载整个窗口全部官方会话的逐日名录交易状态（覆盖 T-2 等非五端点内部会话）
+        if effective_dir_capture_id is not None:
+            cursor.execute(
+                """SELECT session_date, source_symbol, trade_status
+                   FROM stock.source_baostock_session_directory
+                   WHERE source_capture_id = %s
+                     AND session_date = ANY(%s)
+                     AND source_symbol = ANY(%s)""",
+                (effective_dir_capture_id, price_sessions, sorted(all_symbols)),
+            )
+            for sess, sym, dir_ts in cursor.fetchall():
+                directory_status_by_session[sess][str(sym)] = str(dir_ts)
+
+    # 同时合并端点已解析名录（兼容未入库的 Mock/单测场景）
     for u_date, u_info in universe_info_by_date.items():
-        if u_date not in session_status_by_session:
+        if u_date not in directory_status_by_session:
             continue
         ts_map = u_info.get("trade_status_by_symbol") or {}
-        day_status = session_status_by_session[u_date]
         for sym, ts in ts_map.items():
-            if sym not in day_status and ts == "SUSPENDED":
+            directory_status_by_session[u_date].setdefault(str(sym), str(ts))
+
+    # R04：结合 RAW tradestatus 与逐日名录 trade_status，处理内部停牌补充与冲突降级 UNKNOWN
+    trade_status_conflicts: list[dict[str, str]] = []
+    for sess in price_sessions:
+        dir_map = directory_status_by_session[sess]
+        raw_ts_map = raw_tradestatus_by_session[sess]
+        day_status = session_status_by_session[sess]
+        for sym, dir_ts in dir_map.items():
+            raw_ts = raw_ts_map.get(sym)
+            if raw_ts is not None:
+                if (raw_ts == "TRADING" and dir_ts == "SUSPENDED") or (
+                    raw_ts == "SUSPENDED" and dir_ts == "TRADING"
+                ):
+                    # RAW 与名录明确冲突：不得任选方便状态，强制降级 UNKNOWN 并移除价格
+                    day_status[sym] = "UNKNOWN"
+                    qfq_close_by_session[sess].pop(sym, None)
+                    trade_status_conflicts.append(
+                        {
+                            "session_date": sess.isoformat(),
+                            "source_symbol": sym,
+                            "raw_tradestatus": raw_ts,
+                            "directory_trade_status": dir_ts,
+                        }
+                    )
+                continue
+            # RAW 缺行或仅存在 TARGET_MISSING 占位（无 OBSERVED tradestatus）：
+            # 若名录明确 SUSPENDED，按合同认定为 CONFIRMED_SUSPENSION
+            if dir_ts == "SUSPENDED":
                 day_status[sym] = "CONFIRMED_SUSPENSION"
 
     # 3. 构造共同目标坐标身份与各 ReturnEndpoint（每个端点只算一次）
@@ -306,4 +357,24 @@ def persist_source_cross_section_for_session(
         "universe_version": universe_version,
         "calendar_revision": calendar_revision,
         "contract_version": CROSS_SECTION_CONTRACT_VERSION,
+        "universe_quality_summary": {
+            "member_count": len(target_members),
+            "quarantined_symbol_count": len(
+                target_universe_info.get("quarantined_symbols", ())
+            ),
+            "quarantined_symbols": tuple(
+                target_universe_info.get("quarantined_symbols", ())
+            ),
+            "partial_unknown_symbol_count": len(
+                target_universe_info.get("partial_unknown_symbols", ())
+            ),
+            "missing_basic_symbol_count": len(
+                target_universe_info.get("missing_basic_symbols", ())
+            ),
+            "excluded_by_date_bounds": int(
+                target_universe_info.get("excluded_by_date_bounds", 0)
+            ),
+            "trade_status_conflict_count": len(trade_status_conflicts),
+            "trade_status_conflicts": tuple(trade_status_conflicts),
+        },
     }

@@ -414,7 +414,9 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             from stock_a.sources.baostock.evidence import project_baostock_evidence
 
             normalized_symbol = _normalize_symbol(args.symbol)[0]
-            query = query_daily_rows(normalized_symbol, target.isoformat())
+            query = query_daily_rows(
+                normalized_symbol, target.isoformat(), config=config
+            )
             result["baostock_evidence"] = project_baostock_evidence(
                 query=query,
                 requested_symbol=normalized_symbol,

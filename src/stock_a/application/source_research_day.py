@@ -20,6 +20,10 @@ from stock_a.application.source_d0_raw import (
     _official_calendar,
     query_source_d0_raw_launch,
 )
+from stock_a.application.source_d1_structures import (
+    D1_PRODUCER_VERSION_5,
+    expected_d1_structure_types_for_version,
+)
 from stock_a.application.source_market_observation import (
     prepare_d1_material_observation,
 )
@@ -702,6 +706,7 @@ def _persist_static_research_day(
     expected_source_count: int,
     history_session_count: int | None = None,
     worker_count: int = 1,
+    cross_section_universe_version: str | None = None,
 ) -> dict[str, Any]:
     """由同一现役Core/Profile、RPS与D0生产者闭合全池静态事实。"""
     _validate_static_history_count(history_session_count)
@@ -766,6 +771,7 @@ def _persist_static_research_day(
         history_session_count=history_count,
         include_rps_read=True,
         worker_count=worker_count,
+        cross_section_universe_version=cross_section_universe_version,
     )
     if (
         seed.get("profile_revision_matches_runtime") is not True
@@ -1003,18 +1009,21 @@ def _prepare_d1_facts(
             raise SourceResearchDayError(
                 "D1_TYPE_SUMMARY_INVALID", "D1缺少五类结构结果"
             )
-        expected_d1_types = (
-            _D1_STRUCTURE_TYPES_WITH_IMPULSE
-            if set(type_results) == _D1_STRUCTURE_TYPES_WITH_IMPULSE
-            else _D1_STRUCTURE_TYPES
-        )
+        d1_version = _optional_text(d1.get("producer_version")) or D1_PRODUCER_VERSION_5
+        try:
+            expected_d1_types = set(expected_d1_structure_types_for_version(d1_version))
+        except Exception as error:
+            raise SourceResearchDayError(
+                "D1_PRODUCER_VERSION_INVALID", f"不支持的D1生产者版本: {d1_version}"
+            ) from error
         if (
             set(type_results) != expected_d1_types
             or not set(anchor_counts).issubset(expected_d1_types)
             or set(status_counts) != expected_d1_types
         ):
             raise SourceResearchDayError(
-                "D1_TYPE_SUMMARY_INVALID", "D1结构类型不符合现役五类或七类合同"
+                "D1_TYPE_SUMMARY_INVALID",
+                f"D1结构类型不符合版本 {d1_version} 合同要求（期望{len(expected_d1_types)}类）",
             )
         detail_rows = symbol_details.get(symbol, [])
         if not isinstance(detail_rows, list):
@@ -1255,6 +1264,8 @@ def prepare_source_research_day(
     d1_history_session_count: int,
     include_d0: bool = True,
     include_d1: bool = True,
+    include_impulse: bool = True,
+    cross_section_universe_version: str | None = None,
 ) -> tuple[ResearchDayFacts, dict[str, Any]]:
     """按选中的研究域独立准备一个交易日；只读Raw，默认永不写PG。"""
     started = time.perf_counter()
@@ -1266,6 +1277,7 @@ def prepare_source_research_day(
         or source_capture_id <= 0
         or type(include_d0) is not bool
         or type(include_d1) is not bool
+        or type(include_impulse) is not bool
         or not (include_d0 or include_d1)
     ):
         raise SourceResearchDayError(
@@ -1330,6 +1342,8 @@ def prepare_source_research_day(
             industry_snapshot_id=None,
             concept_snapshot_id=None,
             include_source_symbol_structure_results=True,
+            include_impulse=include_impulse,
+            cross_section_universe_version=cross_section_universe_version,
         )
         d1_wall_seconds = time.perf_counter() - d1_started
         d1 = prepared["d1"]
@@ -1487,7 +1501,9 @@ def prepare_source_research_day(
             else "SKIPPED_BY_USER"
         ),
         d1_producer_version=(
-            "STOCK_A_D1_BAOSTOCK_QFQ_R3" if include_d1 else "SKIPPED_BY_USER"
+            _required_text(d1.get("producer_version"), "D1生产者版本")
+            if include_d1
+            else "SKIPPED_BY_USER"
         ),
         d1_material_change_contract=(
             _required_text(
@@ -1519,6 +1535,11 @@ def prepare_source_research_day(
 def _validate_day_facts(
     facts: ResearchDayFacts, *, include_d0: bool, include_d1: bool
 ) -> None:
+    expected_d1_type_count = (
+        len(expected_d1_structure_types_for_version(facts.d1_producer_version))
+        if include_d1
+        else 0
+    )
     if (
         type(include_d0) is not bool
         or type(include_d1) is not bool
@@ -1528,7 +1549,11 @@ def _validate_day_facts(
         or (include_d0 and facts.d0_target_source_count < 1)
         or (include_d0 and facts.d0_union_source_count != len(facts.d0_facts))
         or (include_d1 and facts.d1_source_count < 1)
-        or (include_d1 and len(facts.d1_structure_facts) != facts.d1_source_count * 5)
+        or (
+            include_d1
+            and len(facts.d1_structure_facts)
+            != facts.d1_source_count * expected_d1_type_count
+        )
         or (
             include_d0
             and len({item.source_symbol for item in facts.d0_facts})
@@ -1727,6 +1752,7 @@ def run_source_research_day(
     include_d0: bool = True,
     include_d1: bool = True,
     include_static: bool = True,
+    cross_section_universe_version: str | None = None,
 ) -> dict[str, Any]:
     """执行单日研究；保存域按D0/D1输出日期独立选择。"""
     if (
@@ -1752,6 +1778,7 @@ def run_source_research_day(
         d1_history_session_count=d1_history_session_count,
         include_d0=include_d0,
         include_d1=include_d1,
+        cross_section_universe_version=cross_section_universe_version,
     )
     if persist:
         write_result = persist_source_research_day(
@@ -1775,6 +1802,7 @@ def run_source_research_day(
                 ),
                 history_session_count=history_session_count,
                 worker_count=worker_count,
+                cross_section_universe_version=cross_section_universe_version,
             )
             static_result["wall_seconds"] = round(
                 time.perf_counter() - static_started, 6
