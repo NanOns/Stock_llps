@@ -398,6 +398,7 @@ def fetch_baostock_price_window(
     coordinates: Sequence[str] | None = None,
     transport: object | None = None,
     request_attempt_offsets: Mapping[str, Mapping[str, int]] | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """按显式证券和官方会话读取并配对BaoStock未复权/前复权价格。"""
     if (
@@ -669,6 +670,7 @@ def fetch_baostock_price_window(
                             max_api_calls=max_api_calls_per_batch,
                             target_session_count=len(target_sessions),
                             transport=transport,
+                            config=config,
                         )
                     except Exception as error:
                         login_batch_count_unknown += 1
@@ -1192,6 +1194,7 @@ def run_manual_baostock_daily_capture(
         max_api_calls=max_queries,
         target_session_count=len(sessions),
         transport=transport,
+        config=config,
     )
     response_status = response.get("status")
     if response_status == "REQUEST_BUDGET_EXCEEDED":

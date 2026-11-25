@@ -419,6 +419,35 @@ def query_daily_rows(
     timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
     max_rows: int = _MAX_QUERY_ROWS,
     transport: object | None = None,
+    config: Mapping[str, Any] | None = None,
+    enforce_quota: bool = False,
+) -> dict[str, Any]:
+    """查询一个显式来源代码和单个历史交易日；在线路径经全局串行锁与日配额护栏。"""
+    return _run_with_baostock_guard(
+        config=config,
+        planned_calls=1,
+        api_name="query_history_k_data_plus",
+        injected_transport=transport is not None,
+        enforce_quota=enforce_quota,
+        action=lambda: _query_daily_rows_impl(
+            symbol,
+            target_session,
+            adjustflag=adjustflag,
+            timeout_seconds=timeout_seconds,
+            max_rows=max_rows,
+            transport=transport,
+        ),
+    )
+
+
+def _query_daily_rows_impl(
+    symbol: str,
+    target_session: str,
+    *,
+    adjustflag: str | int = "3",
+    timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
+    max_rows: int = _MAX_QUERY_ROWS,
+    transport: object | None = None,
 ) -> dict[str, Any]:
     """查询一个显式来源代码和单个历史交易日；不重试、不写文件、不改TDX。"""
     adjustflag = _validate_adjustflag(adjustflag)
@@ -1238,14 +1267,45 @@ def query_identity_reference(
         "error_type": error_type,
         "reason": reason,
     }
-    snapshot["verified_source_capture_id"] = _issue_verified_identity_capture(
-        snapshot,
-        injected_transport=transport is not None,
-    )
-    return snapshot
 
 
 def query_daily_range_rows(
+    symbols: tuple[str, ...],
+    start_date: str,
+    end_date: str,
+    *,
+    timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
+    max_rows_per_symbol: int | None = None,
+    adjustflag: str | int = "3",
+    max_api_calls: int = _MAX_API_QUERIES_PER_BATCH,
+    target_session_count: int | None = None,
+    transport: object | None = None,
+    config: Mapping[str, Any] | None = None,
+    enforce_quota: bool = False,
+) -> dict[str, Any]:
+    """按显式范围和坐标查询；在线路径经全局串行锁与日配额护栏。"""
+    planned = len(symbols) if isinstance(symbols, tuple) else 1
+    return _run_with_baostock_guard(
+        config=config,
+        planned_calls=max(1, planned),
+        api_name="query_history_k_data_plus",
+        injected_transport=transport is not None,
+        enforce_quota=enforce_quota,
+        action=lambda: _query_daily_range_rows_impl(
+            symbols,
+            start_date,
+            end_date,
+            timeout_seconds=timeout_seconds,
+            max_rows_per_symbol=max_rows_per_symbol,
+            adjustflag=adjustflag,
+            max_api_calls=max_api_calls,
+            target_session_count=target_session_count,
+            transport=transport,
+        ),
+    )
+
+
+def _query_daily_range_rows_impl(
     symbols: tuple[str, ...],
     start_date: str,
     end_date: str,
@@ -1694,3 +1754,272 @@ def query_daily_range_rows(
         "error_type": error_type,
         "reason": reason,
     }
+
+
+def _run_with_baostock_guard(
+    *,
+    config: Mapping[str, Any] | None,
+    planned_calls: int,
+    api_name: str,
+    injected_transport: bool,
+    enforce_quota: bool,
+    action: Any,
+) -> dict[str, Any]:
+    """在线 BaoStock 入口统一护栏：PG 进程串行锁 + 日配额预检 + 实耗扣减。"""
+    if config is None or (injected_transport and not enforce_quota):
+        return action()
+    from stock_a.storage.postgres.baostock_quota import (
+        baostock_serial_lock,
+        consume_baostock_api_quota,
+        preflight_baostock_api_quota,
+    )
+
+    with baostock_serial_lock(config):
+        preflight_baostock_api_quota(config, planned_calls=planned_calls)
+        result = action()
+        used_calls = int(result.get("query_calls") or 0)
+        if used_calls > 0:
+            failed = (
+                used_calls
+                if result.get("status")
+                not in {"RESPONSE_RECEIVED", "OK", "PARTIAL_RESPONSE"}
+                else 0
+            )
+            consume_baostock_api_quota(
+                config,
+                api_name=api_name,
+                count=used_calls,
+                failed=failed,
+            )
+        return result
+
+
+def _collect_sdk_rows(
+    result_set: Any, *, max_rows: int
+) -> tuple[list[str], list[dict[str, str]]]:
+    fields = list(getattr(result_set, "fields", ()) or ())
+    rows: list[dict[str, str]] = []
+    while len(rows) < max_rows and result_set.next():
+        raw_row = result_set.get_row_data()
+        rows.append(
+            {
+                str(fields[idx]): str(raw_row[idx]) if idx < len(raw_row) else ""
+                for idx in range(len(fields))
+            }
+        )
+    return (fields, rows)
+
+
+def query_stock_basic_catalog(
+    *,
+    config: Mapping[str, Any] | None = None,
+    transport: object | None = None,
+    enforce_quota: bool = False,
+    timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
+    max_rows: int = 20000,
+) -> dict[str, Any]:
+    """采集 BaoStock 全市场证券基本资料（query_stock_basic），支持注入 Mock transport。"""
+
+    def _do() -> dict[str, Any]:
+        started_at = _timestamp()
+        sdk, sdk_version = _load_sdk(transport)
+        if transport is None and sdk_version != _PINNED_SDK_VERSION:
+            raise ContractError(f"UNSUPPORTED_BAOSTOCK_SDK:{sdk_version}")
+        _set_sdk_socket_timeout(
+            float(timeout_seconds), injected_transport=transport is not None
+        )
+        login_res = sdk.login()
+        if _code(login_res) != "0":
+            return {
+                "status": "LOGIN_FAILED",
+                "query_calls": 0,
+                "rows": [],
+                "reason": _error_message(login_res),
+            }
+        try:
+            rs = sdk.query_stock_basic(code="")
+            if _code(rs) != "0":
+                return {
+                    "status": "QUERY_FAILED",
+                    "query_calls": 1,
+                    "rows": [],
+                    "reason": _error_message(rs),
+                }
+            fields, rows = _collect_sdk_rows(rs, max_rows=max_rows)
+            return {
+                "status": "RESPONSE_RECEIVED",
+                "query_calls": 1,
+                "request_started_at": started_at,
+                "request_completed_at": _timestamp(),
+                "response_fields": fields,
+                "rows": rows,
+            }
+        finally:
+            try:
+                sdk.logout()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _run_with_baostock_guard(
+        config=config,
+        planned_calls=1,
+        api_name="query_stock_basic",
+        injected_transport=transport is not None,
+        enforce_quota=enforce_quota,
+        action=_do,
+    )
+
+
+def query_session_directory_rows(
+    *,
+    session_dates: tuple[str, ...],
+    config: Mapping[str, Any] | None = None,
+    transport: object | None = None,
+    enforce_quota: bool = False,
+    timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
+    max_rows_per_day: int = 20000,
+) -> dict[str, Any]:
+    """逐日采集 BaoStock 在市证券名录（query_all_stock），支持注入 Mock transport。"""
+    if not isinstance(session_dates, tuple) or not session_dates:
+        raise ContractError("SESSION_DATES_REQUIRED")
+    for day_text in session_dates:
+        if date.fromisoformat(day_text).isoformat() != day_text:
+            raise ContractError(f"INVALID_SESSION_DATE:{day_text}")
+
+    def _do() -> dict[str, Any]:
+        started_at = _timestamp()
+        sdk, sdk_version = _load_sdk(transport)
+        if transport is None and sdk_version != _PINNED_SDK_VERSION:
+            raise ContractError(f"UNSUPPORTED_BAOSTOCK_SDK:{sdk_version}")
+        _set_sdk_socket_timeout(
+            float(timeout_seconds), injected_transport=transport is not None
+        )
+        login_res = sdk.login()
+        if _code(login_res) != "0":
+            return {
+                "status": "LOGIN_FAILED",
+                "query_calls": 0,
+                "rows_by_session": {},
+                "reason": _error_message(login_res),
+            }
+        rows_by_session: dict[str, list[dict[str, str]]] = {}
+        calls = 0
+        try:
+            for day_text in session_dates:
+                calls += 1
+                rs = sdk.query_all_stock(day=day_text)
+                if _code(rs) != "0":
+                    return {
+                        "status": "QUERY_FAILED",
+                        "query_calls": calls,
+                        "rows_by_session": rows_by_session,
+                        "reason": _error_message(rs),
+                    }
+                _, rows = _collect_sdk_rows(rs, max_rows=max_rows_per_day)
+                rows_by_session[day_text] = rows
+            return {
+                "status": "RESPONSE_RECEIVED",
+                "query_calls": calls,
+                "request_started_at": started_at,
+                "request_completed_at": _timestamp(),
+                "rows_by_session": rows_by_session,
+            }
+        finally:
+            try:
+                sdk.logout()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _run_with_baostock_guard(
+        config=config,
+        planned_calls=len(session_dates),
+        api_name="query_all_stock",
+        injected_transport=transport is not None,
+        enforce_quota=enforce_quota,
+        action=_do,
+    )
+
+
+_INDEX_DAILY_FIELDS = "date,code,open,high,low,close,preclose,volume,amount,pctChg"
+
+
+def query_index_daily_range(
+    *,
+    symbols: tuple[str, ...],
+    start_date: str,
+    end_date: str,
+    config: Mapping[str, Any] | None = None,
+    transport: object | None = None,
+    enforce_quota: bool = False,
+    timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
+    max_rows_per_symbol: int = 250,
+) -> dict[str, Any]:
+    """按配置指数清单采集通用参考指数日线（固定 adjustflag=3 / INDEX_POINT），支持 Mock transport。"""
+    if not isinstance(symbols, tuple) or not symbols:
+        raise ContractError("INDEX_SYMBOLS_REQUIRED")
+    for sym in symbols:
+        if _SYMBOL_PATTERN.fullmatch(sym) is None:
+            raise ContractError(f"INVALID_INDEX_SYMBOL:{sym}")
+    if date.fromisoformat(end_date) < date.fromisoformat(start_date):
+        raise ContractError("INVALID_INDEX_DATE_RANGE")
+
+    def _do() -> dict[str, Any]:
+        started_at = _timestamp()
+        sdk, sdk_version = _load_sdk(transport)
+        if transport is None and sdk_version != _PINNED_SDK_VERSION:
+            raise ContractError(f"UNSUPPORTED_BAOSTOCK_SDK:{sdk_version}")
+        _set_sdk_socket_timeout(
+            float(timeout_seconds), injected_transport=transport is not None
+        )
+        login_res = sdk.login()
+        if _code(login_res) != "0":
+            return {
+                "status": "LOGIN_FAILED",
+                "query_calls": 0,
+                "rows_by_symbol": {},
+                "reason": _error_message(login_res),
+            }
+        rows_by_symbol: dict[str, list[dict[str, str]]] = {}
+        calls = 0
+        try:
+            for sym in symbols:
+                calls += 1
+                market, digits = _SYMBOL_PATTERN.fullmatch(sym).groups()
+                rs = sdk.query_history_k_data_plus(
+                    f"{market.lower()}.{digits}",
+                    _INDEX_DAILY_FIELDS,
+                    start_date=start_date,
+                    end_date=end_date,
+                    frequency="d",
+                    adjustflag="3",
+                )
+                if _code(rs) != "0":
+                    return {
+                        "status": "QUERY_FAILED",
+                        "query_calls": calls,
+                        "rows_by_symbol": rows_by_symbol,
+                        "reason": _error_message(rs),
+                    }
+                _, rows = _collect_sdk_rows(rs, max_rows=max_rows_per_symbol)
+                rows_by_symbol[sym] = rows
+            return {
+                "status": "RESPONSE_RECEIVED",
+                "query_calls": calls,
+                "request_started_at": started_at,
+                "request_completed_at": _timestamp(),
+                "rows_by_symbol": rows_by_symbol,
+            }
+        finally:
+            try:
+                sdk.logout()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _run_with_baostock_guard(
+        config=config,
+        planned_calls=len(symbols),
+        api_name="query_history_k_data_plus",
+        injected_transport=transport is not None,
+        enforce_quota=enforce_quota,
+        action=_do,
+    )

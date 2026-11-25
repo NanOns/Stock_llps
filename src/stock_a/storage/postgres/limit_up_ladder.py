@@ -184,6 +184,8 @@ def persist_limit_up_streaks_for_session(
                     "target_session": target_session.isoformat(),
                     "row_count": len(records),
                     "contiguous_session_count": len(window_sessions),
+                    "calendar_revision": calendar_revision,
+                    "contract_version": LIMIT_UP_LADDER_CONTRACT_VERSION,
                 }
             raise ValueError("LIMIT_UP_STREAK_SAME_KEY_DIFFERENT_CONTENT")
 
@@ -211,6 +213,8 @@ def persist_limit_up_streaks_for_session(
         "target_session": target_session.isoformat(),
         "row_count": len(records),
         "contiguous_session_count": len(window_sessions),
+        "calendar_revision": calendar_revision,
+        "contract_version": LIMIT_UP_LADDER_CONTRACT_VERSION,
     }
 
 

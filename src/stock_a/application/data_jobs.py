@@ -129,7 +129,12 @@ _STAGE_TABLES = {
         "stock.tdx_sector_members",
     ),
     "CORE_PROFILE": ("stock.source_symbol_price_profiles",),
+    "CROSS_SECTION": (
+        "stock.source_cross_section_day_facts",
+        "stock.source_cross_section_endpoints",
+    ),
     "PRICE_LIMITS": ("stock.source_price_limit_day_facts",),
+    "LIMIT_UP_LADDER": ("stock.source_limit_up_streak_day_facts",),
     "MARKET_BREADTH": (
         "stock.source_market_breadth_days",
         "stock.source_market_breadth_symbols",
@@ -171,6 +176,8 @@ _STAGE_ORDER = {
     "SOURCE_BAOSTOCK_PRICES": 1,
     "SOURCE_SECTOR_MEMBERS": 2,
     "PRICE_LIMITS": 2,
+    "LIMIT_UP_LADDER": 3,
+    "CROSS_SECTION": 3,
     "MARKET_BREADTH": 3,
     "CORE_PROFILE": 4,
     "MARKET_PARTICIPATION": 5,
@@ -192,7 +199,9 @@ _MODULES = {
     "BAOSTOCK_PRICES": ("SOURCE", "BaoStock股票日线价格", True, True),
     "TDX_SECTOR_MEMBERS": ("SOURCE", "行业与GN概念成员来源", True, True),
     "CORE_PROFILE": ("BASE", "Core / Profile", True, True),
+    "CROSS_SECTION": ("BASE", "全市场横截面10因子", True, True),
     "PRICE_LIMITS": ("BASE", "涨跌停限价", True, True),
+    "LIMIT_UP_LADDER": ("BASE", "连板梯队", True, True),
     "MARKET_BREADTH": ("BASE", "市场宽度", True, True),
     "MARKET_PARTICIPATION": ("BASE", "成交参与", True, True),
     "D0": ("RESEARCH", "D0 / Seed研究", True, True),
@@ -960,7 +969,9 @@ def build_data_job_plan(
                 if module
                 in {
                     "CORE_PROFILE",
+                    "CROSS_SECTION",
                     "PRICE_LIMITS",
+                    "LIMIT_UP_LADDER",
                     "MARKET_BREADTH",
                     "MARKET_PARTICIPATION",
                     "SECTOR_PULSE",
@@ -1159,6 +1170,8 @@ def build_data_job_plan(
     # 时才允许发起来源请求。Forward还需加入截止内实际到期的端点会话。
     for module in (
         "PRICE_LIMITS",
+        "LIMIT_UP_LADDER",
+        "CROSS_SECTION",
         "FORWARD_PATH",
         "COHORT_STATS",
         "FEP_BASELINE",
@@ -1661,6 +1674,24 @@ def build_data_job_plan(
             business_table="stock.source_price_limit_day_facts",
             status="NOT_STARTED",
         )
+    for day in module_output_sessions.get("LIMIT_UP_LADDER", ()):
+        _unit(
+            units,
+            stage="LIMIT_UP_LADDER",
+            target_session=date.fromisoformat(day) if isinstance(day, str) else day,
+            business_table="stock.source_limit_up_streak_day_facts",
+            status="NOT_STARTED",
+        )
+    for day in module_output_sessions.get("CROSS_SECTION", ()):
+        day_obj = date.fromisoformat(day) if isinstance(day, str) else day
+        for table in _STAGE_TABLES["CROSS_SECTION"]:
+            _unit(
+                units,
+                stage="CROSS_SECTION",
+                target_session=day_obj,
+                business_table=table,
+                status="NOT_STARTED",
+            )
     for day in market_sessions:
         status = (
             "NOT_COMPUTED" if day.isoformat() in market_insufficient else "NOT_STARTED"
@@ -3629,8 +3660,6 @@ def _prepare_reset_resume_inputs_from_persisted_capture(
             status=409,
         )
 
-    from datetime import datetime
-
     captured_at = names_snapshot.get("captured_at")
     if (
         not isinstance(captured_at, datetime)
@@ -4273,6 +4302,7 @@ def _prepare_reset_source_inputs(
             max_history_session_count=int(budget["max_history_session_count"]),
             max_retry_attempts=0,
             retry_backoff_seconds=0,
+            config=config,
         )
     except BaoStockDailyJobError as error:
         raise DataJobError(
@@ -5460,6 +5490,7 @@ def _execute_baostock_source_stage(
                     retry_backoff_seconds=backoff,
                     coordinates=(coordinate,),
                     request_attempt_offsets=request_attempt_offsets,
+                    config=config,
                 )
             persist_outcome(symbols, outcome)
 
@@ -5744,9 +5775,6 @@ def _execute_shared_production_chain(
     cutoff = date.fromisoformat(plan["research_cutoff"])
     if "PRICE_LIMITS" in base_modules:
         from stock_a.research.price_limits import PRICE_LIMIT_CONTRACT_VERSION
-        from stock_a.storage.postgres.limit_up_ladder import (
-            persist_limit_up_streaks_for_session,
-        )
         from stock_a.storage.postgres.price_limits import (
             persist_source_price_limits_for_session,
         )
@@ -5768,12 +5796,6 @@ def _execute_shared_production_chain(
             begin_callback(job_id=job_id, units=day_units)
             try:
                 report = persist_source_price_limits_for_session(
-                    config,
-                    target_session=day,
-                    research_cutoff=cutoff,
-                    source_capture_id=source_capture_id,
-                )
-                persist_limit_up_streaks_for_session(
                     config,
                     target_session=day,
                     research_cutoff=cutoff,
@@ -5806,7 +5828,7 @@ def _execute_shared_production_chain(
                         expected_rows=report["row_count"],
                         inserted_rows=report["row_count"],
                         quality_status="COMPLETE_RAW_NON_PIT_CROSS_TRANSACTION_READBACK",
-                        no_change=False,
+                        no_change=(report.get("status") == "NO_CHANGE"),
                         producer_version=PRICE_LIMIT_CONTRACT_VERSION,
                         calendar_revision=report["calendar_revision"],
                     )
@@ -5822,6 +5844,158 @@ def _execute_shared_production_chain(
                     (
                         str(getattr(error, "code", type(error).__name__)),
                         f"涨跌停限价({day})未闭合：{str(error)[:300]}",
+                    )
+                )
+    if "LIMIT_UP_LADDER" in base_modules:
+        from stock_a.research.limit_up_ladder import LIMIT_UP_LADDER_CONTRACT_VERSION
+        from stock_a.storage.postgres.limit_up_ladder import (
+            persist_limit_up_streaks_for_session,
+        )
+
+        ladder_days = tuple(
+            date.fromisoformat(day)
+            for day in plan.get("module_output_sessions", {}).get("LIMIT_UP_LADDER", ())
+        )
+        for day in ladder_days:
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "LIMIT_UP_LADDER"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                report = persist_limit_up_streaks_for_session(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                )
+                for unit in day_units:
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=report["calendar_revision"],
+                        producer_version=LIMIT_UP_LADDER_CONTRACT_VERSION,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows != report["row_count"]:
+                        raise DataJobError(
+                            "LIMIT_UP_LADDER_READBACK_MISMATCH",
+                            f"连板梯队({day})独立PG读回行数({actual_rows})与预期({report['row_count']})不一致。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="LIMIT_UP_LADDER",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=report["row_count"],
+                        inserted_rows=report["row_count"],
+                        quality_status="COMPLETE_RAW_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=(report.get("status") == "NO_CHANGE"),
+                        producer_version=LIMIT_UP_LADDER_CONTRACT_VERSION,
+                        calendar_revision=report["calendar_revision"],
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="LIMIT_UP_LADDER",
+                    error=error,
+                    message_prefix="连板梯队生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"连板梯队({day})未闭合：{str(error)[:300]}",
+                    )
+                )
+    if "CROSS_SECTION" in base_modules:
+        from stock_a.application.source_cross_section import (
+            persist_source_cross_section_for_session,
+        )
+        from stock_a.research.cross_section import CROSS_SECTION_CONTRACT_VERSION
+
+        cross_days = tuple(
+            date.fromisoformat(day)
+            for day in plan.get("module_output_sessions", {}).get("CROSS_SECTION", ())
+        )
+        for day in cross_days:
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "CROSS_SECTION"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                report = persist_source_cross_section_for_session(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    source_capture_id=source_capture_id,
+                )
+                expected_by_table = {
+                    "stock.source_cross_section_day_facts": report["row_count"],
+                    "stock.source_cross_section_endpoints": report["endpoint_count"],
+                }
+                for unit in day_units:
+                    table = unit["business_table"]
+                    expected_rows = expected_by_table[table]
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=table,
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=report["calendar_revision"],
+                        producer_version=CROSS_SECTION_CONTRACT_VERSION,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows < expected_rows:
+                        raise DataJobError(
+                            "CROSS_SECTION_READBACK_MISMATCH",
+                            f"全市场横截面({day}, {table})独立PG读回行数({actual_rows})小于预期({expected_rows})。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="CROSS_SECTION",
+                        target_session=day,
+                        business_table=table,
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=expected_rows,
+                        inserted_rows=expected_rows,
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=(report.get("status") == "NO_CHANGE"),
+                        producer_version=CROSS_SECTION_CONTRACT_VERSION,
+                        calendar_revision=report["calendar_revision"],
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="CROSS_SECTION",
+                    error=error,
+                    message_prefix="全市场横截面生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"全市场横截面({day})未闭合：{str(error)[:300]}",
                     )
                 )
     # 市场宽度先绑定paired capture的QFQ历史坐标，保留既有B_fixed_source分类公式。

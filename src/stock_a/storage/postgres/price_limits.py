@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal, localcontext
@@ -33,12 +34,31 @@ def fraction_payload(value: Fraction | None) -> dict[str, Any] | None:
     }
 
 
+def _compute_listing_session_ordinal(
+    calendar_sessions: tuple[date, ...] | list[date],
+    *,
+    ipo_date: date | None,
+    target_session: date,
+) -> int | None:
+    """按官方交易日历精确计算上市后交易会话序号（ipo_date早于日历起点或晚于目标日时返回None）。"""
+    if ipo_date is None or not calendar_sessions:
+        return None
+    if target_session < ipo_date or ipo_date < calendar_sessions[0]:
+        return None
+    start_idx = bisect_left(calendar_sessions, ipo_date)
+    end_idx = bisect_right(calendar_sessions, target_session)
+    if end_idx <= start_idx:
+        return None
+    return end_idx - start_idx
+
+
 def persist_source_price_limits_for_session(
     config: Mapping[str, Any],
     *,
     target_session: date,
     research_cutoff: date,
     source_capture_id: int,
+    stock_basic_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """在单事务内计算并幂等写入目标交易日的日线涨跌停限价事实。"""
     if target_session > research_cutoff:
@@ -89,10 +109,33 @@ def persist_source_price_limits_for_session(
         if not raw_rows:
             raise ValueError("目标会话没有可用的BaoStock RAW来源行")
 
+        selected_basic_capture_id = stock_basic_capture_id
+        if selected_basic_capture_id is None:
+            cursor.execute(
+                """SELECT MAX(source_capture_id)
+                   FROM stock.source_baostock_stock_basic"""
+            )
+            basic_row = cursor.fetchone()
+            selected_basic_capture_id = (
+                int(basic_row[0]) if basic_row and basic_row[0] is not None else None
+            )
+        ipo_date_by_symbol: dict[str, date] = {}
+        if selected_basic_capture_id is not None:
+            cursor.execute(
+                """SELECT source_symbol, ipo_date
+                   FROM stock.source_baostock_stock_basic
+                   WHERE source_capture_id = %s
+                     AND field_quality <> 'CONFLICT_QUARANTINED'
+                     AND ipo_date IS NOT NULL""",
+                (selected_basic_capture_id,),
+            )
+            ipo_date_by_symbol = {str(sym): ipo for sym, ipo in cursor.fetchall()}
+
         records = []
         status_counts: dict[str, int] = {
             "ASSESSABLE": 0,
             "NA_SUSPENDED": 0,
+            "NA_NO_PRICE_LIMIT": 0,
             "UNKNOWN": 0,
         }
         for (
@@ -117,6 +160,12 @@ def persist_source_price_limits_for_session(
             raw_tradestatus_quality,
             raw_is_st_quality,
         ) in raw_rows:
+            symbol_ipo_date = ipo_date_by_symbol.get(symbol)
+            listing_ordinal = _compute_listing_session_ordinal(
+                calendar_sessions,
+                ipo_date=symbol_ipo_date,
+                target_session=target_session,
+            )
             fact = evaluate_daily_price_limit(
                 source_symbol=symbol,
                 market=market,
@@ -133,6 +182,8 @@ def persist_source_price_limits_for_session(
                 raw_high=raw_high,
                 raw_low=raw_low,
                 raw_close=raw_close,
+                ipo_date=symbol_ipo_date,
+                listing_session_ordinal=listing_ordinal,
                 raw_preclose_quality=raw_preclose_quality,
                 raw_open_quality=raw_open_quality,
                 raw_high_quality=raw_high_quality,

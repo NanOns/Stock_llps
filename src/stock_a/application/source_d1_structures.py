@@ -27,6 +27,7 @@ from stock_a.research.entry_history.history_preview import (
     research_stock_pg_d1_history_previews,
 )
 from stock_a.research.facts import boolean
+from stock_a.research.d1_impulse import evaluate_d1_impulse_anchors
 from stock_a.research.structure import (
     Anchor,
     Bar,
@@ -47,6 +48,11 @@ STRUCTURE_TYPES = (
     "RANGE_CEILING",
     "GAP_ZONE",
 )
+IMPULSE_STRUCTURE_TYPES = (
+    "IMPULSE_BODY",
+    "IMPULSE_LOW",
+)
+ALL_STRUCTURE_TYPES = STRUCTURE_TYPES + IMPULSE_STRUCTURE_TYPES
 MATERIAL_CHANGE_REASONS = (
     "SUPPORT_STATE_TRANSITION",
     "SUPPORT_ACCEPTANCE_TRANSITION",
@@ -426,6 +432,9 @@ def _generate_day(
     calendar_id: str,
     calendar_revision: str,
     core_previous: Mapping[str, FieldValue] | None,
+    core_today: Mapping[str, FieldValue] | None = None,
+    rel_market_1: FieldValue | None = None,
+    include_impulse: bool = False,
     prior_range_results: Mapping[str, dict[str, Any]] | None = None,
     prior_range_states: Mapping[str, FieldValue] | None = None,
     prior_range_anchors: Mapping[str, Anchor | None] | None = None,
@@ -537,6 +546,57 @@ def _generate_day(
                 core_previous=core_previous,
             ),
         }
+    if include_impulse or rel_market_1 is not None:
+        today_fields = core_today or {}
+        atr20_prev = core_fields.get("core.atr20", unknown("PREVIOUS_CORE_UNAVAILABLE"))
+        clv_today = today_fields.get("core.clv", unknown("TODAY_CLV_UNAVAILABLE"))
+        amount_ratio_today = today_fields.get(
+            "core.amount_ratio20", unknown("TODAY_AMOUNT_RATIO20_UNAVAILABLE")
+        )
+        rel_m1 = (
+            rel_market_1
+            if isinstance(rel_market_1, FieldValue)
+            else unknown("CROSS_REL_MARKET_1_UNAVAILABLE")
+        )
+        impulse_raw = evaluate_d1_impulse_anchors(
+            entity_id=f"SOURCE_SYMBOL_ONLY:{symbol}",
+            ordinal=target_index,
+            coordinate_id=coordinate_id,
+            source_ref=source_ref,
+            window_ref=window_ref,
+            actual=actual,
+            today=bars[target_index],
+            atr20_previous=atr20_prev,
+            clv=clv_today,
+            amount_ratio20=amount_ratio_today,
+            rel_market_1=rel_m1,
+            capability_state="READY",
+        )
+        for kind in IMPULSE_STRUCTURE_TYPES:
+            classified = _evaluate_generated(
+                impulse_raw[kind],
+                kind=kind,
+                prior_range_state=None,
+                prior_range_anchor=None,
+            )
+            anchor = classified["anchor"]
+            if isinstance(anchor, Anchor):
+                anchor_models[kind] = anchor
+            results[kind] = {
+                **{
+                    key: item
+                    for key, item in classified.items()
+                    if key != "carry_anchor"
+                },
+                "anchor": _anchor_payload(anchor, sessions) if anchor else None,
+                "generation_evidence": {
+                    "target_session": day.isoformat(),
+                    "atr20_previous": _render_field(atr20_prev),
+                    "clv": _render_field(clv_today),
+                    "amount_ratio20": _render_field(amount_ratio_today),
+                    "rel_market_1": _render_field(rel_m1),
+                },
+            }
     return (
         results,
         {
@@ -2176,6 +2236,8 @@ def evaluate_source_d1_structure_timeline(
     source_capture_id: int,
     core_previews_by_session: Mapping[date, Mapping[str, Any]],
     history_inputs=None,
+    rel_market_1_by_session: Mapping[date, FieldValue] | None = None,
+    include_impulse: bool = False,
 ) -> dict[str, Any]:
     """为单一来源代码沿已存会话生成锚并逐日观察后继，不回写PG。"""
     normalized = symbol.strip().upper()
@@ -2192,6 +2254,8 @@ def evaluate_source_d1_structure_timeline(
             "D1_STRUCTURE_HISTORY_PREVIEW_INCOMPLETE",
             "单股结构观察需要每个输入会话的精确Core预览",
         )
+    enable_impulse = bool(include_impulse or rel_market_1_by_session is not None)
+    active_structure_types = ALL_STRUCTURE_TYPES if enable_impulse else STRUCTURE_TYPES
     range_state = {
         kind: unknown("RANGE_PRIOR_STATE_LEFT_CENSORED") for kind in _RANGE_TYPES
     }
@@ -2199,7 +2263,7 @@ def evaluate_source_d1_structure_timeline(
     anchors: dict[str, dict[str, Any]] = {}
     state_counts = {
         kind: {"GENERATED": 0, "NOT_GENERATED": 0, "UNKNOWN": 0}
-        for kind in STRUCTURE_TYPES
+        for kind in active_structure_types
     }
     points = []
 
@@ -2227,6 +2291,19 @@ def evaluate_source_d1_structure_timeline(
             if previous_core is not None
             else None
         )
+        today_fields = (
+            {
+                "core.clv": core_field(day, "core.clv"),
+                "core.amount_ratio20": core_field(day, "core.amount_ratio20"),
+            }
+            if enable_impulse
+            else None
+        )
+        day_rel_market_1 = (
+            rel_market_1_by_session.get(day, unknown("CROSS_REL_MARKET_1_UNAVAILABLE"))
+            if isinstance(rel_market_1_by_session, Mapping)
+            else (unknown("CROSS_REL_MARKET_1_UNAVAILABLE") if enable_impulse else None)
+        )
         results, _, anchor_models = _generate_day(
             symbol=normalized,
             target_index=index,
@@ -2238,6 +2315,9 @@ def evaluate_source_d1_structure_timeline(
             calendar_id="OFFICIAL_SESSION_CALENDAR",
             calendar_revision="SOURCE_WINDOW_BOUND",
             core_previous=previous_fields,
+            core_today=today_fields,
+            rel_market_1=day_rel_market_1,
+            include_impulse=enable_impulse,
             prior_range_states=range_state,
             prior_range_anchors=range_anchor,
         )
@@ -2435,7 +2515,7 @@ def evaluate_source_d1_structure_timeline(
                 "evaluated_sessions": len(sessions),
                 "partition_closed": sum(state_counts[kind].values()) == len(sessions),
             }
-            for kind in STRUCTURE_TYPES
+            for kind in active_structure_types
         },
         "events": event_payloads,
         "points": points,

@@ -103,6 +103,12 @@ _MODULE_PROGRESS_TABLES = {
     ),
     "PRICE_LIMITS": frozenset({"stock.source_price_limit_day_facts"}),
     "LIMIT_UP_LADDER": frozenset({"stock.source_limit_up_streak_day_facts"}),
+    "CROSS_SECTION": frozenset(
+        {
+            "stock.source_cross_section_day_facts",
+            "stock.source_cross_section_endpoints",
+        }
+    ),
     "FORWARD_PATH": frozenset({"stock.source_forward_path_facts"}),
     "COHORT_STATS": frozenset({"stock.source_cohort_group_stats"}),
     "FEP_BASELINE": frozenset({"stock.source_fep_baseline_facts"}),
@@ -3213,6 +3219,39 @@ def read_business_table_count(
                 calendar_revision,
             ),
         ),
+        "stock.source_limit_up_streak_day_facts": (
+            """SELECT count(*) FROM stock.source_limit_up_streak_day_facts
+               WHERE target_session=%s AND source_capture_id=%s
+                 AND contract_version=%s AND calendar_revision=%s""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+            ),
+        ),
+        "stock.source_cross_section_day_facts": (
+            """SELECT count(*) FROM stock.source_cross_section_day_facts
+               WHERE target_session=%s AND price_capture_id=%s
+                 AND contract_version=%s AND calendar_revision=%s""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+            ),
+        ),
+        "stock.source_cross_section_endpoints": (
+            """SELECT count(*) FROM stock.source_cross_section_endpoints
+               WHERE target_session=%s AND price_capture_id=%s
+                 AND contract_version=%s AND calendar_revision=%s""",
+            lambda: (
+                target_session,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+            ),
+        ),
         "stock.source_forward_path_facts": (
             """SELECT count(*) FROM stock.source_forward_path_facts
                WHERE target_session=%s AND source_capture_id=%s""",
@@ -4330,40 +4369,22 @@ def mark_progress_cleared(
                WHERE g.t0_session=%s AND g.t0_session<=%s""",
         ),
         "stock.source_price_limit_day_facts": (
-            """SELECT count(*) FROM stock.source_price_limit_day_facts
-               WHERE target_session=%s AND source_capture_id=%s
-                 AND contract_version=%s AND calendar_revision=%s""",
-            lambda: (
-                target_session,
-                source_capture_id,
-                producer_version,
-                calendar_revision,
-            ),
+            "SELECT count(*) FROM stock.source_price_limit_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.source_limit_up_streak_day_facts": (
+            "SELECT count(*) FROM stock.source_limit_up_streak_day_facts WHERE target_session=%s AND target_session<=%s",
         ),
         "stock.source_forward_path_facts": (
-            """SELECT count(*) FROM stock.source_forward_path_facts
-               WHERE target_session=%s AND source_capture_id=%s""",
-            lambda: (target_session, source_capture_id),
+            "SELECT count(*) FROM stock.source_forward_path_facts WHERE target_session=%s AND target_session<=%s",
         ),
         "stock.source_cohort_group_stats": (
-            """SELECT count(*) FROM stock.source_cohort_group_stats
-               WHERE target_session=%s AND source_capture_id=%s
-                 AND research_cutoff=%s""",
-            lambda: (
-                target_session,
-                source_capture_id,
-                research_cutoff,
-            ),
+            "SELECT count(*) FROM stock.source_cohort_group_stats WHERE target_session=%s AND target_session<=%s",
         ),
         "stock.source_fep_baseline_facts": (
-            """SELECT count(*) FROM stock.source_fep_baseline_facts
-               WHERE research_cutoff=%s AND source_capture_id=%s""",
-            lambda: (research_cutoff, source_capture_id),
+            "SELECT count(*) FROM stock.source_fep_baseline_facts WHERE research_cutoff=%s AND research_cutoff<=%s",
         ),
         "stock.source_research_observation_segment_days": (
-            """SELECT count(*) FROM stock.source_research_observation_segment_days
-               WHERE t0_session<=%s AND source_capture_id=%s""",
-            lambda: (research_cutoff, source_capture_id),
+            "SELECT count(*) FROM stock.source_research_observation_segment_days WHERE t0_session=%s AND t0_session<=%s",
         ),
         "stock.source_market_breadth_days": (
             "SELECT count(*) FROM stock.source_market_breadth_days WHERE target_session=%s AND target_session<=%s",

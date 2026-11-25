@@ -4707,18 +4707,30 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     for item in idx_contract["indices"]
                     if item["role"] == "PRIMARY_MARKET"
                 )
-                index_observations = read_market_indices_and_style_summary(
-                    self.preview_server.state.config,
-                    target_session=target,
-                    calendar_revision=cal_rev,
-                    index_contract=idx_contract,
-                )
                 environment_display = read_market_environment_display(
                     self.preview_server.state.config,
                     target_session=target,
                     stock_capture_id=capture_id_val,
                     primary_index_symbol=primary_idx_sym,
                     calendar_revision=cal_rev,
+                )
+                pinned_idx_capture_id = (
+                    environment_display.get("index_capture_id")
+                    if environment_display.get("status") == "AVAILABLE"
+                    else None
+                )
+                pinned_idx_config_ver = (
+                    environment_display.get("index_config_version")
+                    if environment_display.get("status") == "AVAILABLE"
+                    else None
+                )
+                index_observations = read_market_indices_and_style_summary(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    calendar_revision=cal_rev,
+                    index_contract=idx_contract,
+                    index_capture_id=pinned_idx_capture_id,
+                    config_version=pinned_idx_config_ver,
                 )
                 self._send_json(
                     200,
@@ -4728,6 +4740,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             market,
                             market_participation=participation,
                             breadth_change=breadth_change,
+                            environment_display=environment_display,
                         ),
                         "limit_up_ladder": limit_up_ladder,
                         "index_observations": index_observations,

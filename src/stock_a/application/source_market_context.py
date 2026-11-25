@@ -818,6 +818,7 @@ def source_market_context_payload(
     market_participation: Mapping[str, Any] | None = None,
     pressure_axis: Mapping[str, Any] | None = None,
     breadth_change: Mapping[str, Any] | None = None,
+    environment_display: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """输出市场宽度摘要，不暴露逐来源代码计算明细。"""
     calculation = market.calculation
@@ -850,11 +851,37 @@ def source_market_context_payload(
         "INCOMPLETE",
     }:
         participation_classification = None
-    trend_axis = {
-        "status": "NOT_COMPUTED",
-        "classification": "UNKNOWN",
-        "reason": "尚无与该来源范围绑定的合法PRIMARY_MARKET参考序列。",
-    }
+    trend_classification: str | None = None
+    if (
+        isinstance(environment_display, Mapping)
+        and environment_display.get("status") == "AVAILABLE"
+    ):
+        env_trend = (environment_display.get("axes") or {}).get("trend")
+        if env_trend in {"STRONG", "NEUTRAL", "WEAK"}:
+            trend_classification = str(env_trend)
+            trend_axis = {
+                "status": "OBSERVED",
+                "classification": trend_classification,
+                "primary_index_symbol": environment_display.get("primary_index_symbol"),
+                "index_capture_id": environment_display.get("index_capture_id"),
+                "index_config_version": environment_display.get("index_config_version"),
+                "reason": None,
+            }
+        else:
+            trend_axis = {
+                "status": "UNKNOWN",
+                "classification": "UNKNOWN",
+                "primary_index_symbol": environment_display.get("primary_index_symbol"),
+                "index_capture_id": environment_display.get("index_capture_id"),
+                "index_config_version": environment_display.get("index_config_version"),
+                "reason": "主参考指数趋势因子当日为UNKNOWN（窗口不足或点位缺失）。",
+            }
+    else:
+        trend_axis = {
+            "status": "NOT_COMPUTED",
+            "classification": "UNKNOWN",
+            "reason": "尚无与该来源范围绑定的合法PRIMARY_MARKET参考序列。",
+        }
     resolved_pressure = dict(
         pressure_axis
         if pressure_axis is not None
@@ -871,7 +898,7 @@ def source_market_context_payload(
     if pressure_axis_payload.get("status") != "OBSERVED":
         pressure_classification = None
     composite = market_environment_label(
-        None,
+        trend_classification,
         breadth_classification,
         participation_classification,
         pressure_classification,

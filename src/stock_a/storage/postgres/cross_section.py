@@ -368,7 +368,7 @@ def read_cross_section_day_bundle(
     *,
     target_session: date,
     price_capture_id: int,
-    universe_version: str,
+    universe_version: str | None = None,
     calendar_revision: str,
     contract_version: str = CROSS_SECTION_CONTRACT_VERSION,
 ) -> dict[str, Any]:
@@ -378,6 +378,42 @@ def read_cross_section_day_bundle(
         cursor,
         _,
     ):
+        selected_universe_version = universe_version
+        if selected_universe_version is None:
+            cursor.execute(
+                """SELECT universe_version
+                   FROM stock.source_cross_section_day_facts
+                   WHERE target_session = %s
+                     AND price_capture_id = %s
+                     AND calendar_revision = %s
+                     AND contract_version = %s
+                   ORDER BY universe_capture_id DESC NULLS LAST,
+                            universe_version DESC
+                   LIMIT 1""",
+                (
+                    target_session,
+                    price_capture_id,
+                    calendar_revision,
+                    contract_version,
+                ),
+            )
+            uv_row = cursor.fetchone()
+            if uv_row is None:
+                return {
+                    "status": "NOT_COMPUTED",
+                    "target_session": target_session,
+                    "price_capture_id": price_capture_id,
+                    "universe_capture_id": None,
+                    "universe_version": None,
+                    "calendar_id": None,
+                    "calendar_revision": calendar_revision,
+                    "contract_version": contract_version,
+                    "rank_metadata": {},
+                    "relative_metadata": {},
+                    "by_entity": {},
+                }
+            selected_universe_version = str(uv_row[0])
+
         cursor.execute(
             """SELECT source_symbol,
                       rps5, rps5_exact, rps5_quality, rps5_reason,
@@ -400,7 +436,7 @@ def read_cross_section_day_bundle(
             (
                 target_session,
                 price_capture_id,
-                universe_version,
+                selected_universe_version,
                 calendar_revision,
                 contract_version,
             ),
@@ -423,7 +459,7 @@ def read_cross_section_day_bundle(
             (
                 target_session,
                 price_capture_id,
-                universe_version,
+                selected_universe_version,
                 calendar_revision,
                 contract_version,
             ),
@@ -499,7 +535,7 @@ def read_cross_section_day_bundle(
         "target_session": target_session,
         "price_capture_id": price_capture_id,
         "universe_capture_id": universe_capture_id_val,
-        "universe_version": universe_version,
+        "universe_version": selected_universe_version,
         "calendar_id": calendar_id_val,
         "calendar_revision": calendar_revision,
         "contract_version": contract_version,

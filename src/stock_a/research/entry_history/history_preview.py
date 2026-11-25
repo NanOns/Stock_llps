@@ -606,6 +606,8 @@ def research_stock_pg_history_preview(
     include_profile_preview: bool = True,
     selected_profile_fields: frozenset[str] | None = None,
     seed_core_inputs: Mapping[str, FieldValue] | None = None,
+    cross_section_fields: Mapping[str, FieldValue] | None = None,
+    cross_section_meta: Mapping[str, Any] | None = None,
     include_raw_breakout: bool = False,
     allow_missing_target_row: bool = False,
     **legacy_source_identity: Any,
@@ -943,6 +945,8 @@ def research_stock_pg_history_preview(
             price_coordinate=price_coordinate,
             closed_period_bars=closed_period_bars,
             raw_period_trends=raw_period_trends,
+            cross_section_fields=cross_section_fields,
+            cross_section_metadata=cross_section_meta,
             source_snapshot_role="BAOSTOCK_CAPTURE_NON_PIT_NOT_HISTORICAL_AVAILABLE_AT",
         )
         components = profile_preview.get("components", [])

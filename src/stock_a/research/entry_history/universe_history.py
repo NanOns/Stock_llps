@@ -43,10 +43,34 @@ def research_universe_pg_history_preview(
     profile_contract: dict[str, Any],
     closed_period_bars_by_symbol: Mapping[str, Mapping[str, Sequence[object]]]
     | None = None,
+    cross_section_bundle: Mapping[str, Any] | None = None,
     include_profile_preview: bool = True,
     include_raw_breakout: bool = False,
 ) -> dict[str, Any]:
     """以PG SQL分页候选结果生成来源符号级Core/Profile质量摘要。"""
+    cross_available = (
+        isinstance(cross_section_bundle, Mapping)
+        and cross_section_bundle.get("status") == "AVAILABLE"
+    )
+    cross_by_entity = (
+        cross_section_bundle.get("by_entity")
+        if cross_available
+        and isinstance(cross_section_bundle.get("by_entity"), Mapping)
+        else {}
+    )
+    cross_meta = (
+        {
+            "target_session": cross_section_bundle.get("target_session"),
+            "price_capture_id": cross_section_bundle.get("price_capture_id"),
+            "calendar_revision": cross_section_bundle.get("calendar_revision"),
+            "universe_version": cross_section_bundle.get("universe_version"),
+            "universe_capture_id": cross_section_bundle.get("universe_capture_id"),
+            "rank_metadata": cross_section_bundle.get("rank_metadata", {}),
+            "relative_metadata": cross_section_bundle.get("relative_metadata", {}),
+        }
+        if cross_available
+        else None
+    )
     results: list[dict[str, Any]] = []
     for candidate in page.get("candidates", ()):
         symbol = candidate["source_symbol"]
@@ -67,6 +91,10 @@ def research_universe_pg_history_preview(
                     if isinstance(closed_period_bars_by_symbol, Mapping)
                     else None
                 ),
+                cross_section_fields=(
+                    cross_by_entity.get(symbol) if cross_available else None
+                ),
+                cross_section_meta=cross_meta,
                 include_profile_preview=include_profile_preview,
                 include_raw_breakout=include_raw_breakout,
             )

@@ -641,6 +641,29 @@ def compute_source_pool_seed(
     _, sessions, revision = resolve_pg_history_window(
         target_session.isoformat(), history_session_count
     )
+    from stock_a.storage.postgres.cross_section import read_cross_section_day_bundle
+
+    cross_bundle = read_cross_section_day_bundle(
+        config,
+        target_session=target_session,
+        price_capture_id=source_capture_id,
+        universe_version=None,
+        calendar_revision=revision,
+    )
+    if cross_bundle.get("status") == "AVAILABLE":
+        cross_by_entity = cross_bundle.get("by_entity", {})
+        for symbol, symbol_facts in rps["facts"].items():
+            cs_fields = cross_by_entity.get(symbol)
+            if not isinstance(cs_fields, Mapping):
+                continue
+            for rps_key, cs_key in (
+                ("rps5", "cross.rps5"),
+                ("rps5_delta3_pp", "cross.rps5_delta3_pp"),
+                ("rps20", "cross.rps20"),
+                ("rps20_delta3_pp", "cross.rps20_delta3_pp"),
+            ):
+                if cs_key in cs_fields:
+                    symbol_facts[rps_key] = cs_fields[cs_key]
     profile_offset = 0
     profiles = {}
     profile_snapshot_missing = False

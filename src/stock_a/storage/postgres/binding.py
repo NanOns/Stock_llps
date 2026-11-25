@@ -86,6 +86,8 @@ _MIGRATION_FILES = (
     "0072_r02_limit_up_streak_day_facts.sql",
     "0073_r02_baostock_ext_universe_index_cross_section.sql",
     "0074_r02_cross_section_exact_and_endpoints.sql",
+    "0075_r02_price_limit_na_no_limit_check.sql",
+    "0076_r02_d1_impulse_structure_types.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -151,6 +153,8 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_LIMIT_UP_LADDER_FACTS_R1": frozenset({72}),
     "R02_BAOSTOCK_EXT_R3_SCHEMA_R1": frozenset({73}),
     "R02_CROSS_SECTION_EXACT_ENDPOINTS_R1": frozenset({74}),
+    "R02_PRICE_LIMIT_NA_NO_LIMIT_CHECK_R1": frozenset({75}),
+    "R02_D1_IMPULSE_STRUCTURE_TYPES_R1": frozenset({76}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -374,6 +378,8 @@ _RELATIONS_BY_MIGRATION_COUNT[73] = _RELATIONS_BY_MIGRATION_COUNT[72] | {
 _RELATIONS_BY_MIGRATION_COUNT[74] = _RELATIONS_BY_MIGRATION_COUNT[73] | {
     "source_cross_section_endpoints",
 }
+_RELATIONS_BY_MIGRATION_COUNT[75] = _RELATIONS_BY_MIGRATION_COUNT[74]
+_RELATIONS_BY_MIGRATION_COUNT[76] = _RELATIONS_BY_MIGRATION_COUNT[75]
 
 
 class BindingRefused(Exception):

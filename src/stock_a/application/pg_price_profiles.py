@@ -7,7 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from stock_a.contracts.profile_revision import (
     profile_revision as _window_profile_revision,
@@ -595,6 +595,20 @@ def run_source_symbol_price_profile(
                 "PROFILE_SOURCE_PARTITION_OPEN",
                 "paired BaoStock价格目录或来源代码总体未闭合",
             )
+        from stock_a.storage.postgres.cross_section import (
+            read_cross_section_day_bundle,
+        )
+
+        cross_section_bundle = read_cross_section_day_bundle(
+            config,
+            target_session=target_session,
+            price_capture_id=source_capture_id,
+            universe_version=None,
+            calendar_revision=calendar_revision,
+        )
+        if cross_section_bundle.get("status") != "AVAILABLE":
+            cross_section_bundle = None
+
         records: list[dict[str, Any]] = []
         consumer_failures = 0
         source_status_counts: Counter[str] = Counter()
@@ -618,6 +632,7 @@ def run_source_symbol_price_profile(
                 session_dates=session_dates,
                 page=page,
                 profile_contract=profile_contract,
+                cross_section_bundle=cross_section_bundle,
             )
             page_records = _records_for_page(
                 page=page,
