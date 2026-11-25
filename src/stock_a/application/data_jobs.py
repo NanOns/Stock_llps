@@ -8764,9 +8764,13 @@ def _execute_shared_production_chain_impl(
                 resolved_snapshots = (
                     snapshot_ids if snapshot_ids is not None else paired_sector_snapshots()
                 )
-                idx_day = sessions.index(day) if day in sessions else -1
-                t1_day = sessions[idx_day - 1] if idx_day >= 1 else None
-                t3_day = sessions[idx_day - 3] if idx_day >= 3 else None
+                ordered_days = [
+                    date.fromisoformat(s)
+                    for s in plan.get("ordered_sessions", ())
+                ] or [date.fromisoformat(d_txt) for d_txt in all_r03_days]
+                idx_day = ordered_days.index(day) if day in ordered_days else -1
+                t1_day = ordered_days[idx_day - 1] if idx_day >= 1 else None
+                t3_day = ordered_days[idx_day - 3] if idx_day >= 3 else None
                 r03_res = run_r03_formal_sector_for_session(
                     config,
                     target_session=day,
@@ -8776,7 +8780,7 @@ def _execute_shared_production_chain_impl(
                     profile_revision=profile_revision,
                     snapshot_ids=resolved_snapshots,
                     modules=day_modules,
-                    allow_revision=operation in {"RECOMPUTE", "CLEAR_AND_REGENERATE"},
+                    allow_revision=bool(plan.get("allow_revision", False)),
                 )
                 for unit in day_units:
                     mod = unit["stage_code"]
