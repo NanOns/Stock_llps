@@ -7,6 +7,9 @@ from datetime import date
 from fractions import Fraction
 from typing import Any
 
+from stock_a.application.source_market_context import (
+    compute_formal_market_breadth_from_universes,
+)
 from stock_a.research.sector_native import (
     MemberSlot,
     compute_sector_loo_and_support,
@@ -22,9 +25,11 @@ from stock_a.research.sector_rotation import (
 )
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.r03_formal_sector import (
+    R03FormalSectorPgError,
     read_r03_overlap_day,
     read_r03_previous_lifecycle_states,
     read_r03_rotation_recovery_states,
+    write_r03_formal_market_breadth,
     write_r03_loo_support_fact,
     write_r03_native_day_facts,
     write_r03_overlap_results,
@@ -34,17 +39,36 @@ from stock_a.storage.postgres.r03_formal_sector import (
 R03_CONTRACT_VERSION = "R03_FORMAL_SECTOR_V1"
 
 
+def _strict_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text[0] in "+-":
+            if len(text) == 1 or not text[1:].isdigit():
+                return None
+        elif not text.isdigit():
+            return None
+        return int(text)
+    from decimal import Decimal
+
+    if isinstance(value, Decimal):
+        if not value.is_finite() or value != value.to_integral_value():
+            return None
+        return int(value)
+    return None
+
+
 def _frac_from_pair(num: Any, den: Any, quality: Any) -> Fraction | None:
     if quality != "OBSERVED" or num is None or den is None:
         return None
-    if isinstance(num, bool) or isinstance(den, bool):
-        return None
-    try:
-        den_int = int(den)
-        num_int = int(num)
-    except (TypeError, ValueError):
-        return None
-    if den_int <= 0:
+    num_int = _strict_int(num)
+    den_int = _strict_int(den)
+    if num_int is None or den_int is None or den_int <= 0:
         return None
     return Fraction(num_int, den_int)
 
@@ -291,6 +315,57 @@ def _load_snapshot_boards(
     return boards_meta, all_symbols, primary_industry
 
 
+def _resolve_session_universe_members(
+    cur: Any,
+    *,
+    session: date,
+    price_capture_id: int,
+    price_coordinate: str = "FORWARD_ADJUSTED",
+    universe_version: str | None = None,
+) -> tuple[str | None, set[str]]:
+    """按日期与捕获解析日期有效 Research Universe 版本及全部成员（含无归属股票）；多版本未指定时拒绝。"""
+    if universe_version is not None:
+        cur.execute(
+            """
+            SELECT DISTINCT source_symbol
+            FROM stock.source_cross_section_day_facts
+            WHERE price_capture_id=%s AND target_session=%s
+              AND price_coordinate=%s AND universe_version=%s
+            """,
+            (price_capture_id, session, price_coordinate, universe_version),
+        )
+        return universe_version, {str(r[0]) for r in cur.fetchall() if r[0]}
+    cur.execute(
+        """
+        SELECT DISTINCT universe_version
+        FROM stock.source_cross_section_day_facts
+        WHERE price_capture_id=%s AND target_session=%s AND price_coordinate=%s
+          AND universe_version IS NOT NULL
+        ORDER BY universe_version
+        """,
+        (price_capture_id, session, price_coordinate),
+    )
+    versions = [str(r[0]) for r in cur.fetchall() if r[0]]
+    if not versions:
+        return None, set()
+    if len(versions) > 1:
+        raise R03FormalSectorPgError(
+            "R03_UNIVERSE_VERSION_AMBIGUOUS",
+            f"交易日 {session} 捕获 {price_capture_id} 存在多个 universe_version({versions})，拒绝静默选首行。",
+        )
+    resolved_ver = versions[0]
+    cur.execute(
+        """
+        SELECT DISTINCT source_symbol
+        FROM stock.source_cross_section_day_facts
+        WHERE price_capture_id=%s AND target_session=%s
+          AND price_coordinate=%s AND universe_version=%s
+        """,
+        (price_capture_id, session, price_coordinate, resolved_ver),
+    )
+    return resolved_ver, {str(r[0]) for r in cur.fetchall() if r[0]}
+
+
 def assemble_r03_session_inputs(
     config: Mapping[str, Any],
     *,
@@ -301,11 +376,24 @@ def assemble_r03_session_inputs(
     profile_revision: str,
     snapshot_ids: Mapping[str, int],
     snapshot_ids_by_session: Mapping[str, Mapping[str, int]] | None = None,
+    source_capture_id_t1: int | None = None,
+    source_capture_id_t3: int | None = None,
+    profile_revision_t1: str | None = None,
+    profile_revision_t3: str | None = None,
     universe_version: str | None = None,
+    universe_version_t1: str | None = None,
+    universe_version_t3: str | None = None,
     extra_research_entities: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """从现役 PG 表组装 R03 板块端点输入、成员槽位与 LOO 目标列表（只读事务）。"""
-    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+    """从现役 PG 表组装 R03 板块三端独立输入、成员槽位、日期有效 Universe 与 LOO 目标列表（只读事务）。"""
+    cap_t = int(source_capture_id)
+    cap_t1 = int(source_capture_id_t1) if source_capture_id_t1 is not None else cap_t
+    cap_t3 = int(source_capture_id_t3) if source_capture_id_t3 is not None else cap_t
+    prof_t = str(profile_revision)
+    prof_t1 = str(profile_revision_t1) if profile_revision_t1 is not None else prof_t
+    prof_t3 = str(profile_revision_t3) if profile_revision_t3 is not None else prof_t
+
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _conn,
         cur,
         _,
@@ -318,7 +406,31 @@ def assemble_r03_session_inputs(
         meta_t1, syms_t1, _ = _load_snapshot_boards(cur, snaps_t1)
         meta_t3, syms_t3, _ = _load_snapshot_boards(cur, snaps_t3)
 
-        all_entities = set(syms_t) | set(syms_t1) | set(syms_t3)
+        u_ver_t, u_syms_t = _resolve_session_universe_members(
+            cur, session=target_session, price_capture_id=cap_t, universe_version=universe_version
+        )
+        u_ver_t1, u_syms_t1 = (
+            _resolve_session_universe_members(
+                cur,
+                session=t1_session,
+                price_capture_id=cap_t1,
+                universe_version=universe_version_t1 if universe_version_t1 is not None else universe_version,
+            )
+            if t1_session is not None
+            else (None, set())
+        )
+        u_ver_t3, u_syms_t3 = (
+            _resolve_session_universe_members(
+                cur,
+                session=t3_session,
+                price_capture_id=cap_t3,
+                universe_version=universe_version_t3 if universe_version_t3 is not None else universe_version,
+            )
+            if t3_session is not None
+            else (None, set())
+        )
+
+        all_entities = set(syms_t) | set(syms_t1) | set(syms_t3) | set(u_syms_t) | set(u_syms_t1) | set(u_syms_t3)
         if extra_research_entities:
             all_entities.update(str(e) for e in extra_research_entities if e)
         sym_list = sorted(all_entities)
@@ -326,19 +438,19 @@ def assemble_r03_session_inputs(
         obs_t = _load_endpoint_observations(
             cur,
             session=target_session,
-            source_capture_id=source_capture_id,
-            profile_revision=profile_revision,
+            source_capture_id=cap_t,
+            profile_revision=prof_t,
             symbols=sym_list,
-            universe_version=universe_version,
+            universe_version=u_ver_t,
         )
         obs_t1 = (
             _load_endpoint_observations(
                 cur,
                 session=t1_session,
-                source_capture_id=source_capture_id,
-                profile_revision=profile_revision,
+                source_capture_id=cap_t1,
+                profile_revision=prof_t1,
                 symbols=sym_list,
-                universe_version=universe_version,
+                universe_version=u_ver_t1,
             )
             if t1_session is not None
             else {}
@@ -347,10 +459,10 @@ def assemble_r03_session_inputs(
             _load_endpoint_observations(
                 cur,
                 session=t3_session,
-                source_capture_id=source_capture_id,
-                profile_revision=profile_revision,
+                source_capture_id=cap_t3,
+                profile_revision=prof_t3,
                 symbols=sym_list,
-                universe_version=universe_version,
+                universe_version=u_ver_t3,
             )
             if t3_session is not None
             else {}
@@ -398,64 +510,53 @@ def assemble_r03_session_inputs(
             else {}
         )
         present_kinds = sorted({kind for kind, _, _, _ in meta_t}) or ["CONCEPT"]
+        target_entities = sorted(u_syms_t) if u_syms_t else sorted(set(syms_t) | set(extra_research_entities or ()))
         loo_targets = [
             {
                 "entity_id": eid,
                 "primary_industry_id": primary_industry.get(eid),
                 "board_kind": bk,
             }
-            for eid in sym_list
+            for eid in target_entities
             for bk in present_kinds
         ]
+        universe_ret1_t = {eid: obs_t.get(eid, {}).get("ret1") for eid in sorted(u_syms_t)}
+        universe_ret1_t3 = {eid: obs_t3.get(eid, {}).get("ret1") for eid in sorted(u_syms_t3)}
         return {
             "boards_t": boards_t,
             "boards_t1": boards_t1,
             "boards_t3": boards_t3,
             "loo_targets": loo_targets,
+            "universe_version_t": u_ver_t,
+            "universe_version_t3": u_ver_t3,
+            "universe_ret1_t": universe_ret1_t,
+            "universe_ret1_t3": universe_ret1_t3,
         }
 
 
 def _extract_rotation_inputs(
     board_t: Mapping[str, Any],
     board_t1: Mapping[str, Any] | None,
+    prev_basket: FrozenRotationBasket | None = None,
 ) -> dict[str, Any]:
     obs_t = board_t["observations"]
     obs_t1 = board_t1["observations"] if board_t1 is not None else {}
-    prices_t = {
-        s.entity_id: obs_t.get(s.entity_id, {}).get("qfq_close")
-        for s in board_t["members"]
-        if s.entity_id is not None
-    }
-    prices_t1 = {
-        s.entity_id: obs_t1.get(s.entity_id, {}).get("qfq_close")
+    t_entities = {s.entity_id for s in board_t["members"] if s.entity_id is not None}
+    t1_entities = {
+        s.entity_id
         for s in (board_t1["members"] if board_t1 is not None else board_t["members"])
         if s.entity_id is not None
     }
-    seed_t = {
-        s.entity_id: obs_t.get(s.entity_id, {}).get("seed_state", "UNKNOWN")
-        for s in board_t["members"]
-        if s.entity_id is not None
-    }
-    seed_t1 = {
-        s.entity_id: obs_t1.get(s.entity_id, {}).get("seed_state", "UNKNOWN")
-        for s in (board_t1["members"] if board_t1 is not None else board_t["members"])
-        if s.entity_id is not None
-    }
-    ret1_t = {
-        s.entity_id: obs_t.get(s.entity_id, {}).get("ret1")
-        for s in board_t["members"]
-        if s.entity_id is not None
-    }
-    rps20_t = {
-        s.entity_id: obs_t.get(s.entity_id, {}).get("rps20")
-        for s in board_t["members"]
-        if s.entity_id is not None
-    }
-    rps20_t1 = {
-        s.entity_id: obs_t1.get(s.entity_id, {}).get("rps20")
-        for s in (board_t1["members"] if board_t1 is not None else board_t["members"])
-        if s.entity_id is not None
-    }
+    if prev_basket is not None:
+        t_entities.update(prev_basket.members)
+        t1_entities.update(prev_basket.members)
+    prices_t = {eid: obs_t.get(eid, {}).get("qfq_close") for eid in sorted(t_entities)}
+    prices_t1 = {eid: obs_t1.get(eid, {}).get("qfq_close") for eid in sorted(t1_entities)}
+    seed_t = {eid: obs_t.get(eid, {}).get("seed_state", "UNKNOWN") for eid in sorted(t_entities)}
+    seed_t1 = {eid: obs_t1.get(eid, {}).get("seed_state", "UNKNOWN") for eid in sorted(t1_entities)}
+    ret1_t = {eid: obs_t.get(eid, {}).get("ret1") for eid in sorted(t_entities)}
+    rps20_t = {eid: obs_t.get(eid, {}).get("rps20") for eid in sorted(t_entities)}
+    rps20_t1 = {eid: obs_t1.get(eid, {}).get("rps20") for eid in sorted(t1_entities)}
     return {
         "prices_t": prices_t,
         "prices_t1": prices_t1,
@@ -514,7 +615,11 @@ def run_r03_formal_sector_day(
         "states_inserted": 0,
         "states_updated": 0,
         "states_skipped": 0,
+        "board_days_inserted": 0,
+        "board_days_updated": 0,
+        "board_days_skipped": 0,
     }
+    expected_rotation_rows = 0
     if "R03_SECTOR_ROTATION" in active_modules:
         t_by_key = {(str(b["board_kind"]), str(b["board_id"])): b for b in boards_t}
         t1_by_key = {(str(b["board_kind"]), str(b["board_id"])): b for b in boards_t1.values()}
@@ -524,6 +629,7 @@ def run_r03_formal_sector_day(
             bt = t_by_key[bkey]
             bt1 = t1_by_key.get(bkey)
             rec_prev = (rotation_recovery or {}).get(bkey)
+            missing_prev_session = bool(rec_prev.get("missing_previous_session", False)) if rec_prev else False
             prev_ep_pg_id = rec_prev.get("episode_pg_id") if rec_prev else None
             prev_basket: FrozenRotationBasket | None = (
                 rec_prev.get("basket") if rec_prev else None
@@ -539,7 +645,7 @@ def run_r03_formal_sector_day(
                 dq5=nr.get("dq5"),
                 breadth_delta1=nr.get("breadth_delta1"),
             )
-            rot_in = _extract_rotation_inputs(bt, bt1)
+            rot_in = _extract_rotation_inputs(bt, bt1, prev_basket=prev_basket)
             active_prev = (
                 prev_state_dict is not None
                 and prev_state_dict.get("last_known_state", prev_state_dict.get("state"))
@@ -557,8 +663,9 @@ def run_r03_formal_sector_day(
                     top1_concentration=nr["concentration"].get("top1_concentration"),
                 )
 
+            contract_ok = bool(bt.get("coordinate_ready", True)) and not missing_prev_session
             st_res = step_rotation_state_machine(
-                contract_valid=True,
+                contract_valid=contract_ok,
                 previous_episode_state=prev_state_dict,
                 t_minus_1_d2_maturity=prev_d2 if active_prev else "NONE",
                 dq5=nr.get("dq5"),
@@ -566,6 +673,12 @@ def run_r03_formal_sector_day(
                 pulse_raw=pulse_raw,
                 basket_metrics=basket_metrics,
             )
+            if missing_prev_session:
+                st_res = {
+                    **st_res,
+                    "state": "UNKNOWN",
+                    "reason": "ROTATION_MISSING_PREVIOUS_SESSION",
+                }
 
             new_basket = None
             parent_ep_id = None
@@ -575,6 +688,12 @@ def run_r03_formal_sector_day(
                         **st_res,
                         "state": "UNKNOWN",
                         "reason": "BIRTH_T1_MISSING",
+                    }
+                elif not bt1.get("membership_complete", True):
+                    st_res = {
+                        **st_res,
+                        "state": "UNKNOWN",
+                        "reason": "BIRTH_MEMBERSHIP_INCOMPLETE",
                     }
                 else:
                     members_t1 = [
@@ -612,16 +731,19 @@ def run_r03_formal_sector_day(
                             top1_concentration=nr["concentration"].get("top1_concentration"),
                         )
 
-            if new_basket is not None or prev_ep_pg_id is not None:
-                rot_records.append(
-                    {
-                        "episode_pg_id": prev_ep_pg_id,
-                        "parent_episode_id": parent_ep_id,
-                        "basket": new_basket,
-                        "state_result": st_res,
-                        "basket_metrics": basket_metrics,
-                    }
-                )
+            rot_records.append(
+                {
+                    "board_kind": str(nr["board_kind"]),
+                    "board_id": str(nr["board_id"]),
+                    "pulse_raw": pulse_raw,
+                    "episode_pg_id": prev_ep_pg_id,
+                    "parent_episode_id": parent_ep_id,
+                    "basket": new_basket,
+                    "state_result": st_res,
+                    "basket_metrics": basket_metrics,
+                }
+            )
+        expected_rotation_rows = len(rot_records)
         if rot_records:
             rotation_pg = write_r03_rotation_day(
                 config,
@@ -661,9 +783,15 @@ def run_r03_formal_sector_day(
             allow_revision=allow_revision,
         )
 
+    loo_target_list = list(loo_targets or ())
+    expected_loo_rows = (
+        len({(str(t["entity_id"]), str(t.get("board_kind", "CONCEPT"))) for t in loo_target_list})
+        if "R03_SECTOR_LOO" in active_modules
+        else 0
+    )
     loo_written = 0
     if "R03_SECTOR_LOO" in active_modules:
-        for target in loo_targets or ():
+        for target in loo_target_list:
             bk = str(target.get("board_kind", "CONCEPT"))
             loo_res = compute_sector_loo_and_support(
                 target_entity_id=str(target["entity_id"]),
@@ -698,9 +826,9 @@ def run_r03_formal_sector_day(
         "loo_written": loo_written,
         "expected_rows": {
             "R03_SECTOR_NATIVE": len(boards_t) if "R03_SECTOR_NATIVE" in active_modules else 0,
-            "R03_SECTOR_ROTATION": int(rotation_pg.get("states_inserted", 0)) + int(rotation_pg.get("states_updated", 0)) + int(rotation_pg.get("states_skipped", 0)) if "R03_SECTOR_ROTATION" in active_modules else 0,
-            "R03_SECTOR_OVERLAP": int(overlap_pg.get("clusters_inserted", 0)) + int(overlap_pg.get("clusters_updated", 0)) + int(overlap_pg.get("clusters_skipped", 0)) if "R03_SECTOR_OVERLAP" in active_modules else 0,
-            "R03_SECTOR_LOO": len(loo_targets or ()) * len({b[1] for b in boards_t}) if "R03_SECTOR_LOO" in active_modules else 0,
+            "R03_SECTOR_ROTATION": expected_rotation_rows if "R03_SECTOR_ROTATION" in active_modules else 0,
+            "R03_SECTOR_OVERLAP": overlap_clusters_count if "R03_SECTOR_OVERLAP" in active_modules else 0,
+            "R03_SECTOR_LOO": expected_loo_rows,
         },
     }
 
@@ -714,16 +842,41 @@ def run_r03_formal_sector_for_session(
     source_capture_id: int,
     profile_revision: str,
     snapshot_ids: Mapping[str, int],
+    profile_revision_t1: str | None = None,
+    profile_revision_t3: str | None = None,
+    source_capture_id_t1: int | None = None,
+    source_capture_id_t3: int | None = None,
+    universe_version: str | None = None,
+    universe_version_t1: str | None = None,
+    universe_version_t3: str | None = None,
     scope_key: str | None = None,
     modules: set[str] | None = None,
     allow_revision: bool = False,
 ) -> dict[str, Any]:
-    """正常业务入口：从 PG 读取组装全部上游输入并恢复前态后执行 R03 正式生产。"""
+    """正常业务入口：从 PG 读取组装全部上游三端独立输入并恢复前态后执行 R03 正式生产与正式市场宽度落库。"""
     resolved_scope = scope_key or (
         f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
     )
     member_ver = (
         f"IND_{snapshot_ids.get('INDUSTRY', 0)}:CON_{snapshot_ids.get('CONCEPT', 0)}"
+    )
+    rot_recovery = (
+        read_r03_rotation_recovery_states(
+            config,
+            previous_trade_date=t1_session,
+            scope_key=resolved_scope,
+            contract_version=R03_CONTRACT_VERSION,
+        )
+        if t1_session is not None
+        else {}
+    )
+    active_frozen_entities = sorted(
+        {
+            eid
+            for rec in rot_recovery.values()
+            if rec.get("basket") is not None
+            for eid in rec["basket"].members
+        }
     )
     assembled = assemble_r03_session_inputs(
         config,
@@ -733,6 +886,14 @@ def run_r03_formal_sector_for_session(
         source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         snapshot_ids=snapshot_ids,
+        source_capture_id_t1=source_capture_id_t1,
+        source_capture_id_t3=source_capture_id_t3,
+        profile_revision_t1=profile_revision_t1,
+        profile_revision_t3=profile_revision_t3,
+        universe_version=universe_version,
+        universe_version_t1=universe_version_t1,
+        universe_version_t3=universe_version_t3,
+        extra_research_entities=active_frozen_entities,
     )
     prev_states = (
         read_r03_previous_lifecycle_states(
@@ -756,17 +917,28 @@ def run_r03_formal_sector_for_session(
         if t1_session is not None
         else {"status": "NOT_COMPUTED", "clusters": []}
     )
-    rot_recovery = (
-        read_r03_rotation_recovery_states(
+    formal_market_breadth = None
+    if (
+        t3_session is not None
+        and assembled.get("universe_version_t") is not None
+        and assembled.get("universe_version_t3") is not None
+    ):
+        formal_market_breadth = compute_formal_market_breadth_from_universes(
+            universe_t=assembled["universe_ret1_t"],
+            universe_t3=assembled["universe_ret1_t3"],
+            universe_version_t=str(assembled["universe_version_t"]),
+            universe_version_t3=str(assembled["universe_version_t3"]),
+        )
+        write_r03_formal_market_breadth(
             config,
-            previous_trade_date=t1_session,
+            trade_date=target_session,
             scope_key=resolved_scope,
             contract_version=R03_CONTRACT_VERSION,
+            result=formal_market_breadth,
+            allow_revision=allow_revision,
         )
-        if t1_session is not None
-        else {}
-    )
-    return run_r03_formal_sector_day(
+
+    day_res = run_r03_formal_sector_day(
         config,
         trade_date=target_session,
         scope_key=resolved_scope,
@@ -781,3 +953,5 @@ def run_r03_formal_sector_for_session(
         modules=modules,
         allow_revision=allow_revision,
     )
+    day_res["formal_market_breadth"] = formal_market_breadth
+    return day_res

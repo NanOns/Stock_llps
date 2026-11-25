@@ -1382,6 +1382,25 @@ def build_data_job_plan(
                 endpoint_index = target_index + horizon
                 if endpoint_index < len(official_through_cutoff):
                     required_raw_sessions.add(official_through_cutoff[endpoint_index])
+    r03_plan_mods = selected_research_modules & {
+        "R03_SECTOR_NATIVE",
+        "R03_SECTOR_ROTATION",
+        "R03_SECTOR_OVERLAP",
+        "R03_SECTOR_LOO",
+    }
+    if r03_plan_mods:
+        official_through_cutoff = tuple(
+            session for session in all_sessions if session <= cutoff
+        )
+        for r03_mod in r03_plan_mods:
+            for target_day in module_output_sessions.get(r03_mod, ()):
+                required_raw_sessions.add(target_day)
+                if target_day in official_through_cutoff:
+                    t_idx = official_through_cutoff.index(target_day)
+                    if t_idx >= 1:
+                        required_raw_sessions.add(official_through_cutoff[t_idx - 1])
+                    if t_idx >= 3:
+                        required_raw_sessions.add(official_through_cutoff[t_idx - 3])
     raw_window = tuple(sorted(required_raw_sessions))
     if operation == "CLEAR_DERIVED":
         raw_window = ()
@@ -3074,7 +3093,7 @@ class DataJobCoordinator:
                 )
         _R03_TABLE_BY_MODULE = {
             "R03_SECTOR_NATIVE": "stock.r03_sector_native_day_facts",
-            "R03_SECTOR_ROTATION": "stock.r03_sector_rotation_day_states",
+            "R03_SECTOR_ROTATION": "stock.r03_sector_rotation_board_day_facts",
             "R03_SECTOR_OVERLAP": "stock.r03_sector_overlap_clusters",
             "R03_SECTOR_LOO": "stock.r03_sector_loo_support_facts",
         }
@@ -8773,6 +8792,16 @@ def _execute_shared_production_chain_impl(
                 idx_day = ordered_days.index(day) if day in ordered_days else -1
                 t1_day = ordered_days[idx_day - 1] if idx_day >= 1 else None
                 t3_day = ordered_days[idx_day - 3] if idx_day >= 3 else None
+                def _safe_endpoint_profile_rev(ep_day: date | None) -> str | None:
+                    if ep_day is None:
+                        return None
+                    try:
+                        return profile_revision_for_session(ep_day)
+                    except DataJobError:
+                        return profile_revision
+
+                prof_rev_t1 = _safe_endpoint_profile_rev(t1_day)
+                prof_rev_t3 = _safe_endpoint_profile_rev(t3_day)
                 r03_res = run_r03_formal_sector_for_session(
                     config,
                     target_session=day,
@@ -8780,19 +8809,32 @@ def _execute_shared_production_chain_impl(
                     t3_session=t3_day,
                     source_capture_id=source_capture_id,
                     profile_revision=profile_revision,
+                    profile_revision_t1=prof_rev_t1,
+                    profile_revision_t3=prof_rev_t3,
                     snapshot_ids=resolved_snapshots,
                     modules=day_modules,
                     allow_revision=bool(plan.get("allow_revision", False)),
                 )
+                expected_map = r03_res.get("expected_rows")
+                if not isinstance(expected_map, Mapping):
+                    raise DataJobError(
+                        "R03_STAGE_EXPECTED_ROWS_MISSING",
+                        f"R03生产({day_text})未返回独立expected_rows声明。",
+                    )
                 for unit in day_units:
                     mod = unit["stage_code"]
+                    if mod not in expected_map:
+                        raise DataJobError(
+                            "R03_STAGE_EXPECTED_ROWS_MISSING",
+                            f"{mod}({day_text})缺少独立expected_rows声明。",
+                        )
                     actual_rows = data_job_pg.read_business_table_count(
                         config,
                         business_table=unit["business_table"],
                         target_session=day,
                         source_capture_id=source_capture_id,
                         profile_revision=profile_revision,
-                        sector_snapshot_ids=snapshot_ids,
+                        sector_snapshot_ids=resolved_snapshots,
                         research_cutoff=cutoff,
                     )
                     if mod == "R03_SECTOR_NATIVE":
@@ -8801,11 +8843,12 @@ def _execute_shared_production_chain_impl(
                         )
                         no_chg = ins == 0 and int(r03_res["native_pg"]["skipped"]) > 0
                     elif mod == "R03_SECTOR_ROTATION":
-                        ins = int(r03_res["rotation_pg"]["states_inserted"]) + int(
-                            r03_res["rotation_pg"]["states_updated"]
+                        ins = int(r03_res["rotation_pg"].get("board_days_inserted", 0)) + int(
+                            r03_res["rotation_pg"].get("board_days_updated", 0)
                         )
                         no_chg = (
-                            ins == 0 and int(r03_res["rotation_pg"]["states_skipped"]) > 0
+                            ins == 0
+                            and int(r03_res["rotation_pg"].get("board_days_skipped", 0)) > 0
                         )
                     elif mod == "R03_SECTOR_OVERLAP":
                         ins = int(r03_res["overlap_pg"]["clusters_inserted"]) + int(
@@ -8818,10 +8861,8 @@ def _execute_shared_production_chain_impl(
                     else:
                         ins = int(r03_res["loo_written"])
                         no_chg = ins == 0
-                    expected_rows = int(
-                        r03_res.get("expected_rows", {}).get(mod, actual_rows)
-                    )
-                    if expected_rows > 0 and actual_rows != expected_rows:
+                    expected_rows = int(expected_map[mod])
+                    if actual_rows != expected_rows:
                         raise DataJobError(
                             "R03_STAGE_ROW_COUNT_MISMATCH",
                             f"{mod}({day_text})预期行数{expected_rows}，实际读回{actual_rows}。",
@@ -8840,17 +8881,18 @@ def _execute_shared_production_chain_impl(
                         no_change=no_chg,
                         profile_revision=profile_revision,
                         producer_version=R03_CONTRACT_VERSION,
-                        calendar_revision=calendar_revision,
-                        sector_snapshot_ids=snapshot_ids,
+                        calendar_revision=plan.get("calendar_revision"),
+                        sector_snapshot_ids=resolved_snapshots,
                     )
                     resolved_unit_keys.add(unit_key(unit))
             except Exception as error:  # noqa: BLE001
-                mark_units_incomplete(
-                    day_units,
-                    stage_code=",".join(sorted(day_modules)),
-                    error=error,
-                    message_prefix="R03正式板块生产或独立读回未闭合",
-                )
+                for failed_unit in day_units:
+                    mark_units_incomplete(
+                        [failed_unit],
+                        stage_code=str(failed_unit["stage_code"]),
+                        error=error,
+                        message_prefix="R03正式板块生产或独立读回未闭合",
+                    )
                 incomplete_stage_errors.append(
                     (
                         str(getattr(error, "code", type(error).__name__)),

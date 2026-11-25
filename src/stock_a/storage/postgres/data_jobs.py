@@ -111,6 +111,7 @@ _MODULE_PROGRESS_TABLES = {
     "R03_SECTOR_NATIVE": frozenset({"stock.r03_sector_native_day_facts"}),
     "R03_SECTOR_ROTATION": frozenset(
         {
+            "stock.r03_sector_rotation_board_day_facts",
             "stock.r03_sector_rotation_episodes",
             "stock.r03_sector_rotation_day_states",
         }
@@ -5250,6 +5251,35 @@ def read_business_table_count(
                 ),
             ),
         ),
+        "stock.r03_sector_rotation_board_day_facts": (
+            """SELECT count(*) FROM stock.r03_sector_rotation_board_day_facts
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'
+                 AND (%s::text IS NULL OR scope_key=%s)
+                 AND (%s::text IS NULL OR member_version=%s)""",
+            lambda: (
+                target_session,
+                (
+                    f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
+                    if source_capture_id is not None and profile_revision is not None
+                    else None
+                ),
+                (
+                    f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
+                    if source_capture_id is not None and profile_revision is not None
+                    else None
+                ),
+                (
+                    f"IND_{sector_snapshot_ids.get('INDUSTRY', 0)}:CON_{sector_snapshot_ids.get('CONCEPT', 0)}"
+                    if isinstance(sector_snapshot_ids, Mapping)
+                    else None
+                ),
+                (
+                    f"IND_{sector_snapshot_ids.get('INDUSTRY', 0)}:CON_{sector_snapshot_ids.get('CONCEPT', 0)}"
+                    if isinstance(sector_snapshot_ids, Mapping)
+                    else None
+                ),
+            ),
+        ),
         "stock.r03_sector_rotation_day_states": (
             """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
                JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
@@ -6357,6 +6387,11 @@ def mark_progress_cleared(
         ),
         "stock.r03_sector_native_day_facts": (
             """SELECT count(*) FROM stock.r03_sector_native_day_facts
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
+            lambda: (target_session,),
+        ),
+        "stock.r03_sector_rotation_board_day_facts": (
+            """SELECT count(*) FROM stock.r03_sector_rotation_board_day_facts
                WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
             lambda: (target_session,),
         ),

@@ -4807,6 +4807,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                     if trend_cls not in {"STRONG", "NEUTRAL", "WEAK"}:
                         trend_cls = None
+                    if trend_cls is None and isinstance(index_observations, Mapping):
+                        for idx_item in index_observations.get("items") or ():
+                            if isinstance(idx_item, Mapping):
+                                cand = idx_item.get("trend_classification") or idx_item.get("trend")
+                                if cand in {"STRONG", "NEUTRAL", "WEAK"}:
+                                    trend_cls = cand
+                                    break
                     composite = market_environment_label(
                         trend_cls,
                         None,
@@ -4836,6 +4843,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     }
                     pressure_for_risk = standalone_pressure
                     breadth_for_risk = breadth_axis
+                from stock_a.storage.postgres.r03_formal_sector import (
+                    read_r03_formal_market_breadth,
+                )
+
+                formal_breadth = read_r03_formal_market_breadth(
+                    self.preview_server.state.config,
+                    trade_date=target,
+                )
+                if formal_breadth.get("status") in {"OBSERVED", "UNKNOWN", "AMBIGUOUS_SCOPE"}:
+                    base_payload["formal_market_breadth"] = formal_breadth
                 market_risk = compute_market_risk_projection(
                     pressure_axis=pressure_for_risk,
                     breadth_axis=breadth_for_risk,
@@ -4870,20 +4887,40 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         400, "QUERY_REQUIRED", "须提供trade_date、scope_key、member_version与contract_version"
                     )
                 trade_d = _iso_date(values["trade_date"])
+                if trade_d > self.preview_server.state.research_cutoff:
+                    raise PreviewHttpError(
+                        400,
+                        "RESEARCH_CUTOFF_EXCEEDED",
+                        f"查询日期 {trade_d.isoformat()} 超过研究截止日 {self.preview_server.state.research_cutoff.isoformat()}。",
+                    )
+                b_kind = values.get("board_kind")
+                if b_kind is not None and b_kind not in {"INDUSTRY", "CONCEPT"}:
+                    raise PreviewHttpError(
+                        400, "INVALID_BOARD_KIND", "board_kind 仅允许 INDUSTRY 或 CONCEPT。"
+                    )
+                try:
+                    limit_val = int(values["limit"]) if "limit" in values else 50
+                    offset_val = int(values["offset"]) if "offset" in values else 0
+                except ValueError as err:
+                    raise PreviewHttpError(
+                        400, "INVALID_PAGINATION", "limit/offset 必须为整数。"
+                    ) from err
+                if limit_val <= 0 or limit_val > 500 or offset_val < 0:
+                    raise PreviewHttpError(
+                        400, "INVALID_PAGINATION", "limit 须在 [1, 500] 且 offset >= 0。"
+                    )
                 from stock_a.storage.postgres.r03_formal_sector import (
                     read_r03_native_day_facts,
                     read_r03_overlap_day,
                 )
 
-                limit_val = int(values["limit"]) if "limit" in values else 50
-                offset_val = int(values["offset"]) if "offset" in values else 0
                 native_res = read_r03_native_day_facts(
                     self.preview_server.state.config,
                     trade_date=trade_d,
                     scope_key=values["scope_key"],
                     member_version=values["member_version"],
                     contract_version=values["contract_version"],
-                    board_kind=values.get("board_kind"),
+                    board_kind=b_kind,
                     limit=limit_val,
                     offset=offset_val,
                 )
@@ -4893,7 +4930,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     scope_key=values["scope_key"],
                     member_version=values["member_version"],
                     contract_version=values["contract_version"],
-                    board_kind=values.get("board_kind"),
+                    board_kind=b_kind,
                 )
                 self._send_json(
                     200,
@@ -4908,10 +4945,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/product/r03-sector-rotation":
                 required = {"board_kind", "board_id", "scope_key", "contract_version"}
-                values = _query(self.path, required)
-                if set(values) != required:
+                allowed = required | {"as_of_date"}
+                values = _query(self.path, allowed)
+                if not required.issubset(set(values)):
                     raise PreviewHttpError(
                         400, "QUERY_REQUIRED", "须提供board_kind、board_id、scope_key与contract_version"
+                    )
+                if values["board_kind"] not in {"INDUSTRY", "CONCEPT"}:
+                    raise PreviewHttpError(
+                        400, "INVALID_BOARD_KIND", "board_kind 仅允许 INDUSTRY 或 CONCEPT。"
+                    )
+                as_of = (
+                    _iso_date(values["as_of_date"])
+                    if "as_of_date" in values
+                    else self.preview_server.state.research_cutoff
+                )
+                if as_of > self.preview_server.state.research_cutoff:
+                    raise PreviewHttpError(
+                        400,
+                        "RESEARCH_CUTOFF_EXCEEDED",
+                        f"Rotation 截至日 {as_of.isoformat()} 超过研究截止日 {self.preview_server.state.research_cutoff.isoformat()}。",
                     )
                 from stock_a.storage.postgres.r03_formal_sector import (
                     read_r03_rotation_timeline,
@@ -4923,8 +4976,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     board_id=values["board_id"],
                     scope_key=values["scope_key"],
                     contract_version=values["contract_version"],
+                    as_of_date=as_of,
                 )
-                self._send_json(200, {"ok": True, **rot_res})
+                self._send_json(200, {"ok": True, "as_of_date": as_of.isoformat(), **rot_res})
                 return
             if parsed.path == "/api/product/r03-sector-loo":
                 required = {
@@ -4940,7 +4994,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400, "QUERY_REQUIRED", "须提供完整LOO查询参数"
                     )
+                if values["board_kind"] not in {"INDUSTRY", "CONCEPT"}:
+                    raise PreviewHttpError(
+                        400, "INVALID_BOARD_KIND", "board_kind 仅允许 INDUSTRY 或 CONCEPT。"
+                    )
                 trade_d = _iso_date(values["trade_date"])
+                if trade_d > self.preview_server.state.research_cutoff:
+                    raise PreviewHttpError(
+                        400,
+                        "RESEARCH_CUTOFF_EXCEEDED",
+                        f"查询日期 {trade_d.isoformat()} 超过研究截止日 {self.preview_server.state.research_cutoff.isoformat()}。",
+                    )
                 from stock_a.storage.postgres.r03_formal_sector import (
                     read_r03_loo_support_fact,
                 )
