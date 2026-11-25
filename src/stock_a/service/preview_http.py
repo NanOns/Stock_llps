@@ -4637,6 +4637,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target = _iso_date(values["target_session"])
                 cutoff = self.preview_server.state.research_cutoff
                 _require_research_cutoff(target, cutoff)
+                breadth_error_payload: dict[str, Any] | None = None
                 try:
                     market = read_source_market_context(
                         self.preview_server.state.config,
@@ -4650,28 +4651,48 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "MARKET_BREADTH_INCOMPLETE",
                     }:
                         raise
-                    self._send_json(
-                        200,
-                        {
-                            "ok": True,
-                            "status": error.code.removeprefix("MARKET_BREADTH_"),
-                            "target_session": target.isoformat(),
-                            "reason": str(error),
-                        },
+                    market = None
+                    breadth_error_payload = {
+                        "status": error.code.removeprefix("MARKET_BREADTH_"),
+                        "target_session": target.isoformat(),
+                        "reason": str(error),
+                    }
+                if market is not None:
+                    try:
+                        participation = read_source_market_participation(
+                            self.preview_server.state.config, market
+                        )
+                    except (MarketParticipationPgError, RawSourcePgError) as error:
+                        raise PreviewHttpError(
+                            503,
+                            getattr(error, "code", "MARKET_PARTICIPATION_READ_FAILED"),
+                            str(error),
+                        ) from error
+                    cal_rev = market.calendar["calendar_revision"]
+                    breadth_contract_ver = market.calculation.contract_version
+                else:
+                    from stock_a.application.source_market_context import (
+                        SOURCE_MARKET_BREADTH_CONTRACT,
                     )
-                    return
-                try:
-                    participation = read_source_market_participation(
-                        self.preview_server.state.config, market
+                    from stock_a.research.entry_context.sessions import (
+                        load_official_calendar,
                     )
-                except (MarketParticipationPgError, RawSourcePgError) as error:
-                    raise PreviewHttpError(
-                        503,
-                        getattr(error, "code", "MARKET_PARTICIPATION_READ_FAILED"),
-                        str(error),
-                    ) from error
+
+                    cal_payload, _meta, _revs, _sessions = load_official_calendar(
+                        target.year
+                    )
+                    cal_rev = str(cal_payload["revision"])
+                    breadth_contract_ver = SOURCE_MARKET_BREADTH_CONTRACT
+                    participation = {
+                        "status": "NOT_COMPUTED",
+                        "classification": "UNKNOWN",
+                        "reason": "市场宽度未就绪，参与度按独立轴降级返回。",
+                    }
                 from stock_a.contracts.loader import (
                     load_market_reference_indices_contract,
+                )
+                from stock_a.research.sector_native import (
+                    compute_market_risk_projection,
                 )
                 from stock_a.storage.postgres.limit_up_ladder import (
                     read_market_limit_up_ladder_summary,
@@ -4685,13 +4706,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
 
                 capture_id_val = _capture_id(values["source_capture_id"])
-                cal_rev = market.calendar["calendar_revision"]
                 breadth_change = read_market_breadth_change(
                     self.preview_server.state.config,
                     target_session=target,
                     source_capture_id=capture_id_val,
                     calendar_revision=cal_rev,
-                    contract_version=market.calculation.contract_version,
+                    contract_version=breadth_contract_ver,
                 )
                 limit_up_ladder = read_market_limit_up_ladder_summary(
                     self.preview_server.state.config,
@@ -4734,19 +4754,34 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     index_capture_id=pinned_idx_capture_id,
                     config_version=pinned_idx_config_ver,
                 )
+                if market is not None:
+                    base_payload = source_market_context_payload(
+                        market,
+                        market_participation=participation,
+                        breadth_change=breadth_change,
+                        environment_display=environment_display,
+                    )
+                else:
+                    base_payload = {
+                        **(breadth_error_payload or {}),
+                        "breadth": breadth_error_payload,
+                        "participation": participation,
+                        "breadth_change": breadth_change,
+                    }
+                market_risk = compute_market_risk_projection(
+                    pressure_axis=base_payload.get("pressure"),
+                    breadth_axis=base_payload.get("breadth"),
+                    participation_axis=participation,
+                )
                 self._send_json(
                     200,
                     {
                         "ok": True,
-                        **source_market_context_payload(
-                            market,
-                            market_participation=participation,
-                            breadth_change=breadth_change,
-                            environment_display=environment_display,
-                        ),
+                        **base_payload,
                         "limit_up_ladder": limit_up_ladder,
                         "index_observations": index_observations,
                         "environment_display": environment_display,
+                        "market_risk": market_risk,
                     },
                 )
                 return

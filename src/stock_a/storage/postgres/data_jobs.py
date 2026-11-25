@@ -108,6 +108,15 @@ _MODULE_PROGRESS_TABLES = {
             "stock.source_sector_pulse_cohort_reason_facts",
         }
     ),
+    "R03_SECTOR_NATIVE": frozenset({"stock.r03_sector_native_day_facts"}),
+    "R03_SECTOR_ROTATION": frozenset(
+        {
+            "stock.r03_sector_rotation_episodes",
+            "stock.r03_sector_rotation_day_states",
+        }
+    ),
+    "R03_SECTOR_OVERLAP": frozenset({"stock.r03_sector_overlap_clusters"}),
+    "R03_SECTOR_LOO": frozenset({"stock.r03_sector_loo_support_facts"}),
     "PRICE_LIMITS": frozenset({"stock.source_price_limit_day_facts"}),
     "LIMIT_UP_LADDER": frozenset({"stock.source_limit_up_streak_day_facts"}),
     "CROSS_SECTION": frozenset(
@@ -272,6 +281,44 @@ _CLEANUP_MODULES = {
         ),
         "algorithm_column": "followup_contract",
         "algorithm_label": "板块跨日后继合同版本",
+    },
+    "R03_SECTOR_NATIVE": {
+        "parent_table": "stock.r03_sector_native_day_facts",
+        "child_table": None,
+        "cleanup_tables": ("stock.r03_sector_native_day_facts",),
+        "progress_tables": ("stock.r03_sector_native_day_facts",),
+        "algorithm_column": "contract_version",
+        "algorithm_label": "R03正式板块Native与资格合同版本",
+    },
+    "R03_SECTOR_ROTATION": {
+        "parent_table": "stock.r03_sector_rotation_episodes",
+        "child_table": "stock.r03_sector_rotation_day_states",
+        "cleanup_tables": (
+            "stock.r03_sector_rotation_day_states",
+            "stock.r03_sector_rotation_episodes",
+        ),
+        "progress_tables": (
+            "stock.r03_sector_rotation_episodes",
+            "stock.r03_sector_rotation_day_states",
+        ),
+        "algorithm_column": "contract_version",
+        "algorithm_label": "R03正式Rotation生命周期合同版本",
+    },
+    "R03_SECTOR_OVERLAP": {
+        "parent_table": "stock.r03_sector_overlap_clusters",
+        "child_table": None,
+        "cleanup_tables": ("stock.r03_sector_overlap_clusters",),
+        "progress_tables": ("stock.r03_sector_overlap_clusters",),
+        "algorithm_column": "contract_version",
+        "algorithm_label": "R03正式Overlap聚类合同版本",
+    },
+    "R03_SECTOR_LOO": {
+        "parent_table": "stock.r03_sector_loo_support_facts",
+        "child_table": None,
+        "cleanup_tables": ("stock.r03_sector_loo_support_facts",),
+        "progress_tables": ("stock.r03_sector_loo_support_facts",),
+        "algorithm_column": "contract_version",
+        "algorithm_label": "R03正式LOO支持板块合同版本",
     },
     "PRICE_LIMITS": {
         "parent_table": "stock.source_price_limit_day_facts",

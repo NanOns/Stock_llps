@@ -860,8 +860,19 @@ def read_retrospective_rotation(
                 )["core.ma20"]
                 if ma20.quality == "OBSERVED":
                     above_ma20 = current > Fraction(ma20.value)
+            bar = history[i] if history is not None and 0 <= i < len(history) else None
+            actual_quote_state = (
+                "TRUE"
+                if current is not None
+                else (
+                    "CONFIRMED_SUSPENSION"
+                    if bar is not None and bar.state == "SUSPENDED"
+                    else "UNKNOWN"
+                )
+            )
             per_symbol[symbol] = {
                 "actual_quote": current is not None,
+                "actual_quote_state": actual_quote_state,
                 "ret1": ret1,
                 "ret5": ret5,
                 "ret20": ret20,
