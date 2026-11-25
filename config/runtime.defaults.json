@@ -170,7 +170,7 @@
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
     "business_login": "stock_a",
-    "migration_version": 78,
+    "migration_version": 79,
     "project_id": 1,
     "deployment_instance_id": 1
   }

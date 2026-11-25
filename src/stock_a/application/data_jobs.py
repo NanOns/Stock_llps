@@ -5238,6 +5238,23 @@ def _allocate_baostock_aux_capture(
         return int(readback[0])
 
 
+def _selected_source_modules(plan: Mapping[str, Any]) -> set[str]:
+    """解析Coordinator现役扁平source_modules及旧阶段测试/适配器嵌套选择格式。"""
+    source_modules = plan.get("source_modules")
+    if isinstance(source_modules, Sequence) and not isinstance(
+        source_modules, (str, bytes)
+    ):
+        return {value for value in source_modules if isinstance(value, str)}
+    selected = plan.get("selected_modules", ())
+    if isinstance(selected, Mapping):
+        nested = selected.get("source", ())
+        if isinstance(nested, Sequence) and not isinstance(nested, (str, bytes)):
+            return {value for value in nested if isinstance(value, str)}
+    if isinstance(selected, Sequence) and not isinstance(selected, (str, bytes)):
+        return set(selected).intersection(_ALL_SOURCE_MODULES)
+    return set()
+
+
 def _execute_baostock_universe_stage(
     *,
     config: Mapping[str, Any],
@@ -5259,7 +5276,7 @@ def _execute_baostock_universe_stage(
         read_baostock_stock_basic_scope,
     )
 
-    selected_sources = set(plan.get("selected_modules", {}).get("source", ()))
+    selected_sources = _selected_source_modules(plan)
     if "BAOSTOCK_UNIVERSE" not in selected_sources:
         return None
     stage_units = [
@@ -5505,7 +5522,7 @@ def _execute_baostock_market_indices_stage(
         read_market_index_daily_scope,
     )
 
-    selected_sources = set(plan.get("selected_modules", {}).get("source", ()))
+    selected_sources = _selected_source_modules(plan)
     if "BAOSTOCK_MARKET_INDICES" not in selected_sources:
         return None
     stage_units = [
