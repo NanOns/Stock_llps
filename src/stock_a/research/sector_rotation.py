@@ -326,11 +326,17 @@ def step_rotation_state_machine(
         if raw_prev_state == "UNKNOWN" and previous_episode_state is not None
         else raw_prev_state
     )
-    has_active_basket = (
+    is_active_state = (
         previous_episode_state is not None
         and effective_prev_state not in {None, "NONE", "FAILED", "OUT"}
-        and basket_metrics is not None
     )
+    if is_active_state and basket_metrics is None:
+        return {
+            "state": "REJECTED",
+            "reason": "ACTIVE_EPISODE_BASKET_MISSING",
+            "preserve_prior": True,
+        }
+    has_active_basket = is_active_state and basket_metrics is not None
 
     if not has_active_basket:
         # 终态后需 armed 才允许新 child；初次或已 armed 且满足 PULSE raw -> 出生 PULSE
@@ -385,6 +391,34 @@ def step_rotation_state_machine(
                 "prev_mature_true": False,
                 "dq5": dq5,
                 "reason": None,
+            }
+        if effective_prev_state in {"FAILED", "OUT"}:
+            if pulse_raw["state"] == "FALSE":
+                return {
+                    "state": effective_prev_state,
+                    "last_known_state": effective_prev_state,
+                    "stale": False,
+                    "armed": True,
+                    "market_age": prev_market_age + 1,
+                    "eval_age": previous_episode_state.get("eval_age", 0),  # type: ignore[union-attr]
+                    "accepted_once": previous_episode_state.get("accepted_once", False),  # type: ignore[union-attr]
+                    "out_neg_streak": 0,
+                    "prev_mature_true": False,
+                    "dq5": dq5,
+                    "reason": "TERMINATED_ARMED_NO_PULSE",
+                }
+            return {
+                "state": "UNKNOWN",
+                "last_known_state": effective_prev_state,
+                "stale": True,
+                "armed": armed,
+                "market_age": prev_market_age + 1,
+                "eval_age": previous_episode_state.get("eval_age", 0),  # type: ignore[union-attr]
+                "accepted_once": previous_episode_state.get("accepted_once", False),  # type: ignore[union-attr]
+                "out_neg_streak": 0,
+                "prev_mature_true": False,
+                "dq5": None,
+                "reason": pulse_raw.get("reason"),
             }
         if pulse_raw["state"] == "FALSE":
             return {

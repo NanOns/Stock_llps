@@ -5223,24 +5223,28 @@ def read_business_table_count(
         ),
         "stock.r03_sector_native_day_facts": (
             """SELECT count(*) FROM stock.r03_sector_native_day_facts
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'
+                 AND scope_key=%s""",
+            lambda: (target_session, f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"),
         ),
         "stock.r03_sector_rotation_day_states": (
             """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
                JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
-               WHERE s.trade_date=%s AND e.contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE s.trade_date=%s AND e.contract_version='R03_FORMAL_SECTOR_V1'
+                 AND e.scope_key=%s""",
+            lambda: (target_session, f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"),
         ),
         "stock.r03_sector_overlap_clusters": (
             """SELECT count(*) FROM stock.r03_sector_overlap_clusters
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'
+                 AND scope_key=%s""",
+            lambda: (target_session, f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"),
         ),
         "stock.r03_sector_loo_support_facts": (
             """SELECT count(*) FROM stock.r03_sector_loo_support_facts
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'
+                 AND scope_key=%s""",
+            lambda: (target_session, f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"),
         ),
         "stock.source_sector_cross_period_pulse_facts": (
             """SELECT count(*) FROM stock.source_sector_cross_period_pulse_facts p
@@ -6261,24 +6265,28 @@ def mark_progress_cleared(
         ),
         "stock.r03_sector_native_day_facts": (
             """SELECT count(*) FROM stock.r03_sector_native_day_facts
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'
+                 AND scope_key=%s""",
+            lambda: (target_session, f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"),
         ),
         "stock.r03_sector_rotation_day_states": (
             """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
                JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
-               WHERE s.trade_date=%s AND e.contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE s.trade_date=%s AND e.contract_version='R03_FORMAL_SECTOR_V1'
+                 AND e.scope_key=%s""",
+            lambda: (target_session, f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"),
         ),
         "stock.r03_sector_overlap_clusters": (
             """SELECT count(*) FROM stock.r03_sector_overlap_clusters
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'
+                 AND scope_key=%s""",
+            lambda: (target_session, f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"),
         ),
         "stock.r03_sector_loo_support_facts": (
             """SELECT count(*) FROM stock.r03_sector_loo_support_facts
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'
+                 AND scope_key=%s""",
+            lambda: (target_session, f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"),
         ),
         "stock.source_sector_cross_period_pulse_facts": (
             "SELECT count(*) FROM stock.source_sector_cross_period_pulse_facts WHERE target_session=%s AND target_session<=%s",

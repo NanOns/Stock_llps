@@ -539,7 +539,16 @@ def read_r03_rotation_recovery_states(
             )
             m_rows = cur.fetchall()
             members = tuple(mr[0] for mr in m_rows)
-            weights = {mr[0]: Fraction(mr[1]) for mr in m_rows}
+            n_members = len(m_rows)
+            exact_eq_weight = Fraction(1, n_members) if n_members > 0 else Fraction(0)
+            weights = {
+                mr[0]: (
+                    exact_eq_weight
+                    if n_members > 0 and abs(Fraction(mr[1]) - exact_eq_weight) <= Fraction(1, 10**6)
+                    else Fraction(mr[1])
+                )
+                for mr in m_rows
+            }
             b_prices = {mr[0]: Fraction(mr[2]) for mr in m_rows}
             p_prices = {mr[0]: Fraction(mr[3]) for mr in m_rows}
             s0 = frozenset(mr[0] for mr in m_rows if mr[4])
@@ -768,10 +777,11 @@ def write_r03_overlap_results(
         for nr in native_rows:
             bk = str(nr["board_kind"])
             bid = str(nr["board_id"])
-            if bid not in unique_shares and (bk, bid) not in cluster_by_board:
+            if (bk, bid) not in unique_shares and bid not in unique_shares and (bk, bid) not in cluster_by_board:
                 continue
             us = unique_shares.get(
-                bid, {"status": "NA", "value": None, "reason": "SAFETY_NOT_TRUE"}
+                (bk, bid),
+                unique_shares.get(bid, {"status": "NA", "value": None, "reason": "SAFETY_NOT_TRUE"}),
             )
             vals_b = (
                 us["status"],
@@ -942,7 +952,29 @@ def write_r03_loo_support_fact(
         existing = cur.fetchone()
         if existing is not None:
             loo_id = int(existing[0])
-            if existing[1:] == vals:
+            cur.execute(
+                """
+                SELECT board_id, safety_state, prewatch_raw_state, warm_raw_state, confirmed_raw_state
+                FROM stock.r03_sector_loo_candidate_facts
+                WHERE loo_fact_id=%s
+                ORDER BY board_id
+                """,
+                (loo_id,),
+            )
+            existing_cands = [
+                (str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4])) for r in cur.fetchall()
+            ]
+            new_cands = sorted(
+                (
+                    str(c["board_id"]),
+                    str(c["raw_qualification"]["safety"]["state"]),
+                    str(c["raw_qualification"]["prewatch_raw"]["state"]),
+                    str(c["raw_qualification"]["warm_raw"]["state"]),
+                    str(c["raw_qualification"]["confirmed_raw"]["state"]),
+                )
+                for c in loo_result.get("loo_boards", ())
+            )
+            if existing[1:] == vals and existing_cands == new_cands:
                 skipped += 1
             elif not allow_revision:
                 raise R03FormalSectorPgError(

@@ -1278,3 +1278,67 @@ def source_market_not_evaluable_payload(
             "dml_rows_affected": 0,
         },
     }
+
+
+def compute_formal_market_breadth_from_universes(
+    *,
+    universe_t: Mapping[str, Fraction | None],
+    universe_t3: Mapping[str, Fraction | None],
+    universe_version_t: str,
+    universe_version_t3: str,
+) -> dict[str, Any]:
+    """基于 t 与 t-3 各自日期有效 Universe 交集计算正式市场宽度 B_formal。"""
+    ids_t = set(universe_t.keys())
+    ids_t3 = set(universe_t3.keys())
+    common_ids = sorted(ids_t & ids_t3)
+    if not common_ids:
+        return {
+            "status": "UNKNOWN",
+            "reason": "COMMON_UNIVERSE_EMPTY",
+            "universe_version_t": universe_version_t,
+            "universe_version_t3": universe_version_t3,
+            "n_t": len(ids_t),
+            "n_t3": len(ids_t3),
+            "n_common": 0,
+            "n_eligible": 0,
+            "unknown_count": 0,
+            "exact": None,
+        }
+    eligible_diffs: list[int] = []
+    unknown_count = 0
+    for eid in common_ids:
+        r_t = universe_t.get(eid)
+        r_t3 = universe_t3.get(eid)
+        if r_t is None or r_t3 is None:
+            unknown_count += 1
+            continue
+        i_t = 1 if r_t > 0 else 0
+        i_t3 = 1 if r_t3 > 0 else 0
+        eligible_diffs.append(i_t - i_t3)
+    n_eligible = len(eligible_diffs)
+    if n_eligible == 0:
+        return {
+            "status": "UNKNOWN",
+            "reason": "NO_ELIGIBLE_COMMON_RETURNS",
+            "universe_version_t": universe_version_t,
+            "universe_version_t3": universe_version_t3,
+            "n_t": len(ids_t),
+            "n_t3": len(ids_t3),
+            "n_common": len(common_ids),
+            "n_eligible": 0,
+            "unknown_count": unknown_count,
+            "exact": None,
+        }
+    b_val = Fraction(sum(eligible_diffs), n_eligible)
+    return {
+        "status": "OBSERVED",
+        "reason": None,
+        "universe_version_t": universe_version_t,
+        "universe_version_t3": universe_version_t3,
+        "n_t": len(ids_t),
+        "n_t3": len(ids_t3),
+        "n_common": len(common_ids),
+        "n_eligible": n_eligible,
+        "unknown_count": unknown_count,
+        "exact": fraction_payload(b_val),
+    }

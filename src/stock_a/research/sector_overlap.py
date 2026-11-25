@@ -75,16 +75,17 @@ def compute_sector_overlap(
         # 计算 unique_share
         for b in kind_boards:
             bid = str(b["board_id"])
+            ukey = (kind, bid)
             own_set = entity_sets[bid]
             if own_set is None:
-                unique_shares[bid] = {
+                unique_shares[ukey] = {
                     "status": "UNKNOWN",
                     "value": None,
                     "reason": "UNMAPPED_MEMBER_PRESENT",
                 }
                 continue
             if not own_set:
-                unique_shares[bid] = {
+                unique_shares[ukey] = {
                     "status": "NA",
                     "value": None,
                     "reason": "EMPTY_BOARD",
@@ -96,7 +97,7 @@ def compute_sector_overlap(
                 if str(o["board_id"]) != bid
             )
             if others_unknown:
-                unique_shares[bid] = {
+                unique_shares[ukey] = {
                     "status": "UNKNOWN",
                     "value": None,
                     "reason": "OTHER_BOARD_MEMBERSHIP_UNKNOWN",
@@ -108,7 +109,7 @@ def compute_sector_overlap(
                 if oid != bid and entity_sets[oid] is not None:
                     other_union.update(entity_sets[oid])  # type: ignore[arg-type]
             unique_count = len(own_set - other_union)
-            unique_shares[bid] = {
+            unique_shares[ukey] = {
                 "status": "OBSERVED",
                 "value": Fraction(unique_count, len(own_set)),
                 "reason": None,

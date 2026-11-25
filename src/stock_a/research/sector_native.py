@@ -826,7 +826,7 @@ def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[st
         safety_state = board["raw_qualification"]["safety"]["state"]
         eff_mat = board.get("lifecycle", {}).get("effective_maturity")
         prewatch_exited = bool(board.get("lifecycle", {}).get("prewatch_exited", False))
-        if safety_state == "FALSE" or prewatch_exited:
+        if safety_state == "FALSE" or prewatch_exited or eff_mat == "NONE":
             non_rankable.append(
                 {
                     "board_kind": board["board_kind"],
@@ -835,7 +835,11 @@ def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[st
                     "reason": (
                         "PREWATCH_EXITED_TODAY"
                         if prewatch_exited
-                        else board["raw_qualification"]["safety"].get("reason")
+                        else (
+                            "EFFECTIVE_MATURITY_NONE"
+                            if eff_mat == "NONE"
+                            else board["raw_qualification"]["safety"].get("reason")
+                        )
                     ),
                     "sort_key": None,
                 }
@@ -877,7 +881,7 @@ def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[st
             -md3,
             -sw_point,
             _EXHAUSTION_RANK[exh["level"]],
-            str(board["board_id"]),
+            (str(board["board_kind"]), str(board["board_id"])),
         )
         rankable.append(
             {
