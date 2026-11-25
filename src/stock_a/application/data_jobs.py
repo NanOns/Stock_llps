@@ -5325,14 +5325,31 @@ def _execute_baostock_universe_stage(
         dir_sessions = (target_day,)
 
     transport = plan.get("_baostock_transport")
-    capture_id = _allocate_baostock_aux_capture(
-        config,
-        job_id=job_id,
-        stage_kind="BAOSTOCK_UNIVERSE",
-        range_start_session=dir_sessions[0],
-        range_end_session=dir_sessions[-1],
-        requested_symbol_count=len(dir_sessions),
-        parser_contract="BAOSTOCK_UNIVERSE_BASIC_AND_DIRECTORY_R1",
+    all_universe_units = [
+        u
+        for u in plan.get("stage_units", ())
+        if u.get("stage_code") == "SOURCE_BAOSTOCK_UNIVERSE"
+    ]
+    reused_capture_id = next(
+        (
+            int(u["source_capture_id"])
+            for u in all_universe_units
+            if u.get("status") == "COMPLETED" and u.get("source_capture_id") is not None
+        ),
+        None,
+    )
+    capture_id = (
+        reused_capture_id
+        if reused_capture_id is not None
+        else _allocate_baostock_aux_capture(
+            config,
+            job_id=job_id,
+            stage_kind="BAOSTOCK_UNIVERSE",
+            range_start_session=dir_sessions[0],
+            range_end_session=dir_sessions[-1],
+            requested_symbol_count=len(dir_sessions),
+            parser_contract="BAOSTOCK_UNIVERSE_BASIC_AND_DIRECTORY_R1",
+        )
     )
     begin_callback(job_id=job_id, units=stage_units)
     basic_unit = next(
@@ -5352,34 +5369,34 @@ def _execute_baostock_universe_stage(
         None,
     )
 
-    basic_res = query_stock_basic_catalog(
-        config=config,
-        transport=transport,
-        enforce_quota=True,
-    )
-    if not basic_res.get("complete") or basic_res.get("status") != "RESPONSE_RECEIVED":
-        raise DataJobError(
-            "BAOSTOCK_STOCK_BASIC_FETCH_FAILED",
-            f"BaoStock证券基本资料采集未完成: {basic_res.get('status')} ({basic_res.get('reason')})",
-            status=502,
-        )
-    expected_basic_symbols = _validate_basic_catalog_response(basic_res.get("rows"))
-    basic_write = persist_baostock_stock_basic(
-        config,
-        source_capture_id=capture_id,
-        rows=basic_res.get("rows", ()),
-    )
-    actual_basic_rows = read_baostock_stock_basic_scope(
-        config, source_capture_id=capture_id, cutoff=cutoff
-    )
-    actual_basic_symbols = tuple(item["source_symbol"] for item in actual_basic_rows)
-    if actual_basic_symbols != expected_basic_symbols:
-        raise DataJobError(
-            "BAOSTOCK_STOCK_BASIC_READBACK_MISMATCH",
-            "证券基本资料PG读回代码集合与本次规范化响应不一致",
-            status=409,
-        )
     if basic_unit is not None:
+        basic_res = query_stock_basic_catalog(
+            config=config,
+            transport=transport,
+            enforce_quota=True,
+        )
+        if not basic_res.get("complete") or basic_res.get("status") != "RESPONSE_RECEIVED":
+            raise DataJobError(
+                "BAOSTOCK_STOCK_BASIC_FETCH_FAILED",
+                f"BaoStock证券基本资料采集未完成: {basic_res.get('status')} ({basic_res.get('reason')})",
+                status=502,
+            )
+        expected_basic_symbols = _validate_basic_catalog_response(basic_res.get("rows"))
+        basic_write = persist_baostock_stock_basic(
+            config,
+            source_capture_id=capture_id,
+            rows=basic_res.get("rows", ()),
+        )
+        actual_basic_rows = read_baostock_stock_basic_scope(
+            config, source_capture_id=capture_id, cutoff=cutoff
+        )
+        actual_basic_symbols = tuple(item["source_symbol"] for item in actual_basic_rows)
+        if actual_basic_symbols != expected_basic_symbols:
+            raise DataJobError(
+                "BAOSTOCK_STOCK_BASIC_READBACK_MISMATCH",
+                "证券基本资料PG读回代码集合与本次规范化响应不一致",
+                status=409,
+            )
         actual_basic = data_job_pg.read_business_table_count(
             config,
             business_table="stock.source_baostock_stock_basic",
@@ -5410,6 +5427,17 @@ def _execute_baostock_universe_stage(
             producer_version="BAOSTOCK_STOCK_BASIC_R1",
             calendar_revision=plan.get("calendar_revision") or "",
         )
+    else:
+        actual_basic_rows = read_baostock_stock_basic_scope(
+            config, source_capture_id=capture_id, cutoff=cutoff
+        )
+
+    if dir_unit is None:
+        return {
+            "source_capture_id": capture_id,
+            "basic_row_count": len(actual_basic_rows),
+            "directory_row_count": 0,
+        }
 
     dir_res = query_session_directory_rows(
         session_dates=tuple(d.isoformat() for d in dir_sessions),
