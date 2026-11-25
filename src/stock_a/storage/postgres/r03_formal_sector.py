@@ -304,7 +304,7 @@ def read_r03_previous_lifecycle_states(
     member_version: str,
     contract_version: str,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """从 PG 恢复上一官方交易日的板块成熟、降级目标与 PREWATCH 基准前态。"""
+    """从 PG 恢复上一官方交易日的板块成熟、降级目标与 PREWATCH 基准前态；支持合法跨日版本唯一兼容延续。"""
     res = read_r03_native_day_facts(
         config,
         trade_date=previous_trade_date,
@@ -312,11 +312,39 @@ def read_r03_previous_lifecycle_states(
         member_version=member_version,
         contract_version=contract_version,
     )
-    if res["status"] != "AVAILABLE":
-        return {}
-    return {
-        (item["board_kind"], item["board_id"]): item for item in res["items"]
-    }
+    if res["status"] == "AVAILABLE":
+        return {
+            (item["board_kind"], item["board_id"]): item for item in res["items"]
+        }
+    with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
+        _conn,
+        cur,
+        _,
+    ):
+        cur.execute(
+            """
+            SELECT DISTINCT scope_key, member_version
+            FROM stock.r03_sector_native_day_facts
+            WHERE trade_date=%s AND contract_version=%s
+            """,
+            (previous_trade_date, contract_version),
+        )
+        pairs = cur.fetchall()
+    if len(pairs) == 1:
+        compat_scope, compat_mem = str(pairs[0][0]), str(pairs[0][1])
+        compat_res = read_r03_native_day_facts(
+            config,
+            trade_date=previous_trade_date,
+            scope_key=compat_scope,
+            member_version=compat_mem,
+            contract_version=contract_version,
+        )
+        if compat_res["status"] == "AVAILABLE":
+            return {
+                (item["board_kind"], item["board_id"]): item
+                for item in compat_res["items"]
+            }
+    return {}
 
 
 def write_r03_rotation_day(
@@ -755,6 +783,39 @@ def read_r03_rotation_recovery_states(
         if previous_trade_date is not None:
             cur.execute(
                 """
+                SELECT DISTINCT ON (board_kind, board_id)
+                       board_kind, board_id, episode_id, rotation_state, last_known_state, reason_code
+                FROM stock.r03_sector_rotation_board_day_facts
+                WHERE scope_key=%s AND contract_version=%s AND trade_date = %s
+                ORDER BY board_kind, board_id, id DESC
+                """,
+                (scope_key, contract_version, previous_trade_date),
+            )
+            for bk, bid, bd_ep_id, rot_st, lk_st, rsn in cur.fetchall():
+                key = (str(bk), str(bid))
+                if key not in out and bd_ep_id is None:
+                    out[key] = {
+                        "episode_pg_id": None,
+                        "parent_episode_id": None,
+                        "basket": None,
+                        "prev_trade_date": previous_trade_date,
+                        "missing_previous_session": False,
+                        "state_dict": {
+                            "state": str(rot_st),
+                            "last_known_state": lk_st,
+                            "stale": False,
+                            "market_age": 0,
+                            "eval_age": 0,
+                            "accepted_once": False,
+                            "armed": False,
+                            "out_neg_streak": 0,
+                            "prev_mature_true": False,
+                            "dq5": None,
+                            "reason": rsn,
+                        },
+                    }
+            cur.execute(
+                """
                 SELECT DISTINCT e.board_kind, e.board_id
                 FROM stock.r03_sector_rotation_episodes e
                 JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
@@ -1055,6 +1116,26 @@ def write_r03_overlap_results(
                 + vals_b,
             )
             b_ins += 1
+        if allow_revision:
+            current_cluster_keys = {(str(c["board_kind"]), str(c["cluster_id"])) for c in clusters}
+            cur.execute(
+                """
+                SELECT board_kind, cluster_id
+                FROM stock.r03_sector_overlap_clusters
+                WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                """,
+                (trade_date, scope_key, member_version, contract_version),
+            )
+            for old_bk, old_cid in cur.fetchall():
+                if (str(old_bk), str(old_cid)) not in current_cluster_keys:
+                    cur.execute(
+                        """
+                        DELETE FROM stock.r03_sector_overlap_clusters
+                        WHERE trade_date=%s AND board_kind=%s AND cluster_id=%s
+                          AND scope_key=%s AND member_version=%s AND contract_version=%s
+                        """,
+                        (trade_date, old_bk, old_cid, scope_key, member_version, contract_version),
+                    )
     return {
         "clusters_inserted": c_ins,
         "clusters_updated": c_upd,
@@ -1439,9 +1520,11 @@ def read_r03_formal_market_breadth(
     *,
     trade_date: date,
     scope_key: str | None = None,
+    universe_version_t: str | None = None,
+    universe_version_t3: str | None = None,
     contract_version: str = "R03_FORMAL_SECTOR_V1",
 ) -> dict[str, Any]:
-    """只读已保存的 R03 正式市场宽度日级事实；缺失或歧义时诚实返回状态。"""
+    """只读已保存的 R03 正式市场宽度日级事实；缺失或同口径多版本歧义时诚实返回状态。"""
     with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
         _conn,
         cur,
@@ -1458,6 +1541,12 @@ def read_r03_formal_market_breadth(
         if scope_key is not None:
             sql += " AND scope_key=%s"
             params.append(scope_key)
+        if universe_version_t is not None:
+            sql += " AND universe_version_t=%s"
+            params.append(universe_version_t)
+        if universe_version_t3 is not None:
+            sql += " AND universe_version_t3=%s"
+            params.append(universe_version_t3)
         sql += " ORDER BY recorded_at DESC, id DESC"
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
@@ -1466,10 +1555,10 @@ def read_r03_formal_market_breadth(
                 "status": "NOT_READY_HISTORICAL_UNIVERSE",
                 "reason": "该日期尚无已保存的正式市场宽度日级事实。",
             }
-        if scope_key is None and len(rows) > 1:
+        if len(rows) > 1:
             return {
                 "status": "AMBIGUOUS_SCOPE",
-                "reason": f"该日期存在 {len(rows)} 条不同 scope 的正式市场宽度事实，须指定精确 scope_key。",
+                "reason": f"该日期匹配到 {len(rows)} 条不同口径/Universe版本的正式市场宽度事实，须指定精确 scope 与两端 Universe 版本。",
             }
         r = rows[0]
         return {

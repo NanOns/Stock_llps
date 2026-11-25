@@ -7069,6 +7069,57 @@ def _execute_shared_production_chain_impl(
                 persisted = persist_market_breadth(
                     config, market, breadth_change=breadth_change
                 )
+                from stock_a.application.r03_formal_sector import (
+                    produce_formal_market_breadth_for_session,
+                )
+
+                ordered_mkt_days = [
+                    date.fromisoformat(s)
+                    for s in plan.get("ordered_sessions", ())
+                ]
+                mkt_t3_day = (
+                    ordered_mkt_days[ordered_mkt_days.index(day) - 3]
+                    if day in ordered_mkt_days and ordered_mkt_days.index(day) >= 3
+                    else None
+                )
+                if mkt_t3_day is not None:
+                    from stock_a.storage.postgres import source_raw as _sr_mkt
+
+                    with _sr_mkt._transaction(config, write=False, statement_timeout_ms=5000) as (
+                        _mc,
+                        _mcur,
+                        _,
+                    ):
+                        _mcur.execute(
+                            """
+                            SELECT DISTINCT profile_revision
+                            FROM stock.source_symbol_price_profiles
+                            WHERE source_capture_id=%s AND target_session=%s
+                              AND price_coordinate='FORWARD_ADJUSTED'
+                            """,
+                            (source_capture_id, day),
+                        )
+                        revs_t = [str(r[0]) for r in _mcur.fetchall() if r[0]]
+                        _mcur.execute(
+                            """
+                            SELECT DISTINCT profile_revision
+                            FROM stock.source_symbol_price_profiles
+                            WHERE source_capture_id=%s AND target_session=%s
+                              AND price_coordinate='FORWARD_ADJUSTED'
+                            """,
+                            (source_capture_id, mkt_t3_day),
+                        )
+                        revs_t3 = [str(r[0]) for r in _mcur.fetchall() if r[0]]
+                    if len(revs_t) == 1:
+                        produce_formal_market_breadth_for_session(
+                            config,
+                            target_session=day,
+                            t3_session=mkt_t3_day,
+                            source_capture_id=source_capture_id,
+                            profile_revision=revs_t[0],
+                            profile_revision_t3=revs_t3[0] if len(revs_t3) == 1 else None,
+                            allow_revision=bool(plan.get("allow_revision", False)),
+                        )
                 readback = read_source_market_context(
                     config,
                     target_session=day,
@@ -8798,7 +8849,7 @@ def _execute_shared_production_chain_impl(
                     try:
                         return profile_revision_for_session(ep_day)
                     except DataJobError:
-                        return profile_revision
+                        return None
 
                 prof_rev_t1 = _safe_endpoint_profile_rev(t1_day)
                 prof_rev_t3 = _safe_endpoint_profile_rev(t3_day)

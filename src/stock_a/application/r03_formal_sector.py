@@ -78,7 +78,7 @@ def _load_endpoint_observations(
     *,
     session: date,
     source_capture_id: int,
-    profile_revision: str,
+    profile_revision: str | None,
     symbols: Sequence[str],
     price_coordinate: str = "FORWARD_ADJUSTED",
     universe_version: str | None = None,
@@ -98,56 +98,57 @@ def _load_endpoint_observations(
     )
     raw_by_sym = {r[0]: r for r in cur.fetchall()}
 
-    prof_sql = """
-        SELECT source_symbol, ret1_exact_numerator, ret1_exact_denominator, ret1_quality,
-               ret5_exact_numerator, ret5_exact_denominator, ret5_quality,
-               ret20_exact_numerator, ret20_exact_denominator, ret20_quality,
-               amount_ratio20_exact_numerator, amount_ratio20_exact_denominator, amount_ratio20_quality,
-               ma20_exact_numerator, ma20_exact_denominator, ma20_quality
-        FROM stock.source_symbol_price_profiles
-        WHERE source_capture_id=%s AND target_session=%s AND profile_revision=%s
-          AND price_coordinate=%s AND source_symbol=ANY(%s)
-    """
-    prof_params: list[Any] = [source_capture_id, session, profile_revision, price_coordinate, sym_list]
-    if universe_version is not None:
-        prof_sql += " AND cross_section_universe_version=%s"
-        prof_params.append(universe_version)
-    cur.execute(prof_sql, tuple(prof_params))
     prof_by_sym: dict[str, Any] = {}
     prof_ambiguous: set[str] = set()
-    for row in cur.fetchall():
-        sym = row[0]
-        if sym in prof_ambiguous:
-            continue
-        if sym in prof_by_sym:
-            prof_ambiguous.add(sym)
-            prof_by_sym.pop(sym, None)
-        else:
-            prof_by_sym[sym] = row
-
-    seed_sql = """
-        SELECT source_symbol, source_seed_state, universe_match_status
-        FROM stock.source_pool_seed_day_facts
-        WHERE source_capture_id=%s AND target_session=%s AND profile_revision=%s
-          AND price_coordinate=%s AND source_symbol=ANY(%s)
-    """
-    seed_params: list[Any] = [source_capture_id, session, profile_revision, price_coordinate, sym_list]
-    if universe_version is not None:
-        seed_sql += " AND cross_section_universe_version=%s"
-        seed_params.append(universe_version)
-    cur.execute(seed_sql, tuple(seed_params))
     seed_by_sym: dict[str, str] = {}
     seed_ambiguous: set[str] = set()
-    for sym, s_state, u_match in cur.fetchall():
-        if sym in seed_ambiguous:
-            continue
-        if sym in seed_by_sym:
-            seed_ambiguous.add(sym)
-            seed_by_sym[sym] = "UNKNOWN"
-        elif u_match != "EXACT_MATCH":
-            seed_by_sym[sym] = "UNKNOWN"
-        else:
-            seed_by_sym[sym] = s_state
+    if profile_revision is not None:
+        prof_sql = """
+            SELECT source_symbol, ret1_exact_numerator, ret1_exact_denominator, ret1_quality,
+                   ret5_exact_numerator, ret5_exact_denominator, ret5_quality,
+                   ret20_exact_numerator, ret20_exact_denominator, ret20_quality,
+                   amount_ratio20_exact_numerator, amount_ratio20_exact_denominator, amount_ratio20_quality,
+                   ma20_exact_numerator, ma20_exact_denominator, ma20_quality
+            FROM stock.source_symbol_price_profiles
+            WHERE source_capture_id=%s AND target_session=%s AND profile_revision=%s
+              AND price_coordinate=%s AND source_symbol=ANY(%s)
+        """
+        prof_params: list[Any] = [source_capture_id, session, profile_revision, price_coordinate, sym_list]
+        if universe_version is not None:
+            prof_sql += " AND cross_section_universe_version=%s"
+            prof_params.append(universe_version)
+        cur.execute(prof_sql, tuple(prof_params))
+        for row in cur.fetchall():
+            sym = row[0]
+            if sym in prof_ambiguous:
+                continue
+            if sym in prof_by_sym:
+                prof_ambiguous.add(sym)
+                prof_by_sym.pop(sym, None)
+            else:
+                prof_by_sym[sym] = row
+
+        seed_sql = """
+            SELECT source_symbol, source_seed_state, universe_match_status
+            FROM stock.source_pool_seed_day_facts
+            WHERE source_capture_id=%s AND target_session=%s AND profile_revision=%s
+              AND price_coordinate=%s AND source_symbol=ANY(%s)
+        """
+        seed_params: list[Any] = [source_capture_id, session, profile_revision, price_coordinate, sym_list]
+        if universe_version is not None:
+            seed_sql += " AND cross_section_universe_version=%s"
+            seed_params.append(universe_version)
+        cur.execute(seed_sql, tuple(seed_params))
+        for sym, s_state, u_match in cur.fetchall():
+            if sym in seed_ambiguous:
+                continue
+            if sym in seed_by_sym:
+                seed_ambiguous.add(sym)
+                seed_by_sym[sym] = "UNKNOWN"
+            elif u_match != "EXACT_MATCH":
+                seed_by_sym[sym] = "UNKNOWN"
+            else:
+                seed_by_sym[sym] = s_state
 
     cs_sql = """
         SELECT source_symbol, rps20, rps20_exact, rps20_quality
@@ -390,8 +391,8 @@ def assemble_r03_session_inputs(
     cap_t1 = int(source_capture_id_t1) if source_capture_id_t1 is not None else cap_t
     cap_t3 = int(source_capture_id_t3) if source_capture_id_t3 is not None else cap_t
     prof_t = str(profile_revision)
-    prof_t1 = str(profile_revision_t1) if profile_revision_t1 is not None else prof_t
-    prof_t3 = str(profile_revision_t3) if profile_revision_t3 is not None else prof_t
+    prof_t1 = str(profile_revision_t1) if profile_revision_t1 is not None else None
+    prof_t3 = str(profile_revision_t3) if profile_revision_t3 is not None else None
 
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _conn,
@@ -509,8 +510,8 @@ def assemble_r03_session_inputs(
             if t3_session is not None
             else {}
         )
-        present_kinds = sorted({kind for kind, _, _, _ in meta_t}) or ["CONCEPT"]
-        target_entities = sorted(u_syms_t) if u_syms_t else sorted(set(syms_t) | set(extra_research_entities or ()))
+        present_kinds = ("INDUSTRY", "CONCEPT")
+        target_entities = sorted(u_syms_t) if u_syms_t else sorted(set(extra_research_entities or ()))
         loo_targets = [
             {
                 "entity_id": eid,
@@ -541,12 +542,12 @@ def _extract_rotation_inputs(
 ) -> dict[str, Any]:
     obs_t = board_t["observations"]
     obs_t1 = board_t1["observations"] if board_t1 is not None else {}
-    t_entities = {s.entity_id for s in board_t["members"] if s.entity_id is not None}
     t1_entities = {
         s.entity_id
         for s in (board_t1["members"] if board_t1 is not None else board_t["members"])
         if s.entity_id is not None
     }
+    t_entities = {s.entity_id for s in board_t["members"] if s.entity_id is not None} | t1_entities
     if prev_basket is not None:
         t_entities.update(prev_basket.members)
         t1_entities.update(prev_basket.members)
@@ -683,16 +684,23 @@ def run_r03_formal_sector_day(
             new_basket = None
             parent_ep_id = None
             if st_res["state"] == "PULSE" and not active_prev:
+                prev_lk = (
+                    prev_state_dict.get("last_known_state")
+                    if prev_state_dict is not None
+                    else None
+                )
                 if bt1 is None:
                     st_res = {
                         **st_res,
                         "state": "UNKNOWN",
+                        "last_known_state": prev_lk,
                         "reason": "BIRTH_T1_MISSING",
                     }
                 elif not bt1.get("membership_complete", True):
                     st_res = {
                         **st_res,
                         "state": "UNKNOWN",
+                        "last_known_state": prev_lk,
                         "reason": "BIRTH_MEMBERSHIP_INCOMPLETE",
                     }
                 else:
@@ -716,6 +724,7 @@ def run_r03_formal_sector_day(
                         st_res = {
                             **st_res,
                             "state": "UNKNOWN",
+                            "last_known_state": prev_lk,
                             "reason": err_reason or "BIRTH_BASKET_INVALID",
                         }
                     else:
@@ -833,6 +842,75 @@ def run_r03_formal_sector_day(
     }
 
 
+def produce_formal_market_breadth_for_session(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    t3_session: date | None,
+    source_capture_id: int,
+    profile_revision: str,
+    profile_revision_t3: str | None = None,
+    source_capture_id_t3: int | None = None,
+    universe_version_t: str | None = None,
+    universe_version_t3: str | None = None,
+    scope_key: str | None = None,
+    allow_revision: bool = False,
+) -> dict[str, Any] | None:
+    """独立生产并幂等持久化 R03 正式市场宽度（不依赖板块研究模块）。"""
+    if t3_session is None:
+        return None
+    resolved_scope = scope_key or (
+        f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
+    )
+    cap_t = int(source_capture_id)
+    cap_t3 = int(source_capture_id_t3) if source_capture_id_t3 is not None else cap_t
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
+        _conn,
+        cur,
+        _,
+    ):
+        u_ver_t, u_syms_t = _resolve_session_universe_members(
+            cur, session=target_session, price_capture_id=cap_t, universe_version=universe_version_t
+        )
+        u_ver_t3, u_syms_t3 = _resolve_session_universe_members(
+            cur, session=t3_session, price_capture_id=cap_t3, universe_version=universe_version_t3
+        )
+        if u_ver_t is None or u_ver_t3 is None:
+            return None
+        sym_list = sorted(u_syms_t | u_syms_t3)
+        obs_t = _load_endpoint_observations(
+            cur,
+            session=target_session,
+            source_capture_id=cap_t,
+            profile_revision=profile_revision,
+            symbols=sym_list,
+            universe_version=u_ver_t,
+        )
+        obs_t3 = _load_endpoint_observations(
+            cur,
+            session=t3_session,
+            source_capture_id=cap_t3,
+            profile_revision=profile_revision_t3,
+            symbols=sym_list,
+            universe_version=u_ver_t3,
+        )
+    res = compute_formal_market_breadth_from_universes(
+        universe_t={eid: obs_t.get(eid, {}).get("ret1") for eid in sorted(u_syms_t)},
+        universe_t3={eid: obs_t3.get(eid, {}).get("ret1") for eid in sorted(u_syms_t3)},
+        universe_version_t=str(u_ver_t),
+        universe_version_t3=str(u_ver_t3),
+    )
+    write_r03_formal_market_breadth(
+        config,
+        trade_date=target_session,
+        scope_key=resolved_scope,
+        contract_version=R03_CONTRACT_VERSION,
+        result=res,
+        allow_revision=allow_revision,
+    )
+    return res
+
+
 def run_r03_formal_sector_for_session(
     config: Mapping[str, Any],
     *,
@@ -842,6 +920,7 @@ def run_r03_formal_sector_for_session(
     source_capture_id: int,
     profile_revision: str,
     snapshot_ids: Mapping[str, int],
+    snapshot_ids_by_session: Mapping[str, Mapping[str, int]] | None = None,
     profile_revision_t1: str | None = None,
     profile_revision_t3: str | None = None,
     source_capture_id_t1: int | None = None,
@@ -886,6 +965,7 @@ def run_r03_formal_sector_for_session(
         source_capture_id=source_capture_id,
         profile_revision=profile_revision,
         snapshot_ids=snapshot_ids,
+        snapshot_ids_by_session=snapshot_ids_by_session,
         source_capture_id_t1=source_capture_id_t1,
         source_capture_id_t3=source_capture_id_t3,
         profile_revision_t1=profile_revision_t1,

@@ -293,13 +293,15 @@ _CLEANUP_MODULES = {
     },
     "R03_SECTOR_ROTATION": {
         "parent_table": "stock.r03_sector_rotation_episodes",
-        "child_table": "stock.r03_sector_rotation_day_states",
+        "child_table": "stock.r03_sector_rotation_board_day_facts",
         "cleanup_tables": (
+            "stock.r03_sector_rotation_board_day_facts",
             "stock.r03_sector_rotation_day_states",
             "stock.r03_sector_rotation_basket_members",
             "stock.r03_sector_rotation_episodes",
         ),
         "progress_tables": (
+            "stock.r03_sector_rotation_board_day_facts",
             "stock.r03_sector_rotation_episodes",
             "stock.r03_sector_rotation_basket_members",
             "stock.r03_sector_rotation_day_states",
@@ -3786,7 +3788,7 @@ def clear_derived_module(
             elif module_code == "R03_SECTOR_NATIVE":
                 cursor.execute(
                     """DELETE FROM stock.r03_sector_native_day_facts
-                       WHERE trade_date=%s AND scope_key=%s AND member_version=%s
+                       WHERE trade_date >= %s AND scope_key=%s AND member_version=%s
                          AND contract_version=%s""",
                     (
                         target_session,
@@ -3799,7 +3801,39 @@ def clear_derived_module(
                 deleted_by_session[target_session.isoformat()][
                     "stock.r03_sector_native_day_facts"
                 ] += cursor.rowcount
+                for dep_tbl in (
+                    "stock.r03_sector_loo_support_facts",
+                    "stock.r03_sector_overlap_board_facts",
+                    "stock.r03_sector_overlap_clusters",
+                    "stock.r03_sector_rotation_board_day_facts",
+                    "stock.r03_formal_market_breadth_facts",
+                ):
+                    cursor.execute(
+                        f"DELETE FROM {dep_tbl} WHERE trade_date >= %s AND scope_key=%s",
+                        (target_session, key["scope_key"]),
+                    )
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_day_states s
+                       USING stock.r03_sector_rotation_episodes e
+                       WHERE s.episode_id=e.id AND s.trade_date >= %s AND e.scope_key=%s""",
+                    (target_session, key["scope_key"]),
+                )
             elif module_code == "R03_SECTOR_ROTATION":
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_board_day_facts
+                       WHERE trade_date=%s AND scope_key=%s AND member_version=%s
+                         AND contract_version=%s""",
+                    (
+                        target_session,
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_rotation_board_day_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_rotation_board_day_facts"
+                ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.r03_sector_rotation_day_states s
                        USING stock.r03_sector_rotation_episodes e

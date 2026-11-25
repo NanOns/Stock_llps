@@ -4843,13 +4843,31 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     }
                     pressure_for_risk = standalone_pressure
                     breadth_for_risk = breadth_axis
+                from stock_a.storage.postgres import source_raw
                 from stock_a.storage.postgres.r03_formal_sector import (
                     read_r03_formal_market_breadth,
                 )
 
+                mkt_scope_hint = None
+                if capture_id_val is not None:
+                    with source_raw._transaction(
+                        self.preview_server.state.config, write=False, statement_timeout_ms=5000
+                    ) as (_c, _cur, _):
+                        _cur.execute(
+                            """
+                            SELECT DISTINCT scope_key
+                            FROM stock.r03_formal_market_breadth_facts
+                            WHERE trade_date=%s AND scope_key LIKE %s
+                            """,
+                            (target, f"BAOSTOCK_CAP_{capture_id_val}:%"),
+                        )
+                        matched_scopes = [str(r[0]) for r in _cur.fetchall()]
+                    if len(matched_scopes) == 1:
+                        mkt_scope_hint = matched_scopes[0]
                 formal_breadth = read_r03_formal_market_breadth(
                     self.preview_server.state.config,
                     trade_date=target,
+                    scope_key=mkt_scope_hint,
                 )
                 if formal_breadth.get("status") in {"OBSERVED", "UNKNOWN", "AMBIGUOUS_SCOPE"}:
                     base_payload["formal_market_breadth"] = formal_breadth
