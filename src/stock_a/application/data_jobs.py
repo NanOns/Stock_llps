@@ -8761,6 +8761,9 @@ def _execute_shared_production_chain_impl(
                 continue
             try:
                 profile_revision = profile_revision_for_session(day)
+                resolved_snapshots = (
+                    snapshot_ids if snapshot_ids is not None else paired_sector_snapshots()
+                )
                 idx_day = sessions.index(day) if day in sessions else -1
                 t1_day = sessions[idx_day - 1] if idx_day >= 1 else None
                 t3_day = sessions[idx_day - 3] if idx_day >= 3 else None
@@ -8771,7 +8774,7 @@ def _execute_shared_production_chain_impl(
                     t3_session=t3_day,
                     source_capture_id=source_capture_id,
                     profile_revision=profile_revision,
-                    snapshot_ids=snapshot_ids,
+                    snapshot_ids=resolved_snapshots,
                     modules=day_modules,
                     allow_revision=operation in {"RECOMPUTE", "CLEAR_AND_REGENERATE"},
                 )
