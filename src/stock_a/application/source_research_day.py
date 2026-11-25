@@ -703,10 +703,12 @@ def _persist_static_research_day(
     research_cutoff: date,
     source_capture_id: int,
     expected_capture_id: int | None,
-    expected_source_count: int,
+    expected_capture_source_count: int | None = None,
+    expected_research_source_count: int | None = None,
     history_session_count: int | None = None,
     worker_count: int = 1,
     cross_section_universe_version: str | None = None,
+    cross_section_universe_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """由同一现役Core/Profile、RPS与D0生产者闭合全池静态事实。"""
     _validate_static_history_count(history_session_count)
@@ -720,6 +722,25 @@ def _persist_static_research_day(
         price_coordinate="FORWARD_ADJUSTED",
     )
     data_universe_expected_count = source_ctx["capture_expected_row_count"]
+    research_universe_expected_count = source_ctx["research_expected_row_count"]
+    if (
+        expected_capture_source_count is not None
+        and (
+            type(expected_capture_source_count) is not int
+            or expected_capture_source_count != data_universe_expected_count
+        )
+        or expected_research_source_count is not None
+        and (
+            type(expected_research_source_count) is not int
+            or expected_research_source_count != research_universe_expected_count
+        )
+        or type(research_universe_expected_count) is not int
+        or research_universe_expected_count <= 0
+    ):
+        raise SourceResearchDayError(
+            "STATIC_RESEARCH_SOURCE_DENOMINATOR_MISMATCH",
+            "静态研究必须分别闭合原始捕获分母与主板/创业板评价分母。",
+        )
     catalog = source_symbol_price_profile_snapshots(
         config, max_target_session=research_cutoff
     )
@@ -772,11 +793,12 @@ def _persist_static_research_day(
         include_rps_read=True,
         worker_count=worker_count,
         cross_section_universe_version=cross_section_universe_version,
+        cross_section_universe_capture_id=cross_section_universe_capture_id,
     )
     if (
         seed.get("profile_revision_matches_runtime") is not True
         or seed.get("stored_profile_status") != "AVAILABLE"
-        or seed.get("source_pool_total") != expected_source_count
+        or seed.get("source_pool_total") != research_universe_expected_count
         or seed.get("price_coordinate") != "FORWARD_ADJUSTED"
     ):
         raise SourceResearchDayError(
@@ -820,6 +842,17 @@ def _persist_static_research_day(
         profile_revision=profile_revision,
     )
     result["profile_revision"] = profile_revision
+    for field in (
+        "cross_section_universe_capture_id",
+        "cross_section_universe_version",
+        "cross_section_contract_version",
+        "universe_match_status",
+        "ranking_universe_count",
+        "evaluation_universe_count",
+        "rps_source",
+        "formal_research_universe",
+    ):
+        result[field] = seed.get(field)
     return result
 
 
@@ -902,7 +935,9 @@ def run_source_static_research_day(
         research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
         expected_capture_id=None,
-        expected_source_count=coordinate_versions["FORWARD_ADJUSTED"]["row_count"],
+        expected_capture_source_count=int(
+            coordinate_versions["FORWARD_ADJUSTED"]["row_count"]
+        ),
         history_session_count=history_session_count,
         worker_count=worker_count,
     )
@@ -1266,6 +1301,7 @@ def prepare_source_research_day(
     include_d1: bool = True,
     include_impulse: bool = True,
     cross_section_universe_version: str | None = None,
+    cross_section_universe_capture_id: int | None = None,
 ) -> tuple[ResearchDayFacts, dict[str, Any]]:
     """按选中的研究域独立准备一个交易日；只读Raw，默认永不写PG。"""
     started = time.perf_counter()
@@ -1344,6 +1380,7 @@ def prepare_source_research_day(
             include_source_symbol_structure_results=True,
             include_impulse=include_impulse,
             cross_section_universe_version=cross_section_universe_version,
+            cross_section_universe_capture_id=cross_section_universe_capture_id,
         )
         d1_wall_seconds = time.perf_counter() - d1_started
         d1 = prepared["d1"]
@@ -1430,6 +1467,11 @@ def prepare_source_research_day(
             "calendar_id": official["calendar_id"],
             "calendar_revision": official["calendar_revision"],
         }
+    d1_cross_section_scope = (
+        prepared.get("d1", {}).get("cross_section_scope")
+        if include_d1 and isinstance(prepared.get("d1"), Mapping)
+        else None
+    )
     facts = ResearchDayFacts(
         before_session=before_session,
         target_session=target_session,
@@ -1516,6 +1558,21 @@ def prepare_source_research_day(
         d0_facts=d0_rows,
         d1_structure_facts=d1_rows,
         d1_anchor_facts=anchor_rows,
+        cross_section_universe_capture_id=(
+            d1_cross_section_scope.get("universe_capture_id")
+            if isinstance(d1_cross_section_scope, Mapping)
+            else None
+        ),
+        cross_section_universe_version=(
+            d1_cross_section_scope.get("universe_version")
+            if isinstance(d1_cross_section_scope, Mapping)
+            else None
+        ),
+        cross_section_contract_version=(
+            d1_cross_section_scope.get("contract_version")
+            if isinstance(d1_cross_section_scope, Mapping)
+            else None
+        ),
     )
     _validate_day_facts(facts, include_d0=include_d0, include_d1=include_d1)
     report = _summarize_day(
@@ -1659,6 +1716,11 @@ def _summarize_day(
             ),
             "execution": d1.get("execution", {}),
             "reader_wall_seconds": d1_wall_seconds,
+            "cross_section_scope": {
+                "universe_capture_id": facts.cross_section_universe_capture_id,
+                "universe_version": facts.cross_section_universe_version,
+                "contract_version": facts.cross_section_contract_version,
+            },
         }
         if include_d1
         else {
@@ -1702,6 +1764,7 @@ def _summarize_day(
         },
         "d0": d0_summary,
         "d1": d1_summary,
+        "cross_section_scope": d1_summary.get("cross_section_scope"),
         "estimated_transaction_scope": {
             "tables": tables,
             "insert_rows_if_empty": insert_rows,
@@ -1753,6 +1816,7 @@ def run_source_research_day(
     include_d1: bool = True,
     include_static: bool = True,
     cross_section_universe_version: str | None = None,
+    cross_section_universe_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """执行单日研究；保存域按D0/D1输出日期独立选择。"""
     if (
@@ -1779,6 +1843,7 @@ def run_source_research_day(
         include_d0=include_d0,
         include_d1=include_d1,
         cross_section_universe_version=cross_section_universe_version,
+        cross_section_universe_capture_id=cross_section_universe_capture_id,
     )
     if persist:
         write_result = persist_source_research_day(
@@ -1795,7 +1860,7 @@ def run_source_research_day(
                 research_cutoff=research_cutoff,
                 source_capture_id=source_capture_id,
                 expected_capture_id=facts.target_capture_id,
-                expected_source_count=(
+                expected_research_source_count=(
                     facts.d1_source_count
                     if include_d1
                     else facts.d0_target_source_count
@@ -1803,6 +1868,7 @@ def run_source_research_day(
                 history_session_count=history_session_count,
                 worker_count=worker_count,
                 cross_section_universe_version=cross_section_universe_version,
+                cross_section_universe_capture_id=cross_section_universe_capture_id,
             )
             static_result["wall_seconds"] = round(
                 time.perf_counter() - static_started, 6

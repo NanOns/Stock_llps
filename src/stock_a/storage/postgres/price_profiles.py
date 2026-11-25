@@ -85,6 +85,9 @@ _PROFILE_COLUMNS = (
     "calculation_scope",
     "producer_contract",
     "producer_version",
+    "cross_section_universe_capture_id",
+    "cross_section_universe_version",
+    "cross_section_contract_version",
     "price_coordinate",
     "identity_status",
     "stable_security_id_status",
@@ -582,6 +585,25 @@ def _normalize_record(
         raise PriceProfilePgError(
             "PROFILE_BUSINESS_KEY_INVALID",
             "画像来源代码、BaoStock前复权坐标或NON_PIT时钟合同无效",
+        )
+    cross_capture_id = normalized.get("cross_section_universe_capture_id")
+    cross_version = normalized.get("cross_section_universe_version")
+    cross_contract = normalized.get("cross_section_contract_version")
+    if (
+        cross_capture_id is not None
+        and (type(cross_capture_id) is not int or cross_capture_id <= 0)
+        or (cross_version is None) != (cross_contract is None)
+        or cross_version is not None
+        and (
+            not isinstance(cross_version, str)
+            or not cross_version.strip()
+            or not isinstance(cross_contract, str)
+            or not cross_contract.strip()
+        )
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CROSS_SECTION_SCOPE_INVALID",
+            "画像绑定的横截面Universe版本、捕获和合同不完整",
         )
     for name in _CORE_COLUMN_NAMES:
         value = normalized.get(name)

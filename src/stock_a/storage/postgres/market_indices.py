@@ -435,15 +435,91 @@ def read_market_environment_display(
     primary_index_symbol: str,
     calendar_revision: str,
     rule_version: str = "MARKET_PRESENTATION_R1",
+    index_capture_id: int | None = None,
+    index_config_version: str | None = None,
+    calendar_id: str | None = None,
 ) -> dict[str, Any]:
     """只读查询目标日已存市场复合环境展示状态（未落库时诚实返回 NOT_COMPUTED）。"""
+    if (
+        type(target_session) is not date
+        or type(stock_capture_id) is not int
+        or stock_capture_id <= 0
+        or not isinstance(primary_index_symbol, str)
+        or not primary_index_symbol.strip()
+        or not isinstance(calendar_revision, str)
+        or not calendar_revision.strip()
+        or not isinstance(rule_version, str)
+        or not rule_version.strip()
+        or index_capture_id is not None
+        and (type(index_capture_id) is not int or index_capture_id <= 0)
+        or index_config_version is not None
+        and (
+            not isinstance(index_config_version, str)
+            or not index_config_version.strip()
+        )
+        or calendar_id is not None
+        and (not isinstance(calendar_id, str) or not calendar_id.strip())
+    ):
+        raise ValueError("MARKET_ENVIRONMENT_READ_SCOPE_INVALID")
     with _transaction(config, write=False, statement_timeout_ms=10000) as (
         _,
         cursor,
         _,
     ):
         cursor.execute(
-            """SELECT index_capture_id, index_config_version,
+            """SELECT DISTINCT index_capture_id, index_config_version, calendar_id
+               FROM stock.source_market_environment_day_facts
+               WHERE target_session=%s AND stock_capture_id=%s
+                 AND primary_index_symbol=%s AND calendar_revision=%s
+                 AND rule_version=%s
+                 AND (%s::bigint IS NULL OR index_capture_id IS NOT DISTINCT FROM %s)
+                 AND (%s::text IS NULL OR index_config_version IS NOT DISTINCT FROM %s)
+                 AND (%s::text IS NULL OR calendar_id=%s)
+               ORDER BY index_capture_id NULLS FIRST,index_config_version NULLS FIRST,
+                        calendar_id""",
+            (
+                target_session,
+                stock_capture_id,
+                primary_index_symbol,
+                calendar_revision,
+                rule_version,
+                index_capture_id,
+                index_capture_id,
+                index_config_version,
+                index_config_version,
+                calendar_id,
+                calendar_id,
+            ),
+        )
+        scopes = cursor.fetchall()
+        if len(scopes) > 1:
+            return {
+                "status": "INCOMPLETE",
+                "target_session": target_session.isoformat(),
+                "stock_capture_id": stock_capture_id,
+                "primary_index_symbol": primary_index_symbol,
+                "calendar_revision": calendar_revision,
+                "rule_version": rule_version,
+                "reason": "MARKET_ENVIRONMENT_SCOPE_AMBIGUOUS",
+                "candidate_scopes": [
+                    {
+                        "index_capture_id": int(row[0]) if row[0] is not None else None,
+                        "index_config_version": row[1],
+                        "calendar_id": row[2],
+                    }
+                    for row in scopes
+                ],
+            }
+        if not scopes:
+            row = None
+        else:
+            (
+                selected_index_capture_id,
+                selected_index_config_version,
+                selected_calendar_id,
+            ) = scopes[0]
+            cursor.execute(
+                """SELECT index_capture_id, index_config_version,
                       trend_axis, breadth_axis, participation_axis, pressure_axis,
                       raw_status, raw_label, displayed_label, display_status,
                       pending_label, pending_count
@@ -451,17 +527,23 @@ def read_market_environment_display(
                WHERE target_session = %s
                  AND stock_capture_id = %s
                  AND primary_index_symbol = %s
+                 AND index_capture_id IS NOT DISTINCT FROM %s
+                 AND index_config_version IS NOT DISTINCT FROM %s
+                 AND calendar_id = %s
                  AND calendar_revision = %s
                  AND rule_version = %s""",
-            (
-                target_session,
-                stock_capture_id,
-                primary_index_symbol,
-                calendar_revision,
-                rule_version,
-            ),
-        )
-        row = cursor.fetchone()
+                (
+                    target_session,
+                    stock_capture_id,
+                    primary_index_symbol,
+                    selected_index_capture_id,
+                    selected_index_config_version,
+                    selected_calendar_id,
+                    calendar_revision,
+                    rule_version,
+                ),
+            )
+            row = cursor.fetchone()
     if row is None:
         return {
             "status": "NOT_COMPUTED",
@@ -479,6 +561,7 @@ def read_market_environment_display(
         "index_capture_id": int(row[0]) if row[0] is not None else None,
         "primary_index_symbol": primary_index_symbol,
         "index_config_version": row[1],
+        "calendar_id": selected_calendar_id,
         "calendar_revision": calendar_revision,
         "rule_version": rule_version,
         "axes": {
@@ -648,6 +731,65 @@ def persist_market_index_daily_bars(
     }
 
 
+def read_market_index_daily_scope(
+    config: Mapping[str, Any],
+    *,
+    source_capture_id: int,
+    session_dates: Sequence[date],
+    cutoff: date,
+) -> tuple[dict[str, Any], ...]:
+    """只读回指数捕获在精确官方会话集合内的日线键与关键字段。"""
+    sessions = tuple(session_dates)
+    if (
+        type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or type(cutoff) is not date
+        or not sessions
+        or any(type(session) is not date or session > cutoff for session in sessions)
+        or tuple(sorted(set(sessions))) != sessions
+    ):
+        raise ValueError("MARKET_INDEX_DAILY_READ_SCOPE_INVALID")
+    with _transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """SELECT d.source_symbol,d.session_date,d.official_code,
+                      d.open_points,d.high_points,d.low_points,d.close_points,
+                      d.preclose_points,d.volume_raw,d.amount_raw,d.pct_chg_reported,
+                      d.price_quality,d.price_reason
+               FROM stock.source_market_index_daily d
+               JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
+               WHERE d.source_capture_id=%s AND d.session_date=ANY(%s::date[])
+                 AND d.session_date<=%s AND c.provider='BAOSTOCK'
+                 AND c.range_start_session<=d.session_date
+                 AND c.range_end_session>=d.session_date
+                 AND c.range_end_session<=%s
+               ORDER BY d.source_symbol,d.session_date""",
+            (source_capture_id, list(sessions), cutoff, cutoff),
+        )
+        rows = cursor.fetchall()
+    return tuple(
+        {
+            "source_symbol": str(row[0]),
+            "session_date": row[1],
+            "official_code": str(row[2]),
+            "open_points": row[3],
+            "high_points": row[4],
+            "low_points": row[5],
+            "close_points": row[6],
+            "preclose_points": row[7],
+            "volume_raw": row[8],
+            "amount_raw": row[9],
+            "pct_chg_reported": row[10],
+            "price_quality": str(row[11]),
+            "price_reason": row[12],
+        }
+        for row in rows
+    )
+
+
 def persist_market_indices_and_environment_for_session(
     config: Mapping[str, Any],
     *,
@@ -751,15 +893,20 @@ def persist_market_indices_and_environment_for_session(
                    FROM stock.source_market_environment_day_facts
                    WHERE target_session = %s
                      AND stock_capture_id = %s
+                     AND index_capture_id IS NOT DISTINCT FROM %s
+                     AND index_config_version IS NOT DISTINCT FROM %s
+                     AND calendar_id = %s
+                     AND primary_index_symbol = %s
                      AND calendar_revision = %s
-                   ORDER BY (primary_index_symbol = %s AND rule_version = %s) DESC,
-                            id DESC
-                   LIMIT 1""",
+                     AND rule_version = %s""",
                 (
                     prev_session,
                     stock_capture_id,
-                    calendar_revision,
+                    index_capture_id,
+                    config_version,
+                    calendar_id,
                     primary_symbol,
+                    calendar_revision,
                     rule_version,
                 ),
             )

@@ -13,6 +13,7 @@ from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_source_version_context,
 )
+from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.domain import FieldValue, exact_number, unknown
 from stock_a.research.core import (
     CoreObservation,
@@ -1471,6 +1472,7 @@ def discover_source_d1_structures(
     include_source_symbol_structure_results: bool = False,
     include_impulse: bool = False,
     cross_section_universe_version: str | None = None,
+    cross_section_universe_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """一遍完整扫描目标日Raw池，统计五种D1结构并按事件分页。"""
     started_wall = time.perf_counter()
@@ -1554,18 +1556,51 @@ def discover_source_d1_structures(
     )
     active_structure_types = ALL_STRUCTURE_TYPES if include_impulse else STRUCTURE_TYPES
     rel_market_1_by_session_symbol: dict[date, dict[str, FieldValue]] = {}
+    target_cross_section_scope: dict[str, Any] | None = None
     if include_impulse:
         from stock_a.storage.postgres.cross_section import read_cross_section_day_bundle
 
         query_days = days if structure_changes else (target_session,)
         for q_day in query_days:
+            is_target_scope = q_day == target_session
+            _, _, q_calendar_revision = resolve_pg_history_window(q_day.isoformat(), 1)
             bundle = read_cross_section_day_bundle(
                 config,
                 target_session=q_day,
                 price_capture_id=source_capture_id,
-                universe_version=cross_section_universe_version,
-                calendar_revision=target_calendar_revision,
+                universe_version=(
+                    cross_section_universe_version if is_target_scope else None
+                ),
+                universe_capture_id=(
+                    cross_section_universe_capture_id if is_target_scope else None
+                ),
+                calendar_revision=q_calendar_revision,
             )
+            if bundle.get("reason") == "CROSS_SECTION_SCOPE_AMBIGUOUS":
+                raise PgResearchBindingError(
+                    "D1_CROSS_SECTION_SCOPE_AMBIGUOUS",
+                    f"D1实际依赖会话{q_day.isoformat()}存在多个横截面候选，拒绝按最新行猜选",
+                )
+            if (
+                is_target_scope
+                and (
+                    cross_section_universe_version is not None
+                    or cross_section_universe_capture_id is not None
+                )
+                and bundle.get("status") != "AVAILABLE"
+            ):
+                raise PgResearchBindingError(
+                    "D1_SELECTED_CROSS_SECTION_SCOPE_UNAVAILABLE",
+                    "D1目标日指定的横截面版本/捕获没有完整事实",
+                )
+            if is_target_scope and bundle.get("universe_version"):
+                target_cross_section_scope = {
+                    "universe_capture_id": bundle.get("universe_capture_id"),
+                    "universe_version": bundle.get("universe_version"),
+                    "contract_version": bundle.get("contract_version"),
+                    "status": bundle.get("status"),
+                    "reason": bundle.get("reason"),
+                }
             if bundle.get("status") == "AVAILABLE":
                 rel_market_1_by_session_symbol[q_day] = {
                     sym: flds.get(
@@ -2109,6 +2144,7 @@ def discover_source_d1_structures(
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "source_capture_id": source_capture_id,
+        "cross_section_scope": target_cross_section_scope,
         "price_coordinate": "FORWARD_ADJUSTED",
         "time_role": "NON_PIT_RETROSPECTIVE",
         "target_session": target_session.isoformat(),

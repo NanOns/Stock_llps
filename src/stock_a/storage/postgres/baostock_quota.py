@@ -55,6 +55,11 @@ def _beijing_today(now: datetime | None = None) -> date:
     return current.astimezone(_CST).date()
 
 
+def current_baostock_quota_date(now: datetime | None = None) -> date:
+    """返回本机工程配额使用的北京时间自然日，供一次请求链固定日期。"""
+    return _beijing_today(now)
+
+
 @contextmanager
 def baostock_serial_lock(config: Mapping[str, Any]) -> Iterator[Callable[[], None]]:
     """获取 PG 会话级咨询锁以串行本机所有 BaoStock 在线入口；yield 锁存活检查回调，断线即报错停机。"""

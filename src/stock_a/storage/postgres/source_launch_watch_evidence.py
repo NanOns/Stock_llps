@@ -56,13 +56,38 @@ def _expected_d1_types(producer_version: str | None) -> tuple[str, ...]:
     return _D1_STRUCTURE_TYPES
 
 
-def _scope_status(rows: Sequence[tuple[Any, ...]], expected_count: int) -> str:
+def _scope_status(
+    rows: Sequence[tuple[Any, ...]],
+    expected_count: int,
+    *,
+    count_indices: tuple[int, int] = (-2, -1),
+) -> str:
     if not rows:
         return "NOT_COMPUTED"
     if len(rows) != 1:
         return "AMBIGUOUS"
-    row_count, symbol_count = int(rows[0][-2]), int(rows[0][-1])
+    row_count, symbol_count = (
+        int(rows[0][count_indices[0]]),
+        int(rows[0][count_indices[1]]),
+    )
     return "AVAILABLE" if row_count >= symbol_count == expected_count else "INCOMPLETE"
+
+
+def _d1_scope_status(rows: Sequence[tuple[Any, ...]], expected_count: int) -> str:
+    """D1范围必须逐股精确包含对应版本的五类或七类结构。"""
+    if not rows:
+        return "NOT_COMPUTED"
+    if len(rows) != 1:
+        return "AMBIGUOUS"
+    row = rows[0]
+    expected_types = _expected_d1_types(str(row[6]))
+    return (
+        "AVAILABLE"
+        if int(row[10]) == expected_count * len(expected_types)
+        and int(row[11]) == expected_count
+        and int(row[12]) == expected_count
+        else "INCOMPLETE"
+    )
 
 
 def _state(value: Any) -> str:
@@ -171,6 +196,10 @@ def read_source_launch_watch_evidence(
     expected_before_session: date | None = None,
     selected_profile_revision: str | None = None,
     selected_history_session_count: int | None = None,
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
+    universe_match_status: str | None = None,
     membership_snapshot_ids: Mapping[str, int | None] | None = None,
     _scope_symbol: str | None = None,
 ) -> dict[str, Any]:
@@ -212,6 +241,26 @@ def read_source_launch_watch_evidence(
         and (
             not isinstance(selected_profile_revision, str)
             or re.fullmatch(PROFILE_REVISION_PATTERN, selected_profile_revision) is None
+        )
+        or cross_section_universe_capture_id is not None
+        and (
+            type(cross_section_universe_capture_id) is not int
+            or cross_section_universe_capture_id <= 0
+        )
+        or cross_section_universe_version is not None
+        and (
+            not isinstance(cross_section_universe_version, str)
+            or not cross_section_universe_version.strip()
+        )
+        or cross_section_contract_version is not None
+        and (
+            not isinstance(cross_section_contract_version, str)
+            or not cross_section_contract_version.strip()
+        )
+        or universe_match_status is not None
+        and (
+            not isinstance(universe_match_status, str)
+            or not universe_match_status.strip()
         )
     ):
         raise ValueError("D0首页研究证据读取键无效")
@@ -298,23 +347,42 @@ def read_source_launch_watch_evidence(
         if selected_history_session_count is not None:
             seed_scope_filter += " AND history_session_count=%s"
             seed_scope_params += (selected_history_session_count,)
+        for column, value in (
+            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
+            ("cross_section_universe_version", cross_section_universe_version),
+            ("cross_section_contract_version", cross_section_contract_version),
+            ("universe_match_status", universe_match_status),
+        ):
+            if value is not None:
+                seed_scope_filter += f" AND {column}=%s"
+                seed_scope_params += (value,)
         cursor.execute(
             """SELECT profile_revision, producer_contract, producer_version,
                       history_session_count, calendar_id, calendar_revision,
                       research_mode, price_coordinate,
-                      count(*)::bigint, count(DISTINCT source_symbol)::bigint
+                      count(*)::bigint, count(DISTINCT source_symbol)::bigint,
+                      cross_section_universe_capture_id,
+                      cross_section_universe_version,
+                      cross_section_contract_version,universe_match_status,
+                      ranking_universe_count,evaluation_universe_count
                FROM source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s"""
             + seed_scope_filter
             + """
                GROUP BY profile_revision, producer_contract, producer_version,
                         history_session_count, calendar_id, calendar_revision,
-                        research_mode, price_coordinate
+                        research_mode, price_coordinate,
+                        cross_section_universe_capture_id,
+                        cross_section_universe_version,
+                        cross_section_contract_version,universe_match_status,
+                        ranking_universe_count,evaluation_universe_count
                ORDER BY profile_revision, producer_version""",
             seed_scope_params,
         )
         seed_scopes = cursor.fetchall()
-        seed_scope_status = _scope_status(seed_scopes, scoped_source_count)
+        seed_scope_status = _scope_status(
+            seed_scopes, scoped_source_count, count_indices=(8, 9)
+        )
         seed_scope = seed_scopes[0] if len(seed_scopes) == 1 else None
 
         rule_scope_filter = " AND source_symbol=%s" if _scope_symbol else ""
@@ -378,29 +446,72 @@ def read_source_launch_watch_evidence(
         if d1_history_session_count is not None:
             d1_count_clause = " AND d1_history_session_count=%s"
             d1_scope_params += (d1_history_session_count,)
+        for column, value in (
+            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
+            ("cross_section_universe_version", cross_section_universe_version),
+            ("cross_section_contract_version", cross_section_contract_version),
+        ):
+            if value is not None:
+                d1_scope_params += (value,)
+                d1_count_clause += f" AND {column}=%s"
         cursor.execute(
-            """SELECT d1_history_session_count, calendar_revision,
-                      producer_contract, producer_version, material_change_contract,
-                      research_mode, price_coordinate, count(*)::bigint,
-                      count(DISTINCT source_symbol)::bigint
-               FROM source_d1_structure_day_facts
-               WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s"""
+            """WITH d1_by_symbol AS MATERIALIZED (
+                   SELECT d1_history_session_count, calendar_id,
+                          history_window_start, history_window_end, calendar_revision,
+                          producer_contract, producer_version, material_change_contract,
+                          research_mode, price_coordinate, source_symbol,
+                          cross_section_universe_capture_id,
+                          cross_section_universe_version,
+                          cross_section_contract_version,
+                          count(*)::bigint AS row_count,
+                          array_agg(DISTINCT structure_type ORDER BY structure_type) AS types
+                   FROM source_d1_structure_day_facts
+                   WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s"""
             + d1_symbol_clause
             + d1_version_clause
             + d1_count_clause
-            + " GROUP BY d1_history_session_count, calendar_revision, producer_contract,"
-            " producer_version, material_change_contract, research_mode, price_coordinate"
-            " ORDER BY d1_history_session_count, producer_version",
-            d1_scope_params,
+            + " GROUP BY d1_history_session_count, calendar_id, history_window_start,"
+            " history_window_end, calendar_revision, producer_contract, producer_version,"
+            " material_change_contract, research_mode, price_coordinate, source_symbol,"
+            " cross_section_universe_capture_id,cross_section_universe_version,"
+            " cross_section_contract_version"
+            " ) SELECT d1_history_session_count, calendar_id, history_window_start,"
+            " history_window_end, calendar_revision, producer_contract, producer_version,"
+            " material_change_contract, research_mode, price_coordinate,"
+            " sum(row_count)::bigint, count(*)::bigint,"
+            " count(*) FILTER (WHERE row_count=cardinality(CASE"
+            " WHEN producer_version=%s THEN %s::text[] ELSE %s::text[] END)"
+            " AND types=CASE WHEN producer_version=%s THEN %s::text[] ELSE %s::text[] END)::bigint"
+            ", cross_section_universe_capture_id,cross_section_universe_version,"
+            " cross_section_contract_version"
+            " FROM d1_by_symbol"
+            " GROUP BY d1_history_session_count, calendar_id, history_window_start,"
+            " history_window_end, calendar_revision, producer_contract, producer_version,"
+            " material_change_contract, research_mode, price_coordinate,"
+            " cross_section_universe_capture_id,cross_section_universe_version,"
+            " cross_section_contract_version"
+            " ORDER BY d1_history_session_count, producer_version, history_window_start,"
+            " history_window_end",
+            (
+                *d1_scope_params,
+                _D1_STRUCTURE_PRODUCER_VERSION_7,
+                list(_D1_STRUCTURE_TYPES_7),
+                list(_D1_STRUCTURE_TYPES),
+                _D1_STRUCTURE_PRODUCER_VERSION_7,
+                list(_D1_STRUCTURE_TYPES_7),
+                list(_D1_STRUCTURE_TYPES),
+            ),
         )
-        d1_scopes = cursor.fetchall()
-        if len(d1_scopes) > 1:
-            r4_scopes = [
-                row for row in d1_scopes if row[3] == _D1_STRUCTURE_PRODUCER_VERSION_7
-            ]
-            if r4_scopes:
-                d1_scopes = r4_scopes
-        d1_scope_status = _scope_status(d1_scopes, scoped_source_count)
+        from stock_a.storage.postgres.research_day_facts import (
+            _select_preferred_d1_scopes,
+        )
+
+        d1_scopes = _select_preferred_d1_scopes(
+            cursor.fetchall(),
+            version_index=6,
+            comparable_indices=(0, 1, 2, 3, 4, 5, 7, 8, 9),
+        )
+        d1_scope_status = _d1_scope_status(d1_scopes, scoped_source_count)
         d1_scope = d1_scopes[0] if len(d1_scopes) == 1 else None
 
         seed_rows: list[tuple[Any, ...]] = []
@@ -434,9 +545,13 @@ def read_source_launch_watch_evidence(
             and rule_scope[2] == seed_scope[3]
             and rule_scope[6] == "NON_PIT_EXPLORATORY"
             and rule_scope[3] == d1_scope[0]
-            and rule_scope[5] == d1_scope[1]
-            and seed_scope[6] == d1_scope[5] == "NON_PIT_RETROSPECTIVE"
-            and seed_scope[7] == d1_scope[6] == "FORWARD_ADJUSTED"
+            and rule_scope[5] == d1_scope[4]
+            and seed_scope[4] == d1_scope[1]
+            and seed_scope[6] == d1_scope[8] == "NON_PIT_RETROSPECTIVE"
+            and seed_scope[7] == d1_scope[9] == "FORWARD_ADJUSTED"
+            and seed_scope[10] == d1_scope[13]
+            and seed_scope[11] == d1_scope[14]
+            and seed_scope[12] == d1_scope[15]
             and rule_scope[2] > 0
             and rule_scope[3] > 0
         )
@@ -500,16 +615,34 @@ def read_source_launch_watch_evidence(
                           material_change_anchor_count, persisted_detail_count
                    FROM source_d1_structure_day_facts
                    WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s
-                     AND d1_history_session_count=%s AND calendar_revision=%s
-                     AND producer_contract=%s AND producer_version=%s
+                    AND d1_history_session_count=%s AND calendar_id=%s
+                    AND calendar_revision=%s AND producer_contract=%s
+                    AND producer_version=%s
                      AND material_change_contract=%s AND research_mode=%s
-                     AND price_coordinate=%s AND source_symbol=ANY(%s)
+                    AND price_coordinate=%s AND history_window_start=%s
+                    AND history_window_end=%s
+                    AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s
+                    AND cross_section_universe_version IS NOT DISTINCT FROM %s
+                    AND cross_section_contract_version IS NOT DISTINCT FROM %s
+                    AND source_symbol=ANY(%s)
                    ORDER BY source_symbol, structure_type""",
                 (
                     target_session,
                     source_capture_id,
                     source_capture_id,
-                    *d1_scope[:7],
+                    d1_scope[0],
+                    d1_scope[1],
+                    d1_scope[4],
+                    d1_scope[5],
+                    d1_scope[6],
+                    d1_scope[7],
+                    d1_scope[8],
+                    d1_scope[9],
+                    d1_scope[2],
+                    d1_scope[3],
+                    d1_scope[13],
+                    d1_scope[14],
+                    d1_scope[15],
                     list(symbols),
                 ),
             )
@@ -642,6 +775,12 @@ def read_source_launch_watch_evidence(
                 "calendar_revision": seed_scope[5],
                 "research_mode": seed_scope[6],
                 "price_coordinate": seed_scope[7],
+                "cross_section_universe_capture_id": seed_scope[10],
+                "cross_section_universe_version": seed_scope[11],
+                "cross_section_contract_version": seed_scope[12],
+                "universe_match_status": seed_scope[13],
+                "ranking_universe_count": seed_scope[14],
+                "evaluation_universe_count": seed_scope[15],
                 "verification_scope": "SINGLE_SOURCE_SYMBOL_ROW_ONLY",
             }
 
@@ -709,7 +848,7 @@ def read_source_launch_watch_evidence(
             rule_reason_codes = []
 
         expected_d1_types = _expected_d1_types(
-            d1_scope[3] if d1_scope is not None else None
+            d1_scope[6] if d1_scope is not None else None
         )
         structures = d1_by_symbol.get(symbol, [])
         if not structures:
@@ -721,6 +860,7 @@ def read_source_launch_watch_evidence(
                 "structure_fact_count": 0,
                 "expected_structure_fact_count": len(expected_d1_types),
                 "missing_structure_types": list(expected_d1_types),
+                "unexpected_structure_types": [],
                 "target_price_quality": "UNKNOWN",
                 "target_price_reasons": [],
                 "generation_state_counts": {},
@@ -731,6 +871,9 @@ def read_source_launch_watch_evidence(
         else:
             structure_types = {str(row[0]) for row in structures}
             missing_structure_types = sorted(set(expected_d1_types) - structure_types)
+            unexpected_structure_types = sorted(
+                structure_types - set(expected_d1_types)
+            )
             price_qualities = {str(row[1] or "UNKNOWN") for row in structures}
             target_price_quality = (
                 "OBSERVED"
@@ -745,11 +888,14 @@ def read_source_launch_watch_evidence(
             )
             d1_fact = {
                 "status": "AVAILABLE"
-                if d1_scope_status == "AVAILABLE" and not missing_structure_types
+                if d1_scope_status == "AVAILABLE"
+                and not missing_structure_types
+                and not unexpected_structure_types
                 else "PARTIAL",
                 "structure_fact_count": len(structures),
                 "expected_structure_fact_count": len(expected_d1_types),
                 "missing_structure_types": missing_structure_types,
+                "unexpected_structure_types": unexpected_structure_types,
                 "target_price_quality": target_price_quality,
                 "target_price_reasons": sorted(
                     {str(row[2]) for row in structures if row[2]}
@@ -761,7 +907,9 @@ def read_source_launch_watch_evidence(
                 ),
                 "persisted_detail_count": sum(int(row[6] or 0) for row in structures),
                 "reason_codes": []
-                if d1_scope_status == "AVAILABLE" and not missing_structure_types
+                if d1_scope_status == "AVAILABLE"
+                and not missing_structure_types
+                and not unexpected_structure_types
                 else [
                     "D1_SCOPE_PARTITION_INCOMPLETE"
                     if d1_scope_status != "AVAILABLE"
@@ -772,22 +920,15 @@ def read_source_launch_watch_evidence(
         if _scope_symbol is not None and d1_scope is not None:
             d1_fact["scope"] = {
                 "history_session_count": int(d1_scope[0]),
-                "calendar_revision": d1_scope[1],
-                "producer_contract": d1_scope[2],
-                "producer_version": d1_scope[3],
-                "material_change_contract": d1_scope[4],
-                "research_mode": d1_scope[5],
-                "price_coordinate": d1_scope[6],
-                "history_window_start": single_context["d1_structures"][0][
-                    "history_window_start"
-                ]
-                if single_context["d1_structures"]
-                else None,
-                "history_window_end": single_context["d1_structures"][0][
-                    "history_window_end"
-                ]
-                if single_context["d1_structures"]
-                else None,
+                "calendar_id": d1_scope[1],
+                "history_window_start": d1_scope[2].isoformat(),
+                "history_window_end": d1_scope[3].isoformat(),
+                "calendar_revision": d1_scope[4],
+                "producer_contract": d1_scope[5],
+                "producer_version": d1_scope[6],
+                "material_change_contract": d1_scope[7],
+                "research_mode": d1_scope[8],
+                "price_coordinate": d1_scope[9],
                 "verification_scope": "SINGLE_SOURCE_SYMBOL_ROW_ONLY",
             }
             d1_fact["structures"] = single_context["d1_structures"]
@@ -888,7 +1029,7 @@ def read_source_launch_watch_evidence(
         and rule_scope is not None
         and d1_scope is not None
         and rules_semantics_match
-        and rule_scope[5] == d1_scope[1]
+        and rule_scope[5] == d1_scope[4]
         and seed_scope[3] == rule_scope[2]
         and rule_scope[3] == d1_scope[0]
         and (
@@ -924,6 +1065,12 @@ def read_source_launch_watch_evidence(
             "price_coordinate": seed_scope[7],
             "stored_rows": int(seed_scope[8]),
             "stored_source_symbols": int(seed_scope[9]),
+            "cross_section_universe_capture_id": seed_scope[10],
+            "cross_section_universe_version": seed_scope[11],
+            "cross_section_contract_version": seed_scope[12],
+            "universe_match_status": seed_scope[13],
+            "ranking_universe_count": seed_scope[14],
+            "evaluation_universe_count": seed_scope[15],
         }
         if seed_scope
         else None,
@@ -951,14 +1098,21 @@ def read_source_launch_watch_evidence(
         else None,
         "d1_scope": {
             "history_session_count": d1_scope[0],
-            "calendar_revision": d1_scope[1],
-            "producer_contract": d1_scope[2],
-            "producer_version": d1_scope[3],
-            "material_change_contract": d1_scope[4],
-            "research_mode": d1_scope[5],
-            "price_coordinate": d1_scope[6],
-            "stored_rows": int(d1_scope[7]),
-            "stored_source_symbols": int(d1_scope[8]),
+            "calendar_id": d1_scope[1],
+            "history_window_start": d1_scope[2].isoformat(),
+            "history_window_end": d1_scope[3].isoformat(),
+            "calendar_revision": d1_scope[4],
+            "producer_contract": d1_scope[5],
+            "producer_version": d1_scope[6],
+            "material_change_contract": d1_scope[7],
+            "research_mode": d1_scope[8],
+            "price_coordinate": d1_scope[9],
+            "stored_rows": int(d1_scope[10]),
+            "stored_source_symbols": int(d1_scope[11]),
+            "complete_source_symbols": int(d1_scope[12]),
+            "cross_section_universe_capture_id": d1_scope[13],
+            "cross_section_universe_version": d1_scope[14],
+            "cross_section_contract_version": d1_scope[15],
         }
         if d1_scope
         else None,
@@ -1779,17 +1933,28 @@ def _read_single_symbol_context(
                FROM source_d1_structure_day_facts
                WHERE target_session=%s AND source_capture_id=%s
                  AND target_capture_id=%s AND source_symbol=%s
-                 AND d1_history_session_count=%s AND calendar_revision=%s
-                 AND producer_contract=%s AND producer_version=%s
+                 AND d1_history_session_count=%s AND calendar_id=%s
+                 AND calendar_revision=%s AND producer_contract=%s
+                 AND producer_version=%s
                  AND material_change_contract=%s AND research_mode=%s
-                 AND price_coordinate=%s
+                 AND price_coordinate=%s AND history_window_start=%s
+                 AND history_window_end=%s
                ORDER BY structure_type""",
             (
                 target_session,
                 source_capture_id,
                 source_capture_id,
                 source_symbol,
-                *d1_scope[:7],
+                d1_scope[0],
+                d1_scope[1],
+                d1_scope[4],
+                d1_scope[5],
+                d1_scope[6],
+                d1_scope[7],
+                d1_scope[8],
+                d1_scope[9],
+                d1_scope[2],
+                d1_scope[3],
             ),
         )
         for row in cursor.fetchall():
@@ -2192,6 +2357,9 @@ def read_source_launch_watch_page(
     SELECT s.profile_revision, s.producer_contract, s.producer_version,
            s.history_session_count, s.calendar_id, s.calendar_revision,
            s.research_mode, s.price_coordinate, count(*)::bigint AS fact_count,
+           s.cross_section_universe_capture_id,s.cross_section_universe_version,
+           s.cross_section_contract_version,s.universe_match_status,
+           s.ranking_universe_count,s.evaluation_universe_count,
            count(DISTINCT s.source_symbol)::bigint AS symbol_count
     FROM source_pool_seed_day_facts s CROSS JOIN params p
     WHERE s.target_session=p.target_session
@@ -2204,7 +2372,10 @@ def read_source_launch_watch_page(
            OR s.profile_revision=p.selected_profile_revision)
     GROUP BY s.profile_revision, s.producer_contract, s.producer_version,
              s.history_session_count, s.calendar_id, s.calendar_revision,
-             s.research_mode, s.price_coordinate
+             s.research_mode, s.price_coordinate,
+             s.cross_section_universe_capture_id,s.cross_section_universe_version,
+             s.cross_section_contract_version,s.universe_match_status,
+             s.ranking_universe_count,s.evaluation_universe_count
 ), seed_scope_status AS (
     SELECT CASE
         WHEN count(*)=0 THEN 'NOT_COMPUTED'
@@ -2232,6 +2403,12 @@ def read_source_launch_watch_page(
      AND k.calendar_revision=s.calendar_revision
      AND k.research_mode=s.research_mode
      AND k.price_coordinate=s.price_coordinate
+     AND k.cross_section_universe_capture_id IS NOT DISTINCT FROM s.cross_section_universe_capture_id
+     AND k.cross_section_universe_version IS NOT DISTINCT FROM s.cross_section_universe_version
+     AND k.cross_section_contract_version IS NOT DISTINCT FROM s.cross_section_contract_version
+     AND k.universe_match_status IS NOT DISTINCT FROM s.universe_match_status
+     AND k.ranking_universe_count IS NOT DISTINCT FROM s.ranking_universe_count
+     AND k.evaluation_universe_count IS NOT DISTINCT FROM s.evaluation_universe_count
     CROSS JOIN params p
     WHERE s.target_session=p.target_session
       AND s.source_capture_id=p.source_capture_id
@@ -2287,12 +2464,14 @@ def read_source_launch_watch_page(
       AND r.source_capture_id=p.target_capture_id
       AND r.rule_id=ANY(p.rule_ids)
     GROUP BY r.source_symbol
-), d1_scope_candidates AS MATERIALIZED (
-    SELECT d.d1_history_session_count, d.calendar_revision,
-           d.producer_contract, d.producer_version,
-           d.material_change_contract, d.research_mode, d.price_coordinate,
-           count(*)::bigint AS fact_count,
-           count(DISTINCT d.source_symbol)::bigint AS symbol_count
+), d1_symbol_scopes AS MATERIALIZED (
+    SELECT d.d1_history_session_count, d.calendar_id, d.history_window_start,
+           d.history_window_end, d.calendar_revision, d.producer_contract,
+           d.producer_version, d.material_change_contract, d.research_mode,
+           d.price_coordinate, d.source_symbol,
+           d.cross_section_universe_capture_id,d.cross_section_universe_version,
+           d.cross_section_contract_version,count(*)::bigint AS fact_count,
+           array_agg(DISTINCT d.structure_type ORDER BY d.structure_type) AS structure_types
     FROM source_d1_structure_day_facts d CROSS JOIN params p
     WHERE d.target_session=p.target_session
       AND d.source_capture_id=p.source_capture_id
@@ -2300,35 +2479,89 @@ def read_source_launch_watch_page(
       AND (p.d1_history_session_count IS NULL
            OR d.d1_history_session_count=p.d1_history_session_count)
       AND d.producer_version IN ('STOCK_A_D1_BAOSTOCK_QFQ_R3', 'STOCK_A_D1_BAOSTOCK_QFQ_R4')
-    GROUP BY d.d1_history_session_count, d.calendar_revision,
-             d.producer_contract, d.producer_version,
-             d.material_change_contract, d.research_mode, d.price_coordinate
+    GROUP BY d.d1_history_session_count, d.calendar_id, d.history_window_start,
+             d.history_window_end, d.calendar_revision, d.producer_contract,
+             d.producer_version, d.material_change_contract, d.research_mode,
+             d.price_coordinate, d.source_symbol,
+             d.cross_section_universe_capture_id,d.cross_section_universe_version,
+             d.cross_section_contract_version
+), d1_scope_candidates AS MATERIALIZED (
+    SELECT s.d1_history_session_count, s.calendar_id, s.history_window_start,
+           s.history_window_end, s.calendar_revision, s.producer_contract,
+           s.producer_version, s.material_change_contract, s.research_mode,
+           s.price_coordinate, sum(s.fact_count)::bigint AS fact_count,
+           count(*)::bigint AS symbol_count,
+           count(*) FILTER (
+               WHERE s.fact_count=cardinality(CASE
+                   WHEN s.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN
+                       ARRAY['GAP_ZONE','IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
+                             'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
+                   ELSE ARRAY['GAP_ZONE','PIVOT_HIGH','PIVOT_LOW',
+                              'RANGE_CEILING','RANGE_FLOOR']::text[]
+                   END)
+                 AND s.structure_types=CASE
+                   WHEN s.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN
+                       ARRAY['GAP_ZONE','IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
+                             'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
+                   ELSE ARRAY['GAP_ZONE','PIVOT_HIGH','PIVOT_LOW',
+                              'RANGE_CEILING','RANGE_FLOOR']::text[]
+                   END
+           )::bigint AS complete_symbol_count,
+           s.cross_section_universe_capture_id,s.cross_section_universe_version,
+           s.cross_section_contract_version
+    FROM d1_symbol_scopes s
+    GROUP BY s.d1_history_session_count, s.calendar_id, s.history_window_start,
+             s.history_window_end, s.calendar_revision, s.producer_contract,
+             s.producer_version, s.material_change_contract, s.research_mode,
+             s.price_coordinate,s.cross_section_universe_capture_id,
+             s.cross_section_universe_version,s.cross_section_contract_version
+), d1_scope_shapes AS MATERIALIZED (
+    SELECT c.*,
+           CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN
+               ARRAY['GAP_ZONE','IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
+                     'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
+           ELSE ARRAY['GAP_ZONE','PIVOT_HIGH','PIVOT_LOW',
+                      'RANGE_CEILING','RANGE_FLOOR']::text[]
+           END AS expected_structure_types,
+           CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN 7 ELSE 5 END
+               AS expected_structure_count
+    FROM d1_scope_candidates c
 ), d1_scope_preferred AS MATERIALIZED (
     SELECT c.*
-    FROM d1_scope_candidates c
+    FROM d1_scope_shapes c
     WHERE c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4'
        OR NOT EXISTS (
-           SELECT 1 FROM d1_scope_candidates r4
+           SELECT 1 FROM d1_scope_shapes r4
            WHERE r4.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4'
+             AND r4.d1_history_session_count=c.d1_history_session_count
+             AND r4.calendar_id=c.calendar_id
+             AND r4.history_window_start=c.history_window_start
+             AND r4.history_window_end=c.history_window_end
+             AND r4.calendar_revision=c.calendar_revision
+             AND r4.producer_contract=c.producer_contract
+             AND r4.material_change_contract=c.material_change_contract
+             AND r4.research_mode=c.research_mode
+             AND r4.price_coordinate=c.price_coordinate
        )
 ), d1_scope_status AS (
     SELECT CASE
         WHEN count(*)=0 THEN 'NOT_COMPUTED'
         WHEN count(*)>1 THEN 'AMBIGUOUS'
-        WHEN bool_and(fact_count>=symbol_count
-                      AND symbol_count=(SELECT expected_source_count FROM params))
+        WHEN bool_and(fact_count=(SELECT expected_source_count FROM params)
+                                       * expected_structure_count
+                      AND symbol_count=(SELECT expected_source_count FROM params)
+                      AND complete_symbol_count=(SELECT expected_source_count FROM params))
             THEN 'AVAILABLE'
         ELSE 'INCOMPLETE'
     END AS status
     FROM d1_scope_preferred
 ), d1_scope AS (
-    SELECT c.*,
-           CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN 7 ELSE 5 END
-               AS expected_structure_count
+    SELECT c.*
     FROM d1_scope_preferred c
     WHERE (SELECT status FROM d1_scope_status)='AVAILABLE'
 ), d1_by_symbol AS (
     SELECT d.source_symbol, count(DISTINCT d.structure_type)::integer AS structure_count,
+           array_agg(DISTINCT d.structure_type ORDER BY d.structure_type) AS structure_types,
            sum(d.material_change_anchor_count)::integer AS material_anchor_count,
            bool_or(d.target_price_quality='UNKNOWN') AS unknown_price
     FROM source_d1_structure_day_facts d JOIN d1_scope k
@@ -2339,6 +2572,12 @@ def read_source_launch_watch_page(
      AND k.material_change_contract=d.material_change_contract
      AND k.research_mode=d.research_mode
      AND k.price_coordinate=d.price_coordinate
+     AND k.calendar_id=d.calendar_id
+     AND k.history_window_start=d.history_window_start
+     AND k.history_window_end=d.history_window_end
+     AND k.cross_section_universe_capture_id IS NOT DISTINCT FROM d.cross_section_universe_capture_id
+     AND k.cross_section_universe_version IS NOT DISTINCT FROM d.cross_section_universe_version
+     AND k.cross_section_contract_version IS NOT DISTINCT FROM d.cross_section_contract_version
     CROSS JOIN params p
     WHERE d.target_session=p.target_session
       AND d.source_capture_id=p.source_capture_id
@@ -2352,8 +2591,9 @@ def read_source_launch_watch_page(
                 ELSE (SELECT status FROM rule_scope_status)
            END AS rules,
            (SELECT status FROM d1_scope_status) AS d1,
-           COALESCE((SELECT expected_structure_count FROM d1_scope LIMIT 1), 5)
-               AS d1_expected_structure_count,
+           CASE WHEN (SELECT count(*) FROM d1_scope_preferred)=1
+                THEN (SELECT expected_structure_count FROM d1_scope_preferred LIMIT 1)
+           END AS d1_expected_structure_count,
            CASE WHEN (SELECT status FROM seed_scope_status)='AVAILABLE'
                   AND (SELECT status FROM rule_scope_status)='AVAILABLE'
                   AND (SELECT status FROM d1_scope_status)='AVAILABLE'
@@ -2361,11 +2601,15 @@ def read_source_launch_watch_page(
                              AND r.history_session_count=s.history_session_count
                              AND r.d1_history_session_count=d.d1_history_session_count
                              AND r.calendar_revision=d.calendar_revision
+                             AND s.calendar_id=d.calendar_id
                              AND r.scope='NON_PIT_EXPLORATORY'
                              AND s.research_mode='NON_PIT_RETROSPECTIVE'
                              AND d.research_mode='NON_PIT_RETROSPECTIVE'
                              AND s.price_coordinate=d.price_coordinate
                              AND s.price_coordinate='FORWARD_ADJUSTED'
+                             AND s.cross_section_universe_capture_id IS NOT DISTINCT FROM d.cross_section_universe_capture_id
+                             AND s.cross_section_universe_version IS NOT DISTINCT FROM d.cross_section_universe_version
+                             AND s.cross_section_contract_version IS NOT DISTINCT FROM d.cross_section_contract_version
                       FROM rule_scope r CROSS JOIN seed_scope s CROSS JOIN d1_scope d)
                 ELSE FALSE END AS rules_match_seed
 ), base AS (
@@ -2400,6 +2644,8 @@ def read_source_launch_watch_page(
              OR COALESCE(r.has_unknown, TRUE)
              OR g.d1<>'AVAILABLE'
              OR x.structure_count IS DISTINCT FROM g.d1_expected_structure_count
+             OR x.structure_types IS DISTINCT FROM
+                  (SELECT expected_structure_types FROM d1_scope LIMIT 1)
              OR COALESCE(x.unknown_price, TRUE)) AS has_unknown_evidence
     FROM target_pool p
     LEFT JOIN d0_by_symbol d ON d.source_symbol=p.source_symbol

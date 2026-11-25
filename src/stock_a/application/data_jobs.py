@@ -5,8 +5,10 @@ from __future__ import annotations
 import threading
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -121,6 +123,7 @@ _BAOSTOCK_KNOWN_SECURITY_TYPES = frozenset({"1", "2", "3", "4", "5"})
 _BAOSTOCK_SOURCE_BOARDS = frozenset(
     {"MAIN_BOARD", "GEM", "STAR_BOARD", "BEIJING_BOARD"}
 )
+_BAOSTOCK_SYMBOL_RE = re.compile(r"^(SH|SZ|BJ)\.[0-9]{6}$")
 _STAGE_TABLES = {
     "SOURCE_BAOSTOCK_PRICES": ("stock.source_raw_daily",),
     "SOURCE_BAOSTOCK_UNIVERSE": (
@@ -180,6 +183,151 @@ _STAGE_TABLES = {
     "FEP_BASELINE": ("stock.source_fep_baseline_facts",),
     "OBSERVATION_SEGMENTS": ("stock.source_research_observation_segment_days",),
 }
+
+
+def _validated_baostock_symbol(value: Any, *, label: str) -> str:
+    from stock_a.storage.postgres.baostock_universe import normalize_baostock_symbol
+
+    parsed = normalize_baostock_symbol(value)
+    if parsed is None:
+        raise DataJobError(
+            "BAOSTOCK_RESPONSE_SYMBOL_INVALID", f"{label}证券代码无法规范化"
+        )
+    return parsed[0]
+
+
+def _validate_basic_catalog_response(rows: Any) -> tuple[str, ...]:
+    """按响应字段合同独立核验本次主资料响应键，不推断权威在市总量。"""
+    if not isinstance(rows, (tuple, list)) or not rows:
+        raise DataJobError(
+            "BAOSTOCK_STOCK_BASIC_RESPONSE_EMPTY", "BaoStock基本资料成功响应为空"
+        )
+    symbols = []
+    required_fields = ("code", "code_name", "ipoDate", "outDate", "type", "status")
+    for row in rows:
+        if not isinstance(row, Mapping) or any(
+            name not in row for name in required_fields
+        ):
+            raise DataJobError(
+                "BAOSTOCK_STOCK_BASIC_RESPONSE_FIELDS_INVALID",
+                "BaoStock基本资料行缺少SDK响应合同字段",
+            )
+        symbol = _validated_baostock_symbol(row.get("code"), label="基本资料")
+        if not isinstance(row.get("code_name"), str):
+            raise DataJobError(
+                "BAOSTOCK_STOCK_BASIC_NAME_INVALID", f"{symbol}证券名称字段类型无效"
+            )
+        if str(row.get("type") or "").strip() not in _BAOSTOCK_KNOWN_SECURITY_TYPES:
+            raise DataJobError(
+                "BAOSTOCK_STOCK_BASIC_TYPE_INVALID", f"{symbol}证券类型代码无效"
+            )
+        if str(row.get("status") or "").strip() not in {"0", "1"}:
+            raise DataJobError(
+                "BAOSTOCK_STOCK_BASIC_STATUS_INVALID", f"{symbol}上市状态代码无效"
+            )
+        ipo_text = str(row.get("ipoDate") or "").strip()
+        out_text = str(row.get("outDate") or "").strip()
+        dates = []
+        for text in (ipo_text, out_text):
+            if not text:
+                dates.append(None)
+                continue
+            try:
+                parsed_date = date.fromisoformat(text)
+            except ValueError as error:
+                raise DataJobError(
+                    "BAOSTOCK_STOCK_BASIC_DATE_INVALID",
+                    f"{symbol}上市或退市日期格式无效",
+                ) from error
+            if parsed_date.isoformat() != text:
+                raise DataJobError(
+                    "BAOSTOCK_STOCK_BASIC_DATE_INVALID",
+                    f"{symbol}上市或退市日期格式无效",
+                )
+            dates.append(parsed_date)
+        if dates[0] is not None and dates[1] is not None and dates[1] < dates[0]:
+            raise DataJobError(
+                "BAOSTOCK_STOCK_BASIC_DATE_ORDER_INVALID",
+                f"{symbol}退市日期早于上市日期",
+            )
+        symbols.append(symbol)
+    if len(symbols) != len(set(symbols)):
+        raise DataJobError(
+            "BAOSTOCK_STOCK_BASIC_DUPLICATE_SYMBOL", "基本资料响应含重复证券代码"
+        )
+    return tuple(sorted(symbols))
+
+
+def _validate_session_directory_response(
+    rows_by_session: Any, *, requested_sessions: Sequence[date]
+) -> dict[date, tuple[tuple[str, str], ...]]:
+    """要求逐日响应键完整、每个官方会话有成员且身份/交易状态有效。"""
+    if not isinstance(rows_by_session, Mapping):
+        raise DataJobError(
+            "BAOSTOCK_SESSION_DIRECTORY_RESPONSE_INVALID", "逐日名录响应不是按会话分组"
+        )
+    expected_keys = {session.isoformat() for session in requested_sessions}
+    if set(rows_by_session) != expected_keys:
+        raise DataJobError(
+            "BAOSTOCK_SESSION_DIRECTORY_DATES_INCOMPLETE",
+            "逐日名录响应会话键与本次官方请求范围不一致",
+        )
+    normalized: dict[date, tuple[tuple[str, str], ...]] = {}
+    for session in requested_sessions:
+        rows = rows_by_session[session.isoformat()]
+        if not isinstance(rows, (tuple, list)) or not rows:
+            raise DataJobError(
+                "BAOSTOCK_SESSION_DIRECTORY_DAY_EMPTY",
+                f"{session.isoformat()}逐日名录成功响应为空",
+            )
+        members: list[tuple[str, str]] = []
+        for row in rows:
+            if (
+                not isinstance(row, Mapping)
+                or any(name not in row for name in ("code", "tradeStatus", "code_name"))
+                or not isinstance(row.get("code_name"), str)
+            ):
+                raise DataJobError(
+                    "BAOSTOCK_SESSION_DIRECTORY_FIELDS_INVALID",
+                    f"{session.isoformat()}名录行缺少必需字段",
+                )
+            symbol = _validated_baostock_symbol(row.get("code"), label="逐日名录")
+            status = str(row.get("tradeStatus") or "").strip()
+            if status not in {"0", "1"}:
+                raise DataJobError(
+                    "BAOSTOCK_SESSION_DIRECTORY_STATUS_INVALID",
+                    f"{session.isoformat()} {symbol}交易状态无效",
+                )
+            members.append((symbol, "TRADING" if status == "1" else "SUSPENDED"))
+        if len({symbol for symbol, _ in members}) != len(members):
+            raise DataJobError(
+                "BAOSTOCK_SESSION_DIRECTORY_DUPLICATE_SYMBOL",
+                f"{session.isoformat()}逐日名录存在重复证券代码",
+            )
+        normalized[session] = tuple(sorted(members))
+    return normalized
+
+
+def _index_decimal(value: Any, *, field: str, required: bool) -> Decimal | None:
+    if value is None or isinstance(value, bool) or not str(value).strip():
+        if required:
+            raise DataJobError(
+                "BAOSTOCK_INDEX_FIELD_MISSING", f"指数响应缺少必需数值字段{field}"
+            )
+        return None
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as error:
+        raise DataJobError(
+            "BAOSTOCK_INDEX_FIELD_INVALID", f"指数响应数值字段{field}格式无效"
+        ) from error
+    if not parsed.is_finite():
+        raise DataJobError(
+            "BAOSTOCK_INDEX_FIELD_INVALID", f"指数响应数值字段{field}不是有限值"
+        )
+    return parsed
+
+
 _STAGE_ORDER = {
     "BUSINESS_RESET": 1,
     "SOURCE_BAOSTOCK_PRICES": 1,
@@ -3452,6 +3600,11 @@ class DataJobCoordinator:
         sector_snapshot_ids: Mapping[str, int] | None = None,
         followup_target_sessions: Sequence[date] | None = None,
         rule_ids: Sequence[str] | None = None,
+        universe_capture_id: int | None = None,
+        cross_section_universe_capture_id: int | None = None,
+        cross_section_universe_version: str | None = None,
+        cross_section_contract_version: str | None = None,
+        universe_match_status: str | None = None,
         warning_code: str | None = None,
         warning_message: str | None = None,
     ) -> None:
@@ -3475,6 +3628,11 @@ class DataJobCoordinator:
             sector_snapshot_ids=sector_snapshot_ids,
             followup_target_sessions=followup_target_sessions,
             rule_ids=rule_ids,
+            universe_capture_id=universe_capture_id,
+            cross_section_universe_capture_id=cross_section_universe_capture_id,
+            cross_section_universe_version=cross_section_universe_version,
+            cross_section_contract_version=cross_section_contract_version,
+            universe_match_status=universe_match_status,
             research_cutoff=self.research_cutoff,
         )
         stored_producer_version = (
@@ -5097,6 +5255,8 @@ def _execute_baostock_universe_stage(
     from stock_a.storage.postgres.baostock_universe import (
         persist_baostock_session_directory,
         persist_baostock_stock_basic,
+        read_baostock_session_directory_scope,
+        read_baostock_stock_basic_scope,
     )
 
     selected_sources = set(plan.get("selected_modules", {}).get("source", ()))
@@ -5120,17 +5280,32 @@ def _execute_baostock_universe_stage(
             "BaoStock证券主资料与逐日名录没有合法官方会话范围。",
             status=409,
         )
+    if target_day not in eligible_sessions:
+        raise DataJobError(
+            "BAOSTOCK_UNIVERSE_TARGET_NOT_OFFICIAL",
+            "逐日名录目标日必须是截止内官方交易会话",
+            status=409,
+        )
     raw_window = [
         date.fromisoformat(d) if isinstance(d, str) else d
         for d in plan.get("raw_window", ())
     ]
     if raw_window:
-        dir_sessions = tuple(sorted({d for d in raw_window if d <= cutoff}))
+        approved_end = min(target_day, cutoff)
+        if (
+            tuple(sorted(set(raw_window))) != tuple(raw_window)
+            or any(d not in official_sessions or d > approved_end for d in raw_window)
+            or target_day not in raw_window
+        ):
+            raise DataJobError(
+                "BAOSTOCK_DIRECTORY_WINDOW_OUTSIDE_AUTHORITY",
+                "逐日名录窗口必须是目标日及其之前、截止内的唯一官方会话范围",
+                status=409,
+            )
+        dir_sessions = tuple(raw_window)
     else:
-        # 至少覆盖目标日及前23个官方会话以支撑横截面20日窗口内部停牌确证
-        dir_sessions = tuple(eligible_sessions[-24:])
-    if target_day not in dir_sessions and target_day <= cutoff:
-        dir_sessions = tuple(sorted(set(dir_sessions) | {target_day}))
+        # 来源任务没有显式历史窗口时只取目标会话，不自行扩展预热范围。
+        dir_sessions = (target_day,)
 
     transport = plan.get("_baostock_transport")
     capture_id = _allocate_baostock_aux_capture(
@@ -5171,11 +5346,22 @@ def _execute_baostock_universe_stage(
             f"BaoStock证券基本资料采集未完成: {basic_res.get('status')} ({basic_res.get('reason')})",
             status=502,
         )
+    expected_basic_symbols = _validate_basic_catalog_response(basic_res.get("rows"))
     basic_write = persist_baostock_stock_basic(
         config,
         source_capture_id=capture_id,
         rows=basic_res.get("rows", ()),
     )
+    actual_basic_rows = read_baostock_stock_basic_scope(
+        config, source_capture_id=capture_id, cutoff=cutoff
+    )
+    actual_basic_symbols = tuple(item["source_symbol"] for item in actual_basic_rows)
+    if actual_basic_symbols != expected_basic_symbols:
+        raise DataJobError(
+            "BAOSTOCK_STOCK_BASIC_READBACK_MISMATCH",
+            "证券基本资料PG读回代码集合与本次规范化响应不一致",
+            status=409,
+        )
     if basic_unit is not None:
         actual_basic = data_job_pg.read_business_table_count(
             config,
@@ -5186,6 +5372,12 @@ def _execute_baostock_universe_stage(
             producer_version="BAOSTOCK_STOCK_BASIC_R1",
             research_cutoff=cutoff,
         )
+        if actual_basic != len(expected_basic_symbols):
+            raise DataJobError(
+                "BAOSTOCK_STOCK_BASIC_READBACK_COUNT_MISMATCH",
+                "证券基本资料独立读回总数与本次响应独立预期不一致",
+                status=409,
+            )
         progress_callback(
             job_id=job_id,
             stage_code="SOURCE_BAOSTOCK_UNIVERSE",
@@ -5194,7 +5386,7 @@ def _execute_baostock_universe_stage(
             source_capture_id=capture_id,
             profile_history_session_count=None,
             d1_history_session_count=None,
-            expected_rows=int(actual_basic),
+            expected_rows=len(expected_basic_symbols),
             inserted_rows=int(basic_write["row_count"]),
             quality_status="NON_PIT_OBSERVED",
             no_change=basic_write.get("status") == "NO_CHANGE",
@@ -5214,6 +5406,9 @@ def _execute_baostock_universe_stage(
             f"BaoStock逐日名录采集未完成: {dir_res.get('status')} ({dir_res.get('reason')})",
             status=502,
         )
+    expected_directory_members = _validate_session_directory_response(
+        dir_res.get("rows_by_session"), requested_sessions=dir_sessions
+    )
     total_dir_rows = 0
     all_dir_no_change = True
     rows_by_day = dir_res.get("rows_by_session", {})
@@ -5225,7 +5420,30 @@ def _execute_baostock_universe_stage(
             session_date=sess,
             rows=day_rows,
         )
-        total_dir_rows += int(write_res["row_count"])
+        expected_members = expected_directory_members[sess]
+        expected_symbols = {symbol for symbol, _ in expected_members}
+        actual_members = read_baostock_session_directory_scope(
+            config,
+            source_capture_id=capture_id,
+            session_date=sess,
+            cutoff=cutoff,
+        )
+        actual_member_status = {
+            (item["source_symbol"], item["trade_status"]) for item in actual_members
+        }
+        if actual_member_status != set(expected_members):
+            raise DataJobError(
+                "BAOSTOCK_SESSION_DIRECTORY_READBACK_MISMATCH",
+                f"{sess.isoformat()}名录PG成员/状态集合与规范化响应不一致",
+                status=409,
+            )
+        if len(actual_members) != len(expected_symbols):
+            raise DataJobError(
+                "BAOSTOCK_SESSION_DIRECTORY_READBACK_COUNT_MISMATCH",
+                f"{sess.isoformat()}名录读回总数与独立预期不一致",
+                status=409,
+            )
+        total_dir_rows += len(expected_members)
         if write_res.get("status") != "NO_CHANGE":
             all_dir_no_change = False
     if dir_unit is not None:
@@ -5238,6 +5456,12 @@ def _execute_baostock_universe_stage(
             producer_version="BAOSTOCK_SESSION_DIRECTORY_R1",
             research_cutoff=cutoff,
         )
+        if actual_dir != total_dir_rows:
+            raise DataJobError(
+                "BAOSTOCK_SESSION_DIRECTORY_TOTAL_READBACK_MISMATCH",
+                "逐日名录捕获范围PG读回总数与逐会话独立预期不一致",
+                status=409,
+            )
         progress_callback(
             job_id=job_id,
             stage_code="SOURCE_BAOSTOCK_UNIVERSE",
@@ -5246,7 +5470,7 @@ def _execute_baostock_universe_stage(
             source_capture_id=capture_id,
             profile_history_session_count=None,
             d1_history_session_count=None,
-            expected_rows=int(actual_dir),
+            expected_rows=total_dir_rows,
             inserted_rows=total_dir_rows,
             quality_status="NON_PIT_OBSERVED",
             no_change=all_dir_no_change,
@@ -5276,7 +5500,10 @@ def _execute_baostock_market_indices_stage(
 
     from stock_a.contracts.loader import load_market_reference_indices_contract
     from stock_a.sources.baostock.client import query_index_daily_range
-    from stock_a.storage.postgres.market_indices import persist_market_index_daily_bars
+    from stock_a.storage.postgres.market_indices import (
+        persist_market_index_daily_bars,
+        read_market_index_daily_scope,
+    )
 
     selected_sources = set(plan.get("selected_modules", {}).get("source", ()))
     if "BAOSTOCK_MARKET_INDICES" not in selected_sources:
@@ -5299,19 +5526,37 @@ def _execute_baostock_market_indices_stage(
             "参考指数日线没有合法官方会话范围。",
             status=409,
         )
-    # 覆盖输出窗最早日前推至少29个官方会话（且至少30个会话）以支撑全窗MA20+5日斜率与ret20
+    if target_day not in eligible_sessions:
+        raise DataJobError(
+            "BAOSTOCK_INDEX_TARGET_NOT_OFFICIAL",
+            "参考指数目标日必须是截止内官方交易会话",
+            status=409,
+        )
+    # 只请求明确获准的官方窗口；短窗不足时因子按原合同保留未知，不向外扩展预热。
     raw_window = [
         date.fromisoformat(d) if isinstance(d, str) else d
         for d in plan.get("raw_window", ())
     ]
-    start_idx = max(0, len(eligible_sessions) - 30)
     if raw_window:
-        earliest_req = min(d for d in raw_window if d <= cutoff)
-        if earliest_req in eligible_sessions:
-            start_idx = min(
-                start_idx, max(0, eligible_sessions.index(earliest_req) - 29)
+        approved_end = min(target_day, cutoff)
+        if (
+            tuple(sorted(set(raw_window))) != tuple(raw_window)
+            or any(d not in official_sessions or d > approved_end for d in raw_window)
+            or target_day not in raw_window
+        ):
+            raise DataJobError(
+                "BAOSTOCK_INDEX_WINDOW_OUTSIDE_AUTHORITY",
+                "参考指数窗口必须是目标日及其之前、截止内的唯一官方会话范围",
+                status=409,
             )
-    idx_window = tuple(eligible_sessions[start_idx:])
+        idx_window = tuple(
+            session
+            for session in eligible_sessions
+            if raw_window[0] <= session <= raw_window[-1]
+        )
+    else:
+        # 来源任务没有显式历史窗口时只取目标会话；历史因子按现有合同保留未知。
+        idx_window = (target_day,)
     index_contract = load_market_reference_indices_contract(
         Path(config["paths"]["configuration_root"])
     )
@@ -5325,6 +5570,14 @@ def _execute_baostock_market_indices_stage(
             status=409,
         )
     symbols = tuple(str(item["source_symbol"]) for item in enabled_indices)
+    if len(set(symbols)) != len(symbols) or any(
+        re.fullmatch(r"(SH|SZ)\.[0-9]{6}", symbol) is None for symbol in symbols
+    ):
+        raise DataJobError(
+            "BAOSTOCK_INDEX_CONTRACT_SYMBOLS_INVALID",
+            "启用参考指数清单含重复或非法证券代码",
+            status=409,
+        )
     official_code_by_sym = {
         str(item["source_symbol"]): str(
             item.get("official_code") or str(item["source_symbol"]).split(".")[-1]
@@ -5356,39 +5609,151 @@ def _execute_baostock_market_indices_stage(
             f"BaoStock通用参考指数日线采集未完成: {idx_res.get('status')} ({idx_res.get('reason')})",
             status=502,
         )
+    rows_by_symbol = idx_res.get("rows_by_symbol")
+    if not isinstance(rows_by_symbol, Mapping) or set(rows_by_symbol) != set(symbols):
+        raise DataJobError(
+            "BAOSTOCK_INDEX_RESPONSE_SYMBOL_SCOPE_MISMATCH",
+            "指数响应的分组代码集合与配置启用的请求代码不一致",
+            status=409,
+        )
     normalized_rows: list[dict[str, Any]] = []
-    for sym, raw_rows in idx_res.get("rows_by_symbol", {}).items():
+    requested_sessions = set(idx_window)
+    expected_index_keys = {
+        (symbol, session) for symbol in symbols for session in idx_window
+    }
+    actual_index_keys: set[tuple[str, date]] = set()
+    from stock_a.storage.postgres.baostock_universe import normalize_baostock_symbol
+
+    for sym in symbols:
+        raw_rows = rows_by_symbol[sym]
+        if not isinstance(raw_rows, (tuple, list)):
+            raise DataJobError(
+                "BAOSTOCK_INDEX_RESPONSE_ROWS_INVALID",
+                f"{sym}指数响应不是行列表",
+                status=409,
+            )
         official_code = official_code_by_sym.get(sym, sym.split(".")[-1])
         for raw in raw_rows:
+            required = ("date", "code", "open", "high", "low", "close", "preclose")
+            if not isinstance(raw, Mapping) or any(
+                name not in raw for name in required
+            ):
+                raise DataJobError(
+                    "BAOSTOCK_INDEX_RESPONSE_FIELDS_INVALID",
+                    f"{sym}指数响应行缺少必需字段",
+                    status=409,
+                )
+            parsed_code = normalize_baostock_symbol(str(raw.get("code") or ""))
+            if parsed_code is None or parsed_code[0] != sym:
+                raise DataJobError(
+                    "BAOSTOCK_INDEX_RESPONSE_CODE_MISMATCH",
+                    f"指数响应行内code与请求代码{sym}不一致",
+                    status=409,
+                )
             sess_text = str(raw.get("date") or "").strip()
-            if not sess_text:
-                continue
-            sess_day = date.fromisoformat(sess_text)
-            if sess_day > cutoff:
-                continue
+            try:
+                sess_day = date.fromisoformat(sess_text)
+            except ValueError as error:
+                raise DataJobError(
+                    "BAOSTOCK_INDEX_RESPONSE_DATE_INVALID",
+                    f"{sym}指数响应日期格式无效",
+                    status=409,
+                ) from error
+            if (
+                sess_day.isoformat() != sess_text
+                or sess_day not in requested_sessions
+                or sess_day > cutoff
+            ):
+                raise DataJobError(
+                    "BAOSTOCK_INDEX_RESPONSE_DATE_OUTSIDE_REQUEST",
+                    f"{sym}指数响应日期不属于本次获准官方会话范围",
+                    status=409,
+                )
+            key = (sym, sess_day)
+            if key in actual_index_keys:
+                raise DataJobError(
+                    "BAOSTOCK_INDEX_RESPONSE_DUPLICATE_KEY",
+                    f"{sym} {sess_text}指数响应含重复日线键",
+                    status=409,
+                )
+            actual_index_keys.add(key)
+            price_values = {
+                name: _index_decimal(raw.get(name), field=name, required=True)
+                for name in ("open", "high", "low", "close", "preclose")
+            }
+            if (
+                any(value <= 0 for value in price_values.values())
+                or price_values["high"] < price_values["low"]
+                or price_values["high"]
+                < max(price_values["open"], price_values["close"])
+                or price_values["low"]
+                > min(price_values["open"], price_values["close"])
+            ):
+                raise DataJobError(
+                    "BAOSTOCK_INDEX_RESPONSE_PRICE_INVALID",
+                    f"{sym} {sess_text}指数OHLC关系或正值约束无效",
+                    status=409,
+                )
+            volume = _index_decimal(raw.get("volume"), field="volume", required=False)
+            amount = _index_decimal(raw.get("amount"), field="amount", required=False)
+            pct_chg = _index_decimal(raw.get("pctChg"), field="pctChg", required=False)
+            if (volume is not None and volume < 0) or (
+                amount is not None and amount < 0
+            ):
+                raise DataJobError(
+                    "BAOSTOCK_INDEX_RESPONSE_QUANTITY_INVALID",
+                    f"{sym} {sess_text}指数成交量额不能为负数",
+                    status=409,
+                )
             normalized_rows.append(
                 {
                     "source_symbol": sym,
                     "official_code": official_code,
                     "session_date": sess_day,
                     "bar_status": "TARGET_PRESENT",
-                    "open_points": raw.get("open"),
-                    "high_points": raw.get("high"),
-                    "low_points": raw.get("low"),
-                    "close_points": raw.get("close"),
-                    "preclose_points": raw.get("preclose"),
-                    "volume_raw": raw.get("volume"),
-                    "amount_raw": raw.get("amount"),
-                    "pct_chg_reported": raw.get("pctChg"),
+                    "open_points": price_values["open"],
+                    "high_points": price_values["high"],
+                    "low_points": price_values["low"],
+                    "close_points": price_values["close"],
+                    "preclose_points": price_values["preclose"],
+                    "volume_raw": volume,
+                    "amount_raw": amount,
+                    "pct_chg_reported": pct_chg,
                     "price_quality": "OBSERVED",
                     "price_reason": None,
                 }
             )
+    if actual_index_keys != expected_index_keys:
+        missing_keys = sorted(expected_index_keys - actual_index_keys)
+        extra_keys = sorted(actual_index_keys - expected_index_keys)
+        raise DataJobError(
+            "BAOSTOCK_INDEX_RESPONSE_COVERAGE_INCOMPLETE",
+            "参考指数响应代码×官方会话键覆盖不完整："
+            f"缺失{len(missing_keys)}个（示例={missing_keys[:5]}），"
+            f"超出{len(extra_keys)}个（示例={extra_keys[:5]}）",
+            status=409,
+        )
     write_res = persist_market_index_daily_bars(
         config,
         source_capture_id=capture_id,
         rows=normalized_rows,
     )
+    expected_index_readback = {(sym, day) for sym, day in expected_index_keys}
+    actual_index_readback = read_market_index_daily_scope(
+        config,
+        source_capture_id=capture_id,
+        session_dates=idx_window,
+        cutoff=cutoff,
+    )
+    actual_index_readback_keys = {
+        (item["source_symbol"], item["session_date"]) for item in actual_index_readback
+    }
+    if actual_index_readback_keys != expected_index_readback:
+        raise DataJobError(
+            "BAOSTOCK_INDEX_READBACK_SCOPE_MISMATCH",
+            "指数日线PG读回键集合与规范化请求预期不一致",
+            status=409,
+        )
     actual_rows = data_job_pg.read_business_table_count(
         config,
         business_table="stock.source_market_index_daily",
@@ -5398,6 +5763,12 @@ def _execute_baostock_market_indices_stage(
         producer_version="BAOSTOCK_MARKET_INDEX_DAILY_R1",
         research_cutoff=cutoff,
     )
+    if actual_rows != len(expected_index_keys):
+        raise DataJobError(
+            "BAOSTOCK_INDEX_READBACK_COUNT_MISMATCH",
+            "指数日线PG读回总数与请求代码×官方会话独立预期不一致",
+            status=409,
+        )
     for unit in stage_units:
         progress_callback(
             job_id=job_id,
@@ -5407,7 +5778,7 @@ def _execute_baostock_market_indices_stage(
             source_capture_id=capture_id,
             profile_history_session_count=None,
             d1_history_session_count=None,
-            expected_rows=int(actual_rows),
+            expected_rows=len(expected_index_keys),
             inserted_rows=int(write_res["row_count"]),
             quality_status="NON_PIT_OBSERVED",
             no_change=write_res.get("status") == "NO_CHANGE",
@@ -6480,9 +6851,13 @@ def _execute_shared_production_chain_impl(
                     stock_basic_capture_id=selected_universe_capture_id,
                 )
                 if isinstance(plan, dict) and report.get("universe_version"):
-                    plan.setdefault("_cross_section_universe_version_by_day", {})[
+                    plan.setdefault("_cross_section_scope_by_day", {})[
                         day.isoformat()
-                    ] = str(report["universe_version"])
+                    ] = {
+                        "universe_version": str(report["universe_version"]),
+                        "universe_capture_id": report.get("universe_capture_id"),
+                        "contract_version": str(report["contract_version"]),
+                    }
                 expected_by_table = {
                     "stock.source_cross_section_day_facts": report["row_count"],
                     "stock.source_cross_section_endpoints": report["endpoint_count"],
@@ -6499,6 +6874,7 @@ def _execute_shared_production_chain_impl(
                         producer_version=CROSS_SECTION_CONTRACT_VERSION,
                         research_cutoff=cutoff,
                         universe_version=report["universe_version"],
+                        universe_capture_id=report.get("universe_capture_id"),
                     )
                     if actual_rows != expected_rows:
                         raise DataJobError(
@@ -6520,6 +6896,7 @@ def _execute_shared_production_chain_impl(
                         no_change=(report.get("status") == "NO_CHANGE"),
                         producer_version=CROSS_SECTION_CONTRACT_VERSION,
                         calendar_revision=report["calendar_revision"],
+                        universe_capture_id=report.get("universe_capture_id"),
                     )
                     resolved_unit_keys.add(unit_key(unit))
             except Exception as error:  # noqa: BLE001
@@ -6717,11 +7094,13 @@ def _execute_shared_production_chain_impl(
             )
         )
         begin_callback(job_id=job_id, units=[unit])
-        day_cross_universe_version = (
-            plan.get("_cross_section_universe_version_by_day", {}).get(day_text)
-            if isinstance(plan.get("_cross_section_universe_version_by_day"), Mapping)
+        day_cross_section_scope = (
+            plan.get("_cross_section_scope_by_day", {}).get(day_text)
+            if isinstance(plan.get("_cross_section_scope_by_day"), Mapping)
             else None
         )
+        if not isinstance(day_cross_section_scope, Mapping):
+            day_cross_section_scope = {}
         profile = run_source_symbol_price_profile(
             config,
             target_session=day,
@@ -6731,7 +7110,12 @@ def _execute_shared_production_chain_impl(
             session_count=history_count,
             page_size=100,
             profile_contract=profile_contract,
-            cross_section_universe_version=day_cross_universe_version,
+            cross_section_universe_version=day_cross_section_scope.get(
+                "universe_version"
+            ),
+            cross_section_universe_capture_id=day_cross_section_scope.get(
+                "universe_capture_id"
+            ),
         )
         profile_revision = profile.get("profile_revision")
         if isinstance(profile_revision, str) and profile_revision:
@@ -6962,13 +7346,13 @@ def _execute_shared_production_chain_impl(
             )
             begin_callback(job_id=job_id, units=day_units)
             try:
-                day_cross_universe_version = (
-                    plan.get("_cross_section_universe_version_by_day", {}).get(day_text)
-                    if isinstance(
-                        plan.get("_cross_section_universe_version_by_day"), Mapping
-                    )
+                day_cross_section_scope = (
+                    plan.get("_cross_section_scope_by_day", {}).get(day_text)
+                    if isinstance(plan.get("_cross_section_scope_by_day"), Mapping)
                     else None
                 )
+                if not isinstance(day_cross_section_scope, Mapping):
+                    day_cross_section_scope = {}
                 report = run_source_research_day(
                     config,
                     target_session=day,
@@ -6982,7 +7366,12 @@ def _execute_shared_production_chain_impl(
                     include_d0=include_d0,
                     include_d1=include_d1,
                     include_static=include_d0,
-                    cross_section_universe_version=day_cross_universe_version,
+                    cross_section_universe_version=day_cross_section_scope.get(
+                        "universe_version"
+                    ),
+                    cross_section_universe_capture_id=day_cross_section_scope.get(
+                        "universe_capture_id"
+                    ),
                 )
                 if report.get("status") != "PERSISTED":
                     raise DataJobError(
@@ -6993,6 +7382,17 @@ def _execute_shared_production_chain_impl(
                 persistence = report.get("persistence", {})
                 static_result = report.get("static_persistence", {})
                 profile_revision = static_result.get("profile_revision")
+                if isinstance(plan, dict) and isinstance(static_result, Mapping):
+                    selected_scope = plan.get("_cross_section_scope_by_day", {}).get(
+                        day_text
+                    )
+                    if isinstance(selected_scope, dict):
+                        for field in (
+                            "universe_match_status",
+                            "ranking_universe_count",
+                            "evaluation_universe_count",
+                        ):
+                            selected_scope[field] = static_result.get(field)
                 if isinstance(profile_revision, str) and profile_revision:
                     profile_revision_by_session[day_text] = profile_revision
                 calendar_revision = report.get("calendar", {}).get("calendar_revision")
@@ -7002,6 +7402,9 @@ def _execute_shared_production_chain_impl(
                         "D0/D1持久化回执缺少官方日历修订。",
                         status=409,
                     )
+                d1_cross_section_scope = report.get("cross_section_scope")
+                if not isinstance(d1_cross_section_scope, Mapping):
+                    d1_cross_section_scope = {}
                 for unit in day_units:
                     table = unit["business_table"]
                     table_name = table.rsplit(".", 1)[-1]
@@ -7083,6 +7486,44 @@ def _execute_shared_production_chain_impl(
                             if table_name == "source_pool_seed_day_facts"
                             else None
                         ),
+                        universe_match_status=(
+                            source_result.get("universe_match_status")
+                            if table_name == "source_pool_seed_day_facts"
+                            else None
+                        ),
+                        cross_section_universe_capture_id=(
+                            source_result.get("cross_section_universe_capture_id")
+                            if table_name == "source_pool_seed_day_facts"
+                            else d1_cross_section_scope.get("universe_capture_id")
+                            if table_name
+                            in {
+                                "source_d1_structure_day_facts",
+                                "source_d1_material_anchor_day_facts",
+                            }
+                            else None
+                        ),
+                        cross_section_universe_version=(
+                            source_result.get("cross_section_universe_version")
+                            if table_name == "source_pool_seed_day_facts"
+                            else d1_cross_section_scope.get("universe_version")
+                            if table_name
+                            in {
+                                "source_d1_structure_day_facts",
+                                "source_d1_material_anchor_day_facts",
+                            }
+                            else None
+                        ),
+                        cross_section_contract_version=(
+                            source_result.get("cross_section_contract_version")
+                            if table_name == "source_pool_seed_day_facts"
+                            else d1_cross_section_scope.get("contract_version")
+                            if table_name
+                            in {
+                                "source_d1_structure_day_facts",
+                                "source_d1_material_anchor_day_facts",
+                            }
+                            else None
+                        ),
                         producer_version=producer_version,
                         calendar_revision=unit_calendar_revision,
                         research_cutoff=cutoff,
@@ -7130,6 +7571,44 @@ def _execute_shared_production_chain_impl(
                             in {
                                 "source_d0_scenario_day_facts",
                                 "source_pool_seed_day_facts",
+                            }
+                            else None
+                        ),
+                        universe_match_status=(
+                            source_result.get("universe_match_status")
+                            if table_name == "source_pool_seed_day_facts"
+                            else None
+                        ),
+                        cross_section_universe_capture_id=(
+                            source_result.get("cross_section_universe_capture_id")
+                            if table_name == "source_pool_seed_day_facts"
+                            else d1_cross_section_scope.get("universe_capture_id")
+                            if table_name
+                            in {
+                                "source_d1_structure_day_facts",
+                                "source_d1_material_anchor_day_facts",
+                            }
+                            else None
+                        ),
+                        cross_section_universe_version=(
+                            source_result.get("cross_section_universe_version")
+                            if table_name == "source_pool_seed_day_facts"
+                            else d1_cross_section_scope.get("universe_version")
+                            if table_name
+                            in {
+                                "source_d1_structure_day_facts",
+                                "source_d1_material_anchor_day_facts",
+                            }
+                            else None
+                        ),
+                        cross_section_contract_version=(
+                            source_result.get("cross_section_contract_version")
+                            if table_name == "source_pool_seed_day_facts"
+                            else d1_cross_section_scope.get("contract_version")
+                            if table_name
+                            in {
+                                "source_d1_structure_day_facts",
+                                "source_d1_material_anchor_day_facts",
                             }
                             else None
                         ),
@@ -8184,6 +8663,13 @@ def _execute_shared_production_chain_impl(
                         day_text, plan.get("profile_history_session_count") or 1
                     )
                 )
+                day_cross_section_scope = (
+                    plan.get("_cross_section_scope_by_day", {}).get(day_text)
+                    if isinstance(plan.get("_cross_section_scope_by_day"), Mapping)
+                    else None
+                )
+                if not isinstance(day_cross_section_scope, Mapping):
+                    day_cross_section_scope = {}
                 report = persist_source_computable_rules_from_saved(
                     config,
                     target_session=day,
@@ -8192,6 +8678,15 @@ def _execute_shared_production_chain_impl(
                     profile_revision=profile_revision,
                     history_session_count=history_count,
                     snapshot_ids=context_snapshot_ids,
+                    cross_section_universe_capture_id=day_cross_section_scope.get(
+                        "universe_capture_id"
+                    ),
+                    cross_section_universe_version=day_cross_section_scope.get(
+                        "universe_version"
+                    ),
+                    cross_section_contract_version=day_cross_section_scope.get(
+                        "contract_version"
+                    ),
                 )
                 producer_version = report.get("persistence", {}).get("rule_version")
                 if report.get("status") not in {"PERSISTED", "IDEMPOTENT"}:

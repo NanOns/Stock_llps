@@ -183,6 +183,7 @@ def _records_for_page(
     source_capture_id: int,
     profile_revision: str,
     source_context: Mapping[str, Any],
+    cross_section_scope: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
     candidates = {item["source_symbol"]: item for item in page.get("candidates", ())}
     records: list[dict[str, Any]] = []
@@ -225,6 +226,21 @@ def _records_for_page(
             "calculation_scope": SOURCE_SYMBOL_PROFILE_SCOPE,
             "producer_contract": _PRODUCER_CONTRACT,
             "producer_version": _PRODUCER_SEMANTICS_VERSION,
+            "cross_section_universe_capture_id": (
+                cross_section_scope.get("universe_capture_id")
+                if cross_section_scope is not None
+                else None
+            ),
+            "cross_section_universe_version": (
+                cross_section_scope.get("universe_version")
+                if cross_section_scope is not None
+                else None
+            ),
+            "cross_section_contract_version": (
+                cross_section_scope.get("contract_version")
+                if cross_section_scope is not None
+                else None
+            ),
             "price_coordinate": "FORWARD_ADJUSTED",
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
@@ -510,6 +526,7 @@ def run_source_symbol_price_profile(
     page_size: int,
     profile_contract: dict[str, Any],
     cross_section_universe_version: str | None = None,
+    cross_section_universe_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """按精确Raw包和捕获读取价格，复用Core43/Profile11并保存typed画像。"""
     if scope != SOURCE_SYMBOL_PROFILE_SCOPE:
@@ -605,8 +622,26 @@ def run_source_symbol_price_profile(
             target_session=target_session,
             price_capture_id=source_capture_id,
             universe_version=cross_section_universe_version,
+            universe_capture_id=cross_section_universe_capture_id,
             calendar_revision=calendar_revision,
         )
+        explicit_cross_section_scope = (
+            cross_section_universe_version is not None
+            or cross_section_universe_capture_id is not None
+        )
+        if cross_section_bundle.get("status") == "INCOMPLETE":
+            raise PgPriceProfileError(
+                "PROFILE_CROSS_SECTION_SCOPE_AMBIGUOUS_OR_INCOMPLETE",
+                "目标日横截面有多个候选或完整性不足；画像拒绝静默套用其他总体",
+            )
+        if (
+            explicit_cross_section_scope
+            and cross_section_bundle.get("status") != "AVAILABLE"
+        ):
+            raise PgPriceProfileError(
+                "PROFILE_CROSS_SECTION_SCOPE_NOT_FOUND",
+                "指定横截面Universe版本/捕获没有唯一完整事实",
+            )
         if cross_section_bundle.get("status") != "AVAILABLE":
             cross_section_bundle = None
 
@@ -642,6 +677,9 @@ def run_source_symbol_price_profile(
                 source_capture_id=source_capture_id,
                 profile_revision=_PROFILE_REVISION,
                 source_context=source_context,
+                cross_section_scope=(
+                    cross_section_bundle if cross_section_bundle is not None else None
+                ),
             )
             consumer_failures += sum(
                 item.get("consumer_status") == "CONSUMER_FAILED"
@@ -689,6 +727,27 @@ def run_source_symbol_price_profile(
                 "source_zip_opened": False,
                 "baostock_called": False,
                 "formal_universe_status": "UNKNOWN_NOT_PROVED_BY_SOURCE_SYMBOLS",
+                "cross_section_scope": (
+                    {
+                        "universe_version": cross_section_bundle.get(
+                            "universe_version"
+                        ),
+                        "universe_capture_id": cross_section_bundle.get(
+                            "universe_capture_id"
+                        ),
+                        "contract_version": cross_section_bundle.get(
+                            "contract_version"
+                        ),
+                        "status": cross_section_bundle.get("status"),
+                    }
+                    if cross_section_bundle is not None
+                    else {
+                        "universe_version": None,
+                        "universe_capture_id": None,
+                        "contract_version": None,
+                        "status": "NOT_COMPUTED",
+                    }
+                ),
                 "pit_status": "NON_PIT_RETROSPECTIVE",
             }
         )

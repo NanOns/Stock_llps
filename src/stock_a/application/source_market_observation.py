@@ -1630,6 +1630,7 @@ def prepare_d1_material_observation(
     include_source_symbol_structure_results: bool = False,
     include_impulse: bool = True,
     cross_section_universe_version: str | None = None,
+    cross_section_universe_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """一次只读准备全池D1与成员事实，供同进程筛选分页复用。"""
     _target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1653,6 +1654,7 @@ def prepare_d1_material_observation(
         ),
         include_impulse=include_impulse,
         cross_section_universe_version=cross_section_universe_version,
+        cross_section_universe_capture_id=cross_section_universe_capture_id,
     )
     snapshots = [
         read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)
@@ -1682,6 +1684,9 @@ def prepare_saved_d1_material_observation(
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
 ) -> dict[str, Any]:
     """只从D0/D1 typed PG事实组装现有全池材料视图，不扫描或计算Raw行情。"""
     _target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1695,6 +1700,9 @@ def prepare_saved_d1_material_observation(
         industry_snapshot_id=industry_snapshot_id,
         concept_snapshot_id=concept_snapshot_id,
         include_all_results=True,
+        cross_section_universe_capture_id=cross_section_universe_capture_id,
+        cross_section_universe_version=cross_section_universe_version,
+        cross_section_contract_version=cross_section_contract_version,
     )
     if saved.get("storage_status") != "SAVED":
         raise SourceObservationError("PG没有完整D1 typed事实，拒绝读时重算")

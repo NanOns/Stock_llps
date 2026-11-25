@@ -597,3 +597,89 @@ def resolve_date_effective_universe(
         "trade_status_by_symbol": trade_status_by_symbol,
         "excluded_by_date_bounds": excluded_by_date_bounds,
     }
+
+
+def read_baostock_stock_basic_scope(
+    config: Mapping[str, Any], *, source_capture_id: int, cutoff: date
+) -> tuple[dict[str, Any], ...]:
+    """只读回精确BaoStock基本资料捕获的证券身份与规范化关键字段。"""
+    if (
+        type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or type(cutoff) is not date
+    ):
+        raise ValueError("BAOSTOCK_STOCK_BASIC_READ_SCOPE_INVALID")
+    with _transaction(config, write=False, statement_timeout_ms=10000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """SELECT b.source_symbol,b.market,b.board,b.security_type,
+                      b.listing_status,b.ipo_date,b.out_date,b.field_quality
+               FROM stock.source_baostock_stock_basic b
+               JOIN stock.source_captures c ON c.capture_id=b.source_capture_id
+               WHERE b.source_capture_id=%s AND c.provider='BAOSTOCK'
+                 AND c.range_end_session<=%s
+               ORDER BY b.source_symbol""",
+            (source_capture_id, cutoff),
+        )
+        rows = cursor.fetchall()
+    return tuple(
+        {
+            "source_symbol": str(row[0]),
+            "market": str(row[1]),
+            "board": str(row[2]),
+            "security_type": str(row[3]),
+            "listing_status": str(row[4]),
+            "ipo_date": row[5],
+            "out_date": row[6],
+            "field_quality": str(row[7]),
+        }
+        for row in rows
+    )
+
+
+def read_baostock_session_directory_scope(
+    config: Mapping[str, Any],
+    *,
+    source_capture_id: int,
+    session_date: date,
+    cutoff: date,
+) -> tuple[dict[str, Any], ...]:
+    """只读回指定捕获和官方会话的逐日BaoStock名录成员。"""
+    if (
+        type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or type(session_date) is not date
+        or type(cutoff) is not date
+        or session_date > cutoff
+    ):
+        raise ValueError("BAOSTOCK_SESSION_DIRECTORY_READ_SCOPE_INVALID")
+    with _transaction(config, write=False, statement_timeout_ms=10000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """SELECT d.source_symbol,d.market,d.board,d.trade_status
+               FROM stock.source_baostock_session_directory d
+               JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
+               WHERE d.source_capture_id=%s AND d.session_date=%s
+                 AND d.session_date<=%s AND c.provider='BAOSTOCK'
+                 AND c.range_start_session<=d.session_date
+                 AND c.range_end_session>=d.session_date
+                 AND c.range_end_session<=%s
+               ORDER BY d.source_symbol""",
+            (source_capture_id, session_date, cutoff, cutoff),
+        )
+        rows = cursor.fetchall()
+    return tuple(
+        {
+            "source_symbol": str(row[0]),
+            "market": str(row[1]),
+            "board": str(row[2]),
+            "trade_status": str(row[3]),
+        }
+        for row in rows
+    )

@@ -69,6 +69,12 @@ _SEED_COLUMNS = (
     "profile_revision",
     "producer_contract",
     "producer_version",
+    "cross_section_universe_capture_id",
+    "cross_section_universe_version",
+    "cross_section_contract_version",
+    "universe_match_status",
+    "ranking_universe_count",
+    "evaluation_universe_count",
     "history_window_start",
     "history_window_end",
     "history_session_count",
@@ -160,10 +166,33 @@ _D0_KEY = (
 )
 _SEED_KEY = (
     "target_session",
+    "source_capture_id",
     "source_symbol",
+    "profile_revision",
+    "producer_version",
+    "cross_section_universe_capture_id",
+    "cross_section_universe_version",
+    "cross_section_contract_version",
+    "universe_match_status",
+)
+_SEED_SCOPE_KEY = (
+    "target_session",
     "source_capture_id",
     "profile_revision",
     "producer_version",
+    "cross_section_universe_capture_id",
+    "cross_section_universe_version",
+    "cross_section_contract_version",
+    "universe_match_status",
+)
+_SEED_UNIVERSE_MATCH_STATUSES = frozenset(
+    {
+        "EXACT_MATCH",
+        "EVALUATION_SUBSET_OF_RANKING",
+        "FALLBACK_UNIVERSE_MISMATCH",
+        "FALLBACK_CROSS_SECTION_UNAVAILABLE",
+        "FALLBACK_CROSS_SECTION_INCOMPLETE",
+    }
 )
 _D0_TABLE = "source_d0_scenario_day_facts"
 _SEED_TABLE = "source_pool_seed_day_facts"
@@ -439,11 +468,69 @@ def _seed_rows(
     calendar = launch["official_calendar"]
     market_by_symbol = {row["source_symbol"]: row for row in launch["results"]}
     seed_facts = seed.get("facts")
+    match_status = seed.get("universe_match_status")
+    ranking_count = seed.get("ranking_universe_count")
+    evaluation_count = seed.get("evaluation_universe_count")
+    cross_version = seed.get("cross_section_universe_version")
+    cross_contract = seed.get("cross_section_contract_version")
+    cross_capture_id = seed.get("cross_section_universe_capture_id")
+    formal_scope_metadata_valid = (
+        type(evaluation_count) is int
+        and evaluation_count > 0
+        and (
+            cross_capture_id is None
+            or type(cross_capture_id) is int
+            and cross_capture_id > 0
+        )
+        and (
+            match_status == "FALLBACK_CROSS_SECTION_INCOMPLETE"
+            and ranking_count is None
+            and isinstance(cross_version, str)
+            and bool(cross_version.strip())
+            and isinstance(cross_contract, str)
+            and bool(cross_contract.strip())
+            or match_status != "FALLBACK_CROSS_SECTION_INCOMPLETE"
+            and type(ranking_count) is int
+            and ranking_count >= 0
+        )
+        and (
+            match_status == "FALLBACK_CROSS_SECTION_UNAVAILABLE"
+            and cross_capture_id is None
+            and cross_version is None
+            and cross_contract is None
+            and ranking_count == evaluation_count
+            or match_status == "EXACT_MATCH"
+            and isinstance(cross_version, str)
+            and bool(cross_version.strip())
+            and isinstance(cross_contract, str)
+            and bool(cross_contract.strip())
+            and ranking_count == evaluation_count
+            or match_status == "EVALUATION_SUBSET_OF_RANKING"
+            and isinstance(cross_version, str)
+            and bool(cross_version.strip())
+            and isinstance(cross_contract, str)
+            and bool(cross_contract.strip())
+            and ranking_count > evaluation_count
+            or match_status == "FALLBACK_UNIVERSE_MISMATCH"
+            and isinstance(cross_version, str)
+            and bool(cross_version.strip())
+            and isinstance(cross_contract, str)
+            and bool(cross_contract.strip())
+            or match_status == "FALLBACK_CROSS_SECTION_INCOMPLETE"
+            and isinstance(cross_version, str)
+            and bool(cross_version.strip())
+            and isinstance(cross_contract, str)
+            and bool(cross_contract.strip())
+            and ranking_count is None
+        )
+    )
     if (
         not isinstance(seed_facts, Mapping)
         or set(seed_facts) != set(market_by_symbol)
         or seed.get("source_pool_total") != len(market_by_symbol)
         or seed.get("stored_profile_status") != "AVAILABLE"
+        or match_status not in _SEED_UNIVERSE_MATCH_STATUSES
+        or not formal_scope_metadata_valid
         or not isinstance(profile_revision, str)
         or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
     ):
@@ -467,6 +554,18 @@ def _seed_rows(
             "profile_revision": profile_revision,
             "producer_contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
             "producer_version": "SOURCE_POOL_SEED_CORE_PROFILE_R2",
+            "cross_section_universe_capture_id": seed.get(
+                "cross_section_universe_capture_id"
+            ),
+            "cross_section_universe_version": seed.get(
+                "cross_section_universe_version"
+            ),
+            "cross_section_contract_version": seed.get(
+                "cross_section_contract_version"
+            ),
+            "universe_match_status": seed["universe_match_status"],
+            "ranking_universe_count": seed["ranking_universe_count"],
+            "evaluation_universe_count": seed["evaluation_universe_count"],
             "history_window_start": history_window[0],
             "history_window_end": history_window[-1],
             "history_session_count": len(history_window),
@@ -635,12 +734,7 @@ def _scope_predicate(
                 calendar_revisions,
             ),
         )
-    scope = (
-        "target_session",
-        "source_capture_id",
-        "profile_revision",
-        "producer_version",
-    )
+    scope = _SEED_SCOPE_KEY
     return " AND ".join(f"{name}=%s" for name in scope), tuple(
         names[name] for name in scope
     )
@@ -984,6 +1078,10 @@ def read_source_pool_seed_facts(
     price_coordinate: str,
     profile_revision: str,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R2",
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
+    universe_match_status: str | None = None,
 ) -> list[dict[str, Any]]:
     """按BaoStock capture、QFQ坐标及显式截止读取Seed事实全池行。"""
     if (
@@ -993,6 +1091,23 @@ def read_source_pool_seed_facts(
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or price_coordinate != "FORWARD_ADJUSTED"
+        or cross_section_universe_capture_id is not None
+        and (
+            type(cross_section_universe_capture_id) is not int
+            or cross_section_universe_capture_id <= 0
+        )
+        or cross_section_universe_version is not None
+        and (
+            not isinstance(cross_section_universe_version, str)
+            or not cross_section_universe_version.strip()
+        )
+        or cross_section_contract_version is not None
+        and (
+            not isinstance(cross_section_contract_version, str)
+            or not cross_section_contract_version.strip()
+        )
+        or universe_match_status is not None
+        and universe_match_status not in _SEED_UNIVERSE_MATCH_STATUSES
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_READ_SCOPE_INVALID",
@@ -1003,6 +1118,53 @@ def read_source_pool_seed_facts(
         cursor,
         _connection_identity,
     ):
+        scope_filters = []
+        scope_parameters: list[Any] = []
+        for column, value in (
+            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
+            ("cross_section_universe_version", cross_section_universe_version),
+            ("cross_section_contract_version", cross_section_contract_version),
+            ("universe_match_status", universe_match_status),
+        ):
+            if value is not None:
+                scope_filters.append(f"{column}=%s")
+                scope_parameters.append(value)
+        scope_where = " AND ".join(scope_filters)
+        if scope_where:
+            scope_where = " AND " + scope_where
+        cursor.execute(
+            f"""SELECT DISTINCT cross_section_universe_capture_id,
+                              cross_section_universe_version,
+                              cross_section_contract_version,universe_match_status,
+                              ranking_universe_count,evaluation_universe_count
+                FROM {_SEED_TABLE}
+                WHERE target_session=%s AND source_capture_id=%s
+                  AND profile_revision=%s AND producer_version=%s
+                  AND price_coordinate=%s{scope_where}
+                ORDER BY cross_section_universe_version NULLS FIRST,
+                         cross_section_universe_capture_id NULLS FIRST,
+                         cross_section_contract_version NULLS FIRST,
+                         universe_match_status NULLS FIRST""",
+            (
+                target_session,
+                source_capture_id,
+                profile_revision,
+                producer_version,
+                price_coordinate,
+                *scope_parameters,
+            ),
+        )
+        scope_rows = cursor.fetchall()
+        if not scope_rows:
+            raise StaticResearchPgError(
+                "STATIC_SEED_NOT_COMPUTED", "该日Seed没有精确语义的已保存事实"
+            )
+        if len(scope_rows) != 1:
+            raise StaticResearchPgError(
+                "STATIC_SEED_SCOPE_AMBIGUOUS",
+                "目标日同一画像修订存在多个横截面排名/评价总体；必须明确版本和捕获",
+            )
+        selected_scope = scope_rows[0]
         cursor.execute(
             f"""SELECT {", ".join("s." + name for name in _SEED_COLUMNS)}
                 FROM {_SEED_TABLE} s
@@ -1010,6 +1172,12 @@ def read_source_pool_seed_facts(
                 WHERE s.target_session=%s AND s.target_session<=%s
                   AND s.source_capture_id=%s AND s.profile_revision=%s
                   AND s.producer_version=%s AND s.price_coordinate=%s
+                  AND s.cross_section_universe_capture_id IS NOT DISTINCT FROM %s
+                  AND s.cross_section_universe_version IS NOT DISTINCT FROM %s
+                  AND s.cross_section_contract_version IS NOT DISTINCT FROM %s
+                  AND s.universe_match_status IS NOT DISTINCT FROM %s
+                  AND s.ranking_universe_count IS NOT DISTINCT FROM %s
+                  AND s.evaluation_universe_count IS NOT DISTINCT FROM %s
                   AND c.provider='BAOSTOCK' AND c.range_start_session<=s.target_session
                   AND s.target_session<=c.range_end_session
                   AND c.range_end_session<=%s
@@ -1024,6 +1192,7 @@ def read_source_pool_seed_facts(
                 profile_revision,
                 producer_version,
                 price_coordinate,
+                *selected_scope,
                 research_cutoff,
             ),
         )
@@ -1048,6 +1217,10 @@ def read_source_pool_seed_forward_scope(
     expected_source_count: int,
     profile_revision: str | None = None,
     history_session_count: int | None = None,
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
+    universe_match_status: str | None = None,
 ) -> dict[str, Any]:
     """读取唯一闭合Seed范围，供已存T0来源池的后继生产复用。"""
     if (
@@ -1066,6 +1239,23 @@ def read_source_pool_seed_forward_scope(
             type(history_session_count) is not int
             or not 1 <= history_session_count <= 250
         )
+        or cross_section_universe_capture_id is not None
+        and (
+            type(cross_section_universe_capture_id) is not int
+            or cross_section_universe_capture_id <= 0
+        )
+        or cross_section_universe_version is not None
+        and (
+            not isinstance(cross_section_universe_version, str)
+            or not cross_section_universe_version.strip()
+        )
+        or cross_section_contract_version is not None
+        and (
+            not isinstance(cross_section_contract_version, str)
+            or not cross_section_contract_version.strip()
+        )
+        or universe_match_status is not None
+        and universe_match_status not in _SEED_UNIVERSE_MATCH_STATUSES
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_FORWARD_KEY_INVALID", "后继生产Seed键或完整分母无效"
@@ -1089,6 +1279,57 @@ def read_source_pool_seed_forward_scope(
         if history_session_count is not None:
             scope_predicate += " AND history_session_count=%s"
             scope_parameters = (*scope_parameters, history_session_count)
+        for column, value in (
+            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
+            ("cross_section_universe_version", cross_section_universe_version),
+            ("cross_section_contract_version", cross_section_contract_version),
+            ("universe_match_status", universe_match_status),
+        ):
+            if value is not None:
+                scope_predicate += f" AND {column}=%s"
+                scope_parameters = (*scope_parameters, value)
+        cursor.execute(
+            f"""SELECT DISTINCT cross_section_universe_capture_id,
+                              cross_section_universe_version,
+                              cross_section_contract_version,universe_match_status,
+                              ranking_universe_count,evaluation_universe_count
+                FROM {_SEED_TABLE} WHERE {scope_predicate}
+                ORDER BY cross_section_universe_version NULLS FIRST,
+                         cross_section_universe_capture_id NULLS FIRST,
+                         cross_section_contract_version NULLS FIRST,
+                         universe_match_status NULLS FIRST""",
+            scope_parameters,
+        )
+        seed_scope_rows = cursor.fetchall()
+        if not seed_scope_rows:
+            raise StaticResearchPgError(
+                "STATIC_SEED_NOT_COMPUTED", "T0没有已存Seed事实，拒绝重算替代"
+            )
+        if len(seed_scope_rows) != 1:
+            raise StaticResearchPgError(
+                "STATIC_SEED_SCOPE_AMBIGUOUS",
+                "T0存在多个横截面排名/评价范围，必须指定精确业务scope",
+            )
+        selected_cross_scope = seed_scope_rows[0]
+        for column, value in zip(
+            (
+                "cross_section_universe_capture_id",
+                "cross_section_universe_version",
+                "cross_section_contract_version",
+                "universe_match_status",
+            ),
+            selected_cross_scope[:4],
+            strict=True,
+        ):
+            scope_predicate += f" AND {column} IS NOT DISTINCT FROM %s"
+            scope_parameters = (*scope_parameters, value)
+        for column, value in zip(
+            ("ranking_universe_count", "evaluation_universe_count"),
+            selected_cross_scope[4:],
+            strict=True,
+        ):
+            scope_predicate += f" AND {column} IS NOT DISTINCT FROM %s"
+            scope_parameters = (*scope_parameters, value)
         cursor.execute(
             f"""SELECT profile_revision, producer_contract, producer_version,
                        history_session_count, calendar_id, calendar_revision,
@@ -1182,6 +1423,13 @@ def read_source_pool_seed_forward_scope(
         "calendar_revision": scope[5],
         "research_mode": scope[6],
         "price_coordinate": scope[7],
+        "cross_section_universe_capture_id": selected_cross_scope[0],
+        "cross_section_universe_version": selected_cross_scope[1],
+        "cross_section_contract_version": selected_cross_scope[2],
+        "universe_match_status": selected_cross_scope[3]
+        or "UNIVERSE_SCOPE_NOT_RECORDED",
+        "ranking_universe_count": selected_cross_scope[4],
+        "evaluation_universe_count": selected_cross_scope[5],
         "source_count": scope[8],
         "s2_state_counts": {
             "TRUE": scope[12],
@@ -1201,6 +1449,10 @@ def read_source_stock_seed_fact(
     source_symbol: str,
     expected_source_count: int,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R2",
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
+    universe_match_status: str | None = None,
 ) -> dict[str, Any]:
     """按完整来源身份核验分区后，只读取单股行；分母须来自已闭合的Raw版本目录。"""
     if (
@@ -1214,6 +1466,23 @@ def read_source_stock_seed_fact(
         or type(expected_source_count) is not int
         or expected_source_count <= 0
         or producer_version != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+        or cross_section_universe_capture_id is not None
+        and (
+            type(cross_section_universe_capture_id) is not int
+            or cross_section_universe_capture_id <= 0
+        )
+        or cross_section_universe_version is not None
+        and (
+            not isinstance(cross_section_universe_version, str)
+            or not cross_section_universe_version.strip()
+        )
+        or cross_section_contract_version is not None
+        and (
+            not isinstance(cross_section_contract_version, str)
+            or not cross_section_contract_version.strip()
+        )
+        or universe_match_status is not None
+        and universe_match_status not in _SEED_UNIVERSE_MATCH_STATUSES
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_SINGLE_KEY_INVALID", "单股Seed读取必须绑定合法完整业务键"
@@ -1224,6 +1493,72 @@ def read_source_stock_seed_fact(
         cursor,
         _connection_identity,
     ):
+        scope_filter_parts = []
+        scope_filter_params = []
+        for column, value in (
+            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
+            ("cross_section_universe_version", cross_section_universe_version),
+            ("cross_section_contract_version", cross_section_contract_version),
+            ("universe_match_status", universe_match_status),
+        ):
+            if value is not None:
+                scope_filter_parts.append(f"{column}=%s")
+                scope_filter_params.append(value)
+        scope_filter = " AND ".join(scope_filter_parts)
+        if scope_filter:
+            scope_filter = " AND " + scope_filter
+        cursor.execute(
+            f"""SELECT DISTINCT cross_section_universe_capture_id,
+                              cross_section_universe_version,
+                              cross_section_contract_version,universe_match_status,
+                              ranking_universe_count,evaluation_universe_count
+                FROM {_SEED_TABLE}
+                WHERE target_session=%s AND source_capture_id=%s
+                  AND profile_revision=%s AND producer_version=%s{scope_filter}
+                ORDER BY cross_section_universe_version NULLS FIRST,
+                         cross_section_universe_capture_id NULLS FIRST,
+                         cross_section_contract_version NULLS FIRST,
+                         universe_match_status NULLS FIRST""",
+            (
+                target_session,
+                source_capture_id,
+                profile_revision,
+                producer_version,
+                *scope_filter_params,
+            ),
+        )
+        scope_rows = cursor.fetchall()
+        if not scope_rows:
+            return {
+                "status": "NOT_COMPUTED",
+                "reason_code": "SEED_NOT_COMPUTED",
+                "message": "该目标日和精确Raw捕获没有已保存Seed事实。",
+                "partition": {
+                    "stored_rows": 0,
+                    "expected_source_count": expected_source_count,
+                    "closed": False,
+                },
+            }
+        if len(scope_rows) != 1:
+            return {
+                "status": "INCOMPLETE",
+                "reason_code": "SEED_UNIVERSE_SCOPE_AMBIGUOUS",
+                "message": "该Seed业务键存在多个排名/评价范围，必须指定横截面scope。",
+                "partition": {
+                    "stored_rows": 0,
+                    "expected_source_count": expected_source_count,
+                    "closed": False,
+                },
+            }
+        selected_scope = scope_rows[0]
+        scope_identity_predicate = (
+            " AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s"
+            " AND cross_section_universe_version IS NOT DISTINCT FROM %s"
+            " AND cross_section_contract_version IS NOT DISTINCT FROM %s"
+            " AND universe_match_status IS NOT DISTINCT FROM %s"
+            " AND ranking_universe_count IS NOT DISTINCT FROM %s"
+            " AND evaluation_universe_count IS NOT DISTINCT FROM %s"
+        )
         cursor.execute(
             f"""SELECT count(*)::bigint AS stored_rows,
        count(DISTINCT source_capture_id)::bigint AS content_count,
@@ -1231,12 +1566,13 @@ def read_source_stock_seed_fact(
 FROM {_SEED_TABLE}
 WHERE target_session=%s::date
   AND source_capture_id=%s
-  AND profile_revision=%s AND producer_version=%s""",
+  AND profile_revision=%s AND producer_version=%s{scope_identity_predicate}""",
             (
                 target_session,
                 source_capture_id,
                 profile_revision,
                 producer_version,
+                *selected_scope,
             ),
         )
         selected_rows, selected_contents, selected_content = cursor.fetchone()
@@ -1316,6 +1652,12 @@ WHERE s.target_session=%s::date
   AND s.source_symbol=%s AND s.source_capture_id=%s
   AND s.profile_revision=%s
   AND s.producer_version=%s
+  AND s.cross_section_universe_capture_id IS NOT DISTINCT FROM %s
+  AND s.cross_section_universe_version IS NOT DISTINCT FROM %s
+  AND s.cross_section_contract_version IS NOT DISTINCT FROM %s
+  AND s.universe_match_status IS NOT DISTINCT FROM %s
+  AND s.ranking_universe_count IS NOT DISTINCT FROM %s
+  AND s.evaluation_universe_count IS NOT DISTINCT FROM %s
 LIMIT 2""",
             (
                 target_session,
@@ -1323,6 +1665,7 @@ LIMIT 2""",
                 source_capture_id,
                 profile_revision,
                 producer_version,
+                *selected_scope,
             ),
         )
         rows = cursor.fetchall()

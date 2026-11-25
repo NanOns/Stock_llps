@@ -209,6 +209,10 @@ def persist_source_computable_rules_from_saved(
     history_session_count: int,
     snapshot_ids: Mapping[str, int] | None = None,
     include_diagnostics: bool = True,
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
+    universe_match_status: str | None = None,
 ) -> dict[str, Any]:
     """只组合已保存的D0/Seed/D1输入与既有QFQ诊断，不采集或重算基础事实。"""
     history_session_limit = _configured_history_session_limit(config)
@@ -223,6 +227,21 @@ def persist_source_computable_rules_from_saved(
         or type(history_session_count) is not int
         or not 1 <= history_session_count <= history_session_limit
         or type(include_diagnostics) is not bool
+        or cross_section_universe_capture_id is not None
+        and (
+            type(cross_section_universe_capture_id) is not int
+            or cross_section_universe_capture_id <= 0
+        )
+        or cross_section_universe_version is not None
+        and (
+            not isinstance(cross_section_universe_version, str)
+            or not cross_section_universe_version.strip()
+        )
+        or cross_section_contract_version is not None
+        and (
+            not isinstance(cross_section_contract_version, str)
+            or not cross_section_contract_version.strip()
+        )
     ):
         raise SourceFrozenRulesError(
             "SOURCE_RULE_SCOPE_INVALID", "冻结规则目标、来源或Profile键无效"
@@ -264,6 +283,10 @@ def persist_source_computable_rules_from_saved(
         price_coordinate="FORWARD_ADJUSTED",
         profile_revision=profile_revision,
         producer_version=_SEED_PRODUCER_VERSION,
+        cross_section_universe_capture_id=cross_section_universe_capture_id,
+        cross_section_universe_version=cross_section_universe_version,
+        cross_section_contract_version=cross_section_contract_version,
+        universe_match_status=universe_match_status,
     )
     symbols = {row["source_symbol"] for row in launch["results"]}
     if (
@@ -359,6 +382,10 @@ def persist_source_computable_rules_from_saved(
         source_symbols=(min(symbols),),
         selected_profile_revision=profile_revision,
         selected_history_session_count=history_session_count,
+        cross_section_universe_capture_id=cross_section_universe_capture_id,
+        cross_section_universe_version=cross_section_universe_version,
+        cross_section_contract_version=cross_section_contract_version,
+        universe_match_status=universe_match_status,
     )
     d1_scope = evidence.get("d1_scope")
     if (
@@ -372,7 +399,39 @@ def persist_source_computable_rules_from_saved(
         or type(d1_scope.get("history_session_count")) is not int
     ):
         raise SourceFrozenRulesError(
-            "SOURCE_RULE_D1_SCOPE_NOT_CLOSED", "冻结规则没有唯一D1 QFQ R3窗口"
+            "SOURCE_RULE_D1_SCOPE_NOT_CLOSED",
+            "冻结规则没有唯一完整的D1 QFQ五类或七类窗口",
+        )
+    d1_scope_tuple = (
+        d1_scope.get("cross_section_universe_capture_id"),
+        d1_scope.get("cross_section_universe_version"),
+        d1_scope.get("cross_section_contract_version"),
+    )
+    if any(
+        (
+            row.get("cross_section_universe_capture_id"),
+            row.get("cross_section_universe_version"),
+            row.get("cross_section_contract_version"),
+        )
+        != d1_scope_tuple
+        for row in seed_rows
+    ):
+        raise SourceFrozenRulesError(
+            "SOURCE_RULE_SEED_D1_CROSS_SECTION_SCOPE_MISMATCH",
+            "冻结规则Seed与D1保存事实横截面Universe范围不一致",
+        )
+    selected_scope_tuple = (
+        cross_section_universe_capture_id,
+        cross_section_universe_version,
+        cross_section_contract_version,
+    )
+    if (
+        any(value is not None for value in selected_scope_tuple)
+        and d1_scope_tuple != selected_scope_tuple
+    ):
+        raise SourceFrozenRulesError(
+            "SOURCE_RULE_D1_CROSS_SECTION_SCOPE_MISMATCH",
+            "冻结规则D1保存事实与任务选定横截面Universe范围不一致",
         )
     rule_calendar_revision = d1_scope["calendar_revision"]
     d1_history_session_count = d1_scope["history_session_count"]

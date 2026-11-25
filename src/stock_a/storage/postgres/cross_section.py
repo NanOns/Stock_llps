@@ -369,45 +369,59 @@ def read_cross_section_day_bundle(
     target_session: date,
     price_capture_id: int,
     universe_version: str | None = None,
+    universe_capture_id: int | None = None,
     calendar_revision: str,
     contract_version: str = CROSS_SECTION_CONTRACT_VERSION,
 ) -> dict[str, Any]:
     """只读加载目标日全市场10项无损精确Fraction因子与日级共享10端点真实元数据。"""
+    if universe_version is not None and (
+        not isinstance(universe_version, str) or not universe_version.strip()
+    ):
+        raise ValueError("CROSS_SECTION_UNIVERSE_VERSION_INVALID")
+    if universe_capture_id is not None and (
+        type(universe_capture_id) is not int or universe_capture_id <= 0
+    ):
+        raise ValueError("CROSS_SECTION_UNIVERSE_CAPTURE_INVALID")
+
     with _transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
         _,
     ):
         selected_universe_version = universe_version
-        if selected_universe_version is None:
-            # C04：按 universe_capture_id 数值与真实落库顺序（MAX(id)）选最新单版本，
-            # 严禁按 universe_version 文本字典序（防止 BASIC_9 > BASIC_10 倒选旧版）
+        selected_universe_capture_id = universe_capture_id
+        if selected_universe_version is None or selected_universe_capture_id is None:
+            # 只有唯一精确候选可自动复用；多捕获或多版本必须由调用方明确选定。
             cursor.execute(
-                """SELECT universe_version
+                """SELECT DISTINCT universe_version, universe_capture_id
                    FROM stock.source_cross_section_day_facts
                    WHERE target_session = %s
                      AND price_capture_id = %s
                      AND calendar_revision = %s
                      AND contract_version = %s
-                   GROUP BY universe_version, universe_capture_id
-                   ORDER BY universe_capture_id DESC NULLS LAST,
-                            MAX(id) DESC
-                   LIMIT 1""",
+                     AND (%s::text IS NULL OR universe_version = %s)
+                     AND (%s::bigint IS NULL OR universe_capture_id = %s)
+                   ORDER BY universe_version, universe_capture_id NULLS FIRST""",
                 (
                     target_session,
                     price_capture_id,
                     calendar_revision,
                     contract_version,
+                    selected_universe_version,
+                    selected_universe_version,
+                    selected_universe_capture_id,
+                    selected_universe_capture_id,
                 ),
             )
-            uv_row = cursor.fetchone()
-            if uv_row is None:
+            scope_rows = cursor.fetchall()
+            if not scope_rows:
                 return {
                     "status": "NOT_COMPUTED",
+                    "reason": "CROSS_SECTION_SCOPE_NOT_FOUND",
                     "target_session": target_session,
                     "price_capture_id": price_capture_id,
-                    "universe_capture_id": None,
-                    "universe_version": None,
+                    "universe_capture_id": selected_universe_capture_id,
+                    "universe_version": selected_universe_version,
                     "calendar_id": None,
                     "calendar_revision": calendar_revision,
                     "contract_version": contract_version,
@@ -415,7 +429,34 @@ def read_cross_section_day_bundle(
                     "relative_metadata": {},
                     "by_entity": {},
                 }
-            selected_universe_version = str(uv_row[0])
+            if len(scope_rows) != 1:
+                return {
+                    "status": "INCOMPLETE",
+                    "reason": "CROSS_SECTION_SCOPE_AMBIGUOUS",
+                    "target_session": target_session,
+                    "price_capture_id": price_capture_id,
+                    "universe_capture_id": selected_universe_capture_id,
+                    "universe_version": selected_universe_version,
+                    "candidate_scopes": [
+                        {
+                            "universe_version": str(row[0]),
+                            "universe_capture_id": (
+                                int(row[1]) if row[1] is not None else None
+                            ),
+                        }
+                        for row in scope_rows
+                    ],
+                    "calendar_id": None,
+                    "calendar_revision": calendar_revision,
+                    "contract_version": contract_version,
+                    "rank_metadata": {},
+                    "relative_metadata": {},
+                    "by_entity": {},
+                }
+            selected_universe_version = str(scope_rows[0][0])
+            selected_universe_capture_id = (
+                int(scope_rows[0][1]) if scope_rows[0][1] is not None else None
+            )
 
         cursor.execute(
             """SELECT source_symbol,
@@ -433,6 +474,7 @@ def read_cross_section_day_bundle(
                WHERE target_session = %s
                  AND price_capture_id = %s
                  AND universe_version = %s
+                 AND universe_capture_id IS NOT DISTINCT FROM %s
                  AND calendar_revision = %s
                  AND contract_version = %s
                ORDER BY source_symbol""",
@@ -440,6 +482,7 @@ def read_cross_section_day_bundle(
                 target_session,
                 price_capture_id,
                 selected_universe_version,
+                selected_universe_capture_id,
                 calendar_revision,
                 contract_version,
             ),
@@ -456,6 +499,7 @@ def read_cross_section_day_bundle(
                WHERE target_session = %s
                  AND price_capture_id = %s
                  AND universe_version = %s
+                 AND universe_capture_id IS NOT DISTINCT FROM %s
                  AND calendar_revision = %s
                  AND contract_version = %s
                ORDER BY endpoint_key""",
@@ -463,6 +507,7 @@ def read_cross_section_day_bundle(
                 target_session,
                 price_capture_id,
                 selected_universe_version,
+                selected_universe_capture_id,
                 calendar_revision,
                 contract_version,
             ),
@@ -537,16 +582,22 @@ def read_cross_section_day_bundle(
     endpoints_complete = len(rank_meta) == 6 and len(rel_meta) == 4
     if not by_entity:
         bundle_status = "NOT_COMPUTED"
+        bundle_reason = "CROSS_SECTION_SCOPE_NOT_COMPUTED"
     elif not endpoints_complete:
         bundle_status = "INCOMPLETE"
+        bundle_reason = "CROSS_SECTION_ENDPOINTS_INCOMPLETE"
     else:
         bundle_status = "AVAILABLE"
+        bundle_reason = None
 
     return {
         "status": bundle_status,
+        "reason": bundle_reason,
         "target_session": target_session,
         "price_capture_id": price_capture_id,
-        "universe_capture_id": universe_capture_id_val,
+        "universe_capture_id": selected_universe_capture_id
+        if selected_universe_capture_id is not None
+        else universe_capture_id_val,
         "universe_version": selected_universe_version,
         "calendar_id": calendar_id_val,
         "calendar_revision": calendar_revision,
@@ -563,6 +614,7 @@ def read_cross_section_day_facts(
     target_session: date,
     price_capture_id: int,
     universe_version: str,
+    universe_capture_id: int | None = None,
     calendar_revision: str,
     contract_version: str = CROSS_SECTION_CONTRACT_VERSION,
 ) -> dict[str, dict[str, FieldValue]]:
@@ -572,6 +624,7 @@ def read_cross_section_day_facts(
         target_session=target_session,
         price_capture_id=price_capture_id,
         universe_version=universe_version,
+        universe_capture_id=universe_capture_id,
         calendar_revision=calendar_revision,
         contract_version=contract_version,
     )

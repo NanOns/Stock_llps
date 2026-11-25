@@ -154,3 +154,6 @@ class ResearchDayFacts:
     d0_facts: tuple[D0LaunchFact, ...]
     d1_structure_facts: tuple[D1StructureFact, ...]
     d1_anchor_facts: tuple[D1MaterialAnchorFact, ...]
+    cross_section_universe_capture_id: int | None = None
+    cross_section_universe_version: str | None = None
+    cross_section_contract_version: str | None = None

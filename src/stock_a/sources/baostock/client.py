@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timezone
 import importlib
 from importlib import metadata
@@ -31,6 +31,18 @@ _DEFAULT_SOCKET_TIMEOUT_SECONDS = 30.0
 _VERIFIED_DAILY_CAPTURES: dict[int, "BaoStockDailySourceCapture"] = {}
 _VERIFIED_IDENTITY_CAPTURES: dict[int, "BaoStockIdentitySourceCapture"] = {}
 _CAPTURE_ID_SEQUENCE = count(1)
+
+
+def _invoke_sdk_call(
+    request_sdk_call: Callable[..., Any] | None,
+    call: Callable[[], Any],
+    *,
+    quota_counted: bool = False,
+) -> Any:
+    """在线SDK操作先核锁；仅查询接口占用工程调用预算。"""
+    if request_sdk_call is None:
+        return call()
+    return request_sdk_call(call, quota_counted=quota_counted)
 
 
 @dataclass(frozen=True)
@@ -429,13 +441,14 @@ def query_daily_rows(
         api_name="query_history_k_data_plus",
         injected_transport=transport is not None,
         enforce_quota=enforce_quota,
-        action=lambda: _query_daily_rows_impl(
+        action=lambda request_sdk_call: _query_daily_rows_impl(
             symbol,
             target_session,
             adjustflag=adjustflag,
             timeout_seconds=timeout_seconds,
             max_rows=max_rows,
             transport=transport,
+            request_sdk_call=request_sdk_call,
         ),
     )
 
@@ -448,6 +461,7 @@ def _query_daily_rows_impl(
     timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
     max_rows: int = _MAX_QUERY_ROWS,
     transport: object | None = None,
+    request_sdk_call: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """查询一个显式来源代码和单个历史交易日；不重试、不写文件、不改TDX。"""
     adjustflag = _validate_adjustflag(adjustflag)
@@ -529,7 +543,9 @@ def _query_daily_rows_impl(
         login_attempted = True
         _clear_anonymous_api_key(injected_transport=transport is not None)
         with redirect_stdout(output_capture), redirect_stderr(output_capture):
-            login_result = sdk.login()
+            login_result = _invoke_sdk_call(
+                request_sdk_call, sdk.login, quota_counted=False
+            )
         endpoint = _endpoint_snapshot(
             timeout_seconds=float(timeout_seconds),
             injected_transport=transport is not None,
@@ -541,13 +557,17 @@ def _query_daily_rows_impl(
             reason = login_message or "BaoStock登录未成功"
         else:
             with redirect_stdout(output_capture), redirect_stderr(output_capture):
-                response = sdk.query_history_k_data_plus(
-                    source_code,
-                    _QUERY_FIELDS,
-                    start_date=target_session,
-                    end_date=target_session,
-                    frequency="d",
-                    adjustflag=adjustflag,
+                response = _invoke_sdk_call(
+                    request_sdk_call,
+                    lambda: sdk.query_history_k_data_plus(
+                        source_code,
+                        _QUERY_FIELDS,
+                        start_date=target_session,
+                        end_date=target_session,
+                        frequency="d",
+                        adjustflag=adjustflag,
+                    ),
+                    quota_counted=True,
                 )
             query_code = _code(response)
             query_message = _error_message(response)
@@ -604,7 +624,9 @@ def _query_daily_rows_impl(
             logout_attempted = True
             try:
                 with redirect_stdout(output_capture), redirect_stderr(output_capture):
-                    logout_result = sdk.logout()
+                    logout_result = _invoke_sdk_call(
+                        request_sdk_call, sdk.logout, quota_counted=False
+                    )
                 logout_code = _code(logout_result)
                 logout_message = _error_message(logout_result)
                 if logout_code != "0" and status == "RESPONSE_RECEIVED":
@@ -699,13 +721,14 @@ def query_identity_reference(
         api_name="query_all_stock",
         injected_transport=transport is not None,
         enforce_quota=enforce_quota,
-        action=lambda: _query_identity_reference_impl(
+        action=lambda request_sdk_call: _query_identity_reference_impl(
             target_sessions,
             target_symbol=target_symbol,
             timeout_seconds=timeout_seconds,
             max_total_seconds=max_total_seconds,
             max_rows_per_query=max_rows_per_query,
             transport=transport,
+            request_sdk_call=request_sdk_call,
         ),
     )
 
@@ -718,6 +741,7 @@ def _query_identity_reference_impl(
     max_total_seconds: float = 25.0,
     max_rows_per_query: int = 10000,
     transport: object | None = None,
+    request_sdk_call: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """一次登录内有限读取单证券基本资料及最多两个目标日名录，不写文件或推断历史PIT。"""
     if (
@@ -929,7 +953,7 @@ def _query_identity_reference_impl(
         login_attempted = True
         login_started = perf_counter()
         with redirect_stdout(output_capture), redirect_stderr(output_capture):
-            login = sdk.login()
+            login = _invoke_sdk_call(request_sdk_call, sdk.login, quota_counted=False)
         login_elapsed_ms = round((perf_counter() - login_started) * 1000, 3)
         login_code = _code(login)
         login_message = _error_message(login)
@@ -969,10 +993,14 @@ def _query_identity_reference_impl(
                         redirect_stdout(output_capture),
                         redirect_stderr(output_capture),
                     ):
-                        basic_result = (
-                            sdk.query_stock_basic(code=basic_query_code)
-                            if basic_query_code is not None
-                            else sdk.query_stock_basic()
+                        basic_result = _invoke_sdk_call(
+                            request_sdk_call,
+                            lambda: (
+                                sdk.query_stock_basic(code=basic_query_code)
+                                if basic_query_code is not None
+                                else sdk.query_stock_basic()
+                            ),
+                            quota_counted=True,
                         )
                     api_elapsed_ms = round((perf_counter() - api_started) * 1000, 3)
                     calls["stock_basic"] = read_result(
@@ -1086,7 +1114,11 @@ def _query_identity_reference_impl(
                                 redirect_stdout(output_capture),
                                 redirect_stderr(output_capture),
                             ):
-                                result = sdk.query_all_stock(day=target_session)
+                                result = _invoke_sdk_call(
+                                    request_sdk_call,
+                                    lambda: sdk.query_all_stock(day=target_session),
+                                    quota_counted=True,
+                                )
                             api_elapsed_ms = round(
                                 (perf_counter() - api_started) * 1000, 3
                             )
@@ -1173,6 +1205,8 @@ def _query_identity_reference_impl(
                             reason = f"BaoStock指定日{target_session}名录逐行读取耗尽单次总预算；未重试"
                         else:
                             reason = f"BaoStock指定日{target_session}名录逐行读取socket超时；未重试"
+                    if status != "RESPONSE_RECEIVED":
+                        break
     except (socket.timeout, TimeoutError) as error:
         status = "NETWORK_TIMEOUT"
         error_type = type(error).__name__
@@ -1196,7 +1230,9 @@ def _query_identity_reference_impl(
                         redirect_stdout(output_capture),
                         redirect_stderr(output_capture),
                     ):
-                        logout = sdk.logout()
+                        logout = _invoke_sdk_call(
+                            request_sdk_call, sdk.logout, quota_counted=False
+                        )
                     logout_code = _code(logout)
                     logout_message = _error_message(logout)
                     if logout_code != "0" and status == "RESPONSE_RECEIVED":
@@ -1298,6 +1334,7 @@ def _query_identity_reference_impl(
         "error_type": error_type,
         "reason": reason,
     }
+    return snapshot
 
 
 def query_daily_range_rows(
@@ -1322,7 +1359,7 @@ def query_daily_range_rows(
         api_name="query_history_k_data_plus",
         injected_transport=transport is not None,
         enforce_quota=enforce_quota,
-        action=lambda: _query_daily_range_rows_impl(
+        action=lambda request_sdk_call: _query_daily_range_rows_impl(
             symbols,
             start_date,
             end_date,
@@ -1332,6 +1369,7 @@ def query_daily_range_rows(
             max_api_calls=max_api_calls,
             target_session_count=target_session_count,
             transport=transport,
+            request_sdk_call=request_sdk_call,
         ),
     )
 
@@ -1347,6 +1385,7 @@ def _query_daily_range_rows_impl(
     max_api_calls: int = _MAX_API_QUERIES_PER_BATCH,
     target_session_count: int | None = None,
     transport: object | None = None,
+    request_sdk_call: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """按显式范围和坐标查询，并将校验后的响应交给规范化层。"""
     adjustflag = _validate_adjustflag(adjustflag)
@@ -1522,7 +1561,7 @@ def _query_daily_range_rows_impl(
         login_attempted = True
         _clear_anonymous_api_key(injected_transport=transport is not None)
         with redirect_stdout(output_capture), redirect_stderr(output_capture):
-            login = sdk.login()
+            login = _invoke_sdk_call(request_sdk_call, sdk.login, quota_counted=False)
             login_code = _code(login)
             login_message = _error_message(login)
         endpoint = _endpoint_snapshot(
@@ -1534,18 +1573,22 @@ def _query_daily_range_rows_impl(
             reason = "BaoStock登录失败；未发起日线查询"
         else:
             for symbol in symbols:
-                query_calls += 1
                 query_started = _timestamp()
                 source_code = f"{symbol[:2].lower()}.{symbol[3:]}"
                 try:
-                    result = sdk.query_history_k_data_plus(
-                        source_code,
-                        _QUERY_FIELDS,
-                        start_date=start_date,
-                        end_date=end_date,
-                        frequency="d",
-                        adjustflag=adjustflag,
+                    result = _invoke_sdk_call(
+                        request_sdk_call,
+                        lambda: sdk.query_history_k_data_plus(
+                            source_code,
+                            _QUERY_FIELDS,
+                            start_date=start_date,
+                            end_date=end_date,
+                            frequency="d",
+                            adjustflag=adjustflag,
+                        ),
+                        quota_counted=True,
                     )
+                    query_calls += 1
                     fields = tuple(
                         str(value) for value in (getattr(result, "fields", None) or ())
                     )
@@ -1686,7 +1729,9 @@ def _query_daily_range_rows_impl(
             logout_attempted = True
             try:
                 with redirect_stdout(output_capture), redirect_stderr(output_capture):
-                    logout = sdk.logout()
+                    logout = _invoke_sdk_call(
+                        request_sdk_call, sdk.logout, quota_counted=False
+                    )
                 logout_code = _code(logout)
                 logout_message = _error_message(logout)
                 if logout_code != "0" and status == "RESPONSE_RECEIVED":
@@ -1796,14 +1841,16 @@ def _run_with_baostock_guard(
     enforce_quota: bool,
     action: Any,
 ) -> dict[str, Any]:
-    """在线 BaoStock 入口统一护栏：PG 进程串行锁 + 日配额预检 + 请求前短事务预扣。"""
+    """在线 BaoStock 入口统一护栏：锁、事前预扣及逐次SDK请求结算。"""
     if enforce_quota and config is None:
         raise ContractError("BAOSTOCK_QUOTA_CONFIG_REQUIRED")
     if not injected_transport and config is None:
         raise ContractError("BAOSTOCK_ONLINE_GUARD_CONFIG_REQUIRED")
     if injected_transport and not enforce_quota:
-        return action()
+        return action(lambda call, *, quota_counted=False: call())
     from stock_a.storage.postgres.baostock_quota import (
+        BaoStockQuotaError,
+        current_baostock_quota_date,
         baostock_serial_lock,
         consume_baostock_api_quota,
         preflight_baostock_api_quota,
@@ -1812,45 +1859,106 @@ def _run_with_baostock_guard(
 
     with baostock_serial_lock(config) as verify_lock_alive:
         verify_lock_alive()
-        preflight_baostock_api_quota(config, planned_calls=planned_calls)
+        # 预扣、实际发送和退款固定绑定同一北京时间额度日，避免跨午夜退款写到次日。
+        quota_date = current_baostock_quota_date()
+        preflight_baostock_api_quota(
+            config, planned_calls=planned_calls, quota_date=quota_date
+        )
         # 严格遵守 R3/R08 裁定：发送请求前先通过独立短事务预扣计划调用数，返回后按实际发送与失败次数结算
         consume_baostock_api_quota(
             config,
             api_name=api_name,
             count=planned_calls,
             failed=0,
+            quota_date=quota_date,
         )
-        verify_lock_alive()
+        request_counts = {
+            "actual_calls": 0,
+            "failed_calls": 0,
+            "session_failures": 0,
+            "lock_lost": False,
+        }
+
+        def request_sdk_call(
+            call: Callable[[], Any], *, quota_counted: bool = False
+        ) -> Any:
+            try:
+                verify_lock_alive()
+            except BaoStockQuotaError as error:
+                if error.code == "BAOSTOCK_SERIAL_LOCK_LOST":
+                    request_counts["lock_lost"] = True
+                raise
+            if quota_counted:
+                if request_counts["actual_calls"] >= planned_calls:
+                    raise BaoStockQuotaError(
+                        "BAOSTOCK_REQUEST_COUNT_EXCEEDS_PREALLOCATION",
+                        "BaoStock实际查询数将超过事前核准数量，已在发送前停止",
+                    )
+                # 先记为已发送/发送状态未知，再进入SDK；异常路径不会错误退款。
+                request_counts["actual_calls"] += 1
+            try:
+                return call()
+            except Exception:
+                if quota_counted:
+                    request_counts["failed_calls"] += 1
+                else:
+                    request_counts["session_failures"] += 1
+                raise
+
         try:
-            result = action()
+            verify_lock_alive()
+            result = action(request_sdk_call)
         except Exception:
+            actual_calls = request_counts["actual_calls"]
+            failed_calls = (
+                request_counts["failed_calls"] + request_counts["session_failures"]
+            )
             settle_baostock_api_quota(
                 config,
                 api_name=api_name,
                 planned_calls=planned_calls,
-                actual_calls=0,
-                failed_calls=1,
+                actual_calls=actual_calls,
+                failed_calls=failed_calls,
+                quota_date=quota_date,
             )
             raise
-        actual_calls = (
-            int(result["query_calls"])
-            if isinstance(result, Mapping)
-            and isinstance(result.get("query_calls"), int)
-            and result["query_calls"] >= 0
-            else planned_calls
-        )
+        actual_calls = request_counts["actual_calls"]
         status = str(result.get("status") or "") if isinstance(result, Mapping) else ""
-        is_failed = isinstance(result, Mapping) and (
-            result.get("complete") is False
-            or status
-            in {"LOGIN_FAILED", "QUERY_FAILED", "RESPONSE_INCOMPLETE", "SDK_ERROR"}
-        )
-        failed_calls = (
-            max(1, int(result.get("failed_calls", 0)))
-            if is_failed
-            else int(result.get("failed_calls", 0))
+        failure_statuses = {
+            "LOGIN_FAILED",
+            "QUERY_FAILED",
+            "RESPONSE_INCOMPLETE",
+            "SDK_ERROR",
+            "NETWORK_TIMEOUT",
+            "NETWORK_OR_PROTOCOL_ERROR",
+            "PROTOCOL_INVALID",
+            "ROW_LIMIT_EXCEEDED",
+            "LOGOUT_FAILED",
+        }
+        result_failed_calls = (
+            int(result.get("failed_calls", 0))
             if isinstance(result, Mapping)
+            and isinstance(result.get("failed_calls"), int)
+            and result.get("failed_calls", 0) >= 0
             else 0
+        )
+        status_indicates_failure = isinstance(result, Mapping) and (
+            result.get("complete") is False or status in failure_statuses
+        )
+        # SDK抛错由逐次调用闭包记录；失败码/不完整响应由真实结果状态补记。
+        # 锁失联导致的未发送请求只退未发预留，不伪造成来源接口失败。
+        failed_calls = max(
+            request_counts["failed_calls"] + request_counts["session_failures"],
+            result_failed_calls,
+            int(
+                status_indicates_failure
+                and not request_counts["lock_lost"]
+                and (
+                    actual_calls > 0
+                    or status == "LOGIN_FAILED"
+                    or bool(result.get("login_attempted"))
+                )
+            ),
         )
         settlement = settle_baostock_api_quota(
             config,
@@ -1858,13 +1966,16 @@ def _run_with_baostock_guard(
             planned_calls=planned_calls,
             actual_calls=actual_calls,
             failed_calls=failed_calls,
+            quota_date=quota_date,
         )
         if isinstance(result, dict):
+            result["query_calls"] = actual_calls
             result["quota_settlement"] = {
                 "planned_calls": planned_calls,
                 "actual_calls": actual_calls,
                 "failed_calls": failed_calls,
                 "delta_calls": settlement["delta_calls"],
+                "quota_date": settlement["quota_date"],
             }
         return result
 
@@ -1921,7 +2032,7 @@ def query_stock_basic_catalog(
 ) -> dict[str, Any]:
     """采集 BaoStock 全市场证券基本资料（query_stock_basic），支持注入 Mock transport。"""
 
-    def _do() -> dict[str, Any]:
+    def _do(request_sdk_call: Callable[..., Any]) -> dict[str, Any]:
         started_at = _timestamp()
         sdk, sdk_version = _load_sdk(transport)
         if transport is None and sdk_version != _PINNED_SDK_VERSION:
@@ -1929,7 +2040,7 @@ def query_stock_basic_catalog(
         _set_sdk_socket_timeout(
             float(timeout_seconds), injected_transport=transport is not None
         )
-        login_res = sdk.login()
+        login_res = _invoke_sdk_call(request_sdk_call, sdk.login, quota_counted=False)
         if _code(login_res) != "0":
             return {
                 "status": "LOGIN_FAILED",
@@ -1939,7 +2050,11 @@ def query_stock_basic_catalog(
                 "reason": _error_message(login_res),
             }
         try:
-            rs = sdk.query_stock_basic(code="")
+            rs = _invoke_sdk_call(
+                request_sdk_call,
+                lambda: sdk.query_stock_basic(code=""),
+                quota_counted=True,
+            )
             if _code(rs) != "0":
                 return {
                     "status": "QUERY_FAILED",
@@ -1972,7 +2087,7 @@ def query_stock_basic_catalog(
             }
         finally:
             try:
-                sdk.logout()
+                _invoke_sdk_call(request_sdk_call, sdk.logout, quota_counted=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -2002,7 +2117,7 @@ def query_session_directory_rows(
         if date.fromisoformat(day_text).isoformat() != day_text:
             raise ContractError(f"INVALID_SESSION_DATE:{day_text}")
 
-    def _do() -> dict[str, Any]:
+    def _do(request_sdk_call: Callable[..., Any]) -> dict[str, Any]:
         started_at = _timestamp()
         sdk, sdk_version = _load_sdk(transport)
         if transport is None and sdk_version != _PINNED_SDK_VERSION:
@@ -2010,7 +2125,7 @@ def query_session_directory_rows(
         _set_sdk_socket_timeout(
             float(timeout_seconds), injected_transport=transport is not None
         )
-        login_res = sdk.login()
+        login_res = _invoke_sdk_call(request_sdk_call, sdk.login, quota_counted=False)
         if _code(login_res) != "0":
             return {
                 "status": "LOGIN_FAILED",
@@ -2023,8 +2138,12 @@ def query_session_directory_rows(
         calls = 0
         try:
             for day_text in session_dates:
+                rs = _invoke_sdk_call(
+                    request_sdk_call,
+                    lambda: sdk.query_all_stock(day=day_text),
+                    quota_counted=True,
+                )
                 calls += 1
-                rs = sdk.query_all_stock(day=day_text)
                 if _code(rs) != "0":
                     return {
                         "status": "QUERY_FAILED",
@@ -2058,7 +2177,7 @@ def query_session_directory_rows(
             }
         finally:
             try:
-                sdk.logout()
+                _invoke_sdk_call(request_sdk_call, sdk.logout, quota_counted=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -2095,7 +2214,7 @@ def query_index_daily_range(
     if date.fromisoformat(end_date) < date.fromisoformat(start_date):
         raise ContractError("INVALID_INDEX_DATE_RANGE")
 
-    def _do() -> dict[str, Any]:
+    def _do(request_sdk_call: Callable[..., Any]) -> dict[str, Any]:
         started_at = _timestamp()
         sdk, sdk_version = _load_sdk(transport)
         if transport is None and sdk_version != _PINNED_SDK_VERSION:
@@ -2103,7 +2222,7 @@ def query_index_daily_range(
         _set_sdk_socket_timeout(
             float(timeout_seconds), injected_transport=transport is not None
         )
-        login_res = sdk.login()
+        login_res = _invoke_sdk_call(request_sdk_call, sdk.login, quota_counted=False)
         if _code(login_res) != "0":
             return {
                 "status": "LOGIN_FAILED",
@@ -2116,16 +2235,20 @@ def query_index_daily_range(
         calls = 0
         try:
             for sym in symbols:
-                calls += 1
                 market, digits = _SYMBOL_PATTERN.fullmatch(sym).groups()
-                rs = sdk.query_history_k_data_plus(
-                    f"{market.lower()}.{digits}",
-                    _INDEX_DAILY_FIELDS,
-                    start_date=start_date,
-                    end_date=end_date,
-                    frequency="d",
-                    adjustflag="3",
+                rs = _invoke_sdk_call(
+                    request_sdk_call,
+                    lambda: sdk.query_history_k_data_plus(
+                        f"{market.lower()}.{digits}",
+                        _INDEX_DAILY_FIELDS,
+                        start_date=start_date,
+                        end_date=end_date,
+                        frequency="d",
+                        adjustflag="3",
+                    ),
+                    quota_counted=True,
                 )
+                calls += 1
                 if _code(rs) != "0":
                     return {
                         "status": "QUERY_FAILED",
@@ -2167,7 +2290,7 @@ def query_index_daily_range(
             }
         finally:
             try:
-                sdk.logout()
+                _invoke_sdk_call(request_sdk_call, sdk.logout, quota_counted=False)
             except Exception:  # noqa: BLE001
                 pass
 

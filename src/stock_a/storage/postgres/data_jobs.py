@@ -178,6 +178,8 @@ _CLEANUP_MODULES = {
             (
                 "stock.source_d1_structure_day_facts",
                 "stock.source_d1_material_anchor_day_facts",
+                "stock.source_research_observation_segment_days",
+                "stock.source_rps_pulse_t0_change_facts",
             ),
         ),
         "algorithm_column": "producer_version",
@@ -294,27 +296,87 @@ _CLEANUP_MODULES = {
         "parent_table": "stock.source_cross_section_day_facts",
         "child_table": "stock.source_cross_section_endpoints",
         "cleanup_tables": (
+            "stock.source_rps_pulse_t0_change_facts",
+            "stock.source_research_observation_segment_days",
+            "stock.source_t0_early_observation_facts",
+            "stock.source_d0_formal_admission_day_facts",
+            "stock.source_research_enrollments",
+            "stock.source_rule_evaluations",
+            "stock.source_cohort_group_stats",
+            "stock.source_fep_baseline_facts",
+            "stock.source_research_events",
+            "stock.source_d0_launch_day_facts",
+            "stock.source_d1_material_anchor_day_facts",
+            "stock.source_d1_structure_day_facts",
+            "stock.source_pool_seed_day_facts",
+            "stock.source_d0_scenario_day_facts",
+            "stock.source_symbol_price_profiles",
             "stock.source_cross_section_endpoints",
             "stock.source_cross_section_day_facts",
         ),
         "progress_tables": (
             "stock.source_cross_section_day_facts",
             "stock.source_cross_section_endpoints",
+            "stock.source_symbol_price_profiles",
+            "stock.source_pool_seed_day_facts",
+            "stock.source_d0_scenario_day_facts",
+            "stock.source_d0_launch_day_facts",
+            "stock.source_d0_formal_admission_day_facts",
+            "stock.source_d1_structure_day_facts",
+            "stock.source_d1_material_anchor_day_facts",
+            "stock.source_research_observation_segment_days",
+            "stock.source_rps_pulse_t0_change_facts",
+            "stock.source_rule_evaluations",
+            "stock.source_research_enrollments",
+            "stock.source_cohort_group_stats",
+            "stock.source_fep_baseline_facts",
+        ),
+        "required_relations": (
+            (
+                "stock.source_d1_structure_day_facts",
+                "stock.source_d1_material_anchor_day_facts",
+            ),
+            (
+                "stock.source_d0_scenario_day_facts",
+                "stock.source_d0_formal_admission_day_facts",
+            ),
+            (
+                "stock.source_pool_seed_day_facts",
+                "stock.source_d0_formal_admission_day_facts",
+            ),
+            (
+                "stock.source_rule_evaluations",
+                "stock.source_research_enrollments",
+            ),
+            (
+                "stock.source_d0_launch_day_facts",
+                "stock.source_research_enrollments",
+            ),
+            (
+                "stock.source_research_enrollments",
+                "stock.source_t0_early_observation_facts",
+            ),
+            (
+                "stock.source_research_enrollments",
+                "stock.source_research_observation_segment_days",
+            ),
+            (
+                "stock.source_research_enrollments",
+                "stock.source_rps_pulse_t0_change_facts",
+            ),
+            (
+                "stock.source_t0_early_observation_facts",
+                "stock.source_rps_pulse_t0_change_facts",
+            ),
         ),
         "algorithm_column": "contract_version",
         "algorithm_label": "全市场横截面10因子合同版本",
     },
     "MARKET_INDICES_ENV": {
         "parent_table": "stock.source_market_environment_day_facts",
-        "child_table": "stock.source_market_index_day_facts",
-        "cleanup_tables": (
-            "stock.source_market_environment_day_facts",
-            "stock.source_market_index_day_facts",
-        ),
-        "progress_tables": (
-            "stock.source_market_index_day_facts",
-            "stock.source_market_environment_day_facts",
-        ),
+        "child_table": None,
+        "cleanup_tables": ("stock.source_market_environment_day_facts",),
+        "progress_tables": ("stock.source_market_environment_day_facts",),
         "algorithm_column": "rule_version",
         "algorithm_label": "市场复合环境展示规则版本",
     },
@@ -1016,6 +1078,655 @@ def _cleanup_scope(
     return _CLEANUP_MODULES[module_code], tuple(sorted(sessions))
 
 
+def _cross_section_cleanup_details(
+    cursor: Any,
+    *,
+    target_sessions: Sequence[date],
+    source_capture_id: int,
+    cutoff: date,
+) -> dict[str, Any]:
+    """一次解析横截面直接后继和其R4实际历史窗口覆盖的D1链。"""
+    from stock_a.storage.postgres.research_day_facts import _D1_PRODUCER_VERSION_7
+
+    selected = tuple(sorted(set(target_sessions)))
+    cursor.execute(
+        """WITH RECURSIVE scope AS (
+               SELECT unnest(%s::date[]) AS target_session
+           ), profile_rows AS (
+               SELECT DISTINCT p.target_session,p.profile_revision
+               FROM stock.source_symbol_price_profiles p
+               JOIN scope s ON s.target_session=p.target_session
+               WHERE p.source_capture_id=%s
+            ), root_d1 AS (
+               SELECT DISTINCT d.id,d.target_session,d.source_capture_id,
+                      d.d1_history_session_count,d.calendar_revision,
+                      d.history_window_start
+               FROM stock.source_d1_structure_day_facts d
+               WHERE d.source_capture_id=%s AND d.producer_version=%s
+                 AND d.target_session<=%s
+                 AND EXISTS (
+                     SELECT 1 FROM scope s
+                     WHERE d.history_window_start<=s.target_session
+                       AND s.target_session<=d.target_session
+                 )
+            ), root_rules AS (
+               SELECT DISTINCT r.id,r.target_session,r.source_capture_id,
+                      r.rule_id,r.rule_version,r.profile_revision,
+                      r.history_session_count,r.d1_history_session_count,
+                      r.event_window_start,r.calendar_revision
+               FROM stock.source_rule_evaluations r
+               WHERE r.source_capture_id=%s
+                 AND (
+                     (r.target_session,r.profile_revision) IN (
+                         SELECT target_session,profile_revision FROM profile_rows
+                     )
+                      OR EXISTS (
+                          SELECT 1 FROM root_d1 d
+                          WHERE d.target_session=r.target_session
+                            AND d.source_capture_id=r.source_capture_id
+                            AND d.d1_history_session_count=r.d1_history_session_count
+                            AND d.calendar_revision=r.calendar_revision
+                            AND d.history_window_start=r.event_window_start
+                      )
+                  )
+            ), affected_cohort_stats AS (
+               SELECT DISTINCT c.ctid,c.target_session
+               FROM stock.source_cohort_group_stats c
+               JOIN root_rules r
+                 ON c.target_session=r.target_session
+                AND c.source_capture_id=r.source_capture_id
+                AND c.rule_id=r.rule_id AND c.rule_version=r.rule_version
+                AND c.profile_revision=r.profile_revision
+                AND c.history_session_count=r.history_session_count
+                AND c.d1_history_session_count=r.d1_history_session_count
+                AND c.event_window_start=r.event_window_start
+                AND c.calendar_revision=r.calendar_revision
+               WHERE c.research_cutoff<=%s
+            ), affected_t0_fep AS (
+               SELECT DISTINCT f.id,f.research_cutoff,f.target_session,
+                      f.rule_id,f.rule_version,f.profile_family,
+                      f.calendar_revision,f.path_rule_version,
+                      f.source_time_quality,f.parser_contract,f.lane,f.horizon,
+                      f.group_code,f.metric_code,f.condition_code
+               FROM stock.source_fep_baseline_facts f
+               JOIN root_rules r
+                 ON f.target_session=r.target_session
+                AND f.source_capture_id=r.source_capture_id
+                AND f.rule_id=r.rule_id AND f.rule_version=r.rule_version
+                AND f.profile_revision=r.profile_revision
+                AND f.history_session_count=r.history_session_count
+                AND f.d1_history_session_count=r.d1_history_session_count
+                AND f.event_window_start=r.event_window_start
+                AND f.calendar_revision=r.calendar_revision
+               WHERE f.summary_scope='T0' AND f.research_cutoff<=%s
+            ), affected_fep_baselines AS (
+               SELECT id,research_cutoff FROM affected_t0_fep
+               UNION
+               SELECT DISTINCT f.id,f.research_cutoff
+               FROM stock.source_fep_baseline_facts f
+               JOIN affected_t0_fep t0
+                 ON f.research_cutoff=t0.research_cutoff
+                AND f.rule_id=t0.rule_id AND f.rule_version=t0.rule_version
+                AND f.profile_family=t0.profile_family
+                AND f.calendar_revision=t0.calendar_revision
+                AND f.path_rule_version=t0.path_rule_version
+                AND f.source_time_quality=t0.source_time_quality
+                AND f.parser_contract=t0.parser_contract
+                AND f.lane=t0.lane AND f.horizon=t0.horizon
+                AND f.group_code=t0.group_code
+                AND f.metric_code=t0.metric_code
+                AND f.condition_code=t0.condition_code
+               WHERE f.summary_scope='EQUAL_DATE'
+                 AND f.source_capture_id IS NULL
+                 AND f.period_start_session<=t0.target_session
+                 AND t0.target_session<=f.period_end_session
+            ), affected_fep_progress_sessions AS (
+               SELECT DISTINCT p.target_session
+               FROM stock.data_job_progress p
+               JOIN stock.data_jobs j ON j.job_id=p.job_id
+               WHERE p.business_table='stock.source_fep_baseline_facts'
+                 AND p.source_capture_id=(SELECT source_capture_id FROM root_rules LIMIT 1)
+                 AND j.source_capture_id=p.source_capture_id
+                 AND j.research_cutoff IN (
+                     SELECT DISTINCT research_cutoff FROM affected_fep_baselines
+                 )
+            ), affected_research_events AS (
+               SELECT DISTINCT e.id,e.target_session
+               FROM stock.source_research_events e
+               JOIN root_d1 d
+                 ON e.target_session=d.target_session
+                AND e.source_capture_id=d.source_capture_id
+                AND e.target_capture_id=d.source_capture_id
+                AND e.d1_history_session_count=d.d1_history_session_count
+                AND e.calendar_revision=d.calendar_revision
+               WHERE e.event_version='SOURCE_D1_ANCHOR_R1'
+            ), root_d0 AS (
+               SELECT DISTINCT d.id,d.target_session
+               FROM stock.source_d0_launch_day_facts d
+               WHERE d.source_capture_id=%s
+                 AND d.target_session IN (SELECT target_session FROM profile_rows)
+           ), root_seed AS (
+               SELECT DISTINCT f.id,f.target_session
+               FROM stock.source_pool_seed_day_facts f
+               JOIN profile_rows p ON p.target_session=f.target_session
+                                  AND p.profile_revision=f.profile_revision
+               WHERE f.source_capture_id=%s
+           ), affected_enrollments(id) AS (
+               SELECT e.id
+               FROM stock.source_research_enrollments e
+               WHERE e.rule_fact_id IN (SELECT id FROM root_rules)
+                  OR e.previous_rule_fact_id IN (SELECT id FROM root_rules)
+                  OR e.d0_fact_id IN (SELECT id FROM root_d0)
+               UNION
+               SELECT child.id
+               FROM stock.source_research_enrollments child
+               JOIN affected_enrollments parent
+                 ON child.parent_enrollment_id=parent.id
+           ), affected_enrollment_dates AS (
+               SELECT a.id,COALESCE(r.target_session,d.target_session) AS target_session
+               FROM affected_enrollments a
+               LEFT JOIN stock.source_research_enrollments e ON e.id=a.id
+               LEFT JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
+               LEFT JOIN stock.source_d0_launch_day_facts d ON d.id=e.d0_fact_id
+           ), affected_t0 AS (
+               SELECT t.id
+               FROM stock.source_t0_early_observation_facts t
+               WHERE t.source_capture_id=%s
+                 AND (
+                     t.target_session IN (SELECT target_session FROM profile_rows)
+                     OR t.target_session IN (SELECT target_session FROM root_d1)
+                     OR t.enrollment_id IN (SELECT id FROM affected_enrollments)
+                     OR t.rule_fact_id IN (SELECT id FROM root_rules)
+                     OR t.d0_fact_id IN (SELECT id FROM root_d0)
+                     OR t.seed_fact_id IN (SELECT id FROM root_seed)
+                 )
+           ), affected_observation_segments AS (
+               SELECT o.id,o.t0_session
+               FROM stock.source_research_observation_segment_days o
+               WHERE o.anchor_rule_fact_id IN (SELECT id FROM root_rules)
+                  OR o.evidence_rule_fact_id IN (SELECT id FROM root_rules)
+                  OR o.source_enrollment_id IN (SELECT id FROM affected_enrollments)
+                  OR o.parent_enrollment_id IN (SELECT id FROM affected_enrollments)
+                  OR o.linked_enrollment_id IN (SELECT id FROM affected_enrollments)
+           ), affected_pulse_changes AS (
+                SELECT DISTINCT p.target_session
+               FROM stock.source_rps_pulse_t0_change_facts p
+               WHERE p.source_t0_fact_id IN (SELECT id FROM affected_t0)
+                  OR p.enrollment_id IN (SELECT id FROM affected_enrollments)
+           ), dependent_sessions AS (
+               SELECT target_session FROM root_d1
+               WHERE target_session<>ALL(%s::date[])
+               UNION
+               SELECT target_session FROM affected_enrollment_dates
+               WHERE target_session IS NOT NULL
+                 AND target_session<>ALL(%s::date[])
+               UNION
+               SELECT target_session FROM affected_pulse_changes
+               WHERE target_session<>ALL(%s::date[])
+               UNION
+               SELECT t0_session FROM affected_observation_segments
+               WHERE t0_session<>ALL(%s::date[])
+                UNION
+                SELECT target_session FROM affected_fep_progress_sessions
+                WHERE target_session<>ALL(%s::date[])
+           )
+           SELECT
+             (SELECT count(*) FROM stock.source_symbol_price_profiles p
+              WHERE p.target_session IN (SELECT target_session FROM profile_rows)
+                AND p.source_capture_id=%s),
+             (SELECT count(*) FROM root_seed),
+             (SELECT count(*) FROM stock.source_d0_scenario_day_facts f
+              WHERE f.target_session IN (SELECT target_session FROM profile_rows)
+                AND f.source_capture_id=%s),
+             (SELECT count(*) FROM root_d0),
+             (SELECT count(*) FROM stock.source_d0_formal_admission_day_facts f
+              WHERE f.target_session IN (SELECT target_session FROM profile_rows)
+                AND f.source_capture_id=%s),
+             (SELECT count(*) FROM root_d1),
+             (SELECT count(*) FROM stock.source_d1_material_anchor_day_facts a
+              WHERE a.d1_structure_id IN (SELECT id FROM root_d1)),
+             (SELECT count(*) FROM root_rules),
+             (SELECT count(*) FROM affected_enrollments),
+             (SELECT count(*) FROM affected_t0),
+             (SELECT count(*) FROM stock.source_rps_pulse_t0_change_facts p
+              WHERE p.source_t0_fact_id IN (SELECT id FROM affected_t0)
+                 OR p.enrollment_id IN (SELECT id FROM affected_enrollments)),
+             (SELECT count(*) FROM affected_observation_segments),
+             (SELECT count(*) FROM affected_cohort_stats),
+             (SELECT count(*) FROM affected_fep_baselines),
+             (SELECT count(*) FROM affected_research_events),
+             COALESCE((SELECT array_agg(target_session ORDER BY target_session)
+                       FROM dependent_sessions),ARRAY[]::date[]),
+             COALESCE((SELECT array_agg(DISTINCT target_session ORDER BY target_session)
+                       FROM profile_rows),ARRAY[]::date[]),
+             COALESCE((SELECT array_agg(DISTINCT profile_revision ORDER BY profile_revision)
+                       FROM profile_rows),ARRAY[]::text[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM root_rules),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM root_d0),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM root_seed),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_enrollments),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_t0),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM root_d1),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id)
+                       FROM affected_observation_segments),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id)
+                       FROM affected_research_events),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id)
+                       FROM affected_fep_baselines),ARRAY[]::bigint[])""",
+        (
+            list(selected),
+            source_capture_id,
+            source_capture_id,
+            _D1_PRODUCER_VERSION_7,
+            cutoff,
+            source_capture_id,
+            cutoff,
+            cutoff,
+            source_capture_id,
+            source_capture_id,
+            source_capture_id,
+            list(selected),
+            list(selected),
+            list(selected),
+            list(selected),
+            list(selected),
+            source_capture_id,
+            source_capture_id,
+            source_capture_id,
+        ),
+    )
+    row = cursor.fetchone()
+    table_names = (
+        "stock.source_symbol_price_profiles",
+        "stock.source_pool_seed_day_facts",
+        "stock.source_d0_scenario_day_facts",
+        "stock.source_d0_launch_day_facts",
+        "stock.source_d0_formal_admission_day_facts",
+        "stock.source_d1_structure_day_facts",
+        "stock.source_d1_material_anchor_day_facts",
+        "stock.source_rule_evaluations",
+        "stock.source_research_enrollments",
+        "stock.source_t0_early_observation_facts",
+        "stock.source_rps_pulse_t0_change_facts",
+        "stock.source_research_observation_segment_days",
+        "stock.source_cohort_group_stats",
+        "stock.source_fep_baseline_facts",
+        "stock.source_research_events",
+    )
+    id_names = (
+        "dependent_target_sessions",
+        "profile_sessions",
+        "profile_revisions",
+        "rule_fact_ids",
+        "d0_fact_ids",
+        "seed_fact_ids",
+        "enrollment_ids",
+        "t0_fact_ids",
+        "d1_structure_ids",
+        "observation_segment_ids",
+    )
+    return {
+        "dependent_rows": {
+            **{table: int(row[index]) for index, table in enumerate(table_names[:12])},
+            **{
+                table: int(row[12 + index])
+                for index, table in enumerate(table_names[12:])
+            },
+        },
+        **{name: tuple(row[15 + index] or ()) for index, name in enumerate(id_names)},
+        "research_event_ids": tuple(row[25] or ()),
+        "fep_baseline_ids": tuple(row[26] or ()),
+    }
+
+
+def _cross_section_cleanup_dependencies(
+    cursor: Any, *, target_session: date, source_capture_id: int
+) -> dict[str, Any]:
+    """核对横截面所派生Profile/Seed/D0/D1及真实相邻登记引用。"""
+    from stock_a.storage.postgres.research_day_facts import _D1_PRODUCER_VERSION_7
+
+    cursor.execute(
+        """WITH RECURSIVE scope AS (
+               SELECT %s::date AS target_session, %s::bigint AS source_capture_id
+           ), root_profiles AS (
+               SELECT DISTINCT p.profile_revision
+               FROM stock.source_symbol_price_profiles p,scope s
+               WHERE p.target_session=s.target_session
+                 AND p.source_capture_id=s.source_capture_id
+           ), root_d1 AS (
+               SELECT d.id,d.target_session
+               FROM stock.source_d1_structure_day_facts d,scope s
+               WHERE d.target_session=s.target_session
+                 AND d.source_capture_id=s.source_capture_id
+                 AND d.producer_version=%s
+           ), root_rules AS (
+               SELECT r.id,r.target_session
+               FROM stock.source_rule_evaluations r,scope s
+               WHERE r.target_session=s.target_session
+                 AND r.source_capture_id=s.source_capture_id
+                 AND (
+                     r.profile_revision IN (SELECT profile_revision FROM root_profiles)
+                     OR EXISTS (SELECT 1 FROM root_d1)
+                 )
+           ), root_d0 AS (
+               SELECT d.id,d.target_session
+               FROM stock.source_d0_launch_day_facts d,scope s
+               WHERE d.target_session=s.target_session
+                 AND d.source_capture_id=s.source_capture_id
+                 AND EXISTS (SELECT 1 FROM root_profiles)
+           ), root_seed AS (
+               SELECT f.id FROM stock.source_pool_seed_day_facts f,scope s
+               WHERE f.target_session=s.target_session
+                 AND f.source_capture_id=s.source_capture_id
+                 AND f.profile_revision IN (SELECT profile_revision FROM root_profiles)
+           ), affected_enrollments(id) AS (
+               SELECT e.id
+               FROM stock.source_research_enrollments e
+               WHERE e.rule_fact_id IN (SELECT id FROM root_rules)
+                  OR e.previous_rule_fact_id IN (SELECT id FROM root_rules)
+                  OR e.d0_fact_id IN (SELECT id FROM root_d0)
+               UNION
+               SELECT child.id
+               FROM stock.source_research_enrollments child
+               JOIN affected_enrollments parent
+                 ON child.parent_enrollment_id=parent.id
+           ), affected_enrollment_dates AS (
+               SELECT a.id,COALESCE(r.target_session,d.target_session) AS target_session
+               FROM affected_enrollments a
+               LEFT JOIN stock.source_research_enrollments e ON e.id=a.id
+               LEFT JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
+               LEFT JOIN stock.source_d0_launch_day_facts d ON d.id=e.d0_fact_id
+           ), affected_t0 AS (
+               SELECT t.id,t.enrollment_id
+               FROM stock.source_t0_early_observation_facts t,scope s
+               WHERE ((t.target_session=s.target_session
+                      AND t.source_capture_id=s.source_capture_id)
+                     AND (EXISTS (SELECT 1 FROM root_profiles)
+                          OR EXISTS (SELECT 1 FROM root_d1)))
+                  OR t.enrollment_id IN (SELECT id FROM affected_enrollments)
+                  OR t.rule_fact_id IN (SELECT id FROM root_rules)
+                  OR t.d0_fact_id IN (SELECT id FROM root_d0)
+                  OR t.seed_fact_id IN (SELECT id FROM root_seed)
+           )
+           SELECT
+               (SELECT count(*) FROM stock.source_symbol_price_profiles p,scope s
+                WHERE p.target_session=s.target_session
+                  AND p.source_capture_id=s.source_capture_id
+                  AND p.profile_revision IN (SELECT profile_revision FROM root_profiles)),
+               (SELECT count(*) FROM root_seed),
+               (SELECT count(*) FROM stock.source_d0_scenario_day_facts f,scope s
+                WHERE f.target_session=s.target_session
+                  AND f.source_capture_id=s.source_capture_id
+                  AND EXISTS (SELECT 1 FROM root_profiles)),
+               (SELECT count(*) FROM stock.source_d0_launch_day_facts f,scope s
+                WHERE f.target_session=s.target_session
+                  AND f.source_capture_id=s.source_capture_id
+                  AND EXISTS (SELECT 1 FROM root_profiles)),
+               (SELECT count(*) FROM stock.source_d0_formal_admission_day_facts f,scope s
+                WHERE f.target_session=s.target_session
+                  AND f.source_capture_id=s.source_capture_id
+                  AND EXISTS (SELECT 1 FROM root_profiles)),
+               (SELECT count(*) FROM root_d1),
+               (SELECT count(*) FROM stock.source_d1_material_anchor_day_facts a
+                JOIN root_d1 d ON d.id=a.d1_structure_id),
+               (SELECT count(*) FROM root_rules),
+               (SELECT count(*) FROM affected_enrollments),
+               (SELECT count(*) FROM affected_t0),
+               (SELECT count(*) FROM stock.source_rps_pulse_t0_change_facts p
+                WHERE p.source_t0_fact_id IN (SELECT id FROM affected_t0)
+                   OR p.enrollment_id IN (SELECT id FROM affected_enrollments)),
+               (SELECT count(*) FROM stock.source_research_observation_segment_days o
+                WHERE o.anchor_rule_fact_id IN (SELECT id FROM root_rules)
+                   OR o.evidence_rule_fact_id IN (SELECT id FROM root_rules)
+                   OR o.source_enrollment_id IN (SELECT id FROM affected_enrollments)
+                   OR o.parent_enrollment_id IN (SELECT id FROM affected_enrollments)
+                   OR o.linked_enrollment_id IN (SELECT id FROM affected_enrollments)),
+               COALESCE((
+                   SELECT array_agg(DISTINCT d.target_session ORDER BY d.target_session)
+                   FROM affected_enrollment_dates d,scope s
+                   WHERE d.target_session IS NOT NULL
+                     AND d.target_session<>s.target_session
+               ),ARRAY[]::date[])""",
+        (
+            target_session,
+            source_capture_id,
+            _D1_PRODUCER_VERSION_7,
+        ),
+    )
+    row = cursor.fetchone()
+    table_names = (
+        "stock.source_symbol_price_profiles",
+        "stock.source_pool_seed_day_facts",
+        "stock.source_d0_scenario_day_facts",
+        "stock.source_d0_launch_day_facts",
+        "stock.source_d0_formal_admission_day_facts",
+        "stock.source_d1_structure_day_facts",
+        "stock.source_d1_material_anchor_day_facts",
+        "stock.source_rule_evaluations",
+        "stock.source_research_enrollments",
+        "stock.source_t0_early_observation_facts",
+        "stock.source_rps_pulse_t0_change_facts",
+        "stock.source_research_observation_segment_days",
+    )
+    return {
+        "dependent_rows": {
+            table: int(row[index]) for index, table in enumerate(table_names)
+        },
+        "dependent_target_sessions": tuple(row[12] or ()),
+    }
+
+
+def _cross_section_cleanup_target_ids(
+    cursor: Any, *, target_session: date, source_capture_id: int
+) -> dict[str, tuple[Any, ...]]:
+    """在同一事务中冻结需要清理的准确业务ID集合。"""
+    from stock_a.storage.postgres.research_day_facts import _D1_PRODUCER_VERSION_7
+
+    cursor.execute(
+        """WITH RECURSIVE scope AS (
+               SELECT %s::date AS target_session,%s::bigint AS source_capture_id
+           ), root_profiles AS (
+               SELECT DISTINCT p.profile_revision
+               FROM stock.source_symbol_price_profiles p,scope s
+               WHERE p.target_session=s.target_session
+                 AND p.source_capture_id=s.source_capture_id
+           ), root_d1 AS (
+               SELECT d.id FROM stock.source_d1_structure_day_facts d,scope s
+               WHERE d.target_session=s.target_session
+                 AND d.source_capture_id=s.source_capture_id
+                 AND d.producer_version=%s
+           ), root_rules AS (
+               SELECT r.id FROM stock.source_rule_evaluations r,scope s
+               WHERE r.target_session=s.target_session
+                 AND r.source_capture_id=s.source_capture_id
+                 AND (
+                     r.profile_revision IN (SELECT profile_revision FROM root_profiles)
+                     OR EXISTS (SELECT 1 FROM root_d1)
+                 )
+           ), root_d0 AS (
+               SELECT d.id FROM stock.source_d0_launch_day_facts d,scope s
+               WHERE d.target_session=s.target_session
+                 AND d.source_capture_id=s.source_capture_id
+                 AND EXISTS (SELECT 1 FROM root_profiles)
+           ), root_seed AS (
+               SELECT f.id FROM stock.source_pool_seed_day_facts f,scope s
+               WHERE f.target_session=s.target_session
+                 AND f.source_capture_id=s.source_capture_id
+                 AND f.profile_revision IN (SELECT profile_revision FROM root_profiles)
+           ), affected_enrollments(id) AS (
+               SELECT e.id
+               FROM stock.source_research_enrollments e
+               WHERE e.rule_fact_id IN (SELECT id FROM root_rules)
+                  OR e.previous_rule_fact_id IN (SELECT id FROM root_rules)
+                  OR e.d0_fact_id IN (SELECT id FROM root_d0)
+               UNION
+               SELECT child.id
+               FROM stock.source_research_enrollments child
+               JOIN affected_enrollments parent
+                 ON child.parent_enrollment_id=parent.id
+           ), affected_t0(id) AS (
+               SELECT t.id
+               FROM stock.source_t0_early_observation_facts t,scope s
+               WHERE ((t.target_session=s.target_session
+                       AND t.source_capture_id=s.source_capture_id)
+                      AND (EXISTS (SELECT 1 FROM root_profiles)
+                           OR EXISTS (SELECT 1 FROM root_d1)))
+                  OR t.enrollment_id IN (SELECT id FROM affected_enrollments)
+                  OR t.rule_fact_id IN (SELECT id FROM root_rules)
+                  OR t.d0_fact_id IN (SELECT id FROM root_d0)
+                  OR t.seed_fact_id IN (SELECT id FROM root_seed)
+           )
+           SELECT
+             COALESCE((SELECT array_agg(profile_revision ORDER BY profile_revision)
+                       FROM root_profiles),ARRAY[]::text[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM root_rules),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM root_d0),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM root_seed),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_enrollments),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_t0),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM root_d1),ARRAY[]::bigint[])""",
+        (target_session, source_capture_id, _D1_PRODUCER_VERSION_7),
+    )
+    row = cursor.fetchone()
+    names = (
+        "profile_revisions",
+        "rule_fact_ids",
+        "d0_fact_ids",
+        "seed_fact_ids",
+        "enrollment_ids",
+        "t0_fact_ids",
+        "d1_structure_ids",
+    )
+    return {name: tuple(row[index] or ()) for index, name in enumerate(names)}
+
+
+def _cross_section_d1_descendant_dependencies(
+    cursor: Any,
+    *,
+    target_sessions: Sequence[date],
+    source_capture_id: int,
+    cutoff: date,
+) -> dict[str, Any]:
+    """找出D1 R4实际历史窗口覆盖被改会话的后继事实及其相邻登记。"""
+    from stock_a.storage.postgres.research_day_facts import _D1_PRODUCER_VERSION_7
+
+    selected = tuple(sorted(set(target_sessions)))
+    cursor.execute(
+        """WITH RECURSIVE selected_sessions AS (
+               SELECT unnest(%s::date[]) AS target_session
+           ), affected_d1 AS (
+               SELECT DISTINCT d.id,d.target_session
+               FROM stock.source_d1_structure_day_facts d
+               WHERE d.source_capture_id=%s AND d.producer_version=%s
+                 AND d.target_session<=%s
+                 AND d.target_session>=(SELECT min(target_session) FROM selected_sessions)
+                 AND d.target_session<>ALL(%s::date[])
+                 AND EXISTS (
+                     SELECT 1 FROM selected_sessions s
+                     WHERE d.history_window_start<=s.target_session
+                       AND s.target_session<d.target_session
+                 )
+           ), affected_rules AS (
+               SELECT DISTINCT r.id,r.target_session,r.rule_id,r.rule_version,
+                               r.profile_revision,r.history_session_count,
+                               r.d1_history_session_count,r.event_window_start,
+                               r.calendar_revision
+               FROM stock.source_rule_evaluations r
+               WHERE r.source_capture_id=%s
+                 AND r.target_session IN (SELECT target_session FROM affected_d1)
+           ), affected_enrollments(id) AS (
+               SELECT e.id
+               FROM stock.source_research_enrollments e
+               WHERE e.rule_fact_id IN (SELECT id FROM affected_rules)
+                  OR e.previous_rule_fact_id IN (SELECT id FROM affected_rules)
+               UNION
+               SELECT child.id
+               FROM stock.source_research_enrollments child
+               JOIN affected_enrollments parent
+                 ON child.parent_enrollment_id=parent.id
+           ), affected_enrollment_dates AS (
+               SELECT a.id,r.target_session
+               FROM affected_enrollments a
+               JOIN stock.source_research_enrollments e ON e.id=a.id
+               JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
+           ), affected_t0 AS (
+               SELECT t.id
+               FROM stock.source_t0_early_observation_facts t
+               WHERE t.source_capture_id=%s
+                 AND (t.target_session IN (SELECT target_session FROM affected_d1)
+                      OR t.rule_fact_id IN (SELECT id FROM affected_rules)
+                      OR t.enrollment_id IN (SELECT id FROM affected_enrollments))
+           ), affected_observation_segments AS (
+               SELECT o.id,o.t0_session,o.observation_session
+               FROM stock.source_research_observation_segment_days o
+               WHERE o.anchor_rule_fact_id IN (SELECT id FROM affected_rules)
+                  OR o.evidence_rule_fact_id IN (SELECT id FROM affected_rules)
+                  OR o.source_enrollment_id IN (SELECT id FROM affected_enrollments)
+                  OR o.parent_enrollment_id IN (SELECT id FROM affected_enrollments)
+                  OR o.linked_enrollment_id IN (SELECT id FROM affected_enrollments)
+           )
+           SELECT
+             (SELECT count(*) FROM affected_d1),
+             (SELECT count(*) FROM stock.source_d1_material_anchor_day_facts a
+              WHERE a.d1_structure_id IN (SELECT id FROM affected_d1)),
+             (SELECT count(*) FROM affected_rules),
+             (SELECT count(*) FROM affected_enrollments),
+             (SELECT count(*) FROM affected_t0),
+             (SELECT count(*) FROM stock.source_rps_pulse_t0_change_facts p
+              WHERE p.source_t0_fact_id IN (SELECT id FROM affected_t0)
+                 OR p.enrollment_id IN (SELECT id FROM affected_enrollments)),
+             (SELECT count(*) FROM affected_observation_segments),
+             COALESCE((
+                 SELECT array_agg(target_session ORDER BY target_session)
+                 FROM (
+                     SELECT target_session FROM affected_d1
+                     UNION
+                     SELECT target_session FROM affected_enrollment_dates
+                 ) q
+             ),ARRAY[]::date[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_d1),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_rules),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_enrollments),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_t0),ARRAY[]::bigint[]),
+             COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_observation_segments),ARRAY[]::bigint[])""",
+        (
+            list(selected),
+            source_capture_id,
+            _D1_PRODUCER_VERSION_7,
+            cutoff,
+            list(selected),
+            source_capture_id,
+            source_capture_id,
+        ),
+    )
+    row = cursor.fetchone()
+    table_names = (
+        "stock.source_d1_structure_day_facts",
+        "stock.source_d1_material_anchor_day_facts",
+        "stock.source_rule_evaluations",
+        "stock.source_research_enrollments",
+        "stock.source_t0_early_observation_facts",
+        "stock.source_rps_pulse_t0_change_facts",
+        "stock.source_research_observation_segment_days",
+    )
+    id_names = (
+        "d1_structure_ids",
+        "rule_fact_ids",
+        "enrollment_ids",
+        "t0_fact_ids",
+        "observation_segment_ids",
+    )
+    return {
+        "dependent_rows": {
+            table: int(row[index]) for index, table in enumerate(table_names)
+        },
+        "dependent_target_sessions": tuple(row[7] or ()),
+        "dependent_ids": {
+            name: tuple(row[8 + index] or ()) for index, name in enumerate(id_names)
+        },
+    }
+
+
 def _cleanup_fk_blockers(cursor: Any, spec: Mapping[str, Any]) -> list[dict[str, str]]:
     cleanup_tables = tuple(
         str(table)
@@ -1605,7 +2316,6 @@ def _cleanup_version_rows(
                     "target_session": row[0],
                     "source_version": {
                         "source_capture_id": int(row[1]),
-                        "universe_version": str(row[2]),
                     },
                     "algorithm_version": str(row[3]),
                     "parent_rows": int(row[5]),
@@ -1628,29 +2338,20 @@ def _cleanup_version_rows(
         cursor.execute(
             """SELECT target_session, stock_capture_id, index_capture_id,
                       primary_index_symbol, index_config_version,
-                      rule_version, calendar_revision, count(*)
+                      rule_version, calendar_id, calendar_revision, count(*)
                FROM stock.source_market_environment_day_facts
                WHERE target_session=ANY(%s) AND target_session<=%s
                GROUP BY target_session, stock_capture_id, index_capture_id,
                         primary_index_symbol, index_config_version,
-                        rule_version, calendar_revision
+                        rule_version, calendar_id, calendar_revision
                ORDER BY target_session, stock_capture_id, index_capture_id,
-                        rule_version, calendar_revision""",
+                        primary_index_symbol, index_config_version,
+                        rule_version, calendar_id, calendar_revision""",
             (list(target_sessions), cutoff),
         )
         env_versions = []
         for row in cursor.fetchall():
             idx_cap = int(row[2]) if row[2] is not None else None
-            idx_rows = 0
-            if idx_cap is not None:
-                cursor.execute(
-                    """SELECT count(*)
-                       FROM stock.source_market_index_day_facts
-                       WHERE target_session=%s AND index_capture_id=%s
-                         AND config_version=%s AND calendar_revision=%s""",
-                    (row[0], idx_cap, str(row[4]), str(row[6])),
-                )
-                idx_rows = int(cursor.fetchone()[0])
             env_versions.append(
                 {
                     "target_session": row[0],
@@ -1659,11 +2360,10 @@ def _cleanup_version_rows(
                         "index_capture_id": idx_cap,
                     },
                     "algorithm_version": str(row[5]),
-                    "parent_rows": int(row[7]),
-                    "child_rows": idx_rows,
+                    "parent_rows": int(row[8]),
+                    "child_rows": 0,
                     "table_counts": {
-                        "stock.source_market_environment_day_facts": int(row[7]),
-                        "stock.source_market_index_day_facts": idx_rows,
+                        "stock.source_market_environment_day_facts": int(row[8]),
                     },
                     "version_key": {
                         "stock_capture_id": int(row[1]),
@@ -1671,7 +2371,8 @@ def _cleanup_version_rows(
                         "primary_index_symbol": str(row[3]),
                         "index_config_version": str(row[4]),
                         "rule_version": str(row[5]),
-                        "calendar_revision": str(row[6]),
+                        "calendar_id": str(row[6]),
+                        "calendar_revision": str(row[7]),
                     },
                 }
             )
@@ -1892,10 +2593,118 @@ def _cleanup_preview_in_cursor(
     spec, sessions = _cleanup_scope(module_code, target_sessions, cutoff)
     blockers = _cleanup_fk_blockers(cursor, spec)
     versions = _cleanup_version_rows(cursor, module_code, sessions, cutoff)
+    if module_code == "CROSS_SECTION":
+        by_capture: dict[int, list[dict[str, Any]]] = {}
+        for version in versions:
+            by_capture.setdefault(
+                version["version_key"]["price_capture_id"], []
+            ).append(version)
+        for source_capture_id, scoped_versions in by_capture.items():
+            selected_scope_sessions = tuple(
+                sorted({version["target_session"] for version in scoped_versions})
+            )
+            details = _cross_section_cleanup_details(
+                cursor,
+                target_sessions=selected_scope_sessions,
+                source_capture_id=source_capture_id,
+                cutoff=cutoff,
+            )
+            dependent_ids = {
+                name: details[name]
+                for name in (
+                    "profile_sessions",
+                    "profile_revisions",
+                    "rule_fact_ids",
+                    "d0_fact_ids",
+                    "seed_fact_ids",
+                    "enrollment_ids",
+                    "t0_fact_ids",
+                    "d1_structure_ids",
+                    "observation_segment_ids",
+                    "fep_baseline_ids",
+                    "research_event_ids",
+                )
+            }
+            scoped_versions[0]["dependent_rows"] = details["dependent_rows"]
+            scoped_versions[0]["dependent_target_sessions"] = details[
+                "dependent_target_sessions"
+            ]
+            scoped_versions[0]["dependent_ids"] = dependent_ids
+            for version in scoped_versions[1:]:
+                version["dependent_rows"] = {}
+                version["dependent_target_sessions"] = ()
+                version["dependent_ids"] = {}
+    elif module_code == "MARKET_INDICES_ENV":
+        grouped_scopes: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        for version in versions:
+            key = version["version_key"]
+            scope_key = (
+                key["stock_capture_id"],
+                key["index_capture_id"],
+                key["primary_index_symbol"],
+                key["index_config_version"],
+                key["calendar_id"],
+                key["calendar_revision"],
+                key["rule_version"],
+            )
+            grouped_scopes.setdefault(scope_key, []).append(version)
+        selected_sessions = set(sessions)
+        for scope_key, scoped_versions in grouped_scopes.items():
+            root_sessions = sorted(
+                version["target_session"] for version in scoped_versions
+            )
+            first_session = root_sessions[0]
+            (
+                stock_capture_id,
+                index_capture_id,
+                primary,
+                index_config,
+                cal_id,
+                cal_rev,
+                rule_ver,
+            ) = scope_key
+            cursor.execute(
+                """SELECT target_session
+                   FROM stock.source_market_environment_day_facts
+                   WHERE target_session>%s AND target_session<=%s
+                     AND target_session<>ALL(%s::date[])
+                     AND stock_capture_id=%s
+                     AND index_capture_id IS NOT DISTINCT FROM %s
+                     AND primary_index_symbol=%s
+                     AND index_config_version IS NOT DISTINCT FROM %s
+                     AND calendar_id=%s AND calendar_revision=%s
+                     AND rule_version=%s
+                   ORDER BY target_session""",
+                (
+                    first_session,
+                    cutoff,
+                    list(selected_sessions),
+                    stock_capture_id,
+                    index_capture_id,
+                    primary,
+                    index_config,
+                    cal_id,
+                    cal_rev,
+                    rule_ver,
+                ),
+            )
+            dependent_sessions = tuple(row[0] for row in cursor.fetchall())
+            if dependent_sessions:
+                scoped_versions[0].setdefault("dependent_rows", {})[
+                    "stock.source_market_environment_day_facts"
+                ] = len(dependent_sessions)
+                scoped_versions[0]["dependent_target_sessions"] = dependent_sessions
     source_scopes_by_session: dict[date, set[str]] = {}
     for version in versions:
+        scope_version = version["source_version"]
+        if module_code == "CROSS_SECTION":
+            # CROSS_SECTION清理API不接Universe选择键，业务操作即同日、同价格捕获的全scope清理；
+            # 多Universe版本不应伪装成多个价格捕获。不同price_capture_id仍保持歧义阻断。
+            scope_version = {
+                "source_capture_id": version["version_key"]["price_capture_id"]
+            }
         source_scope = json.dumps(
-            version["source_version"],
+            scope_version,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -2255,6 +3064,24 @@ def _cleanup_preview_in_cursor(
             for blocker in blockers
         ],
     ]
+    versions_for_key = []
+    for version in versions:
+        serialized_version = {
+            **version,
+            "target_session": version["target_session"].isoformat(),
+            "dependent_target_sessions": [
+                item.isoformat() if isinstance(item, date) else str(item)
+                for item in version.get("dependent_target_sessions", ())
+            ],
+            "dependent_ids": {
+                name: [
+                    item.isoformat() if isinstance(item, date) else item
+                    for item in values
+                ]
+                for name, values in version.get("dependent_ids", {}).items()
+            },
+        }
+        versions_for_key.append(serialized_version)
     key_document = {
         "module_code": module_code,
         "target_sessions": [session.isoformat() for session in sessions],
@@ -2262,13 +3089,7 @@ def _cleanup_preview_in_cursor(
             session.isoformat() for session in ordered_affected_sessions
         ],
         "cutoff": cutoff.isoformat(),
-        "versions": [
-            {
-                **version,
-                "target_session": version["target_session"].isoformat(),
-            }
-            for version in versions
-        ],
+        "versions": versions_for_key,
         "blockers": blockers,
     }
     preview_key = hashlib.sha256(
@@ -2322,6 +3143,24 @@ def preview_derived_cleanup(
     return preview
 
 
+def _cleanup_preview_date(value: Any) -> date:
+    """将预览JSON序列化的官方会话恢复为date键。"""
+    if type(value) is date:
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError as error:
+            raise DataJobPgError(
+                "DATA_JOB_CLEANUP_PREVIEW_SESSION_INVALID",
+                "清理预览中的下游会话不是有效ISO日期",
+            ) from error
+    raise DataJobPgError(
+        "DATA_JOB_CLEANUP_PREVIEW_SESSION_INVALID",
+        "清理预览中的下游会话类型无效",
+    )
+
+
 def clear_derived_module(
     config: Mapping[str, Any],
     module_code: str,
@@ -2357,12 +3196,44 @@ def clear_derived_module(
         cleanup_count_tables = tuple(
             dict.fromkeys((*spec["cleanup_tables"], *spec["progress_tables"]))
         )
+        busy_scope_sql = "target_session=ANY(%s)"
+        busy_scope_parameters: tuple[Any, ...] = (list(sessions),)
+        if module_code in {"CROSS_SECTION", "MARKET_INDICES_ENV"}:
+            busy_scope_pairs = set()
+            for version in preview["versions"]:
+                key = version["version_key"]
+                source_capture_id = (
+                    key["price_capture_id"]
+                    if module_code == "CROSS_SECTION"
+                    else key["stock_capture_id"]
+                )
+                busy_scope_pairs.add(
+                    (date.fromisoformat(version["target_session"]), source_capture_id)
+                )
+                busy_scope_pairs.update(
+                    (_cleanup_preview_date(dependent_session), source_capture_id)
+                    for dependent_session in version.get(
+                        "dependent_target_sessions", ()
+                    )
+                )
+            busy_scope_pairs = sorted(busy_scope_pairs)
+            busy_scope_sql = """EXISTS (
+                SELECT 1 FROM unnest(%s::date[],%s::bigint[])
+                    AS affected(target_session,source_capture_id)
+                WHERE affected.target_session=p.target_session
+                  AND (p.source_capture_id=affected.source_capture_id
+                       OR p.source_capture_id IS NULL)
+            )"""
+            busy_scope_parameters = (
+                [item[0] for item in busy_scope_pairs],
+                [item[1] for item in busy_scope_pairs],
+            )
         cursor.execute(
-            """SELECT count(*) FROM stock.data_job_progress
-               WHERE target_session=ANY(%s) AND business_table=ANY(%s)
-                 AND status='RUNNING' AND (%s::uuid IS NULL OR job_id<>%s)""",
+            f"""SELECT count(*) FROM stock.data_job_progress AS p
+               WHERE {busy_scope_sql} AND p.business_table=ANY(%s)
+                 AND p.status='RUNNING' AND (%s::uuid IS NULL OR p.job_id<>%s)""",
             (
-                list(sessions),
+                *busy_scope_parameters,
                 list(cleanup_count_tables),
                 current_job_id,
                 current_job_id,
@@ -2817,12 +3688,18 @@ def clear_derived_module(
                 cursor.execute(
                     """DELETE FROM stock.source_market_environment_day_facts
                        WHERE target_session=%s AND stock_capture_id=%s
-                         AND primary_index_symbol=%s AND calendar_revision=%s
+                         AND index_capture_id IS NOT DISTINCT FROM %s
+                         AND primary_index_symbol=%s
+                         AND index_config_version IS NOT DISTINCT FROM %s
+                         AND calendar_id=%s AND calendar_revision=%s
                          AND rule_version=%s""",
                     (
                         target_session,
                         key["stock_capture_id"],
+                        key["index_capture_id"],
                         key["primary_index_symbol"],
+                        key["index_config_version"],
+                        key["calendar_id"],
                         key["calendar_revision"],
                         key["rule_version"],
                     ),
@@ -2833,24 +3710,6 @@ def clear_derived_module(
                 deleted_by_session[target_session.isoformat()][
                     "stock.source_market_environment_day_facts"
                 ] += cursor.rowcount
-                if key.get("index_capture_id") is not None:
-                    cursor.execute(
-                        """DELETE FROM stock.source_market_index_day_facts
-                           WHERE target_session=%s AND index_capture_id=%s
-                             AND config_version=%s AND calendar_revision=%s""",
-                        (
-                            target_session,
-                            key["index_capture_id"],
-                            key["index_config_version"],
-                            key["calendar_revision"],
-                        ),
-                    )
-                    deleted_rows["stock.source_market_index_day_facts"] += (
-                        cursor.rowcount
-                    )
-                    deleted_by_session[target_session.isoformat()][
-                        "stock.source_market_index_day_facts"
-                    ] += cursor.rowcount
             elif module_code == "FORWARD_PATH":
                 cursor.execute(
                     """DELETE FROM stock.source_forward_path_facts
@@ -2966,6 +3825,286 @@ def clear_derived_module(
                     "stock.source_sector_pulse_cohort_group_facts"
                 ] += cursor.rowcount
 
+        if module_code == "MARKET_INDICES_ENV":
+            grouped_scopes: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+            for version in preview["versions"]:
+                key = version["version_key"]
+                scope_key = (
+                    key["stock_capture_id"],
+                    key["index_capture_id"],
+                    key["primary_index_symbol"],
+                    key["index_config_version"],
+                    key["calendar_id"],
+                    key["calendar_revision"],
+                    key["rule_version"],
+                )
+                grouped_scopes.setdefault(scope_key, []).append(version)
+            selected_sessions = set(sessions)
+            for scope_key, scoped_versions in grouped_scopes.items():
+                root_sessions = sorted(
+                    date.fromisoformat(version["target_session"])
+                    for version in scoped_versions
+                )
+                (
+                    stock_capture_id,
+                    index_capture_id,
+                    primary,
+                    index_config,
+                    cal_id,
+                    cal_rev,
+                    rule_ver,
+                ) = scope_key
+                cursor.execute(
+                    """DELETE FROM stock.source_market_environment_day_facts
+                       WHERE target_session>%s AND target_session<=%s
+                         AND target_session<>ALL(%s::date[])
+                         AND stock_capture_id=%s
+                         AND index_capture_id IS NOT DISTINCT FROM %s
+                         AND primary_index_symbol=%s
+                         AND index_config_version IS NOT DISTINCT FROM %s
+                         AND calendar_id=%s AND calendar_revision=%s
+                         AND rule_version=%s
+                       RETURNING target_session""",
+                    (
+                        root_sessions[0],
+                        cutoff,
+                        list(selected_sessions),
+                        stock_capture_id,
+                        index_capture_id,
+                        primary,
+                        index_config,
+                        cal_id,
+                        cal_rev,
+                        rule_ver,
+                    ),
+                )
+                for row in cursor.fetchall():
+                    table = "stock.source_market_environment_day_facts"
+                    deleted_rows[table] += 1
+                    session_counts = deleted_by_session.setdefault(
+                        row[0].isoformat(),
+                        {name: 0 for name in cleanup_count_tables},
+                    )
+                    session_counts[table] += 1
+
+        if module_code == "CROSS_SECTION":
+            scopes_by_capture: dict[int, list[dict[str, Any]]] = {}
+            for version in preview["versions"]:
+                key = version["version_key"]
+                scopes_by_capture.setdefault(key["price_capture_id"], []).append(
+                    version
+                )
+
+            def record_deletion(table: str, count: int, session: date) -> None:
+                if not count:
+                    return
+                deleted_rows[table] += count
+                session_counts = deleted_by_session.setdefault(
+                    session.isoformat(),
+                    {name: 0 for name in cleanup_count_tables},
+                )
+                session_counts[table] += count
+
+            for source_capture_id, scoped_versions in scopes_by_capture.items():
+                selected_scope_sessions = tuple(
+                    sorted(
+                        {
+                            date.fromisoformat(version["target_session"])
+                            for version in scoped_versions
+                        }
+                    )
+                )
+                target_session = selected_scope_sessions[0]
+                target_ids = scoped_versions[0].get("dependent_ids", {})
+                enrollment_sessions: dict[int, date] = {}
+                if target_ids["enrollment_ids"]:
+                    cursor.execute(
+                        """SELECT e.id,COALESCE(r.target_session,d.target_session)
+                           FROM stock.source_research_enrollments e
+                           LEFT JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
+                           LEFT JOIN stock.source_d0_launch_day_facts d ON d.id=e.d0_fact_id
+                           WHERE e.id=ANY(%s::bigint[])""",
+                        (list(target_ids["enrollment_ids"]),),
+                    )
+                    enrollment_sessions = {
+                        int(row[0]): row[1] or target_session
+                        for row in cursor.fetchall()
+                    }
+
+                cursor.execute(
+                    """DELETE FROM stock.source_rps_pulse_t0_change_facts
+                       WHERE source_t0_fact_id=ANY(%s::bigint[])
+                          OR enrollment_id=ANY(%s::bigint[])
+                       RETURNING target_session""",
+                    (
+                        list(target_ids["t0_fact_ids"]),
+                        list(target_ids["enrollment_ids"]),
+                    ),
+                )
+                for row in cursor.fetchall():
+                    record_deletion("stock.source_rps_pulse_t0_change_facts", 1, row[0])
+
+                cursor.execute(
+                    """DELETE FROM stock.source_research_observation_segment_days
+                       WHERE anchor_rule_fact_id=ANY(%s::bigint[])
+                          OR evidence_rule_fact_id=ANY(%s::bigint[])
+                          OR source_enrollment_id=ANY(%s::bigint[])
+                          OR parent_enrollment_id=ANY(%s::bigint[])
+                          OR linked_enrollment_id=ANY(%s::bigint[])
+                       RETURNING t0_session""",
+                    (
+                        list(target_ids["rule_fact_ids"]),
+                        list(target_ids["rule_fact_ids"]),
+                        list(target_ids["enrollment_ids"]),
+                        list(target_ids["enrollment_ids"]),
+                        list(target_ids["enrollment_ids"]),
+                    ),
+                )
+                for row in cursor.fetchall():
+                    record_deletion(
+                        "stock.source_research_observation_segment_days", 1, row[0]
+                    )
+
+                cursor.execute(
+                    """DELETE FROM stock.source_cohort_group_stats
+                       USING stock.source_rule_evaluations r
+                       WHERE r.id=ANY(%s::bigint[])
+                         AND source_cohort_group_stats.target_session=r.target_session
+                         AND source_cohort_group_stats.source_capture_id=r.source_capture_id
+                         AND source_cohort_group_stats.rule_id=r.rule_id
+                         AND source_cohort_group_stats.rule_version=r.rule_version
+                         AND source_cohort_group_stats.profile_revision=r.profile_revision
+                         AND source_cohort_group_stats.history_session_count=r.history_session_count
+                         AND source_cohort_group_stats.d1_history_session_count=r.d1_history_session_count
+                         AND source_cohort_group_stats.event_window_start=r.event_window_start
+                         AND source_cohort_group_stats.calendar_revision=r.calendar_revision
+                         AND source_cohort_group_stats.research_cutoff<=%s
+                       RETURNING source_cohort_group_stats.target_session""",
+                    (list(target_ids["rule_fact_ids"]), cutoff),
+                )
+                for row in cursor.fetchall():
+                    record_deletion("stock.source_cohort_group_stats", 1, row[0])
+
+                cursor.execute(
+                    """DELETE FROM stock.source_fep_baseline_facts
+                       WHERE id=ANY(%s::bigint[])
+                       RETURNING research_cutoff""",
+                    (list(target_ids["fep_baseline_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion("stock.source_fep_baseline_facts", 1, row[0])
+
+                cursor.execute(
+                    """DELETE FROM stock.source_research_events
+                       WHERE id=ANY(%s::bigint[])
+                       RETURNING target_session""",
+                    (list(target_ids["research_event_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion("stock.source_research_events", 1, row[0])
+
+                cursor.execute(
+                    """DELETE FROM stock.source_t0_early_observation_facts
+                       WHERE id=ANY(%s::bigint[])
+                       RETURNING target_session""",
+                    (list(target_ids["t0_fact_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion(
+                        "stock.source_t0_early_observation_facts", 1, row[0]
+                    )
+
+                cursor.execute(
+                    """DELETE FROM stock.source_research_enrollments
+                       WHERE id=ANY(%s::bigint[])
+                       RETURNING id""",
+                    (list(target_ids["enrollment_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion(
+                        "stock.source_research_enrollments",
+                        1,
+                        enrollment_sessions.get(int(row[0]), target_session),
+                    )
+
+                cursor.execute(
+                    """DELETE FROM stock.source_rule_evaluations
+                       WHERE id=ANY(%s::bigint[])
+                       RETURNING target_session""",
+                    (list(target_ids["rule_fact_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion("stock.source_rule_evaluations", 1, row[0])
+
+                if target_ids["profile_sessions"]:
+                    cursor.execute(
+                        """DELETE FROM stock.source_d0_formal_admission_day_facts
+                           WHERE target_session=ANY(%s) AND source_capture_id=%s
+                           RETURNING target_session""",
+                        (list(target_ids["profile_sessions"]), source_capture_id),
+                    )
+                    for row in cursor.fetchall():
+                        record_deletion(
+                            "stock.source_d0_formal_admission_day_facts", 1, row[0]
+                        )
+
+                cursor.execute(
+                    """DELETE FROM stock.source_d0_launch_day_facts
+                       WHERE id=ANY(%s::bigint[])
+                       RETURNING target_session""",
+                    (list(target_ids["d0_fact_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion("stock.source_d0_launch_day_facts", 1, row[0])
+
+                cursor.execute(
+                    """DELETE FROM stock.source_d1_material_anchor_day_facts
+                       WHERE d1_structure_id=ANY(%s::bigint[])
+                       RETURNING created_session""",
+                    (list(target_ids["d1_structure_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion(
+                        "stock.source_d1_material_anchor_day_facts", 1, row[0]
+                    )
+
+                cursor.execute(
+                    """DELETE FROM stock.source_d1_structure_day_facts
+                       WHERE id=ANY(%s::bigint[])
+                       RETURNING target_session""",
+                    (list(target_ids["d1_structure_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion("stock.source_d1_structure_day_facts", 1, row[0])
+
+                cursor.execute(
+                    """DELETE FROM stock.source_pool_seed_day_facts
+                       WHERE id=ANY(%s::bigint[])
+                       RETURNING target_session""",
+                    (list(target_ids["seed_fact_ids"]),),
+                )
+                for row in cursor.fetchall():
+                    record_deletion("stock.source_pool_seed_day_facts", 1, row[0])
+
+                if target_ids["profile_sessions"]:
+                    cursor.execute(
+                        """DELETE FROM stock.source_d0_scenario_day_facts
+                           WHERE target_session=ANY(%s) AND source_capture_id=%s
+                           RETURNING target_session""",
+                        (list(target_ids["profile_sessions"]), source_capture_id),
+                    )
+                    for row in cursor.fetchall():
+                        record_deletion("stock.source_d0_scenario_day_facts", 1, row[0])
+
+                    cursor.execute(
+                        """DELETE FROM stock.source_symbol_price_profiles
+                           WHERE target_session=ANY(%s) AND source_capture_id=%s
+                           RETURNING target_session""",
+                        (list(target_ids["profile_sessions"]), source_capture_id),
+                    )
+                    for row in cursor.fetchall():
+                        record_deletion("stock.source_symbol_price_profiles", 1, row[0])
+
         expected_counts = {
             table: int(preview.get("affected_rows_by_table", {}).get(table, 0))
             for table in cleanup_count_tables
@@ -2982,42 +4121,28 @@ def clear_derived_module(
         downstream_existing_fact_counts: dict[str, int] = {}
         downstream_subsequent_sessions: list[str] = []
         if module_code == "CROSS_SECTION" and sessions:
-            downstream_tables = (
-                "stock.source_symbol_price_profiles",
-                "stock.source_pool_seed_day_facts",
-                "stock.source_d1_structure_day_facts",
-                "stock.source_d1_material_anchor_day_facts",
+            downstream_tables = tuple(
+                table
+                for table in spec["progress_tables"]
+                if table
+                not in {
+                    "stock.source_cross_section_day_facts",
+                    "stock.source_cross_section_endpoints",
+                }
             )
             downstream_invalidated_tables = list(downstream_tables)
-            for ds_table in downstream_tables:
-                if ds_table not in invalidated_tables:
-                    invalidated_tables.append(ds_table)
-            for ds_table, count_sql in (
-                (
-                    "stock.source_symbol_price_profiles",
-                    "SELECT count(*) FROM stock.source_symbol_price_profiles WHERE target_session=ANY(%s)",
-                ),
-                (
-                    "stock.source_pool_seed_day_facts",
-                    "SELECT count(*) FROM stock.source_pool_seed_day_facts WHERE target_session=ANY(%s)",
-                ),
-                (
-                    "stock.source_d1_structure_day_facts",
-                    "SELECT count(*) FROM stock.source_d1_structure_day_facts WHERE target_session=ANY(%s)",
-                ),
-            ):
-                cursor.execute(count_sql, (list(sessions),))
-                downstream_existing_fact_counts[ds_table] = int(cursor.fetchone()[0])
+            downstream_existing_fact_counts = {
+                table: int(preview["affected_rows_by_table"].get(table, 0))
+                for table in downstream_tables
+            }
         elif module_code == "MARKET_INDICES_ENV" and sessions:
-            min_cleared_session = min(sessions)
-            cursor.execute(
-                """SELECT DISTINCT target_session
-                   FROM stock.source_market_environment_day_facts
-                   WHERE target_session > %s
-                   ORDER BY target_session""",
-                (min_cleared_session,),
+            subsequent = sorted(
+                {
+                    _cleanup_preview_date(session)
+                    for version in preview["versions"]
+                    for session in version.get("dependent_target_sessions", ())
+                }
             )
-            subsequent = [row[0] for row in cursor.fetchall()]
             if subsequent:
                 downstream_subsequent_sessions = [d.isoformat() for d in subsequent]
                 downstream_invalidated_tables = [
@@ -3030,8 +4155,40 @@ def clear_derived_module(
                     "stock.source_market_environment_day_facts_subsequent"
                 ] = len(subsequent)
 
+        progress_scope_sql = "p.target_session=ANY(%s)"
+        progress_scope_parameters: tuple[Any, ...] = (invalidated_sessions,)
+        if module_code in {"CROSS_SECTION", "MARKET_INDICES_ENV"}:
+            scope_pairs = set()
+            for version in preview["versions"]:
+                key = version["version_key"]
+                source_capture_id = (
+                    key["price_capture_id"]
+                    if module_code == "CROSS_SECTION"
+                    else key["stock_capture_id"]
+                )
+                scope_pairs.add(
+                    (date.fromisoformat(version["target_session"]), source_capture_id)
+                )
+                scope_pairs.update(
+                    (_cleanup_preview_date(dependent_session), source_capture_id)
+                    for dependent_session in version.get(
+                        "dependent_target_sessions", ()
+                    )
+                )
+            scope_pairs = sorted(scope_pairs)
+            progress_scope_sql = """EXISTS (
+                SELECT 1 FROM unnest(%s::date[],%s::bigint[])
+                    AS affected(target_session,source_capture_id)
+                WHERE affected.target_session=p.target_session
+                  AND (affected.source_capture_id=p.source_capture_id
+                       OR p.source_capture_id IS NULL)
+            )"""
+            progress_scope_parameters = (
+                [item[0] for item in scope_pairs],
+                [item[1] for item in scope_pairs],
+            )
         cursor.execute(
-            """UPDATE stock.data_job_progress
+            f"""UPDATE stock.data_job_progress AS p
                SET status='NOT_COMPUTED',completed_units=0,expected_rows=NULL,
                    verified_rows=NULL,inserted_rows=0,updated_rows=0,
                    source_capture_id=NULL,
@@ -3042,12 +4199,12 @@ def clear_derived_module(
                 error_message='对应派生结果或其依赖的上游横截面/前态已清理；需按依赖重新生成。',
                    deleted_rows=0,
                    updated_at=clock_timestamp(),completed_at=NULL,verified_at=NULL
-               WHERE target_session=ANY(%s) AND business_table=ANY(%s)
-                 AND status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
-                 AND (%s::uuid IS NULL OR job_id<>%s)
+               WHERE {progress_scope_sql} AND p.business_table=ANY(%s)
+                 AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
+                 AND (%s::uuid IS NULL OR p.job_id<>%s)
                RETURNING job_id, business_table""",
             (
-                invalidated_sessions,
+                *progress_scope_parameters,
                 invalidated_tables,
                 current_job_id,
                 current_job_id,
@@ -3246,6 +4403,11 @@ def read_business_table_count(
     followup_target_sessions: Sequence[date] | None = None,
     research_cutoff: date | None = None,
     universe_version: str | None = None,
+    universe_capture_id: int | None = None,
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
+    universe_match_status: str | None = None,
 ) -> int:
     """按唯一来源捕获键和实际业务维度独立读回已提交行数。"""
     if (
@@ -3263,6 +4425,28 @@ def read_business_table_count(
                 )
                 or len(set(rule_ids)) != len(rule_ids)
             )
+        )
+        or universe_capture_id is not None
+        and (type(universe_capture_id) is not int or universe_capture_id <= 0)
+        or cross_section_universe_capture_id is not None
+        and (
+            type(cross_section_universe_capture_id) is not int
+            or cross_section_universe_capture_id <= 0
+        )
+        or cross_section_universe_version is not None
+        and (
+            not isinstance(cross_section_universe_version, str)
+            or not cross_section_universe_version.strip()
+        )
+        or cross_section_contract_version is not None
+        and (
+            not isinstance(cross_section_contract_version, str)
+            or not cross_section_contract_version.strip()
+        )
+        or universe_match_status is not None
+        and (
+            not isinstance(universe_match_status, str)
+            or not universe_match_status.strip()
         )
     ):
         raise DataJobPgError(
@@ -3354,7 +4538,11 @@ def read_business_table_count(
             """SELECT count(*) FROM stock.source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s
                  AND history_session_count=%s AND profile_revision=%s
-                 AND producer_version=ANY(%s::text[]) AND calendar_revision=%s""",
+                 AND producer_version=ANY(%s::text[]) AND calendar_revision=%s
+                 AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s
+                 AND cross_section_universe_version IS NOT DISTINCT FROM %s
+                 AND cross_section_contract_version IS NOT DISTINCT FROM %s
+                 AND universe_match_status IS NOT DISTINCT FROM %s""",
             lambda: (
                 target_session,
                 source_capture_id,
@@ -3362,6 +4550,10 @@ def read_business_table_count(
                 profile_revision,
                 producer_versions,
                 calendar_revision,
+                cross_section_universe_capture_id,
+                cross_section_universe_version,
+                cross_section_contract_version,
+                universe_match_status,
             ),
         ),
         "stock.source_d0_launch_day_facts": (
@@ -3379,13 +4571,19 @@ def read_business_table_count(
             """SELECT count(*) FROM stock.source_d1_structure_day_facts
                WHERE target_session=%s AND source_capture_id=%s
                  AND d1_history_session_count=%s
-                 AND producer_version=%s AND calendar_revision=%s""",
+                 AND producer_version=%s AND calendar_revision=%s
+                 AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s
+                 AND cross_section_universe_version IS NOT DISTINCT FROM %s
+                 AND cross_section_contract_version IS NOT DISTINCT FROM %s""",
             lambda: (
                 target_session,
                 source_capture_id,
                 d1_history_session_count,
                 producer_version,
                 calendar_revision,
+                cross_section_universe_capture_id,
+                cross_section_universe_version,
+                cross_section_contract_version,
             ),
         ),
         "stock.source_d1_material_anchor_day_facts": (
@@ -3393,13 +4591,19 @@ def read_business_table_count(
                JOIN stock.source_d1_structure_day_facts d ON d.id=a.d1_structure_id
                WHERE d.target_session=%s AND d.source_capture_id=%s
                  AND d.d1_history_session_count=%s
-                 AND d.producer_version=%s AND d.calendar_revision=%s""",
+                 AND d.producer_version=%s AND d.calendar_revision=%s
+                 AND d.cross_section_universe_capture_id IS NOT DISTINCT FROM %s
+                 AND d.cross_section_universe_version IS NOT DISTINCT FROM %s
+                 AND d.cross_section_contract_version IS NOT DISTINCT FROM %s""",
             lambda: (
                 target_session,
                 source_capture_id,
                 d1_history_session_count,
                 producer_version,
                 calendar_revision,
+                cross_section_universe_capture_id,
+                cross_section_universe_version,
+                cross_section_contract_version,
             ),
         ),
         "stock.source_research_enrollments": (
@@ -3524,7 +4728,8 @@ def read_business_table_count(
             """SELECT count(*) FROM stock.source_cross_section_day_facts
                WHERE target_session=%s AND price_capture_id=%s
                  AND contract_version=%s AND calendar_revision=%s
-                 AND (%s::text IS NULL OR universe_version=%s)""",
+                 AND (%s::text IS NULL OR universe_version=%s)
+                 AND (%s::bigint IS NULL OR universe_capture_id IS NOT DISTINCT FROM %s)""",
             lambda: (
                 target_session,
                 source_capture_id,
@@ -3532,13 +4737,16 @@ def read_business_table_count(
                 calendar_revision,
                 universe_version,
                 universe_version,
+                universe_capture_id,
+                universe_capture_id,
             ),
         ),
         "stock.source_cross_section_endpoints": (
             """SELECT count(*) FROM stock.source_cross_section_endpoints
                WHERE target_session=%s AND price_capture_id=%s
                  AND contract_version=%s AND calendar_revision=%s
-                 AND (%s::text IS NULL OR universe_version=%s)""",
+                 AND (%s::text IS NULL OR universe_version=%s)
+                 AND (%s::bigint IS NULL OR universe_capture_id IS NOT DISTINCT FROM %s)""",
             lambda: (
                 target_session,
                 source_capture_id,
@@ -3546,6 +4754,8 @@ def read_business_table_count(
                 calendar_revision,
                 universe_version,
                 universe_version,
+                universe_capture_id,
+                universe_capture_id,
             ),
         ),
         "stock.source_market_index_day_facts": (

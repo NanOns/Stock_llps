@@ -115,7 +115,9 @@ def _read_rule_day_contexts(
                   history_calendar_id,history_calendar_revision,history_window_start,
                   history_window_end,price_coordinate,
                   min(history_stored_session_count),max(history_stored_session_count),
-                  count(*),count(DISTINCT p.source_symbol)
+                  count(*),count(DISTINCT p.source_symbol),
+                  p.cross_section_universe_capture_id,
+                  p.cross_section_universe_version,p.cross_section_contract_version
            FROM source_symbol_price_profiles p
            WHERE p.target_session=ANY(%s) AND p.source_capture_id=%s
              AND p.price_coordinate='FORWARD_ADJUSTED'
@@ -127,7 +129,7 @@ def _read_rule_day_contexts(
                    AND s.producer_version=%s
                    AND s.price_coordinate='FORWARD_ADJUSTED'
              )
-           GROUP BY 1,2,3,4,5,6,7,8,9 ORDER BY 1,2,3""",
+           GROUP BY 1,2,3,4,5,6,7,8,9,14,15,16 ORDER BY 1,2,3""",
         (list(selected), source_capture_id, _SEED_PRODUCER_VERSION),
     )
     profile_rows = cursor.fetchall()
@@ -135,23 +137,30 @@ def _read_rule_day_contexts(
         """SELECT target_session,source_capture_id,profile_revision,history_session_count,
                   history_window_start,history_window_end,calendar_revision,research_mode,
                   price_coordinate,producer_contract,producer_version,count(*),
-                  count(DISTINCT source_symbol)
+                  count(DISTINCT source_symbol),cross_section_universe_capture_id,
+                  cross_section_universe_version,cross_section_contract_version,
+                  universe_match_status,ranking_universe_count,evaluation_universe_count
            FROM source_pool_seed_day_facts
            WHERE target_session=ANY(%s) AND source_capture_id=%s
              AND producer_version=%s
-           GROUP BY 1,2,3,4,5,6,7,8,9,10,11 ORDER BY 1,2,3""",
+           GROUP BY 1,2,3,4,5,6,7,8,9,10,11,14,15,16,17,18,19
+           ORDER BY 1,2,3""",
         (list(selected), source_capture_id, _SEED_PRODUCER_VERSION),
     )
     seed_rows = cursor.fetchall()
     cursor.execute(
         """SELECT target_session,target_capture_id,d1_history_session_count,
-                  history_window_start,history_window_end,calendar_revision,
-                  producer_contract,producer_version,research_mode,price_coordinate,
-                  count(*),count(DISTINCT source_symbol),count(DISTINCT structure_type)
+                  history_window_start,history_window_end,calendar_id,calendar_revision,
+                  producer_contract,producer_version,material_change_contract,
+                  research_mode,price_coordinate,count(*),
+                  count(DISTINCT source_symbol),count(DISTINCT structure_type),
+                  array_agg(DISTINCT structure_type ORDER BY structure_type),
+                  cross_section_universe_capture_id,cross_section_universe_version,
+                  cross_section_contract_version
            FROM source_d1_structure_day_facts
            WHERE target_session=ANY(%s) AND source_capture_id=%s
              AND producer_version=ANY(%s)
-           GROUP BY 1,2,3,4,5,6,7,8,9,10 ORDER BY 1,2,3""",
+           GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,17,18,19 ORDER BY 1,2,3""",
         (list(selected), source_capture_id, list(_D1_SUPPORTED_PRODUCER_VERSIONS)),
     )
     d1_rows = cursor.fetchall()
@@ -182,6 +191,12 @@ def _read_rule_day_contexts(
         by_table[key][row[0]].append(row[1:])
 
     contexts: dict[date, dict[str, Any]] = {}
+    from stock_a.storage.postgres.research_day_facts import (
+        _D1_PRODUCER_VERSION_7,
+        _expected_d1_structure_types,
+        _select_preferred_d1_scopes,
+    )
+
     for session in selected:
         captures = by_table["captures"][session]
         context: dict[str, Any] = {
@@ -219,12 +234,11 @@ def _read_rule_day_contexts(
         profile_scopes = by_table["profiles"][session]
         seed_scopes = by_table["seeds"][session]
         d1_scopes = by_table["d1"][session]
-        if len(d1_scopes) > 1:
-            r4_d1_scopes = [
-                row for row in d1_scopes if row[7] == "STOCK_A_D1_BAOSTOCK_QFQ_R4"
-            ]
-            if r4_d1_scopes:
-                d1_scopes = r4_d1_scopes
+        d1_scopes = _select_preferred_d1_scopes(
+            d1_scopes,
+            version_index=7,
+            comparable_indices=(0, 1, 2, 3, 4, 5, 6, 8, 9, 10),
+        )
         if not (
             raw_count > 0
             and raw_count == raw_symbols == expected_count == complete_requests
@@ -252,6 +266,9 @@ def _read_rule_day_contexts(
             maximum_stored_count,
             profile_count,
             profile_symbols,
+            profile_cross_capture_id,
+            profile_cross_version,
+            profile_cross_contract,
         ) = profile
         (
             seed_capture,
@@ -266,22 +283,35 @@ def _read_rule_day_contexts(
             seed_version,
             seed_count,
             seed_symbols,
+            seed_cross_capture_id,
+            seed_cross_version,
+            seed_cross_contract,
+            seed_match_status,
+            seed_ranking_count,
+            seed_evaluation_count,
         ) = seed
         (
             d1_capture,
             d1_history_count,
             d1_start,
             d1_end,
+            d1_calendar_id,
             d1_calendar_revision,
             d1_contract,
             d1_version,
+            d1_material_change_contract,
             d1_research_mode,
             d1_coordinate,
             d1_count,
             d1_symbols,
             structure_count,
+            stored_structure_types,
+            d1_cross_capture_id,
+            d1_cross_version,
+            d1_cross_contract,
         ) = d1
-        expected_d1_type_count = 7 if d1_version == "STOCK_A_D1_BAOSTOCK_QFQ_R4" else 5
+        expected_d1_types = _expected_d1_structure_types(d1_version)
+        expected_d1_type_count = len(expected_d1_types)
         revision_context = _profile_revision_context(profile_revision, history_count)
         inputs_complete = (
             profile_capture == seed_capture == d1_capture == capture
@@ -290,11 +320,13 @@ def _read_rule_day_contexts(
             and d1_count == research_raw_count * expected_d1_type_count
             and d1_symbols == research_raw_count
             and structure_count == expected_d1_type_count
+            and frozenset(stored_structure_types or ()) == frozenset(expected_d1_types)
             and requested_count == history_count
             and 0 <= minimum_stored_count <= maximum_stored_count <= requested_count
             and profile_start == seed_start
             and profile_end == seed_end == session
             and profile_end == session
+            and history_calendar_id == d1_calendar_id
             and history_calendar_revision == d1_calendar_revision
             and bool(seed_calendar_revision)
             and profile_coordinate
@@ -302,6 +334,17 @@ def _read_rule_day_contexts(
             == d1_coordinate
             == "FORWARD_ADJUSTED"
             and research_mode == d1_research_mode == "NON_PIT_RETROSPECTIVE"
+            and (
+                profile_cross_capture_id,
+                profile_cross_version,
+                profile_cross_contract,
+            )
+            == (seed_cross_capture_id, seed_cross_version, seed_cross_contract)
+            and (
+                d1_version != _D1_PRODUCER_VERSION_7
+                or (d1_cross_capture_id, d1_cross_version, d1_cross_contract)
+                == (seed_cross_capture_id, seed_cross_version, seed_cross_contract)
+            )
             and revision_context
             == (revision_context[0], history_calendar_id, history_calendar_revision)
             if revision_context is not None
@@ -323,6 +366,9 @@ def _read_rule_day_contexts(
                 "calendar_id": history_calendar_id,
                 "calendar_revision": history_calendar_revision,
                 "price_coordinate": profile_coordinate,
+                "cross_section_universe_capture_id": profile_cross_capture_id,
+                "cross_section_universe_version": profile_cross_version,
+                "cross_section_contract_version": profile_cross_contract,
             },
             seed={
                 "contract": seed_contract,
@@ -330,16 +376,27 @@ def _read_rule_day_contexts(
                 "calendar_revision": seed_calendar_revision,
                 "research_mode": research_mode,
                 "price_coordinate": seed_coordinate,
+                "cross_section_universe_capture_id": seed_cross_capture_id,
+                "cross_section_universe_version": seed_cross_version,
+                "cross_section_contract_version": seed_cross_contract,
+                "universe_match_status": seed_match_status,
+                "ranking_universe_count": seed_ranking_count,
+                "evaluation_universe_count": seed_evaluation_count,
             },
             d1={
                 "history_count": d1_history_count,
                 "window_start": d1_start,
                 "window_end": d1_end,
+                "calendar_id": d1_calendar_id,
                 "calendar_revision": d1_calendar_revision,
                 "contract": d1_contract,
+                "material_change_contract": d1_material_change_contract,
                 "version": d1_version,
                 "research_mode": d1_research_mode,
                 "price_coordinate": d1_coordinate,
+                "cross_section_universe_capture_id": d1_cross_capture_id,
+                "cross_section_universe_version": d1_cross_version,
+                "cross_section_contract_version": d1_cross_contract,
             },
         )
         rule_scopes = by_table["rules"][session]
@@ -462,6 +519,12 @@ def _rule_context_comparable(
             before_context["source_clock_role"] == target_context["source_clock_role"],
             before_context["parser_contract"] == target_context["parser_contract"],
             before_profile["revision_context"] == target_profile["revision_context"],
+            before_profile["cross_section_universe_capture_id"]
+            == target_profile["cross_section_universe_capture_id"],
+            before_profile["cross_section_universe_version"]
+            == target_profile["cross_section_universe_version"],
+            before_profile["cross_section_contract_version"]
+            == target_profile["cross_section_contract_version"],
             before_profile["window_end"] == before,
             target_profile["window_end"] == target,
             before_context["seed"]["contract"] == target_context["seed"]["contract"],
@@ -472,10 +535,27 @@ def _rule_context_comparable(
             == target_context["seed"]["research_mode"],
             before_context["seed"]["price_coordinate"]
             == target_context["seed"]["price_coordinate"],
+            before_context["seed"]["cross_section_universe_capture_id"]
+            == target_context["seed"]["cross_section_universe_capture_id"],
+            before_context["seed"]["cross_section_universe_version"]
+            == target_context["seed"]["cross_section_universe_version"],
+            before_context["seed"]["cross_section_contract_version"]
+            == target_context["seed"]["cross_section_contract_version"],
+            before_context["seed"]["universe_match_status"]
+            == target_context["seed"]["universe_match_status"],
             before_context["d1"]["history_count"]
             == target_context["d1"]["history_count"],
+            before_context["d1"]["calendar_id"] == target_context["d1"]["calendar_id"],
             before_context["d1"]["contract"] == target_context["d1"]["contract"],
+            before_context["d1"]["material_change_contract"]
+            == target_context["d1"]["material_change_contract"],
             before_context["d1"]["version"] == target_context["d1"]["version"],
+            before_context["d1"]["cross_section_universe_capture_id"]
+            == target_context["d1"]["cross_section_universe_capture_id"],
+            before_context["d1"]["cross_section_universe_version"]
+            == target_context["d1"]["cross_section_universe_version"],
+            before_context["d1"]["cross_section_contract_version"]
+            == target_context["d1"]["cross_section_contract_version"],
             before_context["d1"]["window_end"] == before,
             target_context["d1"]["window_end"] == target,
             before_context["d1"]["research_mode"]
@@ -1143,40 +1223,104 @@ def persist_existing_enrollments(
         version, profile, history_count, d1_count, window_start, calendar_revision = (
             scopes[0][:6]
         )
+        profile_context = _profile_revision_context(profile, history_count)
+        if profile_context is None:
+            raise ValueError("Seed画像修订未标明日历身份，拒绝登记后继")
+        history_calendar_id = profile_context[1]
         cursor.execute(
-            """SELECT count(*),count(DISTINCT source_symbol) FROM source_pool_seed_day_facts
+            """SELECT count(*),count(DISTINCT source_symbol),
+                      count(DISTINCT producer_contract),count(DISTINCT producer_version),
+                      count(DISTINCT calendar_id),count(DISTINCT calendar_revision),
+                      count(DISTINCT research_mode),count(DISTINCT price_coordinate),
+                      min(producer_version),min(calendar_id),min(calendar_revision),
+                      min(research_mode),min(price_coordinate)
+               FROM source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s
                  AND profile_revision=%s AND history_session_count=%s""",
             (target, source_capture_id, profile, history_count),
         )
-        if cursor.fetchone() != (raw_count, raw_count):
+        seed_scope = cursor.fetchone()
+        if not (
+            seed_scope[0] == raw_count
+            and seed_scope[1] == raw_count
+            and seed_scope[2:8] == (1, 1, 1, 1, 1, 1)
+            and seed_scope[8:]
+            == (
+                _SEED_PRODUCER_VERSION,
+                history_calendar_id,
+                profile_context[2],
+                "NON_PIT_RETROSPECTIVE",
+                "FORWARD_ADJUSTED",
+            )
+        ):
             raise ValueError("Seed与规则的来源、画像或完整分母不一致")
         cursor.execute(
-            """SELECT producer_version, count(*), count(DISTINCT source_symbol),
-                      count(DISTINCT structure_type)
+            """SELECT DISTINCT cross_section_universe_capture_id,
+                              cross_section_universe_version,
+                              cross_section_contract_version
+               FROM source_pool_seed_day_facts
+               WHERE target_session=%s AND source_capture_id=%s
+                 AND profile_revision=%s AND history_session_count=%s""",
+            (target, source_capture_id, profile, history_count),
+        )
+        seed_cross_scopes = cursor.fetchall()
+        if len(seed_cross_scopes) != 1:
+            raise ValueError("Seed横截面业务范围缺失或存在多个候选")
+        seed_cross_scope = seed_cross_scopes[0]
+        from stock_a.storage.postgres.research_day_facts import (
+            _expected_d1_structure_types,
+            _select_preferred_d1_scopes,
+        )
+
+        cursor.execute(
+            """SELECT d1_history_session_count,history_window_start,
+                      history_window_end,calendar_id,calendar_revision,
+                      producer_contract,producer_version,material_change_contract,research_mode,
+                      price_coordinate,count(*),count(DISTINCT source_symbol),
+                      count(DISTINCT structure_type),
+                      array_agg(DISTINCT structure_type ORDER BY structure_type),
+                      cross_section_universe_capture_id,cross_section_universe_version,
+                      cross_section_contract_version
                FROM source_d1_structure_day_facts
                WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s
-                 AND d1_history_session_count=%s AND calendar_revision=%s
+                 AND d1_history_session_count=%s AND history_window_start=%s
+                 AND history_window_end=%s AND calendar_id=%s
+                 AND calendar_revision=%s
+                 AND research_mode='NON_PIT_RETROSPECTIVE'
+                 AND price_coordinate='FORWARD_ADJUSTED'
                  AND producer_version=ANY(%s)
-               GROUP BY producer_version""",
+               GROUP BY d1_history_session_count,history_window_start,
+                        history_window_end,calendar_id,calendar_revision,producer_contract,
+                        producer_version,material_change_contract,research_mode,
+                        price_coordinate,cross_section_universe_capture_id,
+                        cross_section_universe_version,cross_section_contract_version""",
             (
                 target,
                 source_capture_id,
                 source_capture_id,
                 d1_count,
+                window_start,
+                target,
+                history_calendar_id,
                 calendar_revision,
                 list(_D1_SUPPORTED_PRODUCER_VERSIONS),
             ),
         )
-        d1_version_rows = cursor.fetchall()
-        if not any(
-            (
-                row[1]
-                == raw_count * (7 if row[0] == "STOCK_A_D1_BAOSTOCK_QFQ_R4" else 5)
-                and row[2] == raw_count
-                and row[3] == (7 if row[0] == "STOCK_A_D1_BAOSTOCK_QFQ_R4" else 5)
-            )
-            for row in d1_version_rows
+        d1_version_rows = _select_preferred_d1_scopes(
+            cursor.fetchall(),
+            version_index=6,
+            comparable_indices=(0, 1, 2, 3, 4, 5, 7, 8, 9),
+        )
+        if len(d1_version_rows) != 1:
+            raise ValueError("D1结构目标窗口或生产范围不唯一")
+        d1_scope = d1_version_rows[0]
+        expected_d1_types = _expected_d1_structure_types(str(d1_scope[6]))
+        if not (
+            d1_scope[10] == raw_count * len(expected_d1_types)
+            and d1_scope[11] == raw_count
+            and d1_scope[12] == len(expected_d1_types)
+            and frozenset(d1_scope[13] or ()) == frozenset(expected_d1_types)
+            and tuple(d1_scope[14:17]) == tuple(seed_cross_scope)
         ):
             raise ValueError("D1结构与规则的日历或完整分母不一致")
         if d0_calendar != calendar_revision:

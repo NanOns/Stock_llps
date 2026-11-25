@@ -625,6 +625,7 @@ def compute_source_pool_seed(
     allow_qfq_profile_recompute: bool = False,
     worker_count: int = 1,
     cross_section_universe_version: str | None = None,
+    cross_section_universe_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """按现役Core/Profile公式从已存PG原始行计算Seed，供初始化生产使用。"""
     validate_seed_worker_count(worker_count)
@@ -649,8 +650,22 @@ def compute_source_pool_seed(
         target_session=target_session,
         price_capture_id=source_capture_id,
         universe_version=cross_section_universe_version,
+        universe_capture_id=cross_section_universe_capture_id,
         calendar_revision=revision,
     )
+    explicit_cross_section_scope = (
+        cross_section_universe_version is not None
+        or cross_section_universe_capture_id is not None
+    )
+    if cross_bundle.get("reason") == "CROSS_SECTION_SCOPE_AMBIGUOUS":
+        raise ValueError(
+            "SEED_CROSS_SECTION_SCOPE_AMBIGUOUS:请明确指定横截面Universe版本与捕获"
+        )
+    if explicit_cross_section_scope and cross_bundle.get("status") != "AVAILABLE":
+        raise ValueError(
+            "SEED_SELECTED_CROSS_SECTION_SCOPE_UNAVAILABLE:"
+            f"{cross_bundle.get('reason') or cross_bundle.get('status')}"
+        )
     # R05/D03：严格区分同总体切换、更大排名池子集评价与显式回退，绝不用 issubset 冒充同一正式总体
     cross_by_entity = (
         cross_bundle.get("by_entity", {})
@@ -715,6 +730,10 @@ def compute_source_pool_seed(
         rps["ranking_universe_count"] = len(new_symbols)
         rps["evaluation_universe_count"] = len(old_symbols)
         rps["cross_section_universe_version"] = cross_bundle.get("universe_version")
+        rps["cross_section_universe_capture_id"] = cross_bundle.get(
+            "universe_capture_id"
+        )
+        rps["cross_section_contract_version"] = cross_bundle.get("contract_version")
         if exact_match:
             rps["scope"] = f"PG_CROSS_SECTION:{cross_bundle['universe_version']}"
             rps["formal_research_universe"] = True
@@ -736,11 +755,31 @@ def compute_source_pool_seed(
             if cross_by_entity
             else "FALLBACK_CROSS_SECTION_UNAVAILABLE"
         )
-        rps["ranking_universe_count"] = len(old_symbols)
+        rps["ranking_universe_count"] = (
+            len(new_symbols)
+            if cross_bundle.get("status") == "AVAILABLE"
+            else None
+            if cross_bundle.get("status") == "INCOMPLETE"
+            else len(old_symbols)
+        )
         rps["evaluation_universe_count"] = len(old_symbols)
         rps["cross_section_universe_version"] = (
-            cross_bundle.get("universe_version") if cross_by_entity else None
+            cross_bundle.get("universe_version")
+            if cross_bundle.get("status") != "NOT_COMPUTED"
+            else None
         )
+        rps["cross_section_universe_capture_id"] = (
+            cross_bundle.get("universe_capture_id")
+            if cross_bundle.get("status") != "NOT_COMPUTED"
+            else None
+        )
+        rps["cross_section_contract_version"] = (
+            cross_bundle.get("contract_version")
+            if cross_bundle.get("status") != "NOT_COMPUTED"
+            else None
+        )
+        if cross_bundle.get("status") == "INCOMPLETE":
+            rps["universe_match_status"] = "FALLBACK_CROSS_SECTION_INCOMPLETE"
     profile_offset = 0
     profiles = {}
     profile_snapshot_missing = False
@@ -778,6 +817,20 @@ def compute_source_pool_seed(
                 continue
             if item["source_symbol"] in profiles:
                 raise ValueError("画像来源代码重复")
+            expected_profile_cross_scope = (
+                rps.get("cross_section_universe_capture_id"),
+                rps.get("cross_section_universe_version"),
+                rps.get("cross_section_contract_version"),
+            )
+            actual_profile_cross_scope = (
+                item.get("cross_section_universe_capture_id"),
+                item.get("cross_section_universe_version"),
+                item.get("cross_section_contract_version"),
+            )
+            if actual_profile_cross_scope != expected_profile_cross_scope:
+                raise ValueError(
+                    "SEED_PROFILE_CROSS_SECTION_SCOPE_MISMATCH:画像事实与选定横截面版本不一致"
+                )
             profiles[item["source_symbol"]] = item
         profile_offset = profile_page["page"]["next_offset"]
         if profile_offset is None:
@@ -1118,6 +1171,10 @@ def compute_source_pool_seed(
         "ranking_universe_count": rps["ranking_universe_count"],
         "evaluation_universe_count": rps["evaluation_universe_count"],
         "cross_section_universe_version": rps.get("cross_section_universe_version"),
+        "cross_section_universe_capture_id": rps.get(
+            "cross_section_universe_capture_id"
+        ),
+        "cross_section_contract_version": rps.get("cross_section_contract_version"),
         "price_coordinate": rps["coordinate"],
         "corporate_action_continuity": rps["corporate_action_continuity"],
         "formal_research_universe": rps["formal_research_universe"],
@@ -1151,6 +1208,10 @@ def read_source_pool_seed(
     selected_symbols: frozenset[str] | None = None,
     include_rps_read: bool = False,
     allow_qfq_profile_recompute: bool = False,
+    cross_section_universe_version: str | None = None,
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_contract_version: str | None = None,
+    universe_match_status: str | None = None,
 ) -> dict[str, Any]:
     """读取完整PG Seed事实；没有精确已存结果时明确失败，不在GET重算全池。"""
     if target_session > research_cutoff:
@@ -1180,6 +1241,10 @@ def read_source_pool_seed(
         source_capture_id=source_capture_id,
         price_coordinate="FORWARD_ADJUSTED",
         profile_revision=profile_revision,
+        cross_section_universe_capture_id=cross_section_universe_capture_id,
+        cross_section_universe_version=cross_section_universe_version,
+        cross_section_contract_version=cross_section_contract_version,
+        universe_match_status=universe_match_status,
     )
     d0_by_symbol = {item["source_symbol"]: item for item in d0["results"]}
     if (
@@ -1200,6 +1265,89 @@ def read_source_pool_seed(
         raise StaticResearchPgError(
             "STATIC_SEED_WINDOW_MISMATCH", "PG Seed历史窗口与请求不一致"
         )
+    seed_scope = {
+        (
+            item["cross_section_universe_capture_id"],
+            item["cross_section_universe_version"],
+            item["cross_section_contract_version"],
+            item["universe_match_status"],
+            item["ranking_universe_count"],
+            item["evaluation_universe_count"],
+        )
+        for item in rows
+    }
+    if len(seed_scope) != 1:
+        raise StaticResearchPgError(
+            "STATIC_SEED_SCOPE_CONTENT_MISMATCH",
+            "Seed全池行的排名总体、评价总体或匹配状态不一致",
+        )
+    (
+        cross_universe_capture_id,
+        cross_universe_version,
+        cross_contract_version,
+        universe_match_status_value,
+        ranking_universe_count,
+        evaluation_universe_count,
+    ) = next(iter(seed_scope))
+    if universe_match_status_value is None:
+        if any(
+            value is not None
+            for value in (
+                cross_universe_capture_id,
+                cross_universe_version,
+                cross_contract_version,
+                ranking_universe_count,
+                evaluation_universe_count,
+            )
+        ):
+            raise StaticResearchPgError(
+                "STATIC_SEED_LEGACY_SCOPE_PARTIAL",
+                "旧Seed缺少完整总体元数据且不能视为新版本正式结果",
+            )
+        universe_scope_status = "UNIVERSE_SCOPE_NOT_RECORDED"
+        rps_source = "LEGACY_SEED_SCOPE_UNRECORDED"
+        formal_research_universe: bool | str = "UNKNOWN"
+        ranking_universe_count = None
+        evaluation_universe_count = None
+    else:
+        if (
+            universe_match_status_value
+            not in {
+                "EXACT_MATCH",
+                "EVALUATION_SUBSET_OF_RANKING",
+                "FALLBACK_UNIVERSE_MISMATCH",
+                "FALLBACK_CROSS_SECTION_UNAVAILABLE",
+                "FALLBACK_CROSS_SECTION_INCOMPLETE",
+            }
+            or evaluation_universe_count != len(rows)
+            or universe_match_status_value == "FALLBACK_CROSS_SECTION_INCOMPLETE"
+            and (
+                ranking_universe_count is not None
+                or not isinstance(cross_universe_version, str)
+                or not cross_universe_version.strip()
+                or not isinstance(cross_contract_version, str)
+                or not cross_contract_version.strip()
+            )
+            or universe_match_status_value != "FALLBACK_CROSS_SECTION_INCOMPLETE"
+            and (type(ranking_universe_count) is not int or ranking_universe_count < 0)
+            or universe_match_status_value == "EXACT_MATCH"
+            and ranking_universe_count != evaluation_universe_count
+            or universe_match_status_value == "EVALUATION_SUBSET_OF_RANKING"
+            and ranking_universe_count <= evaluation_universe_count
+        ):
+            raise StaticResearchPgError(
+                "STATIC_SEED_SCOPE_COUNTS_INVALID",
+                "Seed保存的排名/评价总体计数与其匹配状态不一致",
+            )
+        universe_scope_status = universe_match_status_value
+        rps_source = (
+            "PG_CROSS_SECTION_DAY_FACTS"
+            if universe_match_status_value == "EXACT_MATCH"
+            else "PG_CROSS_SECTION_RANKING_SUPERSET"
+            if universe_match_status_value == "EVALUATION_SUBSET_OF_RANKING"
+            else "SOURCE_RELATIVE_POSITION_FALLBACK"
+        )
+        formal_research_universe = universe_match_status_value == "EXACT_MATCH"
     _target, _sessions, calendar_revision = resolve_pg_history_window(
         target_session.isoformat(), history_session_count
     )
@@ -1529,6 +1677,13 @@ def read_source_pool_seed(
         }
     seed_counts = Counter(item["seed"]["state"] for item in facts.values())
     first = rows[0]
+    seed_scope_label = (
+        f"PG_CROSS_SECTION:{cross_universe_version}"
+        if universe_match_status_value == "EXACT_MATCH"
+        else f"PG_CROSS_SECTION_RANKING_SUPERSET:{cross_universe_version}"
+        if universe_match_status_value == "EVALUATION_SUBSET_OF_RANKING"
+        else "SOURCE_POOL_NON_PIT_EXPLORATORY"
+    )
     result = {
         "status": "SAVED",
         "producer_version": SOURCE_POOL_SEED_PRODUCER_VERSION,
@@ -1547,11 +1702,18 @@ def read_source_pool_seed(
         "history_session_count": history_session_count,
         "profile_input_note": "Seed、D0和RPS读取已存事实；旧Seed遗漏的收益字段仅从同捕获、同窗口及精确画像修订补充，保留来源标记。",
         "stored_profile_status": "AVAILABLE",
-        "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
+        "scope": seed_scope_label,
+        "rps_source": rps_source,
+        "universe_match_status": universe_scope_status,
+        "ranking_universe_count": ranking_universe_count,
+        "evaluation_universe_count": evaluation_universe_count,
+        "cross_section_universe_capture_id": cross_universe_capture_id,
+        "cross_section_universe_version": cross_universe_version,
+        "cross_section_contract_version": cross_contract_version,
         "price_coordinate": "FORWARD_ADJUSTED",
         "time_role": "NON_PIT_RETROSPECTIVE",
         "corporate_action_continuity": "UNKNOWN",
-        "formal_research_universe": "UNKNOWN",
+        "formal_research_universe": formal_research_universe,
         "calendar_revision": first["calendar_revision"],
         "endpoint_counts": rps_endpoint_counts,
         "source_pool_total": len(rows),
@@ -1569,12 +1731,19 @@ def read_source_pool_seed(
             "target_session": target_session,
             "research_cutoff": research_cutoff,
             "source_capture_id": source_capture_id,
-            "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
+            "scope": seed_scope_label,
+            "rps_source": rps_source,
+            "universe_match_status": universe_scope_status,
+            "ranking_universe_count": ranking_universe_count,
+            "evaluation_universe_count": evaluation_universe_count,
+            "cross_section_universe_capture_id": cross_universe_capture_id,
+            "cross_section_universe_version": cross_universe_version,
+            "cross_section_contract_version": cross_contract_version,
             "coordinate": "FORWARD_ADJUSTED",
             "price_coordinate": "FORWARD_ADJUSTED",
             "time_role": "NON_PIT_RETROSPECTIVE",
             "corporate_action_continuity": "UNKNOWN",
-            "formal_research_universe": "UNKNOWN",
+            "formal_research_universe": formal_research_universe,
             "calendar_revision": first["calendar_revision"],
             "endpoint_counts": rps_endpoint_counts,
             "facts": rps_facts,

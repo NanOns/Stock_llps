@@ -62,16 +62,26 @@ def _expected_d1_structure_types(producer_version: str) -> tuple[str, ...]:
 
 
 def _select_preferred_d1_scopes(
-    scopes: Sequence[Sequence[Any]], *, version_index: int
+    scopes: Sequence[Sequence[Any]],
+    *,
+    version_index: int,
+    comparable_indices: Sequence[int],
 ) -> list[Sequence[Any]]:
-    """同键并存旧5类R3与新7类R4时优先选中R4，同版本多条仍保留以报歧义。"""
+    """只在同一可比范围内优先R4，保留异范围与同版多键以报歧义。"""
     items = list(scopes)
     if len(items) <= 1:
         return items
-    r4_items = [row for row in items if row[version_index] == _D1_PRODUCER_VERSION_7]
-    if r4_items:
-        return r4_items
-    return items
+    groups: dict[tuple[Any, ...], list[Sequence[Any]]] = {}
+    for row in items:
+        key = tuple(row[index] for index in comparable_indices)
+        groups.setdefault(key, []).append(row)
+    selected: list[Sequence[Any]] = []
+    for group in groups.values():
+        r4_items = [
+            row for row in group if row[version_index] == _D1_PRODUCER_VERSION_7
+        ]
+        selected.extend(r4_items or group)
+    return selected
 
 
 def _select_verified_d0_scope(
@@ -187,6 +197,9 @@ _D1_COLUMNS = (
     "calendar_revision",
     "producer_contract",
     "producer_version",
+    "cross_section_universe_capture_id",
+    "cross_section_universe_version",
+    "cross_section_contract_version",
     "material_change_contract",
     "source_time_quality",
     "source_clock_role",
@@ -289,6 +302,9 @@ _D1_KEY = (
     "producer_contract",
     "producer_version",
     "material_change_contract",
+    "cross_section_universe_capture_id",
+    "cross_section_universe_version",
+    "cross_section_contract_version",
 )
 _ANCHOR_KEY = ("d1_structure_id", "created_session")
 _TABLES = (
@@ -415,6 +431,9 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 facts.calendar_revision,
                 facts.d1_producer_contract,
                 facts.d1_producer_version,
+                facts.cross_section_universe_capture_id,
+                facts.cross_section_universe_version,
+                facts.cross_section_contract_version,
                 facts.d1_material_change_contract,
                 facts.source_time_quality,
                 facts.source_clock_role,
@@ -530,6 +549,35 @@ def _validate_facts(
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_FACTS_INCOMPLETE", "单日来源身份或域选择无效"
+        )
+    cross_capture_id = facts.cross_section_universe_capture_id
+    cross_version = facts.cross_section_universe_version
+    cross_contract = facts.cross_section_contract_version
+    scope_absent = (
+        cross_capture_id is None and cross_version is None and cross_contract is None
+    )
+    scope_present = (
+        (
+            cross_capture_id is None
+            or type(cross_capture_id) is int
+            and cross_capture_id > 0
+        )
+        and isinstance(cross_version, str)
+        and bool(cross_version.strip())
+        and isinstance(cross_contract, str)
+        and bool(cross_contract.strip())
+    )
+    if (
+        not (scope_absent or scope_present)
+        or not include_d1
+        and not scope_absent
+        or include_d1
+        and facts.d1_producer_version == _D1_PRODUCER_VERSION_5
+        and not scope_absent
+    ):
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_CROSS_SECTION_SCOPE_INVALID",
+            "D1横截面Universe捕获、版本与合同必须成组且只绑定R4 D1事实",
         )
     if include_d0 and (
         facts.d0_before_source_count < 0
@@ -915,6 +963,9 @@ def _insert_rows(
             "producer_contract",
             "producer_version",
             "material_change_contract",
+            "cross_section_universe_capture_id",
+            "cross_section_universe_version",
+            "cross_section_contract_version",
         ),
         "source_d0_scenario_day_facts": (
             "target_session",
@@ -926,10 +977,14 @@ def _insert_rows(
         ),
         "source_pool_seed_day_facts": (
             "target_session",
-            "source_symbol",
             "source_capture_id",
+            "source_symbol",
             "profile_revision",
             "producer_version",
+            "cross_section_universe_capture_id",
+            "cross_section_universe_version",
+            "cross_section_contract_version",
+            "universe_match_status",
         ),
     }
     conflict = ", ".join(current_keys.get(table.rsplit(".", 1)[-1], key))
@@ -1776,6 +1831,9 @@ def read_source_research_day(
     structure_type: str | None = None,
     material_change_reason: str | None = None,
     include_all_results: bool = False,
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
 ) -> dict[str, Any]:
     """只读分页读取PG事实；未迁移或未计算时返回明确状态，不重算回退。"""
     if (
@@ -1816,6 +1874,21 @@ def read_source_research_day(
             )
         )
         or (structure_type is not None and structure_type not in _STRUCTURE_TYPE_SET)
+        or cross_section_universe_capture_id is not None
+        and (
+            type(cross_section_universe_capture_id) is not int
+            or cross_section_universe_capture_id <= 0
+        )
+        or cross_section_universe_version is not None
+        and (
+            not isinstance(cross_section_universe_version, str)
+            or not cross_section_universe_version.strip()
+        )
+        or cross_section_contract_version is not None
+        and (
+            not isinstance(cross_section_contract_version, str)
+            or not cross_section_contract_version.strip()
+        )
         or (
             material_change_reason is not None
             and (not material_change_reason or len(material_change_reason) > 128)
@@ -1855,22 +1928,45 @@ def read_source_research_day(
                 "results": [],
                 "reason": "R06事实迁移尚未应用",
             }
+        d1_scope_filter = ""
+        d1_scope_filter_params: tuple[Any, ...] = ()
+        for column, value in (
+            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
+            ("cross_section_universe_version", cross_section_universe_version),
+            ("cross_section_contract_version", cross_section_contract_version),
+        ):
+            if value is not None:
+                d1_scope_filter += f" AND {column}=%s"
+                d1_scope_filter_params += (value,)
         cursor.execute(
-            "SELECT DISTINCT target_capture_id, calendar_revision, "
-            "producer_contract, producer_version, material_change_contract "
+            "SELECT DISTINCT target_capture_id, d1_history_session_count, "
+            "history_window_start, history_window_end, calendar_id, calendar_revision, "
+            "producer_contract, producer_version, material_change_contract, "
+            "research_mode, price_coordinate, cross_section_universe_capture_id, "
+            "cross_section_universe_version, cross_section_contract_version "
             "FROM source_d1_structure_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s "
             "AND producer_version=ANY(%s) AND d1_history_session_count=%s "
-            "ORDER BY target_capture_id, calendar_revision, "
-            "producer_contract, producer_version, material_change_contract",
+            + d1_scope_filter
+            + " "
+            "ORDER BY target_capture_id, d1_history_session_count, "
+            "history_window_start, history_window_end, calendar_id, calendar_revision, "
+            "producer_contract, producer_version, material_change_contract, "
+            "research_mode, price_coordinate, cross_section_universe_capture_id, "
+            "cross_section_universe_version, cross_section_contract_version",
             (
                 target_session,
                 source_capture_id,
                 list(_D1_SUPPORTED_PRODUCER_VERSIONS),
                 d1_history_session_count,
+                *d1_scope_filter_params,
             ),
         )
-        d1_scopes = _select_preferred_d1_scopes(cursor.fetchall(), version_index=3)
+        d1_scopes = _select_preferred_d1_scopes(
+            cursor.fetchall(),
+            version_index=7,
+            comparable_indices=(0, 1, 2, 3, 4, 5, 6, 8, 9, 10),
+        )
         if not d1_scopes:
             return {
                 "storage_status": "NOT_COMPUTED",
@@ -1886,27 +1982,49 @@ def read_source_research_day(
             )
         (
             target_capture_id,
+            _selected_d1_history_count,
+            _selected_d1_window_start,
+            _selected_d1_window_end,
+            calendar_id,
             calendar_revision,
             producer_contract,
             d1_producer_version,
             material_change_contract,
+            _selected_d1_research_mode,
+            _selected_d1_price_coordinate,
+            cross_section_universe_capture_id,
+            cross_section_universe_version,
+            cross_section_contract_version,
         ) = d1_scopes[0]
         d1_predicate = (
             "target_session=%s AND source_capture_id=%s "
             "AND target_capture_id=%s AND d1_history_session_count=%s "
-            "AND calendar_revision=%s "
+            "AND history_window_start=%s AND history_window_end=%s "
+            "AND calendar_id=%s AND calendar_revision=%s "
             "AND producer_contract=%s AND producer_version=%s "
-            "AND material_change_contract=%s"
+            "AND material_change_contract=%s AND research_mode=%s "
+            "AND price_coordinate=%s "
+            "AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s "
+            "AND cross_section_universe_version IS NOT DISTINCT FROM %s "
+            "AND cross_section_contract_version IS NOT DISTINCT FROM %s"
         )
         d1_params = (
             target_session,
             source_capture_id,
             target_capture_id,
             d1_history_session_count,
+            _selected_d1_window_start,
+            _selected_d1_window_end,
+            calendar_id,
             calendar_revision,
             producer_contract,
             d1_producer_version,
             material_change_contract,
+            _selected_d1_research_mode,
+            _selected_d1_price_coordinate,
+            cross_section_universe_capture_id,
+            cross_section_universe_version,
+            cross_section_contract_version,
         )
         snapshot_specs = []
         for supplied_id, kind, source_kind in (
@@ -2138,9 +2256,14 @@ def read_source_research_day(
         d1_alias_predicate = (
             "d.target_session=%s AND d.source_capture_id=%s "
             "AND d.target_capture_id=%s AND d.d1_history_session_count=%s "
-            "AND d.calendar_revision=%s "
+            "AND d.history_window_start=%s AND d.history_window_end=%s "
+            "AND d.calendar_id=%s AND d.calendar_revision=%s "
             "AND d.producer_contract=%s AND d.producer_version=%s "
-            "AND d.material_change_contract=%s"
+            "AND d.material_change_contract=%s AND d.research_mode=%s "
+            "AND d.price_coordinate=%s "
+            "AND d.cross_section_universe_capture_id IS NOT DISTINCT FROM %s "
+            "AND d.cross_section_universe_version IS NOT DISTINCT FROM %s "
+            "AND d.cross_section_contract_version IS NOT DISTINCT FROM %s"
         )
         filters = []
         filter_params = []
@@ -2368,6 +2491,12 @@ def read_source_research_day(
             "d1_producer_contract": producer_contract,
             "d1_producer_version": d1_producer_version,
             "d1_material_change_contract": material_change_contract,
+            "cross_section_universe_capture_id": cross_section_universe_capture_id,
+            "cross_section_universe_version": cross_section_universe_version,
+            "cross_section_contract_version": cross_section_contract_version,
+            "cross_section_scope_status": "BOUND"
+            if cross_section_universe_version is not None
+            else "NOT_RECORDED_OR_UNAVAILABLE",
             "research_mode": "NON_PIT_RETROSPECTIVE",
             "price_coordinate": "FORWARD_ADJUSTED",
             "result_status": result_status,
@@ -2422,13 +2551,34 @@ def read_source_research_day(
 
 
 def read_source_research_day_scope(
-    config: Mapping[str, Any], *, target_session: date, source_capture_id: int
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_capture_id: int,
+    cross_section_universe_capture_id: int | None = None,
+    cross_section_universe_version: str | None = None,
+    cross_section_contract_version: str | None = None,
 ) -> dict[str, Any]:
     """读取单日D1 typed事实的唯一已保存窗口键，不计算或修改事实。"""
     if (
         type(target_session) is not date
         or type(source_capture_id) is not int
         or source_capture_id <= 0
+        or cross_section_universe_capture_id is not None
+        and (
+            type(cross_section_universe_capture_id) is not int
+            or cross_section_universe_capture_id <= 0
+        )
+        or cross_section_universe_version is not None
+        and (
+            not isinstance(cross_section_universe_version, str)
+            or not cross_section_universe_version.strip()
+        )
+        or cross_section_contract_version is not None
+        and (
+            not isinstance(cross_section_contract_version, str)
+            or not cross_section_contract_version.strip()
+        )
     ):
         raise ResearchDayPgError("RESEARCH_DAY_QUERY_INVALID", "PG研究事实范围键无效")
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
@@ -2450,17 +2600,44 @@ def read_source_research_day_scope(
                 "ddl_executed": False,
                 "dml_executed": False,
             }
+        scope_filter = ""
+        scope_filter_params: tuple[Any, ...] = ()
+        for column, value in (
+            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
+            ("cross_section_universe_version", cross_section_universe_version),
+            ("cross_section_contract_version", cross_section_contract_version),
+        ):
+            if value is not None:
+                scope_filter += f" AND {column}=%s"
+                scope_filter_params += (value,)
         cursor.execute(
             "SELECT DISTINCT d1_history_session_count, target_capture_id, "
+            "history_window_start, history_window_end, calendar_id, "
             "calendar_revision, producer_contract, producer_version, "
-            "material_change_contract FROM source_d1_structure_day_facts "
+            "material_change_contract, research_mode, price_coordinate, "
+            "cross_section_universe_capture_id, cross_section_universe_version, "
+            "cross_section_contract_version "
+            "FROM source_d1_structure_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s "
-            "AND producer_version=ANY(%s) "
-            "ORDER BY d1_history_session_count, target_capture_id, calendar_revision, "
-            "producer_contract, producer_version, material_change_contract",
-            (target_session, source_capture_id, list(_D1_SUPPORTED_PRODUCER_VERSIONS)),
+            "AND producer_version=ANY(%s) " + scope_filter + " "
+            "ORDER BY d1_history_session_count, target_capture_id, "
+            "history_window_start, history_window_end, calendar_id, calendar_revision, "
+            "producer_contract, producer_version, material_change_contract, "
+            "research_mode, price_coordinate, cross_section_universe_capture_id, "
+            "cross_section_universe_version, cross_section_contract_version, "
+            "history_window_start, history_window_end",
+            (
+                target_session,
+                source_capture_id,
+                list(_D1_SUPPORTED_PRODUCER_VERSIONS),
+                *scope_filter_params,
+            ),
         )
-        scopes = _select_preferred_d1_scopes(cursor.fetchall(), version_index=4)
+        scopes = _select_preferred_d1_scopes(
+            cursor.fetchall(),
+            version_index=7,
+            comparable_indices=(0, 1, 2, 3, 4, 5, 6, 8, 9, 10),
+        )
     if not scopes:
         return {
             "status": "NOT_COMPUTED",
@@ -2483,10 +2660,21 @@ def read_source_research_day_scope(
         "source_capture_id": source_capture_id,
         "d1_history_session_count": scopes[0][0],
         "target_capture_id": scopes[0][1],
-        "calendar_revision": scopes[0][2],
-        "producer_contract": scopes[0][3],
-        "producer_version": scopes[0][4],
-        "material_change_contract": scopes[0][5],
+        "history_window_start": scopes[0][2].isoformat(),
+        "history_window_end": scopes[0][3].isoformat(),
+        "calendar_id": scopes[0][4],
+        "calendar_revision": scopes[0][5],
+        "producer_contract": scopes[0][6],
+        "producer_version": scopes[0][7],
+        "material_change_contract": scopes[0][8],
+        "research_mode": scopes[0][9],
+        "price_coordinate": scopes[0][10],
+        "cross_section_universe_capture_id": scopes[0][11],
+        "cross_section_universe_version": scopes[0][12],
+        "cross_section_contract_version": scopes[0][13],
+        "cross_section_scope_status": "BOUND"
+        if scopes[0][12] is not None
+        else "NOT_RECORDED_OR_UNAVAILABLE",
         "scope_count": 1,
         "database_write_attempted": False,
         "ddl_executed": False,
@@ -2774,12 +2962,17 @@ def read_source_board_comparison(
             "AND (p.history_calendar_revision=s.calendar_revision OR "
             "strpos('+' || p.history_calendar_revision || '+', '+' || "
             "to_char(s.target_session, 'YYYY') || ':' || s.calendar_revision || '+') > 0) "
-            "AND p.price_coordinate=s.price_coordinate))::bigint "
+            "AND p.price_coordinate=s.price_coordinate))::bigint, "
+            "s.cross_section_universe_capture_id,s.cross_section_universe_version,"
+            "s.cross_section_contract_version,s.universe_match_status,"
+            "s.ranking_universe_count,s.evaluation_universe_count "
             "FROM source_pool_seed_day_facts s "
             f"WHERE {seed_scope_predicate} "
             "GROUP BY s.profile_revision,s.producer_contract,s.producer_version,"
             "s.history_session_count,s.calendar_id,s.calendar_revision,"
-            "s.research_mode,s.price_coordinate "
+            "s.research_mode,s.price_coordinate,s.cross_section_universe_capture_id,"
+            "s.cross_section_universe_version,s.cross_section_contract_version,"
+            "s.universe_match_status,s.ranking_universe_count,s.evaluation_universe_count "
             "ORDER BY s.profile_revision,s.producer_version,s.history_session_count",
             tuple(seed_scope_parameters),
         )
@@ -2793,7 +2986,9 @@ def read_source_board_comparison(
         seed_scope = None
         seed_by_symbol: dict[str, str] = {}
         seed_status = "NOT_COMPUTED"
-        if len(complete_seed_scopes) == 1:
+        if len(candidate_seed_scopes) > 1:
+            seed_status = "AMBIGUOUS"
+        elif len(complete_seed_scopes) == 1:
             seed_scope = complete_seed_scopes[0]
             if (
                 seed_scope[6] == "NON_PIT_RETROSPECTIVE"
@@ -2804,8 +2999,19 @@ def read_source_board_comparison(
                     "WHERE target_session=%s AND source_capture_id=%s "
                     "AND profile_revision=%s AND producer_contract=%s AND producer_version=%s "
                     "AND history_session_count=%s AND calendar_id=%s AND calendar_revision=%s "
-                    "AND research_mode=%s AND price_coordinate=%s",
-                    (target_session, source_capture_id, *seed_scope[:8]),
+                    "AND research_mode=%s AND price_coordinate=%s "
+                    "AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s "
+                    "AND cross_section_universe_version IS NOT DISTINCT FROM %s "
+                    "AND cross_section_contract_version IS NOT DISTINCT FROM %s "
+                    "AND universe_match_status IS NOT DISTINCT FROM %s "
+                    "AND ranking_universe_count IS NOT DISTINCT FROM %s "
+                    "AND evaluation_universe_count IS NOT DISTINCT FROM %s",
+                    (
+                        target_session,
+                        source_capture_id,
+                        *seed_scope[:8],
+                        *seed_scope[12:18],
+                    ),
                 )
                 rows = cursor.fetchall()
                 seed_by_symbol = {row[0]: row[1] or "UNKNOWN" for row in rows}
@@ -2823,12 +3029,19 @@ def read_source_board_comparison(
             seed_status = "INCOMPLETE"
 
         cursor.execute(
-            "SELECT DISTINCT d1_history_session_count,calendar_revision,"
-            "producer_contract,producer_version,material_change_contract,"
-            "research_mode,price_coordinate FROM source_d1_structure_day_facts "
+            "SELECT DISTINCT d1_history_session_count,calendar_id,"
+            "calendar_revision,producer_contract,producer_version,"
+            "material_change_contract,research_mode,price_coordinate,"
+            "history_window_start,history_window_end,"
+            "cross_section_universe_capture_id,cross_section_universe_version,"
+            "cross_section_contract_version "
+            "FROM source_d1_structure_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s "
             "AND producer_version=ANY(%s) AND d1_history_session_count=%s "
-            "ORDER BY calendar_revision,producer_contract,producer_version",
+            "ORDER BY calendar_revision,producer_contract,producer_version,"
+            "history_window_start,history_window_end,"
+            "cross_section_universe_capture_id,cross_section_universe_version,"
+            "cross_section_contract_version",
             (
                 target_session,
                 source_capture_id,
@@ -2837,31 +3050,49 @@ def read_source_board_comparison(
                 d1_history_session_count,
             ),
         )
-        d1_scopes = _select_preferred_d1_scopes(cursor.fetchall(), version_index=3)
-        d1_by_symbol: dict[str, tuple[str, int, int]] = {}
+        d1_scopes = _select_preferred_d1_scopes(
+            cursor.fetchall(),
+            version_index=4,
+            comparable_indices=(0, 1, 2, 3, 5, 6, 7, 8, 9),
+        )
+        d1_by_symbol: dict[str, tuple[str, int, int, frozenset[str]]] = {}
         d1_status = "NOT_COMPUTED"
         if len(d1_scopes) == 1:
             d1_scope = d1_scopes[0]
             if (
-                d1_scope[5] == "NON_PIT_RETROSPECTIVE"
-                and d1_scope[6] == "FORWARD_ADJUSTED"
+                d1_scope[6] == "NON_PIT_RETROSPECTIVE"
+                and d1_scope[7] == "FORWARD_ADJUSTED"
             ):
                 cursor.execute(
                     "SELECT source_symbol,"
                     "array_agg(DISTINCT target_price_quality ORDER BY target_price_quality),"
-                    "coalesce(sum(material_change_anchor_count),0)::bigint,count(*)::int "
+                    "coalesce(sum(material_change_anchor_count),0)::bigint,count(*)::int,"
+                    "array_agg(DISTINCT structure_type ORDER BY structure_type) "
                     "FROM source_d1_structure_day_facts "
                     "WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s "
                     "AND d1_history_session_count=%s AND calendar_revision=%s "
-                    "AND producer_contract=%s AND producer_version=%s "
+                    "AND calendar_id=%s AND producer_contract=%s "
+                    "AND producer_version=%s "
                     "AND material_change_contract=%s AND research_mode=%s "
-                    "AND price_coordinate=%s "
+                    "AND price_coordinate=%s AND history_window_start=%s "
+                    "AND history_window_end=%s "
+                    "AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s "
+                    "AND cross_section_universe_version IS NOT DISTINCT FROM %s "
+                    "AND cross_section_contract_version IS NOT DISTINCT FROM %s "
                     "GROUP BY source_symbol",
                     (
                         target_session,
                         source_capture_id,
                         target_capture_id,
-                        *d1_scope,
+                        d1_scope[0],
+                        d1_scope[2],
+                        d1_scope[1],
+                        *d1_scope[3:8],
+                        d1_scope[8],
+                        d1_scope[9],
+                        d1_scope[10],
+                        d1_scope[11],
+                        d1_scope[12],
                     ),
                 )
                 rows = cursor.fetchall()
@@ -2874,17 +3105,20 @@ def read_source_board_comparison(
                         else "PARTIAL",
                         int(row[2] or 0),
                         int(row[3]),
+                        frozenset(row[4] or ()),
                     )
                     for row in rows
                 }
                 expected_compare_d1_count = len(
-                    _expected_d1_structure_types(d1_scope[3])
+                    _expected_d1_structure_types(d1_scope[4])
                 )
                 d1_status = (
                     "AVAILABLE"
                     if len(d1_by_symbol) == source_symbol_count
                     and all(
                         item[2] == expected_compare_d1_count
+                        and item[3]
+                        == frozenset(_expected_d1_structure_types(d1_scope[4]))
                         for item in d1_by_symbol.values()
                     )
                     else "INCOMPLETE"
@@ -2893,6 +3127,14 @@ def read_source_board_comparison(
                 d1_status = "UNKNOWN"
         elif len(d1_scopes) > 1:
             d1_status = "AMBIGUOUS"
+        if (
+            len(d1_scopes) == 1
+            and seed_scope is not None
+            and d1_scopes[0][4] == _D1_PRODUCER_VERSION_7
+            and tuple(d1_scopes[0][10:13]) != tuple(seed_scope[12:15])
+        ):
+            d1_status = "SCOPE_MISMATCH"
+            d1_by_symbol = {}
 
     intersection = board_sets[0] & board_sets[1]
     union = board_sets[0] | board_sets[1]
