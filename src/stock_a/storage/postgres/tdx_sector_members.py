@@ -183,7 +183,8 @@ def _read_strength_inputs(
                FROM stock.source_symbol_price_profiles p
                WHERE p.target_session=%s AND p.source_capture_id=%s
                  AND p.profile_revision=%s AND p.source_symbol=ANY(%s::text[])
-               ORDER BY p.source_symbol COLLATE "C""",
+               ORDER BY p.source_symbol COLLATE "C"
+            """,
             (target_session, source_capture_id, profile_revision, list(missing)),
         )
         columns = [item.name for item in cursor.description]

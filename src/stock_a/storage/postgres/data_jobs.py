@@ -65,6 +65,7 @@ _MODULE_PROGRESS_TABLES = {
             "stock.source_market_breadth_days",
             "stock.source_market_breadth_symbols",
             "stock.source_market_breadth_change_days",
+            "stock.r03_formal_market_breadth_facts",
         }
     ),
     "MARKET_PARTICIPATION": frozenset(
@@ -156,11 +157,13 @@ _CLEANUP_MODULES = {
             "stock.source_market_breadth_change_days",
             "stock.source_market_breadth_symbols",
             "stock.source_market_breadth_days",
+            "stock.r03_formal_market_breadth_facts",
         ),
         "progress_tables": (
             "stock.source_market_breadth_change_days",
             "stock.source_market_breadth_symbols",
             "stock.source_market_breadth_days",
+            "stock.r03_formal_market_breadth_facts",
         ),
         "algorithm_column": "contract_version",
         "algorithm_label": "市场宽度合同版本",
@@ -286,7 +289,18 @@ _CLEANUP_MODULES = {
     "R03_SECTOR_NATIVE": {
         "parent_table": "stock.r03_sector_native_day_facts",
         "child_table": None,
-        "cleanup_tables": ("stock.r03_sector_native_day_facts",),
+        "cleanup_tables": (
+            "stock.r03_sector_loo_candidate_facts",
+            "stock.r03_sector_loo_support_facts",
+            "stock.r03_sector_overlap_pair_facts",
+            "stock.r03_sector_overlap_board_facts",
+            "stock.r03_sector_overlap_clusters",
+            "stock.r03_sector_rotation_board_day_facts",
+            "stock.r03_sector_rotation_day_states",
+            "stock.r03_sector_rotation_basket_members",
+            "stock.r03_sector_rotation_episodes",
+            "stock.r03_sector_native_day_facts",
+        ),
         "progress_tables": ("stock.r03_sector_native_day_facts",),
         "algorithm_column": "contract_version",
         "algorithm_label": "R03正式板块Native与资格合同版本",
@@ -313,6 +327,7 @@ _CLEANUP_MODULES = {
         "parent_table": "stock.r03_sector_overlap_clusters",
         "child_table": "stock.r03_sector_overlap_board_facts",
         "cleanup_tables": (
+            "stock.r03_sector_overlap_pair_facts",
             "stock.r03_sector_overlap_board_facts",
             "stock.r03_sector_overlap_clusters",
         ),
@@ -1880,6 +1895,8 @@ def _cleanup_version_rows(
     module_code: str,
     target_sessions: tuple[date, ...],
     cutoff: date,
+    *,
+    member_version: str | None = None,
 ) -> list[dict[str, Any]]:
     """只按capture键盘点现役派生结果和其真实下游依赖。"""
     if module_code == "CORE_PROFILE":
@@ -1938,15 +1955,18 @@ def _cleanup_version_rows(
                     "source_capture_id": int(row[1]),
                     "calendar_revision": str(row[2]),
                     "contract_version": str(row[3]),
+                    "formal_breadth_keys": [],
                 },
             }
             for row in cursor.fetchall()
         ]
+        by_day_cap: dict[tuple[date, int], dict[str, Any]] = {}
         for version in versions:
             target = version["target_session"]
             capture_id = version["source_version"]["source_capture_id"]
             revision = version["calendar_revision"]
             contract = version["algorithm_version"]
+            by_day_cap.setdefault((target, capture_id), version)
             cursor.execute(
                 """SELECT count(*)::bigint,
                           coalesce(array_agg(DISTINCT target_session
@@ -1971,9 +1991,55 @@ def _cleanup_version_rows(
             )
             dependent_count, dependent_targets = cursor.fetchone()
             version["dependent_rows"] = {
-                "stock.source_market_breadth_change_days": int(dependent_count)
+                "stock.source_market_breadth_change_days": int(dependent_count),
+                "stock.r03_formal_market_breadth_facts": 0,
             }
             version["dependent_target_sessions"] = tuple(dependent_targets or ())
+        cursor.execute(
+            """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
+               FROM stock.r03_formal_market_breadth_facts
+               WHERE trade_date=ANY(%s) AND trade_date<=%s
+               ORDER BY trade_date, scope_key, universe_version_t, universe_version_t3, contract_version""",
+            (list(target_sessions), cutoff),
+        )
+        for f_day, f_scope, f_ut, f_ut3, f_contract in cursor.fetchall():
+            f_cap: int | None = None
+            if str(f_scope).startswith("BAOSTOCK_CAP_"):
+                cap_part = str(f_scope).split(":", 1)[0].removeprefix("BAOSTOCK_CAP_")
+                if cap_part.isdigit():
+                    f_cap = int(cap_part)
+            formal_key = {
+                "scope_key": str(f_scope),
+                "universe_version_t": str(f_ut),
+                "universe_version_t3": str(f_ut3),
+                "contract_version": str(f_contract),
+            }
+            if f_cap is not None and (f_day, f_cap) in by_day_cap:
+                target_v = by_day_cap[(f_day, f_cap)]
+                target_v["dependent_rows"]["stock.r03_formal_market_breadth_facts"] += 1
+                target_v["version_key"]["formal_breadth_keys"].append(formal_key)
+            else:
+                versions.append(
+                    {
+                        "target_session": f_day,
+                        "source_version": {"scope_key": str(f_scope)},
+                        "algorithm_version": str(f_contract),
+                        "calendar_revision": "",
+                        "parent_rows": 0,
+                        "child_rows": 0,
+                        "dependent_rows": {
+                            "stock.source_market_breadth_change_days": 0,
+                            "stock.r03_formal_market_breadth_facts": 1,
+                        },
+                        "dependent_target_sessions": (),
+                        "version_key": {
+                            "source_capture_id": f_cap,
+                            "calendar_revision": None,
+                            "contract_version": str(f_contract),
+                            "formal_breadth_keys": [formal_key],
+                        },
+                    }
+                )
         return versions
 
     if module_code == "D1":
@@ -2229,34 +2295,201 @@ def _cleanup_version_rows(
             """SELECT trade_date, scope_key, member_version, contract_version, count(*)
                FROM stock.r03_sector_native_day_facts
                WHERE trade_date=ANY(%s) AND trade_date<=%s
+                 AND (%s::text IS NULL OR member_version=%s)
                GROUP BY trade_date, scope_key, member_version, contract_version
                ORDER BY trade_date, scope_key, member_version, contract_version""",
-            (list(target_sessions), cutoff),
+            (list(target_sessions), cutoff, member_version, member_version),
         )
-        return [
-            {
-                "target_session": row[0],
-                "source_version": {"scope_key": str(row[1])},
-                "algorithm_version": str(row[3]),
-                "parent_rows": int(row[4]),
-                "child_rows": 0,
-                "version_key": {
-                    "scope_key": str(row[1]),
-                    "member_version": str(row[2]),
-                    "contract_version": str(row[3]),
-                },
-            }
-            for row in cursor.fetchall()
-        ]
+        native_rows = cursor.fetchall()
+        native_versions: list[dict[str, Any]] = []
+        grouped_min_day: dict[tuple[str, str, str], date] = {}
+        grouped_selected_days: dict[tuple[str, str, str], set[date]] = {}
+        for row in native_rows:
+            gkey = (str(row[1]), str(row[2]), str(row[3]))
+            grouped_selected_days.setdefault(gkey, set()).add(row[0])
+            if gkey not in grouped_min_day or row[0] < grouped_min_day[gkey]:
+                grouped_min_day[gkey] = row[0]
+
+        subsequent_attached: set[tuple[str, str, str]] = set()
+        for row in native_rows:
+            t_day = row[0]
+            s_key, m_ver, c_ver = str(row[1]), str(row[2]), str(row[3])
+            gkey = (s_key, m_ver, c_ver)
+            is_root = gkey not in subsequent_attached
+            extra_days: list[date] = []
+            if is_root:
+                subsequent_attached.add(gkey)
+                min_day = grouped_min_day[gkey]
+                selected_days = grouped_selected_days[gkey]
+                cursor.execute(
+                    """
+                    SELECT DISTINCT d FROM (
+                        SELECT trade_date AS d FROM stock.r03_sector_native_day_facts
+                        WHERE trade_date > %s AND trade_date <= %s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                        UNION
+                        SELECT trade_date AS d FROM stock.r03_sector_loo_support_facts
+                        WHERE trade_date >= %s AND trade_date <= %s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                        UNION
+                        SELECT trade_date AS d FROM stock.r03_sector_overlap_clusters
+                        WHERE trade_date >= %s AND trade_date <= %s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                        UNION
+                        SELECT trade_date AS d FROM stock.r03_sector_rotation_board_day_facts
+                        WHERE trade_date >= %s AND trade_date <= %s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                        UNION
+                        SELECT s.trade_date AS d FROM stock.r03_sector_rotation_day_states s
+                        JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
+                        WHERE s.trade_date >= %s AND s.trade_date <= %s AND e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s
+                    ) sub
+                    WHERE NOT (d = ANY(%s))
+                    ORDER BY d
+                    """,
+                    (
+                        min_day,
+                        cutoff,
+                        s_key,
+                        m_ver,
+                        c_ver,
+                        min_day,
+                        cutoff,
+                        s_key,
+                        m_ver,
+                        c_ver,
+                        min_day,
+                        cutoff,
+                        s_key,
+                        m_ver,
+                        c_ver,
+                        min_day,
+                        cutoff,
+                        s_key,
+                        m_ver,
+                        c_ver,
+                        min_day,
+                        cutoff,
+                        s_key,
+                        m_ver,
+                        c_ver,
+                        list(selected_days),
+                    ),
+                )
+                extra_days = [r[0] for r in cursor.fetchall()]
+
+            scope_days = [t_day, *extra_days]
+            all_affected_days = sorted(grouped_selected_days[gkey] | set(extra_days))
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_loo_candidate_facts c
+                   JOIN stock.r03_sector_loo_support_facts f ON f.id=c.loo_fact_id
+                   WHERE f.trade_date=ANY(%s) AND f.scope_key=%s AND f.member_version=%s AND f.contract_version=%s""",
+                (scope_days, s_key, m_ver, c_ver),
+            )
+            loo_cand_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_loo_support_facts
+                   WHERE trade_date=ANY(%s) AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                (scope_days, s_key, m_ver, c_ver),
+            )
+            loo_sup_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_overlap_board_facts
+                   WHERE trade_date=ANY(%s) AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                (scope_days, s_key, m_ver, c_ver),
+            )
+            ov_board_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_overlap_pair_facts
+                   WHERE trade_date=ANY(%s) AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                (scope_days, s_key, m_ver, c_ver),
+            )
+            ov_pair_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_overlap_clusters
+                   WHERE trade_date=ANY(%s) AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                (scope_days, s_key, m_ver, c_ver),
+            )
+            ov_cluster_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_rotation_board_day_facts
+                   WHERE trade_date=ANY(%s) AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                (scope_days, s_key, m_ver, c_ver),
+            )
+            rot_board_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
+                   JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
+                   WHERE s.trade_date=ANY(%s) AND e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s""",
+                (scope_days, s_key, m_ver, c_ver),
+            )
+            rot_state_cnt = int(cursor.fetchone()[0])
+            extra_native_cnt = 0
+            orphan_bm_cnt = 0
+            orphan_ep_cnt = 0
+            if extra_days:
+                cursor.execute(
+                    """SELECT count(*) FROM stock.r03_sector_native_day_facts
+                       WHERE trade_date=ANY(%s) AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                    (extra_days, s_key, m_ver, c_ver),
+                )
+                extra_native_cnt = int(cursor.fetchone()[0])
+            if is_root:
+                cursor.execute(
+                    """SELECT count(*) FROM stock.r03_sector_rotation_basket_members bm
+                       JOIN stock.r03_sector_rotation_episodes e ON e.id=bm.episode_id
+                       WHERE e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                             WHERE s.episode_id=e.id AND NOT (s.trade_date=ANY(%s))
+                         )""",
+                    (s_key, m_ver, c_ver, all_affected_days),
+                )
+                orphan_bm_cnt = int(cursor.fetchone()[0])
+                cursor.execute(
+                    """SELECT count(*) FROM stock.r03_sector_rotation_episodes e
+                       WHERE e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                             WHERE s.episode_id=e.id AND NOT (s.trade_date=ANY(%s))
+                         )""",
+                    (s_key, m_ver, c_ver, all_affected_days),
+                )
+                orphan_ep_cnt = int(cursor.fetchone()[0])
+            native_versions.append(
+                {
+                    "target_session": t_day,
+                    "source_version": {"scope_key": s_key},
+                    "algorithm_version": c_ver,
+                    "parent_rows": int(row[4]),
+                    "child_rows": 0,
+                    "dependent_rows": {
+                        "stock.r03_sector_loo_candidate_facts": loo_cand_cnt,
+                        "stock.r03_sector_loo_support_facts": loo_sup_cnt,
+                        "stock.r03_sector_overlap_pair_facts": ov_pair_cnt,
+                        "stock.r03_sector_overlap_board_facts": ov_board_cnt,
+                        "stock.r03_sector_overlap_clusters": ov_cluster_cnt,
+                        "stock.r03_sector_rotation_board_day_facts": rot_board_cnt,
+                        "stock.r03_sector_rotation_day_states": rot_state_cnt,
+                        "stock.r03_sector_rotation_basket_members": orphan_bm_cnt,
+                        "stock.r03_sector_rotation_episodes": orphan_ep_cnt,
+                        "stock.r03_sector_native_day_facts": extra_native_cnt,
+                    },
+                    "dependent_target_sessions": tuple(extra_days),
+                    "version_key": {
+                        "scope_key": s_key,
+                        "member_version": m_ver,
+                        "contract_version": c_ver,
+                    },
+                }
+            )
+        return native_versions
 
     if module_code == "R03_SECTOR_OVERLAP":
         cursor.execute(
             """SELECT trade_date, scope_key, member_version, contract_version, count(*)
                FROM stock.r03_sector_overlap_clusters
                WHERE trade_date=ANY(%s) AND trade_date<=%s
+                 AND (%s::text IS NULL OR member_version=%s)
                GROUP BY trade_date, scope_key, member_version, contract_version
                ORDER BY trade_date, scope_key, member_version, contract_version""",
-            (list(target_sessions), cutoff),
+            (list(target_sessions), cutoff, member_version, member_version),
         )
         versions = []
         for row in cursor.fetchall():
@@ -2266,6 +2499,12 @@ def _cleanup_version_rows(
                 (row[0], row[1], row[2], row[3]),
             )
             child_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_overlap_pair_facts
+                   WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                (row[0], row[1], row[2], row[3]),
+            )
+            pair_cnt = int(cursor.fetchone()[0])
             versions.append(
                 {
                     "target_session": row[0],
@@ -2273,6 +2512,9 @@ def _cleanup_version_rows(
                     "algorithm_version": str(row[3]),
                     "parent_rows": int(row[4]),
                     "child_rows": child_cnt,
+                    "dependent_rows": {
+                        "stock.r03_sector_overlap_pair_facts": pair_cnt,
+                    },
                     "version_key": {
                         "scope_key": str(row[1]),
                         "member_version": str(row[2]),
@@ -2289,9 +2531,10 @@ def _cleanup_version_rows(
                FROM stock.r03_sector_loo_support_facts f
                LEFT JOIN stock.r03_sector_loo_candidate_facts c ON c.loo_fact_id=f.id
                WHERE f.trade_date=ANY(%s) AND f.trade_date<=%s
+                 AND (%s::text IS NULL OR f.member_version=%s)
                GROUP BY f.trade_date, f.scope_key, f.member_version, f.contract_version
                ORDER BY f.trade_date, f.scope_key, f.member_version, f.contract_version""",
-            (list(target_sessions), cutoff),
+            (list(target_sessions), cutoff, member_version, member_version),
         )
         return [
             {
@@ -2311,48 +2554,77 @@ def _cleanup_version_rows(
 
     if module_code == "R03_SECTOR_ROTATION":
         cursor.execute(
-            """SELECT s.trade_date, e.scope_key, e.member_version, e.contract_version,
-                      count(DISTINCT e.id) FILTER (
-                          WHERE e.t0_session=s.trade_date
-                            AND NOT EXISTS (
-                                SELECT 1 FROM stock.r03_sector_rotation_day_states s2
-                                WHERE s2.episode_id=e.id AND NOT (s2.trade_date=ANY(%s))
-                            )
-                      ),
-                      count(DISTINCT s.id),
-                      count(DISTINCT bm.id) FILTER (
-                          WHERE e.t0_session=s.trade_date
-                            AND NOT EXISTS (
-                                SELECT 1 FROM stock.r03_sector_rotation_day_states s2
-                                WHERE s2.episode_id=e.id AND NOT (s2.trade_date=ANY(%s))
-                            )
-                      )
-               FROM stock.r03_sector_rotation_day_states s
-               JOIN stock.r03_sector_rotation_episodes e ON e.id = s.episode_id
-               LEFT JOIN stock.r03_sector_rotation_basket_members bm ON bm.episode_id=e.id
-               WHERE s.trade_date=ANY(%s) AND s.trade_date<=%s
-               GROUP BY s.trade_date, e.scope_key, e.member_version, e.contract_version
-               ORDER BY s.trade_date, e.scope_key, e.member_version, e.contract_version""",
-            (list(target_sessions), list(target_sessions), list(target_sessions), cutoff),
+            """SELECT DISTINCT d_day, s_key, m_ver, c_ver FROM (
+                   SELECT trade_date AS d_day, scope_key AS s_key, member_version AS m_ver, contract_version AS c_ver
+                   FROM stock.r03_sector_rotation_board_day_facts
+                   WHERE trade_date=ANY(%s) AND trade_date<=%s
+                     AND (%s::text IS NULL OR member_version=%s)
+                   UNION
+                   SELECT s.trade_date AS d_day, e.scope_key AS s_key, e.member_version AS m_ver, e.contract_version AS c_ver
+                   FROM stock.r03_sector_rotation_day_states s
+                   JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
+                   WHERE s.trade_date=ANY(%s) AND s.trade_date<=%s
+                     AND (%s::text IS NULL OR e.member_version=%s)
+               ) t
+               ORDER BY d_day, s_key, m_ver, c_ver""",
+            (
+                list(target_sessions),
+                cutoff,
+                member_version,
+                member_version,
+                list(target_sessions),
+                cutoff,
+                member_version,
+                member_version,
+            ),
         )
-        return [
-            {
-                "target_session": row[0],
-                "source_version": {"scope_key": str(row[1])},
-                "algorithm_version": str(row[3]),
-                "parent_rows": int(row[4]),
-                "child_rows": int(row[5]),
-                "dependent_rows": {
-                    "stock.r03_sector_rotation_basket_members": int(row[6]),
-                },
-                "version_key": {
-                    "scope_key": str(row[1]),
-                    "member_version": str(row[2]),
-                    "contract_version": str(row[3]),
-                },
-            }
-            for row in cursor.fetchall()
-        ]
+        rot_versions: list[dict[str, Any]] = []
+        for t_day, s_key, m_ver, c_ver in cursor.fetchall():
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_rotation_board_day_facts
+                   WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                (t_day, s_key, m_ver, c_ver),
+            )
+            board_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
+                   JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
+                   WHERE s.trade_date=%s AND e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s""",
+                (t_day, s_key, m_ver, c_ver),
+            )
+            state_cnt = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(DISTINCT e.id), count(DISTINCT bm.id)
+                   FROM stock.r03_sector_rotation_episodes e
+                   LEFT JOIN stock.r03_sector_rotation_basket_members bm ON bm.episode_id=e.id
+                   WHERE e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s
+                     AND e.t0_session=%s
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.r03_sector_rotation_day_states s2
+                         WHERE s2.episode_id=e.id AND NOT (s2.trade_date=ANY(%s))
+                     )""",
+                (s_key, m_ver, c_ver, t_day, list(target_sessions)),
+            )
+            ep_cnt, bm_cnt = cursor.fetchone()
+            rot_versions.append(
+                {
+                    "target_session": t_day,
+                    "source_version": {"scope_key": str(s_key)},
+                    "algorithm_version": str(c_ver),
+                    "parent_rows": int(ep_cnt or 0),
+                    "child_rows": board_cnt,
+                    "dependent_rows": {
+                        "stock.r03_sector_rotation_day_states": state_cnt,
+                        "stock.r03_sector_rotation_basket_members": int(bm_cnt or 0),
+                    },
+                    "version_key": {
+                        "scope_key": str(s_key),
+                        "member_version": str(m_ver),
+                        "contract_version": str(c_ver),
+                    },
+                }
+            )
+        return rot_versions
 
     if module_code == "SECTOR_PULSE":
         cursor.execute(
@@ -2783,10 +3055,13 @@ def _cleanup_preview_in_cursor(
     module_code: str,
     target_sessions: tuple[date, ...],
     cutoff: date,
+    member_version: str | None = None,
 ) -> dict[str, Any]:
     spec, sessions = _cleanup_scope(module_code, target_sessions, cutoff)
     blockers = _cleanup_fk_blockers(cursor, spec)
-    versions = _cleanup_version_rows(cursor, module_code, sessions, cutoff)
+    versions = _cleanup_version_rows(
+        cursor, module_code, sessions, cutoff, member_version=member_version
+    )
     if module_code == "CROSS_SECTION":
         by_capture: dict[int, list[dict[str, Any]]] = {}
         for version in versions:
@@ -3082,37 +3357,7 @@ def _cleanup_preview_in_cursor(
                             ),
                         }
                     )
-    if module_code == "R03_SECTOR_NATIVE":
-        for version in versions:
-            scope_k = version["version_key"]["scope_key"]
-            t_day = version["target_session"]
-            for dep_table, sql in (
-                (
-                    "stock.r03_sector_rotation_day_states",
-                    """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
-                       JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
-                       WHERE s.trade_date=%s AND e.scope_key=%s""",
-                ),
-                (
-                    "stock.r03_sector_overlap_clusters",
-                    "SELECT count(*) FROM stock.r03_sector_overlap_clusters WHERE trade_date=%s AND scope_key=%s",
-                ),
-                (
-                    "stock.r03_sector_loo_support_facts",
-                    "SELECT count(*) FROM stock.r03_sector_loo_support_facts WHERE trade_date=%s AND scope_key=%s",
-                ),
-            ):
-                cursor.execute(sql, (t_day, scope_k))
-                dep_rows = int(cursor.fetchone()[0])
-                if dep_rows:
-                    blockers.append(
-                        {
-                            "referenced_table": spec["parent_table"],
-                            "dependent_table": dep_table,
-                            "constraint": "业务依赖：R03后继事实依赖同日期同scope的Native事实",
-                            "reason": f"先清理同日期与scope的R03后继模块，再清理R03_SECTOR_NATIVE（PG读回到{dep_rows}条）",
-                        }
-                    )
+    # R03_SECTOR_NATIVE 采用同事务精确版本级联清理（含 LOO/Overlap/Rotation 及未选中后继），不再旧式阻断
     if module_code == "SECTOR_PULSE":
         for version in versions:
             source_version = version["source_version"]
@@ -3355,6 +3600,8 @@ def preview_derived_cleanup(
     module_code: str,
     target_sessions: Sequence[date],
     cutoff: date,
+    *,
+    member_version: str | None = None,
 ) -> dict[str, Any]:
     """预览一个已登记派生模块的准确版本、日期、行数与外键依赖。"""
     _spec, sessions = _cleanup_scope(module_code, target_sessions, cutoff)
@@ -3364,7 +3611,10 @@ def preview_derived_cleanup(
             module_code=module_code,
             target_sessions=sessions,
             cutoff=cutoff,
+            member_version=member_version,
         )
+    if member_version is not None:
+        preview["member_version_filter"] = member_version
     return preview
 
 
@@ -3394,6 +3644,7 @@ def clear_derived_module(
     *,
     expected_preview_key: str | None = None,
     current_job_id: UUID | None = None,
+    member_version: str | None = None,
 ) -> dict[str, Any]:
     """在单一PG事务内按精确模块版本删除派生事实并失效旧进度。"""
     spec, sessions = _cleanup_scope(module_code, target_sessions, cutoff)
@@ -3407,6 +3658,7 @@ def clear_derived_module(
             module_code=module_code,
             target_sessions=sessions,
             cutoff=cutoff,
+            member_version=member_version,
         )
         if not preview["complete"]:
             raise DataJobPgError(
@@ -3494,68 +3746,87 @@ def clear_derived_module(
                     "stock.source_symbol_price_profiles"
                 ] += cursor.rowcount
             elif module_code == "MARKET_BREADTH":
-                cursor.execute(
-                    """DELETE FROM stock.source_market_breadth_change_days
-                       WHERE (target_session=%s AND target_source_capture_id=%s
-                              AND target_calendar_revision=%s
-                              AND target_contract_version=%s)
-                          OR (before_session=%s AND before_source_capture_id=%s
-                              AND before_calendar_revision=%s
-                              AND before_contract_version=%s)
-                       RETURNING target_session""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["calendar_revision"],
-                        key["contract_version"],
-                        target_session,
-                        key["source_capture_id"],
-                        key["calendar_revision"],
-                        key["contract_version"],
-                    ),
-                )
-                changed_market_sessions = [row[0] for row in cursor.fetchall()]
-                deleted_rows["stock.source_market_breadth_change_days"] += len(
-                    changed_market_sessions
-                )
-                for changed_session in changed_market_sessions:
-                    session_counts = deleted_by_session.setdefault(
-                        changed_session.isoformat(),
-                        {table: 0 for table in spec["progress_tables"]},
+                if key.get("source_capture_id") is not None and key.get("calendar_revision"):
+                    cursor.execute(
+                        """DELETE FROM stock.source_market_breadth_change_days
+                           WHERE (target_session=%s AND target_source_capture_id=%s
+                                  AND target_calendar_revision=%s
+                                  AND target_contract_version=%s)
+                              OR (before_session=%s AND before_source_capture_id=%s
+                                  AND before_calendar_revision=%s
+                                  AND before_contract_version=%s)
+                           RETURNING target_session""",
+                        (
+                            target_session,
+                            key["source_capture_id"],
+                            key["calendar_revision"],
+                            key["contract_version"],
+                            target_session,
+                            key["source_capture_id"],
+                            key["calendar_revision"],
+                            key["contract_version"],
+                        ),
                     )
-                    session_counts["stock.source_market_breadth_change_days"] += 1
-                cursor.execute(
-                    """DELETE FROM stock.source_market_breadth_symbols s
-                       USING stock.source_market_breadth_days d
-                       WHERE s.breadth_day_id=d.id AND d.target_session=%s
-                         AND d.source_capture_id=%s
-                         AND d.calendar_revision=%s AND d.contract_version=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["calendar_revision"],
-                        key["contract_version"],
-                    ),
-                )
-                deleted_rows["stock.source_market_breadth_symbols"] += cursor.rowcount
-                deleted_by_session[target_session.isoformat()][
-                    "stock.source_market_breadth_symbols"
-                ] += cursor.rowcount
-                cursor.execute(
-                    """DELETE FROM stock.source_market_breadth_days
-                       WHERE target_session=%s AND source_capture_id=%s AND calendar_revision=%s
-                         AND contract_version=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["calendar_revision"],
-                        key["contract_version"],
-                    ),
-                )
-                deleted_rows["stock.source_market_breadth_days"] += cursor.rowcount
-                deleted_by_session[target_session.isoformat()][
-                    "stock.source_market_breadth_days"
-                ] += cursor.rowcount
+                    changed_market_sessions = [row[0] for row in cursor.fetchall()]
+                    deleted_rows["stock.source_market_breadth_change_days"] += len(
+                        changed_market_sessions
+                    )
+                    for changed_session in changed_market_sessions:
+                        session_counts = deleted_by_session.setdefault(
+                            changed_session.isoformat(),
+                            {table: 0 for table in cleanup_count_tables},
+                        )
+                        session_counts["stock.source_market_breadth_change_days"] += 1
+                    cursor.execute(
+                        """DELETE FROM stock.source_market_breadth_symbols s
+                           USING stock.source_market_breadth_days d
+                           WHERE s.breadth_day_id=d.id AND d.target_session=%s
+                             AND d.source_capture_id=%s
+                             AND d.calendar_revision=%s AND d.contract_version=%s""",
+                        (
+                            target_session,
+                            key["source_capture_id"],
+                            key["calendar_revision"],
+                            key["contract_version"],
+                        ),
+                    )
+                    deleted_rows["stock.source_market_breadth_symbols"] += cursor.rowcount
+                    deleted_by_session[target_session.isoformat()][
+                        "stock.source_market_breadth_symbols"
+                    ] += cursor.rowcount
+                    cursor.execute(
+                        """DELETE FROM stock.source_market_breadth_days
+                           WHERE target_session=%s AND source_capture_id=%s AND calendar_revision=%s
+                             AND contract_version=%s""",
+                        (
+                            target_session,
+                            key["source_capture_id"],
+                            key["calendar_revision"],
+                            key["contract_version"],
+                        ),
+                    )
+                    deleted_rows["stock.source_market_breadth_days"] += cursor.rowcount
+                    deleted_by_session[target_session.isoformat()][
+                        "stock.source_market_breadth_days"
+                    ] += cursor.rowcount
+                for fkey in key.get("formal_breadth_keys", ()):
+                    cursor.execute(
+                        """DELETE FROM stock.r03_formal_market_breadth_facts
+                           WHERE trade_date=%s AND scope_key=%s
+                             AND universe_version_t=%s AND universe_version_t3=%s
+                             AND contract_version=%s""",
+                        (
+                            target_session,
+                            fkey["scope_key"],
+                            fkey["universe_version_t"],
+                            fkey["universe_version_t3"],
+                            fkey["contract_version"],
+                        ),
+                    )
+                    deleted_rows["stock.r03_formal_market_breadth_facts"] += cursor.rowcount
+                    deleted_by_session[target_session.isoformat()][
+                        "stock.r03_formal_market_breadth_facts"
+                    ] += cursor.rowcount
             elif module_code == "D1":
                 cursor.execute(
                     """DELETE FROM stock.source_research_enrollments e
@@ -3786,38 +4057,7 @@ def clear_derived_module(
                     "stock.source_d0_formal_admission_day_facts"
                 ] += cursor.rowcount
             elif module_code == "R03_SECTOR_NATIVE":
-                cursor.execute(
-                    """DELETE FROM stock.r03_sector_native_day_facts
-                       WHERE trade_date >= %s AND scope_key=%s AND member_version=%s
-                         AND contract_version=%s""",
-                    (
-                        target_session,
-                        key["scope_key"],
-                        key["member_version"],
-                        key["contract_version"],
-                    ),
-                )
-                deleted_rows["stock.r03_sector_native_day_facts"] += cursor.rowcount
-                deleted_by_session[target_session.isoformat()][
-                    "stock.r03_sector_native_day_facts"
-                ] += cursor.rowcount
-                for dep_tbl in (
-                    "stock.r03_sector_loo_support_facts",
-                    "stock.r03_sector_overlap_board_facts",
-                    "stock.r03_sector_overlap_clusters",
-                    "stock.r03_sector_rotation_board_day_facts",
-                    "stock.r03_formal_market_breadth_facts",
-                ):
-                    cursor.execute(
-                        f"DELETE FROM {dep_tbl} WHERE trade_date >= %s AND scope_key=%s",
-                        (target_session, key["scope_key"]),
-                    )
-                cursor.execute(
-                    """DELETE FROM stock.r03_sector_rotation_day_states s
-                       USING stock.r03_sector_rotation_episodes e
-                       WHERE s.episode_id=e.id AND s.trade_date >= %s AND e.scope_key=%s""",
-                    (target_session, key["scope_key"]),
-                )
+                pass
             elif module_code == "R03_SECTOR_ROTATION":
                 cursor.execute(
                     """DELETE FROM stock.r03_sector_rotation_board_day_facts
@@ -3871,6 +4111,33 @@ def clear_derived_module(
                     "stock.r03_sector_rotation_basket_members"
                 ] += cursor.rowcount
                 cursor.execute(
+                    """UPDATE stock.r03_sector_rotation_episodes e
+                       SET parent_episode_id=NULL
+                       WHERE e.parent_episode_id IN (
+                           SELECT ep.id FROM stock.r03_sector_rotation_episodes ep
+                           WHERE ep.scope_key=%s AND ep.member_version=%s
+                             AND ep.contract_version=%s
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                                 WHERE s.episode_id=ep.id
+                             )
+                       )
+                         AND e.scope_key=%s AND e.member_version=%s
+                         AND e.contract_version=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                             WHERE s.episode_id=e.id
+                         )""",
+                    (
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                cursor.execute(
                     """DELETE FROM stock.r03_sector_rotation_episodes e
                        WHERE e.scope_key=%s AND e.member_version=%s
                          AND e.contract_version=%s
@@ -3889,6 +4156,21 @@ def clear_derived_module(
                     "stock.r03_sector_rotation_episodes"
                 ] += cursor.rowcount
             elif module_code == "R03_SECTOR_OVERLAP":
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_overlap_pair_facts
+                       WHERE trade_date=%s AND scope_key=%s AND member_version=%s
+                         AND contract_version=%s""",
+                    (
+                        target_session,
+                        key["scope_key"],
+                        key["member_version"],
+                        key["contract_version"],
+                    ),
+                )
+                deleted_rows["stock.r03_sector_overlap_pair_facts"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.r03_sector_overlap_pair_facts"
+                ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.r03_sector_overlap_board_facts
                        WHERE trade_date=%s AND scope_key=%s AND member_version=%s
@@ -4216,6 +4498,121 @@ def clear_derived_module(
                     "stock.source_sector_pulse_cohort_group_facts"
                 ] += cursor.rowcount
 
+        if module_code == "R03_SECTOR_NATIVE":
+            grouped_native: dict[tuple[str, str, str], set[date]] = {}
+            for version in preview["versions"]:
+                key = version["version_key"]
+                gkey = (
+                    key["scope_key"],
+                    key["member_version"],
+                    key["contract_version"],
+                )
+                day_set = grouped_native.setdefault(gkey, set())
+                day_set.add(date.fromisoformat(version["target_session"]))
+                for dep_day in version.get("dependent_target_sessions", ()):
+                    day_set.add(_cleanup_preview_date(dep_day))
+
+            def _record_native_del(table: str, session_d: date) -> None:
+                deleted_rows[table] += 1
+                sc = deleted_by_session.setdefault(
+                    session_d.isoformat(),
+                    {name: 0 for name in cleanup_count_tables},
+                )
+                sc[table] += 1
+
+            for (s_key, m_ver, c_ver), day_set in grouped_native.items():
+                affected_days = sorted(day_set)
+                min_day = affected_days[0]
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_loo_candidate_facts c
+                       USING stock.r03_sector_loo_support_facts f
+                       WHERE c.loo_fact_id=f.id AND f.trade_date=ANY(%s)
+                         AND f.scope_key=%s AND f.member_version=%s AND f.contract_version=%s
+                       RETURNING f.trade_date""",
+                    (affected_days, s_key, m_ver, c_ver),
+                )
+                for row in cursor.fetchall():
+                    _record_native_del("stock.r03_sector_loo_candidate_facts", row[0])
+                for tbl in (
+                    "stock.r03_sector_loo_support_facts",
+                    "stock.r03_sector_overlap_pair_facts",
+                    "stock.r03_sector_overlap_board_facts",
+                    "stock.r03_sector_overlap_clusters",
+                    "stock.r03_sector_rotation_board_day_facts",
+                ):
+                    cursor.execute(
+                        f"""DELETE FROM {tbl}
+                            WHERE trade_date=ANY(%s) AND scope_key=%s
+                              AND member_version=%s AND contract_version=%s
+                            RETURNING trade_date""",
+                        (affected_days, s_key, m_ver, c_ver),
+                    )
+                    for row in cursor.fetchall():
+                        _record_native_del(tbl, row[0])
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_day_states s
+                       USING stock.r03_sector_rotation_episodes e
+                       WHERE s.episode_id=e.id AND s.trade_date=ANY(%s)
+                         AND e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s
+                       RETURNING s.trade_date""",
+                    (affected_days, s_key, m_ver, c_ver),
+                )
+                for row in cursor.fetchall():
+                    _record_native_del("stock.r03_sector_rotation_day_states", row[0])
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_basket_members bm
+                       USING stock.r03_sector_rotation_episodes e
+                       WHERE bm.episode_id=e.id
+                         AND e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                             WHERE s.episode_id=e.id
+                         )
+                       RETURNING e.t0_session""",
+                    (s_key, m_ver, c_ver),
+                )
+                for row in cursor.fetchall():
+                    _record_native_del("stock.r03_sector_rotation_basket_members", min_day)
+                cursor.execute(
+                    """UPDATE stock.r03_sector_rotation_episodes e
+                       SET parent_episode_id=NULL
+                       WHERE e.parent_episode_id IN (
+                           SELECT ep.id FROM stock.r03_sector_rotation_episodes ep
+                           WHERE ep.scope_key=%s AND ep.member_version=%s AND ep.contract_version=%s
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                                 WHERE s.episode_id=ep.id
+                             )
+                       )
+                         AND e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                             WHERE s.episode_id=e.id
+                         )""",
+                    (s_key, m_ver, c_ver, s_key, m_ver, c_ver),
+                )
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_episodes e
+                       WHERE e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                             WHERE s.episode_id=e.id
+                         )
+                       RETURNING e.t0_session""",
+                    (s_key, m_ver, c_ver),
+                )
+                for row in cursor.fetchall():
+                    _record_native_del("stock.r03_sector_rotation_episodes", min_day)
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_native_day_facts
+                       WHERE trade_date=ANY(%s) AND scope_key=%s
+                         AND member_version=%s AND contract_version=%s
+                       RETURNING trade_date""",
+                    (affected_days, s_key, m_ver, c_ver),
+                )
+                for row in cursor.fetchall():
+                    _record_native_del("stock.r03_sector_native_day_facts", row[0])
+
         if module_code == "MARKET_INDICES_ENV":
             grouped_scopes: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
             for version in preview["versions"]:
@@ -4506,11 +4903,119 @@ def clear_derived_module(
                 "清理影响行数与预览不一致；事务回滚并保留原事实",
             )
 
-        invalidated_tables = list(cleanup_count_tables)
-        invalidated_sessions = list(sessions)
-        downstream_invalidated_tables: list[str] = []
-        downstream_existing_fact_counts: dict[str, int] = {}
-        downstream_subsequent_sessions: list[str] = []
+        r03_cascade_tables: list[str] = []
+        r03_cascade_sessions: set[date] = set()
+        r03_cascade_counts: dict[str, int] = {}
+        if module_code in {"D0", "CORE_PROFILE", "CROSS_SECTION"} and preview["versions"]:
+            r03_targets: list[tuple[date, str]] = []
+            for v in preview["versions"]:
+                v_day = date.fromisoformat(v["target_session"])
+                v_key = v["version_key"]
+                if module_code == "CORE_PROFILE":
+                    r03_targets.append(
+                        (
+                            v_day,
+                            f"BAOSTOCK_CAP_{v_key['source_capture_id']}:PROF_{v_key['profile_revision']}:NON_PIT",
+                        )
+                    )
+                elif module_code == "D0":
+                    r03_targets.append((v_day, f"BAOSTOCK_CAP_{v_key['source_capture_id']}:%"))
+                else:
+                    r03_targets.append((v_day, f"BAOSTOCK_CAP_{v_key['price_capture_id']}:%"))
+            r03_tbls = (
+                "stock.r03_sector_loo_candidate_facts",
+                "stock.r03_sector_loo_support_facts",
+                "stock.r03_sector_overlap_pair_facts",
+                "stock.r03_sector_overlap_board_facts",
+                "stock.r03_sector_overlap_clusters",
+                "stock.r03_sector_rotation_board_day_facts",
+                "stock.r03_sector_rotation_day_states",
+                "stock.r03_sector_rotation_basket_members",
+                "stock.r03_sector_rotation_episodes",
+                "stock.r03_sector_native_day_facts",
+            )
+            r03_cascade_counts = {t: 0 for t in r03_tbls}
+            for min_d, pat in r03_targets:
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_loo_candidate_facts c
+                       USING stock.r03_sector_loo_support_facts f
+                       WHERE c.loo_fact_id=f.id AND f.trade_date>=%s AND f.trade_date<=%s AND f.scope_key LIKE %s
+                       RETURNING f.trade_date""",
+                    (min_d, cutoff, pat),
+                )
+                for row in cursor.fetchall():
+                    r03_cascade_counts["stock.r03_sector_loo_candidate_facts"] += 1
+                    r03_cascade_sessions.add(row[0])
+                for tbl in (
+                    "stock.r03_sector_loo_support_facts",
+                    "stock.r03_sector_overlap_pair_facts",
+                    "stock.r03_sector_overlap_board_facts",
+                    "stock.r03_sector_overlap_clusters",
+                    "stock.r03_sector_rotation_board_day_facts",
+                ):
+                    cursor.execute(
+                        f"DELETE FROM {tbl} WHERE trade_date>=%s AND trade_date<=%s AND scope_key LIKE %s RETURNING trade_date",
+                        (min_d, cutoff, pat),
+                    )
+                    for row in cursor.fetchall():
+                        r03_cascade_counts[tbl] += 1
+                        r03_cascade_sessions.add(row[0])
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_day_states s
+                       USING stock.r03_sector_rotation_episodes e
+                       WHERE s.episode_id=e.id AND s.trade_date>=%s AND s.trade_date<=%s AND e.scope_key LIKE %s
+                       RETURNING s.trade_date""",
+                    (min_d, cutoff, pat),
+                )
+                for row in cursor.fetchall():
+                    r03_cascade_counts["stock.r03_sector_rotation_day_states"] += 1
+                    r03_cascade_sessions.add(row[0])
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_basket_members bm
+                       USING stock.r03_sector_rotation_episodes e
+                       WHERE bm.episode_id=e.id AND e.scope_key LIKE %s
+                         AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=e.id)""",
+                    (pat,),
+                )
+                r03_cascade_counts["stock.r03_sector_rotation_basket_members"] += cursor.rowcount
+                cursor.execute(
+                    """UPDATE stock.r03_sector_rotation_episodes e SET parent_episode_id=NULL
+                       WHERE e.parent_episode_id IN (
+                           SELECT ep.id FROM stock.r03_sector_rotation_episodes ep
+                           WHERE ep.scope_key LIKE %s
+                             AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=ep.id)
+                       ) AND e.scope_key LIKE %s
+                         AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=e.id)""",
+                    (pat, pat),
+                )
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_rotation_episodes e
+                       WHERE e.scope_key LIKE %s
+                         AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=e.id)""",
+                    (pat,),
+                )
+                r03_cascade_counts["stock.r03_sector_rotation_episodes"] += cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM stock.r03_sector_native_day_facts
+                       WHERE trade_date>=%s AND trade_date<=%s AND scope_key LIKE %s
+                       RETURNING trade_date""",
+                    (min_d, cutoff, pat),
+                )
+                for row in cursor.fetchall():
+                    r03_cascade_counts["stock.r03_sector_native_day_facts"] += 1
+                    r03_cascade_sessions.add(row[0])
+            if any(r03_cascade_counts.values()):
+                r03_cascade_tables = list(r03_tbls)
+
+        invalidated_tables = list(dict.fromkeys([*cleanup_count_tables, *r03_cascade_tables]))
+        invalidated_sessions = sorted(set(sessions) | r03_cascade_sessions)
+        downstream_invalidated_tables: list[str] = list(r03_cascade_tables)
+        downstream_existing_fact_counts: dict[str, int] = {
+            k: v for k, v in r03_cascade_counts.items() if v > 0
+        }
+        downstream_subsequent_sessions: list[str] = [
+            d.isoformat() for d in sorted(r03_cascade_sessions - set(sessions))
+        ]
         if module_code == "CROSS_SECTION" and sessions:
             downstream_tables = tuple(
                 table
@@ -4526,6 +5031,26 @@ def clear_derived_module(
                 table: int(preview["affected_rows_by_table"].get(table, 0))
                 for table in downstream_tables
             }
+        elif module_code == "R03_SECTOR_NATIVE" and sessions:
+            subsequent = sorted(
+                {
+                    _cleanup_preview_date(session)
+                    for version in preview["versions"]
+                    for session in version.get("dependent_target_sessions", ())
+                }
+            )
+            downstream_invalidated_tables = [
+                tbl
+                for tbl in cleanup_count_tables
+                if tbl != "stock.r03_sector_native_day_facts"
+            ]
+            downstream_existing_fact_counts = {
+                tbl: int(preview.get("affected_rows_by_table", {}).get(tbl, 0))
+                for tbl in downstream_invalidated_tables
+            }
+            if subsequent:
+                downstream_subsequent_sessions = [d.isoformat() for d in subsequent]
+                invalidated_sessions = sorted(set(invalidated_sessions) | set(subsequent))
         elif module_code == "MARKET_INDICES_ENV" and sessions:
             subsequent = sorted(
                 {
@@ -5229,6 +5754,28 @@ def read_business_table_count(
                  AND calendar_revision=%s
                  AND contract_version='MKT-02_BAOSTOCK_QFQ_POSITIVE_RETURN_STATE_DELTA_R3'""",
             lambda: (target_session, source_capture_id, calendar_revision),
+        ),
+        "stock.r03_formal_market_breadth_facts": (
+            """SELECT count(*) FROM stock.r03_formal_market_breadth_facts
+               WHERE trade_date=%s AND contract_version=%s
+                 AND (%s::text IS NULL OR scope_key=%s)
+                 AND (%s::text IS NULL OR universe_version_t=%s)""",
+            lambda: (
+                target_session,
+                producer_version or "R03_FORMAL_SECTOR_V1",
+                (
+                    f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
+                    if source_capture_id is not None and profile_revision is not None
+                    else None
+                ),
+                (
+                    f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
+                    if source_capture_id is not None and profile_revision is not None
+                    else None
+                ),
+                universe_version,
+                universe_version,
+            ),
         ),
         "stock.source_market_participation_days": (
             """SELECT count(*) FROM stock.source_market_participation_days
@@ -6379,8 +6926,9 @@ def mark_progress_cleared(
     business_table: str,
     deleted_rows: int,
     regenerate: bool = False,
+    version_keys: Sequence[Mapping[str, Any]] | None = None,
 ) -> None:
-    """读回派生表目标日期为零行后，记录清理任务的真实删除数。"""
+    """读回派生表目标日期（或精确版本）为零行后，记录清理任务的真实删除数。"""
     cleanup_tables = {
         table for spec in _CLEANUP_MODULES.values() for table in spec["progress_tables"]
     }
@@ -6421,29 +6969,24 @@ def mark_progress_cleared(
         ),
         "stock.r03_sector_native_day_facts": (
             """SELECT count(*) FROM stock.r03_sector_native_day_facts
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND trade_date<=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
         ),
         "stock.r03_sector_rotation_board_day_facts": (
             """SELECT count(*) FROM stock.r03_sector_rotation_board_day_facts
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND trade_date<=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
         ),
         "stock.r03_sector_rotation_day_states": (
             """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
                JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
-               WHERE s.trade_date=%s AND e.contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE s.trade_date=%s AND s.trade_date<=%s AND e.contract_version='R03_FORMAL_SECTOR_V1'""",
         ),
         "stock.r03_sector_overlap_clusters": (
             """SELECT count(*) FROM stock.r03_sector_overlap_clusters
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND trade_date<=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
         ),
         "stock.r03_sector_loo_support_facts": (
             """SELECT count(*) FROM stock.r03_sector_loo_support_facts
-               WHERE trade_date=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
-            lambda: (target_session,),
+               WHERE trade_date=%s AND trade_date<=%s AND contract_version='R03_FORMAL_SECTOR_V1'""",
         ),
         "stock.source_sector_cross_period_pulse_facts": (
             "SELECT count(*) FROM stock.source_sector_cross_period_pulse_facts WHERE target_session=%s AND target_session<=%s",
@@ -6534,6 +7077,9 @@ def mark_progress_cleared(
                  ON d.id=r.participation_day_id
                WHERE d.target_session=%s AND d.target_session<=%s""",
         ),
+        "stock.r03_formal_market_breadth_facts": (
+            "SELECT count(*) FROM stock.r03_formal_market_breadth_facts WHERE trade_date=%s AND trade_date<=%s",
+        ),
     }
     status = "CLEARED" if deleted_rows > 0 or regenerate else "NO_CHANGE"
     quality_status = status
@@ -6554,8 +7100,49 @@ def mark_progress_cleared(
                 "DATA_JOB_CLEANUP_PROGRESS_SCOPE_INVALID",
                 "清理进度任务未运行或目标会话超过任务截止；未登记完成",
             )
-        cursor.execute(count_queries[business_table][0], (target_session, job[1]))
-        if int(cursor.fetchone()[0]) != 0:
+        r03_version_filtered = {
+            "stock.r03_sector_native_day_facts",
+            "stock.r03_sector_rotation_board_day_facts",
+            "stock.r03_sector_overlap_clusters",
+            "stock.r03_sector_loo_support_facts",
+        }
+        if business_table in r03_version_filtered and version_keys:
+            rem_count = 0
+            for vk in version_keys:
+                cursor.execute(
+                    f"""SELECT count(*) FROM {business_table}
+                        WHERE trade_date=%s AND trade_date<=%s
+                          AND scope_key=%s AND member_version=%s AND contract_version=%s""",
+                    (
+                        target_session,
+                        job[1],
+                        vk["scope_key"],
+                        vk["member_version"],
+                        vk["contract_version"],
+                    ),
+                )
+                rem_count += int(cursor.fetchone()[0])
+        elif business_table == "stock.r03_sector_rotation_day_states" and version_keys:
+            rem_count = 0
+            for vk in version_keys:
+                cursor.execute(
+                    """SELECT count(*) FROM stock.r03_sector_rotation_day_states s
+                       JOIN stock.r03_sector_rotation_episodes e ON e.id=s.episode_id
+                       WHERE s.trade_date=%s AND s.trade_date<=%s
+                         AND e.scope_key=%s AND e.member_version=%s AND e.contract_version=%s""",
+                    (
+                        target_session,
+                        job[1],
+                        vk["scope_key"],
+                        vk["member_version"],
+                        vk["contract_version"],
+                    ),
+                )
+                rem_count += int(cursor.fetchone()[0])
+        else:
+            cursor.execute(count_queries[business_table][0], (target_session, job[1]))
+            rem_count = int(cursor.fetchone()[0])
+        if rem_count != 0:
             raise DataJobPgError(
                 "DATA_JOB_CLEANUP_READBACK_NOT_EMPTY",
                 "派生表仍有目标日结果；清理进度不能标记完成",

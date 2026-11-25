@@ -4033,12 +4033,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     d1_sessions,
                     d1_calendar_revision,
                     source_capture_id,
+                    price_coordinate,
                     event_window_start,
                     0,
                     1,
                     include_symbol_details=True,
                     source_symbol=explain_symbol,
-                    price_coordinate=price_coordinate,
                 )
                 exact_details = discovery["complete_symbol_details"]
                 detail = (
@@ -4157,12 +4157,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         d1_sessions,
                         d1_calendar_revision,
                         source_capture_id,
+                        price_coordinate,
                         event_window_start,
                         0,
                         1,
                         include_symbol_details=True,
                         source_version_context=source_version_context,
-                        price_coordinate=price_coordinate,
                     )
                     validate_source_d1_discovery_fact(
                         discovery,
@@ -4275,6 +4275,90 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "reused_exact_inputs": cache_hit,
             "reused_source_d1_discovery": source_d1_cache_hit,
         }
+        if profile_revision is not None:
+            from stock_a.application.r03_formal_sector import R03_CONTRACT_VERSION
+            from stock_a.storage.postgres.r03_formal_sector import (
+                read_r03_loo_support_fact,
+                read_r03_native_day_facts,
+                read_r03_overlap_day,
+            )
+
+            r03_scope = f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
+            r03_member_ver = f"IND_{body['industry_snapshot_id']}:CON_{body['concept_snapshot_id']}"
+            native_res = read_r03_native_day_facts(
+                config,
+                trade_date=target,
+                scope_key=r03_scope,
+                member_version=r03_member_ver,
+                contract_version=R03_CONTRACT_VERSION,
+            )
+            ov_res = read_r03_overlap_day(
+                config,
+                trade_date=target,
+                scope_key=r03_scope,
+                member_version=r03_member_ver,
+                contract_version=R03_CONTRACT_VERSION,
+            )
+            result["r03_formal_sector_context"] = {
+                "scope_key": r03_scope,
+                "member_version": r03_member_ver,
+                "contract_version": R03_CONTRACT_VERSION,
+                "native_status": native_res.get("status"),
+                "overlap_status": ov_res.get("status"),
+                "clusters": ov_res.get("clusters", []),
+                "pairs": [
+                    {
+                        **p,
+                        "jaccard_value": (
+                            str(p["jaccard_value"])
+                            if p.get("jaccard_value") is not None
+                            else None
+                        ),
+                    }
+                    for p in ov_res.get("pairs", ())
+                ],
+            }
+            if detail_board_kind and detail_board_native_id:
+                n_item = next(
+                    (
+                        item
+                        for item in native_res.get("items", ())
+                        if item.get("board_kind") == detail_board_kind
+                        and item.get("board_id") == detail_board_native_id
+                    ),
+                    None,
+                )
+                o_item = next(
+                    (
+                        item
+                        for item in ov_res.get("board_facts", ())
+                        if item.get("board_kind") == detail_board_kind
+                        and item.get("board_id") == detail_board_native_id
+                    ),
+                    None,
+                )
+                result["r03_formal_board_detail"] = {
+                    "native": n_item,
+                    "overlap_board": o_item,
+                }
+            if explain_symbol is not None:
+                result["r03_formal_loo"] = {
+                    "scope_key": r03_scope,
+                    "member_version": r03_member_ver,
+                    "contract_version": R03_CONTRACT_VERSION,
+                    "by_board_kind": {
+                        bk: read_r03_loo_support_fact(
+                            config,
+                            trade_date=target,
+                            target_entity_id=explain_symbol,
+                            board_kind=bk,
+                            scope_key=r03_scope,
+                            member_version=r03_member_ver,
+                            contract_version=R03_CONTRACT_VERSION,
+                        )
+                        for bk in ("INDUSTRY", "CONCEPT")
+                    },
+                }
         return result
 
     def do_HEAD(self) -> None:
@@ -4848,28 +4932,57 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     read_r03_formal_market_breadth,
                 )
 
-                mkt_scope_hint = None
+                mkt_scope_hint: str | None = None
+                req_profile_rev = values.get("profile_revision")
+                req_u_t = values.get("universe_version_t")
+                req_u_t3 = values.get("universe_version_t3")
                 if capture_id_val is not None:
                     with source_raw._transaction(
                         self.preview_server.state.config, write=False, statement_timeout_ms=5000
                     ) as (_c, _cur, _):
-                        _cur.execute(
-                            """
+                        scope_sql = """
                             SELECT DISTINCT scope_key
                             FROM stock.r03_formal_market_breadth_facts
                             WHERE trade_date=%s AND scope_key LIKE %s
-                            """,
-                            (target, f"BAOSTOCK_CAP_{capture_id_val}:%"),
-                        )
+                        """
+                        scope_params: list[Any] = [target, f"BAOSTOCK_CAP_{capture_id_val}:%"]
+                        if req_profile_rev:
+                            scope_sql += " AND scope_key=%s"
+                            scope_params.append(f"BAOSTOCK_CAP_{capture_id_val}:PROF_{req_profile_rev}:NON_PIT")
+                        _cur.execute(scope_sql, tuple(scope_params))
                         matched_scopes = [str(r[0]) for r in _cur.fetchall()]
-                    if len(matched_scopes) == 1:
+                    if not matched_scopes:
+                        formal_breadth = {
+                            "status": "NOT_READY_HISTORICAL_UNIVERSE",
+                            "reason": f"捕获 {capture_id_val} 在 {target} 尚无已保存的正式市场宽度事实（禁止串读其他捕获）。",
+                        }
+                    elif len(matched_scopes) > 1:
+                        formal_breadth = {
+                            "status": "AMBIGUOUS_SCOPE",
+                            "reason": f"捕获 {capture_id_val} 在 {target} 匹配到多个正式市场宽度口径({matched_scopes})，须指定精确 profile_revision。",
+                        }
+                    else:
                         mkt_scope_hint = matched_scopes[0]
-                formal_breadth = read_r03_formal_market_breadth(
-                    self.preview_server.state.config,
-                    trade_date=target,
-                    scope_key=mkt_scope_hint,
-                )
-                if formal_breadth.get("status") in {"OBSERVED", "UNKNOWN", "AMBIGUOUS_SCOPE"}:
+                        formal_breadth = read_r03_formal_market_breadth(
+                            self.preview_server.state.config,
+                            trade_date=target,
+                            scope_key=mkt_scope_hint,
+                            universe_version_t=req_u_t,
+                            universe_version_t3=req_u_t3,
+                        )
+                else:
+                    formal_breadth = read_r03_formal_market_breadth(
+                        self.preview_server.state.config,
+                        trade_date=target,
+                        universe_version_t=req_u_t,
+                        universe_version_t3=req_u_t3,
+                    )
+                if formal_breadth.get("status") in {
+                    "OBSERVED",
+                    "UNKNOWN",
+                    "AMBIGUOUS_SCOPE",
+                    "NOT_READY_HISTORICAL_UNIVERSE",
+                }:
                     base_payload["formal_market_breadth"] = formal_breadth
                 market_risk = compute_market_risk_projection(
                     pressure_axis=pressure_for_risk,
@@ -5238,13 +5351,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         read_source_sector_pulse_directory_page,
                     )
 
+                    prof_rev = _profile_revision(values["profile_revision"])
                     result = read_source_sector_pulse_directory_page(
                         self.preview_server.state.config,
                         target_session=target,
                         research_cutoff=cutoff,
                         source_capture_id=source["source_capture_id"],
                         source_pool_count=source["raw_row_count"],
-                        profile_revision=_profile_revision(values["profile_revision"]),
+                        profile_revision=prof_rev,
                         snapshot_ids={
                             "INDUSTRY": industry_snapshot_id,
                             "CONCEPT": concept_snapshot_id,
@@ -5257,6 +5371,102 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         offset=offset,
                         limit=limit,
                     )
+                    from stock_a.application.r03_formal_sector import (
+                        R03_CONTRACT_VERSION,
+                    )
+                    from stock_a.storage.postgres import source_raw as _sr_dir
+                    from stock_a.storage.postgres.r03_formal_sector import (
+                        read_r03_native_day_facts,
+                        read_r03_overlap_day,
+                    )
+
+                    r03_scope = (
+                        f"BAOSTOCK_CAP_{source['source_capture_id']}:PROF_{prof_rev}:NON_PIT"
+                    )
+                    r03_member_ver = f"IND_{industry_snapshot_id}:CON_{concept_snapshot_id}"
+                    r03_native = read_r03_native_day_facts(
+                        self.preview_server.state.config,
+                        trade_date=target,
+                        scope_key=r03_scope,
+                        member_version=r03_member_ver,
+                        contract_version=R03_CONTRACT_VERSION,
+                    )
+                    r03_overlap = read_r03_overlap_day(
+                        self.preview_server.state.config,
+                        trade_date=target,
+                        scope_key=r03_scope,
+                        member_version=r03_member_ver,
+                        contract_version=R03_CONTRACT_VERSION,
+                    )
+                    rot_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+                    with _sr_dir._transaction(
+                        self.preview_server.state.config,
+                        write=False,
+                        statement_timeout_ms=5000,
+                    ) as (_dc, _dcur, _):
+                        _dcur.execute(
+                            """
+                            SELECT board_kind, board_id, rotation_state, last_known_state, reason_code
+                            FROM stock.r03_sector_rotation_board_day_facts
+                            WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                            """,
+                            (target, r03_scope, r03_member_ver, R03_CONTRACT_VERSION),
+                        )
+                        for bk, bid, r_st, lk_st, rsn in _dcur.fetchall():
+                            rot_by_key[(str(bk), str(bid))] = {
+                                "rotation_state": str(r_st),
+                                "last_known_state": lk_st,
+                                "reason_code": rsn,
+                            }
+                    native_by_key = {
+                        (str(it["board_kind"]), str(it["board_id"])): it
+                        for it in r03_native.get("items", ())
+                    }
+                    ov_by_key = {
+                        (str(it["board_kind"]), str(it["board_id"])): it
+                        for it in r03_overlap.get("board_facts", ())
+                    }
+                    for dir_item in result.get("items", ()):
+                        dk = (
+                            str(dir_item.get("board_kind", "")),
+                            str(dir_item.get("board_native_id", "")),
+                        )
+                        n_it = native_by_key.get(dk)
+                        o_it = ov_by_key.get(dk)
+                        rt_it = rot_by_key.get(dk)
+                        if n_it or o_it or rt_it:
+                            dir_item["r03_formal"] = {
+                                "effective_maturity": n_it.get("effective_maturity") if n_it else None,
+                                "display_maturity": n_it.get("display_maturity") if n_it else None,
+                                "health_state": n_it.get("health_state") if n_it else None,
+                                "exhaustion_level": n_it.get("exhaustion_level") if n_it else None,
+                                "emergence_level": n_it.get("emergence_level") if n_it else None,
+                                "priority_status": n_it.get("priority_status") if n_it else None,
+                                "priority_rank": n_it.get("priority_rank") if n_it else None,
+                                "unique_share_status": o_it.get("unique_share_status") if o_it else None,
+                                "unique_share": str(o_it["unique_share"]) if o_it and o_it.get("unique_share") is not None else None,
+                                "cluster_id": o_it.get("cluster_id") if o_it else None,
+                                "rotation_state": rt_it.get("rotation_state") if rt_it else None,
+                            }
+                    result["r03_formal_sector_context"] = {
+                        "scope_key": r03_scope,
+                        "member_version": r03_member_ver,
+                        "contract_version": R03_CONTRACT_VERSION,
+                        "native_status": r03_native.get("status"),
+                        "overlap_status": r03_overlap.get("status"),
+                        "clusters": r03_overlap.get("clusters", []),
+                        "pairs": [
+                            {
+                                **p,
+                                "jaccard_value": (
+                                    str(p["jaccard_value"])
+                                    if p.get("jaccard_value") is not None
+                                    else None
+                                ),
+                            }
+                            for p in r03_overlap.get("pairs", ())
+                        ],
+                    }
                 except PreviewHttpError:
                     raise
                 except ValueError as error:

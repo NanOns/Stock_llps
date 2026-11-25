@@ -145,7 +145,9 @@ def write_r03_native_day_facts(
             existing = cur.fetchone()
             if existing is not None:
                 same = all(
-                    _dec_eq(e, v) if isinstance(v, Decimal) or isinstance(e, Decimal) else e == v
+                    _dec_eq(e, v)
+                    if isinstance(v, Decimal) or isinstance(e, Decimal)
+                    else e == v
                     for e, v in zip(existing, vals, strict=True)
                 )
                 if same:
@@ -243,9 +245,7 @@ def read_r03_native_day_facts(
         cur,
         _,
     ):
-        where_sql = (
-            "WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s"
-        )
+        where_sql = "WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s"
         params: list[Any] = [trade_date, scope_key, member_version, contract_version]
         if board_kind is not None:
             where_sql += " AND board_kind=%s"
@@ -256,7 +256,40 @@ def read_r03_native_day_facts(
             tuple(params),
         )
         total_count = int(cur.fetchone()[0])
+        cur.execute(
+            """
+            SELECT status, expected_rows
+            FROM stock.data_job_progress
+            WHERE target_session=%s AND business_table='stock.r03_sector_native_day_facts'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (trade_date,),
+        )
+        prog_row = cur.fetchone()
+        if prog_row is not None and str(prog_row[0]) in {
+            "FAILED",
+            "INCOMPLETE",
+            "RUNNING",
+        }:
+            return {
+                "status": "INCOMPLETE",
+                "total_count": 0,
+                "items": [],
+                "reason": "该日期 R03 Native 分区最新任务状态未完成，禁止读取半成品。",
+            }
         if total_count == 0:
+            if (
+                prog_row is not None
+                and str(prog_row[0]) in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}
+                and prog_row[1] == 0
+            ):
+                return {
+                    "status": "AVAILABLE_EMPTY",
+                    "total_count": 0,
+                    "items": [],
+                    "reason": "该日期已完成计算且合法结果为空（0行）。",
+                }
             return {
                 "status": "NOT_COMPUTED",
                 "total_count": 0,
@@ -303,47 +336,21 @@ def read_r03_previous_lifecycle_states(
     scope_key: str,
     member_version: str,
     contract_version: str,
+    previous_scope_key: str | None = None,
+    previous_member_version: str | None = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """从 PG 恢复上一官方交易日的板块成熟、降级目标与 PREWATCH 基准前态；支持合法跨日版本唯一兼容延续。"""
+    """从 PG 恢复上一官方交易日的板块成熟、降级目标与 PREWATCH 基准前态；仅按显式合法版本连续，绝不盲目全局回退。"""
+    target_scope = previous_scope_key or scope_key
+    target_mem = previous_member_version or member_version
     res = read_r03_native_day_facts(
         config,
         trade_date=previous_trade_date,
-        scope_key=scope_key,
-        member_version=member_version,
+        scope_key=target_scope,
+        member_version=target_mem,
         contract_version=contract_version,
     )
     if res["status"] == "AVAILABLE":
-        return {
-            (item["board_kind"], item["board_id"]): item for item in res["items"]
-        }
-    with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
-        _conn,
-        cur,
-        _,
-    ):
-        cur.execute(
-            """
-            SELECT DISTINCT scope_key, member_version
-            FROM stock.r03_sector_native_day_facts
-            WHERE trade_date=%s AND contract_version=%s
-            """,
-            (previous_trade_date, contract_version),
-        )
-        pairs = cur.fetchall()
-    if len(pairs) == 1:
-        compat_scope, compat_mem = str(pairs[0][0]), str(pairs[0][1])
-        compat_res = read_r03_native_day_facts(
-            config,
-            trade_date=previous_trade_date,
-            scope_key=compat_scope,
-            member_version=compat_mem,
-            contract_version=contract_version,
-        )
-        if compat_res["status"] == "AVAILABLE":
-            return {
-                (item["board_kind"], item["board_id"]): item
-                for item in compat_res["items"]
-            }
+        return {(item["board_kind"], item["board_id"]): item for item in res["items"]}
     return {}
 
 
@@ -469,7 +476,9 @@ def write_r03_rotation_day(
                         )
                         for eid in sorted(basket.members)
                     ]
-                    members_same = len(existing_members) == len(expected_members) and all(
+                    members_same = len(existing_members) == len(
+                        expected_members
+                    ) and all(
                         em[0] == xm[0]
                         and _dec_eq(em[1], xm[1])
                         and _dec_eq(em[2], xm[2])
@@ -477,38 +486,15 @@ def write_r03_rotation_day(
                         and bool(em[4]) == bool(xm[4])
                         and bool(em[5]) == bool(xm[5])
                         and bool(em[6]) == bool(xm[6])
-                        for em, xm in zip(existing_members, expected_members, strict=True)
+                        for em, xm in zip(
+                            existing_members, expected_members, strict=True
+                        )
                     )
                     if tuple(ep_row[1:]) != ep_meta_expected or not members_same:
-                        if not allow_revision:
-                            raise R03FormalSectorPgError(
-                                "R03_ROTATION_EPISODE_CONTENT_CONFLICT",
-                                f"Rotation Episode({basket.episode_id})已存在但冻结篮子或基准不同且未授权修订。",
-                            )
-                        cur.execute(
-                            """
-                            UPDATE stock.r03_sector_rotation_episodes SET
-                                member_version=%s, frozen_member_count=%s,
-                                s0_count=%s, u0_count=%s, h0_count=%s,
-                                s0_known=%s, u0_known=%s, h0_known=%s, left_censored=%s
-                            WHERE id=%s
-                            """,
-                            (member_version,) + ep_meta_expected + (episode_pg_id,),
+                        raise R03FormalSectorPgError(
+                            "R03_ROTATION_T0_EVIDENCE_IMMUTABLE",
+                            f"Rotation Episode({basket.episode_id})已存在且原已接受 T0 冻结篮子/基准不可被修订覆盖；如需重算请先清理对应版本。",
                         )
-                        cur.execute(
-                            "DELETE FROM stock.r03_sector_rotation_basket_members WHERE episode_id=%s",
-                            (episode_pg_id,),
-                        )
-                        for xm in expected_members:
-                            cur.execute(
-                                """
-                                INSERT INTO stock.r03_sector_rotation_basket_members (
-                                    episode_id, entity_id, weight, b_price, p_price,
-                                    in_s0, in_u0, in_h0
-                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                                """,
-                                (episode_pg_id,) + xm,
-                            )
 
             st = rec["state_result"]
             b_kind = str(rec.get("board_kind") or (basket.board_kind if basket else ""))
@@ -531,7 +517,14 @@ def write_r03_rotation_day(
                     WHERE trade_date=%s AND board_kind=%s AND board_id=%s
                       AND scope_key=%s AND member_version=%s AND contract_version=%s
                     """,
-                    (trade_date, b_kind, b_id, scope_key, member_version, contract_version),
+                    (
+                        trade_date,
+                        b_kind,
+                        b_id,
+                        scope_key,
+                        member_version,
+                        contract_version,
+                    ),
                 )
                 bd_existing = cur.fetchone()
                 if bd_existing is not None:
@@ -552,7 +545,14 @@ def write_r03_rotation_day(
                               AND scope_key=%s AND member_version=%s AND contract_version=%s
                             """,
                             bd_vals
-                            + (trade_date, b_kind, b_id, scope_key, member_version, contract_version),
+                            + (
+                                trade_date,
+                                b_kind,
+                                b_id,
+                                scope_key,
+                                member_version,
+                                contract_version,
+                            ),
                         )
                         board_days_updated += 1
                 else:
@@ -564,7 +564,14 @@ def write_r03_rotation_day(
                             last_known_state, reason_code
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
-                        (trade_date, b_kind, b_id, scope_key, member_version, contract_version)
+                        (
+                            trade_date,
+                            b_kind,
+                            b_id,
+                            scope_key,
+                            member_version,
+                            contract_version,
+                        )
                         + bd_vals,
                     )
                     board_days_inserted += 1
@@ -591,6 +598,8 @@ def write_r03_rotation_day(
                 (bm.get("diffusion") or {}).get("state", "UNKNOWN"),
                 (bm.get("early") or {}).get("state", "UNKNOWN"),
                 (bm.get("mature") or {}).get("state", "UNKNOWN"),
+                bm.get("valuation_quality", "UNKNOWN"),
+                bm.get("max_quote_age"),
                 st.get("reason"),
             )
             cur.execute(
@@ -598,7 +607,8 @@ def write_r03_rotation_day(
                 SELECT rotation_state, last_known_state, stale, market_age, eval_age,
                        accepted_once, armed, out_neg_streak, prev_mature_true, dq5,
                        formation_r, post_r, seed_retention, breadth_retention,
-                       strong_retention, diffusion_state, early_state, mature_state, reason_code
+                       strong_retention, diffusion_state, early_state, mature_state,
+                       valuation_quality, max_quote_age, reason_code
                 FROM stock.r03_sector_rotation_day_states
                 WHERE episode_id=%s AND trade_date=%s
                 """,
@@ -607,7 +617,9 @@ def write_r03_rotation_day(
             existing = cur.fetchone()
             if existing is not None:
                 same = all(
-                    _dec_eq(e, v) if isinstance(v, Decimal) or isinstance(e, Decimal) else e == v
+                    _dec_eq(e, v)
+                    if isinstance(v, Decimal) or isinstance(e, Decimal)
+                    else e == v
                     for e, v in zip(existing, vals, strict=True)
                 )
                 if same:
@@ -625,7 +637,8 @@ def write_r03_rotation_day(
                         eval_age=%s, accepted_once=%s, armed=%s, out_neg_streak=%s,
                         prev_mature_true=%s, dq5=%s, formation_r=%s, post_r=%s,
                         seed_retention=%s, breadth_retention=%s, strong_retention=%s,
-                        diffusion_state=%s, early_state=%s, mature_state=%s, reason_code=%s,
+                        diffusion_state=%s, early_state=%s, mature_state=%s,
+                        valuation_quality=%s, max_quote_age=%s, reason_code=%s,
                         recorded_at=now()
                     WHERE episode_id=%s AND trade_date=%s
                     """,
@@ -641,9 +654,9 @@ def write_r03_rotation_day(
                     market_age, eval_age, accepted_once, armed, out_neg_streak,
                     prev_mature_true, dq5, formation_r, post_r, seed_retention,
                     breadth_retention, strong_retention, diffusion_state, early_state,
-                    mature_state, reason_code
+                    mature_state, valuation_quality, max_quote_age, reason_code
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (episode_pg_id, trade_date) + vals,
@@ -667,34 +680,67 @@ def read_r03_rotation_recovery_states(
     previous_trade_date: date | None = None,
     scope_key: str,
     contract_version: str,
+    previous_scope_key: str | None = None,
+    member_version: str | None = None,
+    previous_member_version: str | None = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """跨重启从 PG 恢复各板块精确上一官方会话或历史最新 Rotation Episode、冻结篮子与最近日状态前态。"""
+    """跨重启从 PG 恢复各板块精确上一官方会话或历史最新 Rotation Episode、冻结篮子与最近日状态前态（精确绑定 scope 与 member_version）。"""
     if previous_trade_date is None and before_trade_date is None:
         return {}
+    prev_scope = previous_scope_key or scope_key
+    prev_mem = previous_member_version or member_version
     with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
         _conn,
         cur,
         _,
     ):
         if previous_trade_date is not None:
+            mem_filter = " AND b.member_version=%s" if prev_mem is not None else ""
+            params_ep: list[Any] = [prev_scope, contract_version, previous_trade_date]
+            if prev_mem is not None:
+                params_ep.append(prev_mem)
             cur.execute(
-                """
-                SELECT DISTINCT ON (e.board_kind, e.board_id)
-                       e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+                f"""
+                SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
                        e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
                        s.trade_date, s.rotation_state, s.last_known_state, s.stale,
                        s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
                        s.prev_mature_true, s.dq5, e.frozen_member_count
-                FROM stock.r03_sector_rotation_episodes e
-                JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
-                WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date = %s
-                ORDER BY e.board_kind, e.board_id, e.id DESC
+                FROM stock.r03_sector_rotation_board_day_facts b
+                JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
+                JOIN stock.r03_sector_rotation_day_states s
+                  ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                WHERE b.scope_key=%s AND b.contract_version=%s AND b.trade_date=%s
+                {mem_filter}
+                ORDER BY b.board_kind, b.board_id, e.id DESC
                 """,
-                (scope_key, contract_version, previous_trade_date),
+                tuple(params_ep),
             )
+            rows = cur.fetchall()
+            if not rows and prev_mem is None:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (e.board_kind, e.board_id)
+                           e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+                           e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
+                           s.trade_date, s.rotation_state, s.last_known_state, s.stale,
+                           s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
+                           s.prev_mature_true, s.dq5, e.frozen_member_count
+                    FROM stock.r03_sector_rotation_episodes e
+                    JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
+                    WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date = %s
+                    ORDER BY e.board_kind, e.board_id, e.id DESC
+                    """,
+                    (prev_scope, contract_version, previous_trade_date),
+                )
+                rows = cur.fetchall()
         else:
+            mem_filter = " AND e.member_version=%s" if prev_mem is not None else ""
+            params_hist: list[Any] = [prev_scope, contract_version, before_trade_date]
+            if prev_mem is not None:
+                params_hist.append(prev_mem)
             cur.execute(
-                """
+                f"""
                 SELECT DISTINCT ON (e.board_kind, e.board_id)
                        e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
                        e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
@@ -704,11 +750,12 @@ def read_r03_rotation_recovery_states(
                 FROM stock.r03_sector_rotation_episodes e
                 JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
                 WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date < %s
+                {mem_filter}
                 ORDER BY e.board_kind, e.board_id, s.trade_date DESC, e.id DESC
                 """,
-                (scope_key, contract_version, before_trade_date),
+                tuple(params_hist),
             )
-        rows = cur.fetchall()
+            rows = cur.fetchall()
         out: dict[tuple[str, str], dict[str, Any]] = {}
         for r in rows:
             ep_id = int(r[0])
@@ -781,16 +828,18 @@ def read_r03_rotation_recovery_states(
                 },
             }
         if previous_trade_date is not None:
-            cur.execute(
-                """
+            bd_sql = """
                 SELECT DISTINCT ON (board_kind, board_id)
                        board_kind, board_id, episode_id, rotation_state, last_known_state, reason_code
                 FROM stock.r03_sector_rotation_board_day_facts
                 WHERE scope_key=%s AND contract_version=%s AND trade_date = %s
-                ORDER BY board_kind, board_id, id DESC
-                """,
-                (scope_key, contract_version, previous_trade_date),
-            )
+            """
+            bd_params: list[Any] = [prev_scope, contract_version, previous_trade_date]
+            if prev_mem is not None:
+                bd_sql += " AND member_version=%s"
+                bd_params.append(prev_mem)
+            bd_sql += " ORDER BY board_kind, board_id, id DESC"
+            cur.execute(bd_sql, tuple(bd_params))
             for bk, bid, bd_ep_id, rot_st, lk_st, rsn in cur.fetchall():
                 key = (str(bk), str(bid))
                 if key not in out and bd_ep_id is None:
@@ -814,15 +863,16 @@ def read_r03_rotation_recovery_states(
                             "reason": rsn,
                         },
                     }
-            cur.execute(
-                """
-                SELECT DISTINCT e.board_kind, e.board_id
-                FROM stock.r03_sector_rotation_episodes e
-                JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
-                WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date < %s
-                """,
-                (scope_key, contract_version, previous_trade_date),
-            )
+            miss_sql = """
+                SELECT DISTINCT board_kind, board_id
+                FROM stock.r03_sector_rotation_board_day_facts
+                WHERE scope_key=%s AND contract_version=%s AND trade_date < %s
+            """
+            miss_params: list[Any] = [prev_scope, contract_version, previous_trade_date]
+            if prev_mem is not None:
+                miss_sql += " AND member_version=%s"
+                miss_params.append(prev_mem)
+            cur.execute(miss_sql, tuple(miss_params))
             for bk, bid in cur.fetchall():
                 key = (str(bk), str(bid))
                 if key not in out:
@@ -911,7 +961,8 @@ def read_r03_rotation_timeline(
                 SELECT trade_date, rotation_state, last_known_state, stale, market_age,
                        eval_age, accepted_once, armed, out_neg_streak, formation_r, post_r,
                        seed_retention, breadth_retention, strong_retention,
-                       diffusion_state, early_state, mature_state, reason_code
+                       diffusion_state, early_state, mature_state,
+                       valuation_quality, max_quote_age, reason_code
                 FROM stock.r03_sector_rotation_day_states
                 WHERE episode_id=%s
             """
@@ -1055,11 +1106,17 @@ def write_r03_overlap_results(
         for nr in native_rows:
             bk = str(nr["board_kind"])
             bid = str(nr["board_id"])
-            if (bk, bid) not in unique_shares and bid not in unique_shares and (bk, bid) not in cluster_by_board:
+            if (
+                (bk, bid) not in unique_shares
+                and bid not in unique_shares
+                and (bk, bid) not in cluster_by_board
+            ):
                 continue
             us = unique_shares.get(
                 (bk, bid),
-                unique_shares.get(bid, {"status": "NA", "value": None, "reason": "SAFETY_NOT_TRUE"}),
+                unique_shares.get(
+                    bid, {"status": "NA", "value": None, "reason": "SAFETY_NOT_TRUE"}
+                ),
             )
             vals_b = (
                 us["status"],
@@ -1081,7 +1138,9 @@ def write_r03_overlap_results(
             existing_b = cur.fetchone()
             if existing_b is not None:
                 same_b = all(
-                    _dec_eq(e, v) if isinstance(v, Decimal) or isinstance(e, Decimal) else e == v
+                    _dec_eq(e, v)
+                    if isinstance(v, Decimal) or isinstance(e, Decimal)
+                    else e == v
                     for e, v in zip(existing_b, vals_b, strict=True)
                 )
                 if same_b:
@@ -1100,7 +1159,15 @@ def write_r03_overlap_results(
                     WHERE trade_date=%s AND board_kind=%s AND board_id=%s
                       AND scope_key=%s AND member_version=%s AND contract_version=%s
                     """,
-                    vals_b + (trade_date, bk, bid, scope_key, member_version, contract_version),
+                    vals_b
+                    + (
+                        trade_date,
+                        bk,
+                        bid,
+                        scope_key,
+                        member_version,
+                        contract_version,
+                    ),
                 )
                 b_upd += 1
                 continue
@@ -1117,7 +1184,9 @@ def write_r03_overlap_results(
             )
             b_ins += 1
         if allow_revision:
-            current_cluster_keys = {(str(c["board_kind"]), str(c["cluster_id"])) for c in clusters}
+            current_cluster_keys = {
+                (str(c["board_kind"]), str(c["cluster_id"])) for c in clusters
+            }
             cur.execute(
                 """
                 SELECT board_kind, cluster_id
@@ -1134,8 +1203,123 @@ def write_r03_overlap_results(
                         WHERE trade_date=%s AND board_kind=%s AND cluster_id=%s
                           AND scope_key=%s AND member_version=%s AND contract_version=%s
                         """,
-                        (trade_date, old_bk, old_cid, scope_key, member_version, contract_version),
+                        (
+                            trade_date,
+                            old_bk,
+                            old_cid,
+                            scope_key,
+                            member_version,
+                            contract_version,
+                        ),
                     )
+        # 幂等写入 Overlap 板块对 Jaccard 边事实（修订时清理过期旧边）
+        pair_rows = overlap.get("pairs", ())
+        current_pair_keys = {
+            (str(p["board_kind"]), str(p["board_id_a"]), str(p["board_id_b"]))
+            for p in pair_rows
+        }
+        if allow_revision:
+            cur.execute(
+                """
+                SELECT board_kind, board_id_a, board_id_b
+                FROM stock.r03_sector_overlap_pair_facts
+                WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                """,
+                (trade_date, scope_key, member_version, contract_version),
+            )
+            for old_bk, old_a, old_b in cur.fetchall():
+                if (str(old_bk), str(old_a), str(old_b)) not in current_pair_keys:
+                    cur.execute(
+                        """
+                        DELETE FROM stock.r03_sector_overlap_pair_facts
+                        WHERE trade_date=%s AND board_kind=%s AND board_id_a=%s AND board_id_b=%s
+                          AND scope_key=%s AND member_version=%s AND contract_version=%s
+                        """,
+                        (
+                            trade_date,
+                            old_bk,
+                            old_a,
+                            old_b,
+                            scope_key,
+                            member_version,
+                            contract_version,
+                        ),
+                    )
+        for pr in pair_rows:
+            p_vals = (
+                str(pr["jaccard_status"]),
+                _num(pr.get("jaccard_value")),
+                pr.get("reason"),
+            )
+            cur.execute(
+                """
+                SELECT jaccard_status, jaccard_value, reason_code
+                FROM stock.r03_sector_overlap_pair_facts
+                WHERE trade_date=%s AND board_kind=%s AND board_id_a=%s AND board_id_b=%s
+                  AND scope_key=%s AND member_version=%s AND contract_version=%s
+                """,
+                (
+                    trade_date,
+                    pr["board_kind"],
+                    pr["board_id_a"],
+                    pr["board_id_b"],
+                    scope_key,
+                    member_version,
+                    contract_version,
+                ),
+            )
+            ex_p = cur.fetchone()
+            if ex_p is not None:
+                same_p = all(
+                    _dec_eq(e, v)
+                    if isinstance(v, Decimal) or isinstance(e, Decimal)
+                    else e == v
+                    for e, v in zip(ex_p, p_vals, strict=True)
+                )
+                if same_p:
+                    continue
+                if not allow_revision:
+                    raise R03FormalSectorPgError(
+                        "R03_OVERLAP_PAIR_CONFLICT",
+                        f"Overlap边({trade_date}, {pr['board_kind']}, {pr['board_id_a']}, {pr['board_id_b']})已存在不同内容。",
+                    )
+                cur.execute(
+                    """
+                    UPDATE stock.r03_sector_overlap_pair_facts SET
+                        jaccard_status=%s, jaccard_value=%s, reason_code=%s, recorded_at=now()
+                    WHERE trade_date=%s AND board_kind=%s AND board_id_a=%s AND board_id_b=%s
+                      AND scope_key=%s AND member_version=%s AND contract_version=%s
+                    """,
+                    p_vals
+                    + (
+                        trade_date,
+                        pr["board_kind"],
+                        pr["board_id_a"],
+                        pr["board_id_b"],
+                        scope_key,
+                        member_version,
+                        contract_version,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO stock.r03_sector_overlap_pair_facts (
+                        trade_date, board_kind, board_id_a, board_id_b, scope_key,
+                        member_version, contract_version, jaccard_status, jaccard_value, reason_code
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        trade_date,
+                        pr["board_kind"],
+                        pr["board_id_a"],
+                        pr["board_id_b"],
+                        scope_key,
+                        member_version,
+                        contract_version,
+                    )
+                    + p_vals,
+                )
     return {
         "clusters_inserted": c_ins,
         "clusters_updated": c_upd,
@@ -1161,9 +1345,7 @@ def read_r03_overlap_day(
         cur,
         _,
     ):
-        where_sql = (
-            "WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s"
-        )
+        where_sql = "WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s"
         params: list[Any] = [trade_date, scope_key, member_version, contract_version]
         if board_kind is not None:
             where_sql += " AND board_kind=%s"
@@ -1192,19 +1374,255 @@ def read_r03_overlap_day(
         )
         b_cols = [d[0] for d in cur.description]
         board_facts = [dict(zip(b_cols, r, strict=True)) for r in cur.fetchall()]
+        cur.execute(
+            f"""
+            SELECT board_kind, board_id_a, board_id_b, jaccard_status, jaccard_value, reason_code
+            FROM stock.r03_sector_overlap_pair_facts
+            {where_sql}
+            ORDER BY board_kind ASC, board_id_a ASC, board_id_b ASC
+            """,
+            tuple(params),
+        )
+        p_cols = [d[0] for d in cur.description]
+        pairs = [dict(zip(p_cols, r, strict=True)) for r in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT status, expected_rows
+            FROM stock.data_job_progress
+            WHERE target_session=%s AND business_table='stock.r03_sector_overlap_clusters'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (trade_date,),
+        )
+        ov_prog = cur.fetchone()
+        if ov_prog is not None and str(ov_prog[0]) in {
+            "FAILED",
+            "INCOMPLETE",
+            "RUNNING",
+        }:
+            return {
+                "status": "INCOMPLETE",
+                "clusters": [],
+                "board_facts": [],
+                "reason": "该日期 Overlap 分区最新任务状态未完成，禁止读取半成品。",
+            }
         if not clusters and not board_facts:
+            if (
+                ov_prog is not None
+                and str(ov_prog[0]) in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}
+                and ov_prog[1] == 0
+            ):
+                return {
+                    "status": "AVAILABLE_EMPTY",
+                    "clusters": [],
+                    "board_facts": [],
+                    "pairs": [],
+                    "reason": "该日期 Overlap 已完成计算且合法结果为空（0簇）。",
+                }
             return {
                 "status": "NOT_COMPUTED",
                 "clusters": [],
                 "board_facts": [],
+                "pairs": [],
                 "reason": "该日期与口径尚无已保存的 Overlap 事实。",
             }
         return {
             "status": "AVAILABLE",
             "clusters": clusters,
             "board_facts": board_facts,
+            "pairs": pairs,
             "reason": None,
         }
+
+
+def write_r03_loo_day_batch(
+    config: Mapping[str, Any],
+    *,
+    trade_date: date,
+    scope_key: str,
+    member_version: str,
+    contract_version: str,
+    targets_and_results: Sequence[tuple[str, Mapping[str, Any]]],
+    allow_revision: bool = False,
+) -> dict[str, int]:
+    """在单事务中原子写入当日全部 LOO 目标支持事实及候选明细，任一目标失败整日回滚不暴露部分分区。"""
+    inserted = updated = skipped = 0
+    with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
+        _conn,
+        cur,
+        _,
+    ):
+        for bk, loo_result in targets_and_results:
+            res = _write_r03_loo_support_in_cursor(
+                cur,
+                trade_date=trade_date,
+                board_kind=bk,
+                scope_key=scope_key,
+                member_version=member_version,
+                contract_version=contract_version,
+                loo_result=loo_result,
+                allow_revision=allow_revision,
+            )
+            inserted += res["inserted"]
+            updated += res["updated"]
+            skipped += res["skipped"]
+    return {"inserted": inserted, "updated": updated, "skipped": skipped}
+
+
+def _write_r03_loo_support_in_cursor(
+    cur: Any,
+    *,
+    trade_date: date,
+    board_kind: str,
+    scope_key: str,
+    member_version: str,
+    contract_version: str,
+    loo_result: Mapping[str, Any],
+    allow_revision: bool = False,
+) -> dict[str, int]:
+    inserted = updated = skipped = 0
+    vals = (
+        loo_result.get("primary_industry_id"),
+        loo_result.get("algorithm_support_board_id"),
+        loo_result["support_status"],
+        loo_result.get("reason"),
+    )
+    cur.execute(
+        """
+        SELECT id, primary_industry_id, algorithm_support_board_id, support_status, reason_code
+        FROM stock.r03_sector_loo_support_facts
+        WHERE trade_date=%s AND target_entity_id=%s AND board_kind=%s
+          AND scope_key=%s AND member_version=%s AND contract_version=%s
+        """,
+        (
+            trade_date,
+            loo_result["target_entity_id"],
+            board_kind,
+            scope_key,
+            member_version,
+            contract_version,
+        ),
+    )
+    existing = cur.fetchone()
+    if existing is not None:
+        loo_id = int(existing[0])
+        cur.execute(
+            """
+            SELECT board_id, safety_state, prewatch_raw_state, warm_raw_state,
+                   confirmed_raw_state, emergence_level, seed_wilson_point,
+                   rs5_pct, dq5, reason_code
+            FROM stock.r03_sector_loo_candidate_facts
+            WHERE loo_fact_id=%s
+            ORDER BY board_id
+            """,
+            (loo_id,),
+        )
+        existing_cands = [
+            (
+                str(r[0]),
+                str(r[1]),
+                str(r[2]),
+                str(r[3]),
+                str(r[4]),
+                str(r[5]) if r[5] is not None else None,
+                Decimal(str(r[6])) if r[6] is not None else None,
+                Decimal(str(r[7])) if r[7] is not None else None,
+                Decimal(str(r[8])) if r[8] is not None else None,
+                str(r[9]) if r[9] is not None else None,
+            )
+            for r in cur.fetchall()
+        ]
+        new_cands = sorted(
+            (
+                str(c["board_id"]),
+                str(c["raw_qualification"]["safety"]["state"]),
+                str(c["raw_qualification"]["prewatch_raw"]["state"]),
+                str(c["raw_qualification"]["warm_raw"]["state"]),
+                str(c["raw_qualification"]["confirmed_raw"]["state"]),
+                str(c["emergence"]["level"])
+                if c.get("emergence", {}).get("level") is not None
+                else None,
+                _num(c.get("seed_wilson", {}).get("point_value")),
+                _num(c.get("rs5_pct")),
+                _num(c.get("dq5")),
+                str(c["priority"]["reason"])
+                if c.get("priority", {}).get("reason") is not None
+                else None,
+            )
+            for c in loo_result.get("loo_boards", ())
+        )
+        if existing[1:] == vals and existing_cands == new_cands:
+            skipped += 1
+        elif not allow_revision:
+            raise R03FormalSectorPgError(
+                "R03_LOO_KEY_CONTENT_CONFLICT",
+                f"LOO支持事实({trade_date}, {loo_result['target_entity_id']}, {board_kind})已存在不同内容。",
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE stock.r03_sector_loo_support_facts SET
+                    primary_industry_id=%s, algorithm_support_board_id=%s,
+                    support_status=%s, reason_code=%s, recorded_at=now()
+                WHERE id=%s
+                """,
+                vals + (loo_id,),
+            )
+            cur.execute(
+                "DELETE FROM stock.r03_sector_loo_candidate_facts WHERE loo_fact_id=%s",
+                (loo_id,),
+            )
+            updated += 1
+    else:
+        cur.execute(
+            """
+            INSERT INTO stock.r03_sector_loo_support_facts (
+                trade_date, target_entity_id, board_kind, scope_key, member_version,
+                contract_version, primary_industry_id, algorithm_support_board_id,
+                support_status, reason_code
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                trade_date,
+                loo_result["target_entity_id"],
+                board_kind,
+                scope_key,
+                member_version,
+                contract_version,
+            )
+            + vals,
+        )
+        loo_id = int(cur.fetchone()[0])
+        inserted += 1
+
+    if inserted or updated:
+        for cand in loo_result.get("loo_boards", ()):
+            rq = cand["raw_qualification"]
+            cur.execute(
+                """
+                INSERT INTO stock.r03_sector_loo_candidate_facts (
+                    loo_fact_id, board_id, safety_state, prewatch_raw_state,
+                    warm_raw_state, confirmed_raw_state, emergence_level,
+                    seed_wilson_point, rs5_pct, dq5, reason_code
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    loo_id,
+                    cand["board_id"],
+                    rq["safety"]["state"],
+                    rq["prewatch_raw"]["state"],
+                    rq["warm_raw"]["state"],
+                    rq["confirmed_raw"]["state"],
+                    cand["emergence"]["level"],
+                    _num(cand["seed_wilson"].get("point_value")),
+                    _num(cand.get("rs5_pct")),
+                    _num(cand.get("dq5")),
+                    cand["priority"].get("reason"),
+                ),
+            )
+    return {"inserted": inserted, "updated": updated, "skipped": skipped}
 
 
 def write_r03_loo_support_fact(
@@ -1219,149 +1637,87 @@ def write_r03_loo_support_fact(
     allow_revision: bool = False,
 ) -> dict[str, int]:
     """幂等写入单股 LOO 算法支持板块结果及全部候选板块重算证据。"""
-    inserted = updated = skipped = 0
     with source_raw._transaction(config, write=True, statement_timeout_ms=15000) as (
         _conn,
         cur,
         _,
     ):
-        vals = (
-            loo_result.get("primary_industry_id"),
-            loo_result.get("algorithm_support_board_id"),
-            loo_result["support_status"],
-            loo_result.get("reason"),
+        return _write_r03_loo_support_in_cursor(
+            cur,
+            trade_date=trade_date,
+            board_kind=board_kind,
+            scope_key=scope_key,
+            member_version=member_version,
+            contract_version=contract_version,
+            loo_result=loo_result,
+            allow_revision=allow_revision,
         )
-        cur.execute(
-            """
-            SELECT id, primary_industry_id, algorithm_support_board_id, support_status, reason_code
-            FROM stock.r03_sector_loo_support_facts
-            WHERE trade_date=%s AND target_entity_id=%s AND board_kind=%s
-              AND scope_key=%s AND member_version=%s AND contract_version=%s
-            """,
-            (
-                trade_date,
-                loo_result["target_entity_id"],
-                board_kind,
-                scope_key,
-                member_version,
-                contract_version,
-            ),
-        )
-        existing = cur.fetchone()
-        if existing is not None:
-            loo_id = int(existing[0])
-            cur.execute(
-                """
-                SELECT board_id, safety_state, prewatch_raw_state, warm_raw_state,
-                       confirmed_raw_state, emergence_level, seed_wilson_point,
-                       rs5_pct, dq5, reason_code
-                FROM stock.r03_sector_loo_candidate_facts
-                WHERE loo_fact_id=%s
-                ORDER BY board_id
-                """,
-                (loo_id,),
-            )
-            existing_cands = [
-                (
-                    str(r[0]),
-                    str(r[1]),
-                    str(r[2]),
-                    str(r[3]),
-                    str(r[4]),
-                    str(r[5]) if r[5] is not None else None,
-                    Decimal(str(r[6])) if r[6] is not None else None,
-                    Decimal(str(r[7])) if r[7] is not None else None,
-                    Decimal(str(r[8])) if r[8] is not None else None,
-                    str(r[9]) if r[9] is not None else None,
-                )
-                for r in cur.fetchall()
-            ]
-            new_cands = sorted(
-                (
-                    str(c["board_id"]),
-                    str(c["raw_qualification"]["safety"]["state"]),
-                    str(c["raw_qualification"]["prewatch_raw"]["state"]),
-                    str(c["raw_qualification"]["warm_raw"]["state"]),
-                    str(c["raw_qualification"]["confirmed_raw"]["state"]),
-                    str(c["emergence"]["level"]) if c.get("emergence", {}).get("level") is not None else None,
-                    _num(c.get("seed_wilson", {}).get("point_value")),
-                    _num(c.get("rs5_pct")),
-                    _num(c.get("dq5")),
-                    str(c["priority"]["reason"]) if c.get("priority", {}).get("reason") is not None else None,
-                )
-                for c in loo_result.get("loo_boards", ())
-            )
-            if existing[1:] == vals and existing_cands == new_cands:
-                skipped += 1
-            elif not allow_revision:
-                raise R03FormalSectorPgError(
-                    "R03_LOO_KEY_CONTENT_CONFLICT",
-                    f"LOO支持事实({trade_date}, {loo_result['target_entity_id']}, {board_kind})已存在不同内容。",
-                )
-            else:
-                cur.execute(
-                    """
-                    UPDATE stock.r03_sector_loo_support_facts SET
-                        primary_industry_id=%s, algorithm_support_board_id=%s,
-                        support_status=%s, reason_code=%s, recorded_at=now()
-                    WHERE id=%s
-                    """,
-                    vals + (loo_id,),
-                )
-                cur.execute(
-                    "DELETE FROM stock.r03_sector_loo_candidate_facts WHERE loo_fact_id=%s",
-                    (loo_id,),
-                )
-                updated += 1
-        else:
-            cur.execute(
-                """
-                INSERT INTO stock.r03_sector_loo_support_facts (
-                    trade_date, target_entity_id, board_kind, scope_key, member_version,
-                    contract_version, primary_industry_id, algorithm_support_board_id,
-                    support_status, reason_code
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    trade_date,
-                    loo_result["target_entity_id"],
-                    board_kind,
-                    scope_key,
-                    member_version,
-                    contract_version,
-                )
-                + vals,
-            )
-            loo_id = int(cur.fetchone()[0])
-            inserted += 1
 
-        if inserted or updated:
-            for cand in loo_result.get("loo_boards", ()):
-                rq = cand["raw_qualification"]
-                cur.execute(
-                    """
-                    INSERT INTO stock.r03_sector_loo_candidate_facts (
-                        loo_fact_id, board_id, safety_state, prewatch_raw_state,
-                        warm_raw_state, confirmed_raw_state, emergence_level,
-                        seed_wilson_point, rs5_pct, dq5, reason_code
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        loo_id,
-                        cand["board_id"],
-                        rq["safety"]["state"],
-                        rq["prewatch_raw"]["state"],
-                        rq["warm_raw"]["state"],
-                        rq["confirmed_raw"]["state"],
-                        cand["emergence"]["level"],
-                        _num(cand["seed_wilson"].get("point_value")),
-                        _num(cand.get("rs5_pct")),
-                        _num(cand.get("dq5")),
-                        cand["priority"].get("reason"),
-                    ),
-                )
-    return {"inserted": inserted, "updated": updated, "skipped": skipped}
+
+def verify_r03_partition_keys(
+    config: Mapping[str, Any],
+    *,
+    module_code: str,
+    trade_date: date,
+    scope_key: str,
+    member_version: str,
+    contract_version: str,
+    expected_keys: set[tuple[str, str]],
+) -> dict[str, Any]:
+    """独立只读连接核验 R03 分区实际业务键集合与预期严格相等（防少行、同数错键、额外或预期0陈旧）。"""
+    with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
+        _conn,
+        cur,
+        _,
+    ):
+        if module_code == "R03_SECTOR_NATIVE":
+            cur.execute(
+                """
+                SELECT board_kind, board_id
+                FROM stock.r03_sector_native_day_facts
+                WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                """,
+                (trade_date, scope_key, member_version, contract_version),
+            )
+        elif module_code == "R03_SECTOR_ROTATION":
+            cur.execute(
+                """
+                SELECT board_kind, board_id
+                FROM stock.r03_sector_rotation_board_day_facts
+                WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                """,
+                (trade_date, scope_key, member_version, contract_version),
+            )
+        elif module_code == "R03_SECTOR_OVERLAP":
+            cur.execute(
+                """
+                SELECT board_kind, cluster_id
+                FROM stock.r03_sector_overlap_clusters
+                WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                """,
+                (trade_date, scope_key, member_version, contract_version),
+            )
+        elif module_code == "R03_SECTOR_LOO":
+            cur.execute(
+                """
+                SELECT target_entity_id, board_kind
+                FROM stock.r03_sector_loo_support_facts
+                WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s
+                """,
+                (trade_date, scope_key, member_version, contract_version),
+            )
+        else:
+            return {"matched": True, "missing": [], "extra": []}
+        actual_keys = {(str(r[0]), str(r[1])) for r in cur.fetchall()}
+    missing = sorted(expected_keys - actual_keys)
+    extra = sorted(actual_keys - expected_keys)
+    return {
+        "matched": (not missing and not extra),
+        "actual_count": len(actual_keys),
+        "expected_count": len(expected_keys),
+        "missing": missing[:10],
+        "extra": extra[:10],
+    }
 
 
 def read_r03_loo_support_fact(
@@ -1444,9 +1800,21 @@ def write_r03_formal_market_breadth(
     u_t = str(result["universe_version_t"])
     u_t3 = str(result["universe_version_t3"])
     exact = result.get("exact")
-    num = int(exact["numerator"]) if isinstance(exact, Mapping) and exact.get("numerator") is not None else None
-    den = int(exact["denominator"]) if isinstance(exact, Mapping) and exact.get("denominator") is not None else None
-    val = _num(Fraction(num, den)) if num is not None and den is not None and den > 0 else None
+    num = (
+        int(exact["numerator"])
+        if isinstance(exact, Mapping) and exact.get("numerator") is not None
+        else None
+    )
+    den = (
+        int(exact["denominator"])
+        if isinstance(exact, Mapping) and exact.get("denominator") is not None
+        else None
+    )
+    val = (
+        _num(Fraction(num, den))
+        if num is not None and den is not None and den > 0
+        else None
+    )
     vals = (
         str(result["status"]),
         result.get("reason"),
@@ -1478,7 +1846,9 @@ def write_r03_formal_market_breadth(
         existing = cur.fetchone()
         if existing is not None:
             same = all(
-                _dec_eq(e, v) if isinstance(v, Decimal) or isinstance(e, Decimal) else e == v
+                _dec_eq(e, v)
+                if isinstance(v, Decimal) or isinstance(e, Decimal)
+                else e == v
                 for e, v in zip(existing, vals, strict=True)
             )
             if same:
@@ -1586,46 +1956,116 @@ def cleanup_r03_scope_day(
     *,
     trade_date: date,
     scope_key: str,
+    member_version: str | None = None,
+    contract_version: str | None = None,
+    include_formal_market: bool = False,
 ) -> dict[str, int]:
-    """按精确日期与 scope 有界清理 R03 正式事实，不触碰其他捕获、日期或来源层。"""
+    """按精确日期、scope 及可选成员/合同版本有界清理 R03 正式事实，不触碰其他捕获、日期或来源层，默认不误删独立市场宽度。"""
     deleted: dict[str, int] = {}
+    ver_sql = ""
+    ver_params: tuple[Any, ...] = ()
+    if member_version is not None:
+        ver_sql += " AND member_version=%s"
+        ver_params += (member_version,)
+    if contract_version is not None:
+        ver_sql += " AND contract_version=%s"
+        ver_params += (contract_version,)
+
+    ep_ver_sql = ""
+    if member_version is not None:
+        ep_ver_sql += " AND e.member_version=%s"
+    if contract_version is not None:
+        ep_ver_sql += " AND e.contract_version=%s"
+
     with source_raw._transaction(config, write=True, statement_timeout_ms=15000) as (
         _conn,
         cur,
         _,
     ):
-        for table in (
+        cur.execute(
+            f"""
+            DELETE FROM stock.r03_sector_loo_candidate_facts c
+            USING stock.r03_sector_loo_support_facts f
+            WHERE c.loo_fact_id = f.id AND f.trade_date=%s AND f.scope_key=%s
+            {ep_ver_sql.replace("e.", "f.")}
+            """,
+            (trade_date, scope_key, *ver_params),
+        )
+        deleted["stock.r03_sector_loo_candidate_facts"] = cur.rowcount
+        tables: list[str] = [
             "stock.r03_sector_loo_support_facts",
+            "stock.r03_sector_overlap_pair_facts",
             "stock.r03_sector_overlap_board_facts",
             "stock.r03_sector_overlap_clusters",
             "stock.r03_sector_rotation_board_day_facts",
             "stock.r03_sector_native_day_facts",
-            "stock.r03_formal_market_breadth_facts",
-        ):
+        ]
+        for table in tables:
             cur.execute(
-                f"DELETE FROM {table} WHERE trade_date=%s AND scope_key=%s",
-                (trade_date, scope_key),
+                f"DELETE FROM {table} WHERE trade_date=%s AND scope_key=%s {ver_sql}",
+                (trade_date, scope_key, *ver_params),
             )
             deleted[table] = cur.rowcount
+        if include_formal_market:
+            mkt_sql = "DELETE FROM stock.r03_formal_market_breadth_facts WHERE trade_date=%s AND scope_key=%s"
+            mkt_params: tuple[Any, ...] = (trade_date, scope_key)
+            if contract_version is not None:
+                mkt_sql += " AND contract_version=%s"
+                mkt_params += (contract_version,)
+            cur.execute(mkt_sql, mkt_params)
+            deleted["stock.r03_formal_market_breadth_facts"] = cur.rowcount
         cur.execute(
-            """
+            f"""
             DELETE FROM stock.r03_sector_rotation_day_states s
             USING stock.r03_sector_rotation_episodes e
-            WHERE s.episode_id = e.id AND s.trade_date=%s AND e.scope_key=%s
+            WHERE s.episode_id = e.id AND s.trade_date=%s AND e.scope_key=%s {ep_ver_sql}
             """,
-            (trade_date, scope_key),
+            (trade_date, scope_key, *ver_params),
         )
         deleted["stock.r03_sector_rotation_day_states"] = cur.rowcount
         cur.execute(
-            """
-            DELETE FROM stock.r03_sector_rotation_episodes e
-            WHERE e.t0_session=%s AND e.scope_key=%s
+            f"""
+            DELETE FROM stock.r03_sector_rotation_basket_members bm
+            USING stock.r03_sector_rotation_episodes e
+            WHERE bm.episode_id = e.id AND e.t0_session=%s AND e.scope_key=%s {ep_ver_sql}
               AND NOT EXISTS (
                   SELECT 1 FROM stock.r03_sector_rotation_day_states s
                   WHERE s.episode_id = e.id
               )
             """,
-            (trade_date, scope_key),
+            (trade_date, scope_key, *ver_params),
+        )
+        deleted["stock.r03_sector_rotation_basket_members"] = cur.rowcount
+        cur.execute(
+            f"""
+            UPDATE stock.r03_sector_rotation_episodes e
+            SET parent_episode_id = NULL
+            WHERE e.parent_episode_id IN (
+                SELECT ep.id FROM stock.r03_sector_rotation_episodes ep
+                WHERE ep.t0_session=%s AND ep.scope_key=%s {ep_ver_sql.replace("e.", "ep.")}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                      WHERE s.episode_id = ep.id
+                  )
+            )
+              AND e.t0_session=%s AND e.scope_key=%s {ep_ver_sql}
+              AND NOT EXISTS (
+                  SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                  WHERE s.episode_id = e.id
+              )
+            """,
+            (trade_date, scope_key, *ver_params, trade_date, scope_key, *ver_params),
+        )
+        cur.execute(
+            f"""
+            DELETE FROM stock.r03_sector_rotation_episodes e
+            WHERE e.t0_session=%s AND e.scope_key=%s {ep_ver_sql}
+              AND NOT EXISTS (
+                  SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                  WHERE s.episode_id = e.id
+              )
+            """,
+            (trade_date, scope_key, *ver_params),
         )
         deleted["stock.r03_sector_rotation_episodes"] = cur.rowcount
     return deleted
@@ -1636,46 +2076,122 @@ def invalidate_r03_from_date(
     *,
     from_trade_date: date,
     scope_key: str,
+    member_version: str | None = None,
+    contract_version: str | None = None,
+    include_formal_market: bool = False,
 ) -> dict[str, int]:
-    """上游输入在 from_trade_date 修订后，按同 scope 级联失效 from_trade_date 及全部后继 R03 事实与正式市场宽度，保留更早日期、其他 scope 及真实 Raw。"""
+    """上游输入在 from_trade_date 修订后，按同 scope（及可选成员/合同版本）级联失效 from_trade_date 及全部后继 R03 事实，保留更早日期、其他 scope/成员版本、独立市场宽度与真实 Raw。"""
     deleted: dict[str, int] = {}
+    ver_sql = ""
+    ver_params: tuple[Any, ...] = ()
+    if member_version is not None:
+        ver_sql += " AND member_version=%s"
+        ver_params += (member_version,)
+    if contract_version is not None:
+        ver_sql += " AND contract_version=%s"
+        ver_params += (contract_version,)
+
+    ep_ver_sql = ""
+    if member_version is not None:
+        ep_ver_sql += " AND e.member_version=%s"
+    if contract_version is not None:
+        ep_ver_sql += " AND e.contract_version=%s"
+
     with source_raw._transaction(config, write=True, statement_timeout_ms=15000) as (
         _conn,
         cur,
         _,
     ):
+        cur.execute(
+            f"""
+            DELETE FROM stock.r03_sector_loo_candidate_facts c
+            USING stock.r03_sector_loo_support_facts f
+            WHERE c.loo_fact_id = f.id AND f.trade_date >= %s AND f.scope_key=%s
+            {ep_ver_sql.replace("e.", "f.")}
+            """,
+            (from_trade_date, scope_key, *ver_params),
+        )
+        deleted["stock.r03_sector_loo_candidate_facts"] = cur.rowcount
         for table in (
             "stock.r03_sector_loo_support_facts",
+            "stock.r03_sector_overlap_pair_facts",
             "stock.r03_sector_overlap_board_facts",
             "stock.r03_sector_overlap_clusters",
             "stock.r03_sector_rotation_board_day_facts",
             "stock.r03_sector_native_day_facts",
-            "stock.r03_formal_market_breadth_facts",
         ):
             cur.execute(
-                f"DELETE FROM {table} WHERE trade_date >= %s AND scope_key=%s",
-                (from_trade_date, scope_key),
+                f"DELETE FROM {table} WHERE trade_date >= %s AND scope_key=%s {ver_sql}",
+                (from_trade_date, scope_key, *ver_params),
             )
             deleted[table] = cur.rowcount
+        if include_formal_market:
+            mkt_sql = "DELETE FROM stock.r03_formal_market_breadth_facts WHERE trade_date >= %s AND scope_key=%s"
+            mkt_params: tuple[Any, ...] = (from_trade_date, scope_key)
+            if contract_version is not None:
+                mkt_sql += " AND contract_version=%s"
+                mkt_params += (contract_version,)
+            cur.execute(mkt_sql, mkt_params)
+            deleted["stock.r03_formal_market_breadth_facts"] = cur.rowcount
         cur.execute(
-            """
+            f"""
             DELETE FROM stock.r03_sector_rotation_day_states s
             USING stock.r03_sector_rotation_episodes e
-            WHERE s.episode_id = e.id AND s.trade_date >= %s AND e.scope_key=%s
+            WHERE s.episode_id = e.id AND s.trade_date >= %s AND e.scope_key=%s {ep_ver_sql}
             """,
-            (from_trade_date, scope_key),
+            (from_trade_date, scope_key, *ver_params),
         )
         deleted["stock.r03_sector_rotation_day_states"] = cur.rowcount
         cur.execute(
-            """
-            DELETE FROM stock.r03_sector_rotation_episodes e
-            WHERE e.t0_session >= %s AND e.scope_key=%s
+            f"""
+            DELETE FROM stock.r03_sector_rotation_basket_members bm
+            USING stock.r03_sector_rotation_episodes e
+            WHERE bm.episode_id = e.id AND e.t0_session >= %s AND e.scope_key=%s {ep_ver_sql}
               AND NOT EXISTS (
                   SELECT 1 FROM stock.r03_sector_rotation_day_states s
                   WHERE s.episode_id = e.id
               )
             """,
-            (from_trade_date, scope_key),
+            (from_trade_date, scope_key, *ver_params),
+        )
+        deleted["stock.r03_sector_rotation_basket_members"] = cur.rowcount
+        cur.execute(
+            f"""
+            UPDATE stock.r03_sector_rotation_episodes e
+            SET parent_episode_id = NULL
+            WHERE e.parent_episode_id IN (
+                SELECT ep.id FROM stock.r03_sector_rotation_episodes ep
+                WHERE ep.t0_session >= %s AND ep.scope_key=%s {ep_ver_sql.replace("e.", "ep.")}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                      WHERE s.episode_id = ep.id
+                  )
+            )
+              AND e.t0_session >= %s AND e.scope_key=%s {ep_ver_sql}
+              AND NOT EXISTS (
+                  SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                  WHERE s.episode_id = e.id
+              )
+            """,
+            (
+                from_trade_date,
+                scope_key,
+                *ver_params,
+                from_trade_date,
+                scope_key,
+                *ver_params,
+            ),
+        )
+        cur.execute(
+            f"""
+            DELETE FROM stock.r03_sector_rotation_episodes e
+            WHERE e.t0_session >= %s AND e.scope_key=%s {ep_ver_sql}
+              AND NOT EXISTS (
+                  SELECT 1 FROM stock.r03_sector_rotation_day_states s
+                  WHERE s.episode_id = e.id
+              )
+            """,
+            (from_trade_date, scope_key, *ver_params),
         )
         deleted["stock.r03_sector_rotation_episodes"] = cur.rowcount
     return deleted

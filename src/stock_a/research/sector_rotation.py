@@ -135,19 +135,41 @@ def evaluate_basket_metrics(
     rps20_u: Mapping[str, Fraction | None],
     breadth_delta1: Fraction | None,
     top1_concentration: Fraction | None,
+    quote_states_u: Mapping[str, str] | None = None,
+    last_actual_quotes_u: Mapping[str, tuple[Fraction, int]] | None = None,
 ) -> dict[str, Any]:
-    """计算后继日 u 的 formation_R、post_R、留存与扩散指标。"""
+    """计算后继日 u 的 formation_R、post_R（支持<=20会话已证停牌MARKED_ESTIMATE）、留存与扩散指标。"""
     form_r: Fraction | None = Fraction(0)
     post_r: Fraction | None = Fraction(0)
+    has_marked = False
+    max_quote_age: int | None = 0
+    valuation_quality = "OBSERVED"
     for eid in basket.members:
+        q_state = (
+            quote_states_u.get(eid, "TRUE") if quote_states_u is not None else "TRUE"
+        )
         pu = prices_u.get(eid)
-        if pu is None or pu <= 0:
+        eff_price: Fraction | None = None
+        if q_state == "TRUE" and pu is not None and pu > 0:
+            eff_price = pu
+        elif q_state == "CONFIRMED_SUSPENSION" and last_actual_quotes_u is not None:
+            est = last_actual_quotes_u.get(eid)
+            if est is not None and est[0] > 0 and 0 < est[1] <= 20:
+                eff_price = est[0]
+                has_marked = True
+                if max_quote_age is not None:
+                    max_quote_age = max(max_quote_age, int(est[1]))
+        if eff_price is None:
             form_r = None
             post_r = None
+            valuation_quality = "UNKNOWN"
+            max_quote_age = None
             break
         w = basket.weights[eid]
-        form_r += w * (pu / basket.b_prices[eid] - 1)
-        post_r += w * (pu / basket.p_prices[eid] - 1)
+        form_r += w * (eff_price / basket.b_prices[eid] - 1)
+        post_r += w * (eff_price / basket.p_prices[eid] - 1)
+    if valuation_quality != "UNKNOWN" and has_marked:
+        valuation_quality = "MARKED_ESTIMATE"
 
     # Seed 留存
     if not basket.s0_known:
@@ -290,6 +312,8 @@ def evaluate_basket_metrics(
     return {
         "formation_r": form_r,
         "post_r": post_r,
+        "valuation_quality": valuation_quality,
+        "max_quote_age": max_quote_age,
         "seed_retention": seed_ret,
         "breadth_retention": breadth_ret,
         "strong_retention": strong_ret,
@@ -320,7 +344,9 @@ def step_rotation_state_machine(
             "preserve_prior": True,
         }
 
-    raw_prev_state = previous_episode_state.get("state") if previous_episode_state else None
+    raw_prev_state = (
+        previous_episode_state.get("state") if previous_episode_state else None
+    )
     effective_prev_state = (
         previous_episode_state.get("last_known_state")
         if raw_prev_state == "UNKNOWN" and previous_episode_state is not None
@@ -464,7 +490,11 @@ def step_rotation_state_machine(
     prev_mature_true = (
         False
         if prev_was_unknown
-        else bool(previous_episode_state.get("prev_mature_true", previous_episode_state.get("mature_true", False)))
+        else bool(
+            previous_episode_state.get(
+                "prev_mature_true", previous_episode_state.get("mature_true", False)
+            )
+        )
     )
     prev_dq5 = None if prev_was_unknown else previous_episode_state.get("dq5")
 

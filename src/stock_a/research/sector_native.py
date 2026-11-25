@@ -475,12 +475,7 @@ def _common_member_delta(
 
     n_t = membership["n_t"]
     n_u = membership["n_u"]
-    if (
-        n_t < 5
-        or n_u < 5
-        or len(vals_t) < 5
-        or 5 * len(vals_t) < 4 * max(n_t, n_u)
-    ):
+    if n_t < 5 or n_u < 5 or len(vals_t) < 5 or 5 * len(vals_t) < 4 * max(n_t, n_u):
         return {
             "delta": None,
             "common_eval_count": len(vals_t),
@@ -611,13 +606,16 @@ def advance_sector_maturity_and_health(
     else:
         health = "STABLE"
 
-    prev_display = (
-        previous_state.get("display_maturity") if previous_state else None
-    )
+    prev_display = previous_state.get("display_maturity") if previous_state else None
     prev_last_known = (
         previous_state.get("last_known_maturity") if previous_state else None
     )
-    if prev_last_known is None and prev_display in {"NONE", "PREWATCH", "WARM", "CONFIRMED"}:
+    if prev_last_known is None and prev_display in {
+        "NONE",
+        "PREWATCH",
+        "WARM",
+        "CONFIRMED",
+    }:
         prev_last_known = prev_display
     prev_downgrade_streak = int(
         previous_state.get("downgrade_streak", 0) if previous_state else 0
@@ -658,7 +656,10 @@ def advance_sector_maturity_and_health(
         prewatch_exited = True
 
     if prev_display is None or prev_display == "UNKNOWN":
-        if prev_last_known is not None and _MATURITY_ORDER[effective_maturity] < _MATURITY_ORDER[prev_last_known]:
+        if (
+            prev_last_known is not None
+            and _MATURITY_ORDER[effective_maturity] < _MATURITY_ORDER[prev_last_known]
+        ):
             # 从 UNKNOWN 恢复后降级重新从 1 计数
             display_maturity = prev_last_known
             downgrade_streak = 1
@@ -668,7 +669,9 @@ def advance_sector_maturity_and_health(
             display_maturity = effective_maturity
             downgrade_streak = 0
             downgrade_target = None
-            display_quality = "FIRST_OBSERVED" if prev_last_known is None else "OBSERVED"
+            display_quality = (
+                "FIRST_OBSERVED" if prev_last_known is None else "OBSERVED"
+            )
     elif _MATURITY_ORDER[effective_maturity] > _MATURITY_ORDER[prev_display]:
         display_maturity = effective_maturity
         downgrade_streak = 0
@@ -678,7 +681,8 @@ def advance_sector_maturity_and_health(
         if (
             prev_downgrade_streak >= 1
             and prev_downgrade_target in _MATURITY_ORDER
-            and _MATURITY_ORDER[effective_maturity] <= _MATURITY_ORDER[prev_downgrade_target]
+            and _MATURITY_ORDER[effective_maturity]
+            <= _MATURITY_ORDER[prev_downgrade_target]
         ):
             downgrade_streak = prev_downgrade_streak + 1
         else:
@@ -818,7 +822,9 @@ def compute_sector_emergence(
 _EXHAUSTION_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 
 
-def compute_sector_priority(boards: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def compute_sector_priority(
+    boards: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
     """按 ALG-32 / §11.7 对板块进行确定性有序 Priority 排序（含 RANKABLE/EXCLUDED/UNKNOWN）。"""
     rankable: list[dict[str, Any]] = []
     non_rankable: list[dict[str, Any]] = []
@@ -914,10 +920,7 @@ def compute_sector_native_day(
 ) -> list[dict[str, Any]]:
     """串联 ALG-21/22/23/30/31/32 计算单日全板块正式 Native、资格、前态、风险与 Priority。"""
     ranked_t = rank_endpoint_boards(
-        {
-            _board_key(b): compute_endpoint_board_primitives(**b)
-            for b in boards_t
-        }
+        {_board_key(b): compute_endpoint_board_primitives(**b) for b in boards_t}
     )
     ranked_t3 = rank_endpoint_boards(
         {
@@ -1056,6 +1059,23 @@ def compute_sector_loo_and_support(
         reduced_t.append({**b, "members": slots})
 
     if not member_keys:
+        if not scoped_t or any(
+            not b.get("membership_complete", True)
+            or any(s.entity_id is None for s in b["members"])
+            for b in scoped_t
+        ):
+            return {
+                "target_entity_id": target_entity_id,
+                "primary_industry_id": primary_industry_id,
+                "algorithm_support_board_id": None,
+                "support_status": "UNKNOWN",
+                "reason": (
+                    "BOARD_KIND_SOURCE_MISSING"
+                    if not scoped_t
+                    else "MEMBERSHIP_INCOMPLETE_CANNOT_PROVE_UNASSIGNED"
+                ),
+                "loo_boards": [],
+            }
         return {
             "target_entity_id": target_entity_id,
             "primary_industry_id": primary_industry_id,
@@ -1094,8 +1114,18 @@ def compute_sector_loo_and_support(
         c_st = rq["confirmed_raw"]["state"]
         w_st = rq["warm_raw"]["state"]
         p_st = rq["prewatch_raw"]["state"]
-        lower = 3 if c_st == "TRUE" else 2 if w_st == "TRUE" else 1 if p_st == "TRUE" else 0
-        upper = 3 if c_st != "FALSE" else 2 if w_st != "FALSE" else 1 if p_st != "FALSE" else 0
+        lower = (
+            3 if c_st == "TRUE" else 2 if w_st == "TRUE" else 1 if p_st == "TRUE" else 0
+        )
+        upper = (
+            3
+            if c_st != "FALSE"
+            else 2
+            if w_st != "FALSE"
+            else 1
+            if p_st != "FALSE"
+            else 0
+        )
         return lower, upper
 
     qualified_candidates = []

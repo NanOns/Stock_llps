@@ -1233,7 +1233,11 @@ def read_tdx_sector_strength(
             },
             "research_mode": snapshot["research_mode"],
         },
-        "target_source_version": source_version,
+        "target_source_version": {
+            **source_version,
+            "price_coordinate": "FORWARD_ADJUSTED",
+            "time_role": "NON_PIT_RETROSPECTIVE",
+        },
         "target_profile_snapshot": data["profile_snapshot"],
         "official_calendar": data["official_calendar"],
         "target_session": target_session.isoformat(),

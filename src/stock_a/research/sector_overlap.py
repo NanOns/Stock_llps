@@ -53,6 +53,7 @@ def compute_sector_overlap(
 
     unique_shares: dict[str, dict[str, Any]] = {}
     clusters: list[dict[str, Any]] = []
+    pairs: list[dict[str, Any]] = []
     overview_selected: dict[str, list[str]] = {"INDUSTRY": [], "CONCEPT": []}
 
     prev_by_kind: dict[str, list[Mapping[str, Any]]] = {"INDUSTRY": [], "CONCEPT": []}
@@ -119,18 +120,38 @@ def compute_sector_overlap(
         board_ids = sorted(str(b["board_id"]) for b in kind_boards)
         adj: dict[str, set[str]] = {bid: set() for bid in board_ids}
         unknown_edges: list[tuple[str, str]] = []
-        if kind == "CONCEPT":
-            for i, a_id in enumerate(board_ids):
-                for b_id in board_ids[i + 1 :]:
-                    set_a = entity_sets[a_id]
-                    set_b = entity_sets[b_id]
-                    if set_a is None or set_b is None:
+        for i, a_id in enumerate(board_ids):
+            for b_id in board_ids[i + 1 :]:
+                set_a = entity_sets[a_id]
+                set_b = entity_sets[b_id]
+                if set_a is None or set_b is None:
+                    pairs.append(
+                        {
+                            "board_kind": kind,
+                            "board_id_a": a_id,
+                            "board_id_b": b_id,
+                            "jaccard_status": "UNKNOWN",
+                            "jaccard_value": None,
+                            "reason": "MEMBERSHIP_UNKNOWN",
+                        }
+                    )
+                    if kind == "CONCEPT":
                         unknown_edges.append((a_id, b_id))
-                        continue
-                    j = compute_jaccard(set_a, set_b)
-                    if j is not None and j >= jaccard_threshold:
-                        adj[a_id].add(b_id)
-                        adj[b_id].add(a_id)
+                    continue
+                j = compute_jaccard(set_a, set_b)
+                pairs.append(
+                    {
+                        "board_kind": kind,
+                        "board_id_a": a_id,
+                        "board_id_b": b_id,
+                        "jaccard_status": "OBSERVED" if j is not None else "UNKNOWN",
+                        "jaccard_value": j,
+                        "reason": None if j is not None else "EMPTY_UNION",
+                    }
+                )
+                if kind == "CONCEPT" and j is not None and j >= jaccard_threshold:
+                    adj[a_id].add(b_id)
+                    adj[b_id].add(a_id)
 
         visited: set[str] = set()
         components: list[list[str]] = []
@@ -237,5 +258,6 @@ def compute_sector_overlap(
     return {
         "unique_shares": unique_shares,
         "clusters": clusters,
+        "pairs": pairs,
         "overview_selected": overview_selected,
     }

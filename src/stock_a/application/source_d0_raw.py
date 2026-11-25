@@ -2083,6 +2083,7 @@ def query_source_d0_raw_launch(
             "source_time_quality": source_version["source_time_quality"],
             "source_available_at": _iso(source_version["source_available_at"]),
             "source_clock_role": source_version["source_clock_role"],
+            "time_role": "NON_PIT_RETROSPECTIVE",
             "capture_expected_row_count": source_version["capture_expected_row_count"],
             **calendar_identity,
         },

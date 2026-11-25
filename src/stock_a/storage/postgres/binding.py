@@ -93,6 +93,7 @@ _MIGRATION_FILES = (
     "0079_r02_register_coordinator_source_modules.sql",
     "0080_r03_formal_sector_rotation_overlap.sql",
     "0081_r03_formal_market_breadth_and_rotation_board_days.sql",
+    "0082_r03_rotation_valuation_and_overlap_pairs.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -141,6 +142,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_FINAL_CLOSURE_20261125": frozenset({77, 78, 79}),
     "R03_COMPLETE_PHASE_REPAIR_20261125": frozenset({80}),
     "R03_REMAINING_IMPLEMENTATION_AND_E2E_20261125": frozenset({81}),
+    "R03_PRECISE_SCOPE_AND_NORMAL_OPERATIONS_CLOSURE_20261125": frozenset({82}),
     "SOURCE_SWITCH_01_BAOSTOCK_PRICE_PG_RESET_E2E_R1_20261119": frozenset(
         {54, 55, 56, 57, 58, 59}
     ),
@@ -404,6 +406,9 @@ _RELATIONS_BY_MIGRATION_COUNT[80] = _RELATIONS_BY_MIGRATION_COUNT[79] | {
 _RELATIONS_BY_MIGRATION_COUNT[81] = _RELATIONS_BY_MIGRATION_COUNT[80] | {
     "r03_formal_market_breadth_facts",
     "r03_sector_rotation_board_day_facts",
+}
+_RELATIONS_BY_MIGRATION_COUNT[82] = _RELATIONS_BY_MIGRATION_COUNT[81] | {
+    "r03_sector_overlap_pair_facts",
 }
 
 
