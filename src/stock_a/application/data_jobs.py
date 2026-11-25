@@ -2270,6 +2270,8 @@ def build_data_job_plan(
         },
         "sector_pulse_insufficient_sessions": sorted(sector_pulse_insufficient),
         "sector_followup_insufficient_sessions": sorted(sector_followup_insufficient),
+        "ordered_sessions": [day.isoformat() for day in eligible],
+        "allow_revision": operation in {"RECOMPUTE", "CLEAR_AND_REGENERATE"},
         "module_output_sessions": {
             **{
                 module: [day.isoformat() for day in sessions]
@@ -8816,6 +8818,14 @@ def _execute_shared_production_chain_impl(
                     else:
                         ins = int(r03_res["loo_written"])
                         no_chg = ins == 0
+                    expected_rows = int(
+                        r03_res.get("expected_rows", {}).get(mod, actual_rows)
+                    )
+                    if expected_rows > 0 and actual_rows != expected_rows:
+                        raise DataJobError(
+                            "R03_STAGE_ROW_COUNT_MISMATCH",
+                            f"{mod}({day_text})预期行数{expected_rows}，实际读回{actual_rows}。",
+                        )
                     progress_callback(
                         job_id=job_id,
                         stage_code=mod,
@@ -8824,7 +8834,7 @@ def _execute_shared_production_chain_impl(
                         source_capture_id=source_capture_id,
                         profile_history_session_count=None,
                         d1_history_session_count=None,
-                        expected_rows=actual_rows,
+                        expected_rows=expected_rows,
                         inserted_rows=inserted_count(ins),
                         quality_status="COMPLETE_R03_FORMAL_SECTOR",
                         no_change=no_chg,

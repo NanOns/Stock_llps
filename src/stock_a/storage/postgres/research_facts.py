@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from fractions import Fraction
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from psycopg import sql
 

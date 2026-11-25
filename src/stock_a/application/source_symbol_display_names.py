@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Any, Mapping
 
 from stock_a.storage.postgres.source_symbol_display_names import (
     SourceSymbolDisplayNameError,

@@ -499,31 +499,51 @@ def write_r03_rotation_day(
 def read_r03_rotation_recovery_states(
     config: Mapping[str, Any],
     *,
-    before_trade_date: date,
+    before_trade_date: date | None = None,
+    previous_trade_date: date | None = None,
     scope_key: str,
     contract_version: str,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """跨重启从 PG 恢复各板块最新 Rotation Episode、冻结篮子与最近日状态前态。"""
+    """跨重启从 PG 恢复各板块精确上一官方会话或历史最新 Rotation Episode、冻结篮子与最近日状态前态。"""
+    if previous_trade_date is None and before_trade_date is None:
+        return {}
     with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
         _conn,
         cur,
         _,
     ):
-        cur.execute(
-            """
-            SELECT DISTINCT ON (e.board_kind, e.board_id)
-                   e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
-                   e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
-                   s.trade_date, s.rotation_state, s.last_known_state, s.stale,
-                   s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
-                   s.prev_mature_true, s.dq5
-            FROM stock.r03_sector_rotation_episodes e
-            JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
-            WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date < %s
-            ORDER BY e.board_kind, e.board_id, s.trade_date DESC, e.id DESC
-            """,
-            (scope_key, contract_version, before_trade_date),
-        )
+        if previous_trade_date is not None:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (e.board_kind, e.board_id)
+                       e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+                       e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
+                       s.trade_date, s.rotation_state, s.last_known_state, s.stale,
+                       s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
+                       s.prev_mature_true, s.dq5
+                FROM stock.r03_sector_rotation_episodes e
+                JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
+                WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date = %s
+                ORDER BY e.board_kind, e.board_id, e.id DESC
+                """,
+                (scope_key, contract_version, previous_trade_date),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (e.board_kind, e.board_id)
+                       e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+                       e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
+                       s.trade_date, s.rotation_state, s.last_known_state, s.stale,
+                       s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
+                       s.prev_mature_true, s.dq5
+                FROM stock.r03_sector_rotation_episodes e
+                JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
+                WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date < %s
+                ORDER BY e.board_kind, e.board_id, s.trade_date DESC, e.id DESC
+                """,
+                (scope_key, contract_version, before_trade_date),
+            )
         rows = cur.fetchall()
         out: dict[tuple[str, str], dict[str, Any]] = {}
         for r in rows:
@@ -954,7 +974,9 @@ def write_r03_loo_support_fact(
             loo_id = int(existing[0])
             cur.execute(
                 """
-                SELECT board_id, safety_state, prewatch_raw_state, warm_raw_state, confirmed_raw_state
+                SELECT board_id, safety_state, prewatch_raw_state, warm_raw_state,
+                       confirmed_raw_state, emergence_level, seed_wilson_point,
+                       rs5_pct, dq5, reason_code
                 FROM stock.r03_sector_loo_candidate_facts
                 WHERE loo_fact_id=%s
                 ORDER BY board_id
@@ -962,7 +984,19 @@ def write_r03_loo_support_fact(
                 (loo_id,),
             )
             existing_cands = [
-                (str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4])) for r in cur.fetchall()
+                (
+                    str(r[0]),
+                    str(r[1]),
+                    str(r[2]),
+                    str(r[3]),
+                    str(r[4]),
+                    str(r[5]) if r[5] is not None else None,
+                    Decimal(str(r[6])) if r[6] is not None else None,
+                    Decimal(str(r[7])) if r[7] is not None else None,
+                    Decimal(str(r[8])) if r[8] is not None else None,
+                    str(r[9]) if r[9] is not None else None,
+                )
+                for r in cur.fetchall()
             ]
             new_cands = sorted(
                 (
@@ -971,6 +1005,11 @@ def write_r03_loo_support_fact(
                     str(c["raw_qualification"]["prewatch_raw"]["state"]),
                     str(c["raw_qualification"]["warm_raw"]["state"]),
                     str(c["raw_qualification"]["confirmed_raw"]["state"]),
+                    str(c["emergence"]["level"]) if c.get("emergence", {}).get("level") is not None else None,
+                    _num(c.get("seed_wilson", {}).get("point_value")),
+                    _num(c.get("rs5_pct")),
+                    _num(c.get("dq5")),
+                    str(c["priority"]["reason"]) if c.get("priority", {}).get("reason") is not None else None,
                 )
                 for c in loo_result.get("loo_boards", ())
             )

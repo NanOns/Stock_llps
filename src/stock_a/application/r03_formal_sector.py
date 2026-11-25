@@ -90,9 +90,15 @@ def _load_endpoint_observations(
         prof_params.append(universe_version)
     cur.execute(prof_sql, tuple(prof_params))
     prof_by_sym: dict[str, Any] = {}
+    prof_ambiguous: set[str] = set()
     for row in cur.fetchall():
         sym = row[0]
-        if sym not in prof_by_sym:
+        if sym in prof_ambiguous:
+            continue
+        if sym in prof_by_sym:
+            prof_ambiguous.add(sym)
+            prof_by_sym.pop(sym, None)
+        else:
             prof_by_sym[sym] = row
 
     seed_sql = """
@@ -107,12 +113,17 @@ def _load_endpoint_observations(
         seed_params.append(universe_version)
     cur.execute(seed_sql, tuple(seed_params))
     seed_by_sym: dict[str, str] = {}
+    seed_ambiguous: set[str] = set()
     for sym, s_state, u_match in cur.fetchall():
-        if sym not in seed_by_sym:
-            if u_match not in {None, "MATCHED", "EXACT"}:
-                seed_by_sym[sym] = "UNKNOWN"
-            else:
-                seed_by_sym[sym] = s_state
+        if sym in seed_ambiguous:
+            continue
+        if sym in seed_by_sym:
+            seed_ambiguous.add(sym)
+            seed_by_sym[sym] = "UNKNOWN"
+        elif u_match != "EXACT_MATCH":
+            seed_by_sym[sym] = "UNKNOWN"
+        else:
+            seed_by_sym[sym] = s_state
 
     cs_sql = """
         SELECT source_symbol, rps20, rps20_exact, rps20_quality
@@ -126,9 +137,15 @@ def _load_endpoint_observations(
         cs_params.append(universe_version)
     cur.execute(cs_sql, tuple(cs_params))
     cs_by_sym: dict[str, Any] = {}
+    cs_ambiguous: set[str] = set()
     for row in cur.fetchall():
         sym = row[0]
-        if sym not in cs_by_sym:
+        if sym in cs_ambiguous:
+            continue
+        if sym in cs_by_sym:
+            cs_ambiguous.add(sym)
+            cs_by_sym.pop(sym, None)
+        else:
             cs_by_sym[sym] = row
 
     obs: dict[str, dict[str, Any]] = {}
@@ -679,6 +696,12 @@ def run_r03_formal_sector_day(
         "overlap_clusters_count": overlap_clusters_count,
         "overlap_pg": overlap_pg,
         "loo_written": loo_written,
+        "expected_rows": {
+            "R03_SECTOR_NATIVE": len(boards_t) if "R03_SECTOR_NATIVE" in active_modules else 0,
+            "R03_SECTOR_ROTATION": int(rotation_pg.get("states_inserted", 0)) + int(rotation_pg.get("states_updated", 0)) + int(rotation_pg.get("states_skipped", 0)) if "R03_SECTOR_ROTATION" in active_modules else 0,
+            "R03_SECTOR_OVERLAP": int(overlap_pg.get("clusters_inserted", 0)) + int(overlap_pg.get("clusters_updated", 0)) + int(overlap_pg.get("clusters_skipped", 0)) if "R03_SECTOR_OVERLAP" in active_modules else 0,
+            "R03_SECTOR_LOO": len(loo_targets or ()) * len({b[1] for b in boards_t}) if "R03_SECTOR_LOO" in active_modules else 0,
+        },
     }
 
 
@@ -733,11 +756,15 @@ def run_r03_formal_sector_for_session(
         if t1_session is not None
         else {"status": "NOT_COMPUTED", "clusters": []}
     )
-    rot_recovery = read_r03_rotation_recovery_states(
-        config,
-        before_trade_date=target_session,
-        scope_key=resolved_scope,
-        contract_version=R03_CONTRACT_VERSION,
+    rot_recovery = (
+        read_r03_rotation_recovery_states(
+            config,
+            previous_trade_date=t1_session,
+            scope_key=resolved_scope,
+            contract_version=R03_CONTRACT_VERSION,
+        )
+        if t1_session is not None
+        else {}
     )
     return run_r03_formal_sector_day(
         config,
