@@ -731,27 +731,32 @@ def _verify_raw_source(
     include_d0: bool,
     include_d1: bool,
 ) -> None:
-    sessions = (
-        (facts.before_session, facts.target_session)
+    target_symbols = (
+        {item.source_symbol for item in facts.d0_facts if item.after_state is not None}
         if include_d0
-        else (facts.target_session,)
+        else {item.source_symbol for item in facts.d1_structure_facts}
     )
-    placeholders = ", ".join(["%s"] * len(sessions))
-    cursor.execute(
-        f"""
-        SELECT session_date, count(*), count(DISTINCT source_symbol),
-               count(DISTINCT source_capture_id), min(source_capture_id),
-               count(DISTINCT source_capture_id), min(source_capture_id)
-        FROM source_raw_daily
-        WHERE session_date IN ({placeholders})
-          AND board IN ('MAIN_BOARD', 'GEM')
-        GROUP BY session_date ORDER BY session_date
-        """,
-        (*sessions,),
+    before_symbols = (
+        {item.source_symbol for item in facts.d0_facts if item.before_state is not None}
+        if include_d0
+        else set()
     )
-    observed = {row[0]: row[1:] for row in cursor.fetchall()}
-    target = observed.get(facts.target_session)
-    before = observed.get(facts.before_session) if include_d0 else None
+
+    def raw_scope(session: date, symbols: set[str]):
+        if not symbols:
+            return None
+        cursor.execute(
+            """SELECT count(*),count(DISTINCT source_symbol),
+                      count(DISTINCT source_capture_id),min(source_capture_id)
+               FROM source_raw_daily
+               WHERE session_date=%s AND board IN ('MAIN_BOARD','GEM')
+                 AND source_symbol=ANY(%s::text[])""",
+            (session, sorted(symbols)),
+        )
+        return cursor.fetchone()
+
+    target = raw_scope(facts.target_session, target_symbols)
+    before = raw_scope(facts.before_session, before_symbols) if include_d0 else None
     target_count = facts.d0_target_source_count if include_d0 else facts.d1_source_count
     if (
         target is None
@@ -760,12 +765,11 @@ def _verify_raw_source(
         or target[1] != target_count
         or target[2] != 1
         or target[3] != facts.target_capture_id
-        or target[4] != 1
-        or target[5] != facts.source_capture_id
         or (
             include_d0
             and (
-                before[1] != facts.d0_before_source_count
+                before[0] != facts.d0_before_source_count
+                or before[1] != facts.d0_before_source_count
                 or before[2] != 1
                 or before[3] != facts.before_capture_id
             )
@@ -775,19 +779,7 @@ def _verify_raw_source(
             "RESEARCH_DAY_RAW_IDENTITY_MISMATCH",
             "D0/D1事实与固定PG中的前后态Raw总体、捕获或数据包编号不一致",
         )
-    cursor.execute(
-        f"""
-        SELECT session_date, source_symbol FROM source_raw_daily
-        WHERE session_date IN ({placeholders})
-          AND board IN ('MAIN_BOARD', 'GEM')
-        ORDER BY session_date, source_symbol
-        """,
-        (*sessions,),
-    )
-    raw_symbols_by_session = {session: set() for session in sessions}
-    for session_date, source_symbol in cursor.fetchall():
-        raw_symbols_by_session[session_date].add(source_symbol)
-    raw_symbols = raw_symbols_by_session[facts.target_session]
+    raw_symbols = set(target_symbols)
     d1_symbols = {item.source_symbol for item in facts.d1_structure_facts}
     d0_target_symbols = {
         item.source_symbol for item in facts.d0_facts if item.after_state is not None
@@ -803,11 +795,18 @@ def _verify_raw_source(
         item.source_symbol for item in facts.d0_facts if item.before_state is not None
     }
     fact_union_symbols = {item.source_symbol for item in facts.d0_facts}
+    cursor.execute(
+        """SELECT source_symbol FROM source_raw_daily
+           WHERE session_date=%s AND board IN ('MAIN_BOARD','GEM')
+             AND source_symbol=ANY(%s::text[])
+           ORDER BY source_symbol""",
+        (facts.before_session, sorted(before_symbols)),
+    )
+    raw_before_symbols = {row[0] for row in cursor.fetchall()}
     if include_d0 and (
-        before_symbols != raw_symbols_by_session[facts.before_session]
+        before_symbols != raw_before_symbols
         or len(before_symbols) != facts.d0_before_source_count
-        or fact_union_symbols
-        != raw_symbols_by_session[facts.before_session] | raw_symbols
+        or fact_union_symbols != raw_before_symbols | raw_symbols
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_BEFORE_PARTITION_OPEN", "D0前态来源分母未闭合到事实行"
