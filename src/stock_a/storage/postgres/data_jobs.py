@@ -6710,9 +6710,23 @@ def mark_progress_verified(
                 f"阶段版本字段{field_name}必须为非空文本或空值",
             )
     progress_fact_tables = set().union(*_MODULE_PROGRESS_TABLES.values())
+    capture_optional_fact_tables = {
+        "stock.source_symbol_price_profiles",
+        "stock.source_cross_section_day_facts",
+        "stock.source_cross_section_endpoints",
+        "stock.source_market_breadth_days",
+        "stock.source_market_breadth_symbols",
+        "stock.source_market_breadth_change_days",
+        "stock.r03_formal_market_breadth_facts",
+        "stock.r03_sector_native_day_facts",
+        "stock.r03_sector_rotation_board_day_facts",
+        "stock.r03_sector_overlap_clusters",
+        "stock.r03_sector_loo_support_facts",
+    }
     if (
         business_table in progress_fact_tables
         and business_table not in _SECTOR_SNAPSHOT_PROGRESS_TABLES
+        and business_table not in capture_optional_fact_tables
         and (type(source_capture_id) is not int or source_capture_id <= 0)
     ):
         raise DataJobPgError(

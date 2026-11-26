@@ -186,8 +186,6 @@ def _records_for_page(
             )
         source_time_quality = target_row.get("source_time_quality") or "UNKNOWN"
         source_available_at = target_row.get("capture_available_at")
-        if source_available_at is None:
-            source_available_at = target_row.get("observed_started_at")
         if isinstance(source_available_at, str):
             source_available_at = datetime.fromisoformat(source_available_at)
         record: dict[str, Any] = {
