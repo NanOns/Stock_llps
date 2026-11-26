@@ -16,6 +16,8 @@ from fractions import Fraction
 from statistics import median
 from typing import Any
 
+from stock_a.domain.market_presentation import classify_market_breadth
+
 
 def tri(state: bool | None, reason: str | None = None) -> dict[str, Any]:
     """构造标准三态字典。"""
@@ -727,29 +729,43 @@ def advance_sector_maturity_and_health(
     prev_display_quality = (
         previous_state.get("display_quality") if previous_state else None
     )
+    raw_last_known_display = (
+        (
+            previous_state.get("last_known_display")
+            or previous_state.get("last_known_maturity")
+        )
+        if previous_state is not None
+        else None
+    )
     prev_last_known_display = (
-        previous_state.get("last_known_display") if previous_state else None
+        raw_last_known_display
+        if raw_last_known_display in _VALID_MATURITIES
+        else (prev_display if prev_display in _VALID_MATURITIES else None)
     )
-    if prev_last_known_display is None and prev_display in _VALID_MATURITIES:
-        prev_last_known_display = prev_display
-    if (
-        prev_last_known_display is None
-        and previous_state is not None
-        and previous_state.get("last_known_maturity") in _VALID_MATURITIES
-    ):
-        prev_last_known_display = previous_state.get("last_known_maturity")
 
-    prev_last_known_effective = (
-        previous_state.get("last_known_effective") if previous_state else None
+    raw_last_known_effective = (
+        (
+            previous_state.get("last_known_effective")
+            or previous_state.get("last_known_maturity")
+        )
+        if previous_state is not None
+        else None
     )
-    if prev_last_known_effective is None and prev_effective in _VALID_MATURITIES:
-        prev_last_known_effective = prev_effective
-    if (
-        prev_last_known_effective is None
-        and previous_state is not None
-        and previous_state.get("last_known_maturity") in _VALID_MATURITIES
-    ):
-        prev_last_known_effective = previous_state.get("last_known_maturity")
+    prev_last_known_effective = (
+        raw_last_known_effective
+        if raw_last_known_effective in _VALID_MATURITIES
+        else (prev_effective if prev_effective in _VALID_MATURITIES else None)
+    )
+
+    _valid_exhaustion = frozenset({"HIGH", "MEDIUM", "LOW"})
+    prev_exhaustion_level = "UNKNOWN"
+    if previous_state is not None:
+        raw_ex = previous_state.get("exhaustion_level")
+        raw_prev_ex = previous_state.get("prev_exhaustion_level")
+        if raw_ex in _valid_exhaustion:
+            prev_exhaustion_level = str(raw_ex)
+        elif raw_prev_ex in _valid_exhaustion:
+            prev_exhaustion_level = str(raw_prev_ex)
 
     prev_downgrade_streak = int(
         previous_state.get("downgrade_streak", 0) if previous_state else 0
@@ -790,6 +806,7 @@ def advance_sector_maturity_and_health(
             "health": health,
             "prev_trade_date": prev_trade_date,
             "session_gap": session_gap,
+            "prev_exhaustion_level": prev_exhaustion_level,
         }
 
     # 若昨日因 PREWATCH 10日无改善退出且今日仍仅达 PREWATCH，当日不重入
@@ -803,6 +820,7 @@ def advance_sector_maturity_and_health(
         or prev_display_quality == "STALE"
         or prev_display == "UNKNOWN"
     )
+    gap_after_prev = previous_state is not None and previous_session_missing
     if prev_display is None or prev_display == "UNKNOWN" or recovered_from_unknown:
         anchor = (
             prev_display
@@ -813,16 +831,21 @@ def advance_sector_maturity_and_health(
             anchor is not None
             and _MATURITY_ORDER[effective_maturity] < _MATURITY_ORDER[anchor]
         ):
-            # 从 UNKNOWN 恢复后降级重新从 1 计数
             display_maturity = anchor
-            downgrade_streak = 1
-            downgrade_target = effective_maturity
-            display_quality = "OBSERVED"
+            if gap_after_prev:
+                # 中间缺日后恢复，禁止推进 downgrade_streak
+                downgrade_streak = 0
+                downgrade_target = None
+            else:
+                # 从 UNKNOWN 恢复后降级重新从 1 计数
+                downgrade_streak = 1
+                downgrade_target = effective_maturity
+            display_quality = "STALE" if previous_session_missing else "OBSERVED"
         else:
             display_maturity = effective_maturity
             downgrade_streak = 0
             downgrade_target = None
-            if previous_state is None and previous_session_missing:
+            if previous_session_missing:
                 display_quality = "STALE"
             elif anchor is not None or prev_last_known_effective is not None:
                 display_quality = "OBSERVED"
@@ -832,39 +855,45 @@ def advance_sector_maturity_and_health(
         display_maturity = effective_maturity
         downgrade_streak = 0
         downgrade_target = None
-        display_quality = "OBSERVED"
+        display_quality = "STALE" if previous_session_missing else "OBSERVED"
     elif _MATURITY_ORDER[effective_maturity] < _MATURITY_ORDER[prev_display]:
-        if (
-            prev_downgrade_streak >= 1
-            and prev_downgrade_target in _MATURITY_ORDER
-            and _MATURITY_ORDER[effective_maturity]
-            <= _MATURITY_ORDER[prev_downgrade_target]
-        ):
-            downgrade_streak = prev_downgrade_streak + 1
-        else:
-            downgrade_streak = 1
-        if downgrade_streak >= 2:
-            display_maturity = effective_maturity
+        if gap_after_prev:
+            # 中间缺日后恢复，禁止推进 downgrade_streak
             downgrade_streak = 0
             downgrade_target = None
-        else:
             display_maturity = prev_display
-            downgrade_target = effective_maturity
-        display_quality = "OBSERVED"
+        else:
+            if (
+                prev_downgrade_streak >= 1
+                and prev_downgrade_target in _MATURITY_ORDER
+                and _MATURITY_ORDER[effective_maturity]
+                <= _MATURITY_ORDER[prev_downgrade_target]
+            ):
+                downgrade_streak = prev_downgrade_streak + 1
+            else:
+                downgrade_streak = 1
+            if downgrade_streak >= 2:
+                display_maturity = effective_maturity
+                downgrade_streak = 0
+                downgrade_target = None
+            else:
+                display_maturity = prev_display
+                downgrade_target = effective_maturity
+        display_quality = "STALE" if previous_session_missing else "OBSERVED"
     else:
         display_maturity = prev_display
         downgrade_streak = 0
         downgrade_target = None
-        display_quality = "OBSERVED"
+        display_quality = "STALE" if previous_session_missing else "OBSERVED"
 
-    # PREWATCH 10 日无改善（同版 dq5 相对归零基准 < 3pp）退出；dq5 未知时不累加
+    # PREWATCH 10 日无改善（同版 dq5 相对归零基准 < 3pp）退出；dq5 未知或中间缺日时不累加
     prewatch_no_improve_count = 0
     prewatch_dq5_baseline = None
     if display_maturity == "PREWATCH" and not prewatch_exited:
         if prev_display != "PREWATCH" or prev_dq5_base is None:
             prewatch_dq5_baseline = dq5
             prewatch_no_improve_count = 0
-        elif dq5 is None:
+        elif dq5 is None or gap_after_prev:
             prewatch_dq5_baseline = prev_dq5_base
             prewatch_no_improve_count = prev_prewatch_age
         elif (dq5 - prev_dq5_base) >= Fraction(3):
@@ -897,6 +926,7 @@ def advance_sector_maturity_and_health(
         "health": health,
         "prev_trade_date": prev_trade_date,
         "session_gap": session_gap,
+        "prev_exhaustion_level": prev_exhaustion_level,
     }
 
 
@@ -1264,18 +1294,6 @@ def compute_sector_loo_and_support(
     membership_known: bool = True,
 ) -> dict[str, Any]:
     """ALG-25 LOO：从所有同类型 peer 剔除目标证券后完整重算并确定算法支持板块。"""
-    if not membership_known:
-        return {
-            "target_entity_id": target_entity_id,
-            "primary_industry_id": primary_industry_id,
-            "algorithm_support_board_id": None,
-            "support_status": "UNKNOWN",
-            "reason": "MEMBERSHIP_SOURCE_MISSING",
-            "candidate_count": 0,
-            "qualified_candidate_count": 0,
-            "loo_boards": [],
-        }
-
     scoped_t = [
         b for b in boards_t if board_kind is None or str(b["board_kind"]) == board_kind
     ]
@@ -1289,6 +1307,22 @@ def compute_sector_loo_and_support(
         for k, b in boards_t3.items()
         if board_kind is None or str(b["board_kind"]) == board_kind
     }
+    if not scoped_t:
+        return {
+            "target_entity_id": target_entity_id,
+            "primary_industry_id": primary_industry_id,
+            "algorithm_support_board_id": None,
+            "support_status": "UNKNOWN",
+            "reason": (
+                "LOO_MEMBERSHIP_OR_SLOT_UNKNOWN"
+                if not membership_known
+                else "BOARD_KIND_SOURCE_MISSING"
+            ),
+            "candidate_count": 0,
+            "qualified_candidate_count": 0,
+            "loo_boards": [],
+        }
+
     reduced_t = []
     member_keys: set[tuple[str, str]] = set()
     for b in scoped_t:
@@ -1297,86 +1331,39 @@ def compute_sector_loo_and_support(
             member_keys.add(_board_key(b))
         reduced_t.append({**b, "members": slots})
 
-    if not scoped_t:
-        return {
-            "target_entity_id": target_entity_id,
-            "primary_industry_id": primary_industry_id,
-            "algorithm_support_board_id": None,
-            "support_status": "UNKNOWN",
-            "reason": "BOARD_KIND_SOURCE_MISSING",
-            "candidate_count": 0,
-            "qualified_candidate_count": 0,
-            "loo_boards": [],
+    if member_keys:
+        reduced_t1 = {
+            k: {
+                **b,
+                "members": [s for s in b["members"] if s.entity_id != target_entity_id],
+            }
+            for k, b in scoped_t1.items()
         }
-
-    all_scoped_endpoints = [*scoped_t, *scoped_t1.values(), *scoped_t3.values()]
-    has_unmapped_slot = any(
-        any(s.entity_id is None for s in b["members"]) for b in all_scoped_endpoints
-    )
-    has_incomplete_membership = any(
-        not b.get("membership_complete", True) for b in all_scoped_endpoints
-    )
-    if has_unmapped_slot or has_incomplete_membership:
-        if not member_keys:
-            reason = "MEMBERSHIP_INCOMPLETE_CANNOT_PROVE_UNASSIGNED"
-        elif has_unmapped_slot:
-            reason = "UNMAPPED_MEMBER_AFFECTS_LOO"
-        else:
-            reason = "MEMBERSHIP_INCOMPLETE_AFFECTS_LOO"
-        return {
-            "target_entity_id": target_entity_id,
-            "primary_industry_id": primary_industry_id,
-            "algorithm_support_board_id": None,
-            "support_status": "UNKNOWN",
-            "reason": reason,
-            "candidate_count": len(member_keys),
-            "qualified_candidate_count": 0,
-            "loo_boards": [],
+        reduced_t3 = {
+            k: {
+                **b,
+                "members": [s for s in b["members"] if s.entity_id != target_entity_id],
+            }
+            for k, b in scoped_t3.items()
         }
-
-    if not member_keys:
-        return {
-            "target_entity_id": target_entity_id,
-            "primary_industry_id": primary_industry_id,
-            "algorithm_support_board_id": None,
-            "support_status": "NA",
-            "reason": "NO_APPLICABLE_BOARD",
-            "candidate_count": 0,
-            "qualified_candidate_count": 0,
-            "loo_boards": [],
-        }
-
-    reduced_t1 = {
-        k: {
-            **b,
-            "members": [s for s in b["members"] if s.entity_id != target_entity_id],
-        }
-        for k, b in scoped_t1.items()
-    }
-    reduced_t3 = {
-        k: {
-            **b,
-            "members": [s for s in b["members"] if s.entity_id != target_entity_id],
-        }
-        for k, b in scoped_t3.items()
-    }
-
-    recomputed = compute_sector_native_day(
-        boards_t=reduced_t,
-        boards_t1=reduced_t1,
-        boards_t3=reduced_t3,
-    )
-    candidates = [
-        {
-            **r,
-            "is_selected_support": False,
-            "breadth_delta3": r.get("breadth_delta3"),
-            "ma20_delta3": r.get("ma20_delta3"),
-            "top1_concentration": r["concentration"].get("top1_concentration"),
-        }
-        for r in recomputed
-        if _board_key(r) in member_keys
-    ]
+        recomputed = compute_sector_native_day(
+            boards_t=reduced_t,
+            boards_t1=reduced_t1,
+            boards_t3=reduced_t3,
+        )
+        candidates = [
+            {
+                **r,
+                "is_selected_support": False,
+                "breadth_delta3": r.get("breadth_delta3"),
+                "ma20_delta3": r.get("ma20_delta3"),
+                "top1_concentration": r["concentration"].get("top1_concentration"),
+            }
+            for r in recomputed
+            if _board_key(r) in member_keys
+        ]
+    else:
+        candidates = []
 
     def _qual_bounds(row: Mapping[str, Any]) -> tuple[int, int]:
         rq = row["raw_qualification"]
@@ -1399,15 +1386,43 @@ def compute_sector_loo_and_support(
 
     qualified_candidates = []
     max_known_lower = 0
-    max_possible_upper = 0
     for c in candidates:
         lo, up = _qual_bounds(c)
         if lo > max_known_lower:
             max_known_lower = lo
-        if up > max_possible_upper:
-            max_possible_upper = up
         if lo == up and lo > 0:
             qualified_candidates.append((lo, c))
+
+    all_scoped_endpoints = [*scoped_t, *scoped_t1.values(), *scoped_t3.values()]
+    has_unmapped_slot = any(
+        any(s.entity_id is None for s in b["members"]) for b in all_scoped_endpoints
+    )
+    has_incomplete_membership = any(
+        not b.get("membership_complete", True) for b in all_scoped_endpoints
+    )
+    if not membership_known or has_unmapped_slot or has_incomplete_membership:
+        return {
+            "target_entity_id": target_entity_id,
+            "primary_industry_id": primary_industry_id,
+            "algorithm_support_board_id": None,
+            "support_status": "UNKNOWN",
+            "reason": "LOO_MEMBERSHIP_OR_SLOT_UNKNOWN",
+            "candidate_count": len(candidates),
+            "qualified_candidate_count": len(qualified_candidates),
+            "loo_boards": candidates,
+        }
+
+    if not member_keys:
+        return {
+            "target_entity_id": target_entity_id,
+            "primary_industry_id": primary_industry_id,
+            "algorithm_support_board_id": None,
+            "support_status": "NA",
+            "reason": "NO_APPLICABLE_BOARD",
+            "candidate_count": 0,
+            "qualified_candidate_count": 0,
+            "loo_boards": [],
+        }
 
     # 若存在可能达到或超过已知最高档的未知候选，禁止用低档覆盖
     ambiguous_higher = any(
@@ -1518,6 +1533,29 @@ def compute_market_risk_projection(
 
     effective_breadth = formal_breadth if formal_breadth is not None else breadth_axis
     breadth_projected = _project_axis("breadth", effective_breadth)
+    if formal_breadth is not None:
+        fb_status = formal_breadth.get("status", "UNKNOWN")
+        breadth_projected["status"] = fb_status
+        if fb_status == "OBSERVED":
+            fb_cls = formal_breadth.get("classification")
+            if not fb_cls:
+                bv = _to_fraction(formal_breadth.get("breadth_value"))
+                fb_cls = classify_market_breadth(bv) if bv is not None else "UNKNOWN"
+            fb_cov = formal_breadth.get("coverage")
+            if fb_cov is None:
+                n_common = formal_breadth.get("n_common")
+                n_eligible = formal_breadth.get("n_eligible")
+                if (
+                    n_common is not None
+                    and n_eligible is not None
+                    and int(n_common) > 0
+                ):
+                    fb_cov = Fraction(int(n_eligible), int(n_common))
+            breadth_projected["classification"] = fb_cls
+            breadth_projected["coverage"] = fb_cov
+        else:
+            breadth_projected["classification"] = "UNKNOWN"
+            breadth_projected["coverage"] = None
     breadth_denominators = {
         "n_t": effective_breadth.get("n_t") if effective_breadth else None,
         "n_t3": effective_breadth.get("n_t3") if effective_breadth else None,
@@ -1534,7 +1572,7 @@ def compute_market_risk_projection(
             "change_status": breadth_change.get("change_status", "UNKNOWN"),
             "delta": breadth_change.get("delta"),
         }
-        if breadth_change is not None
+        if breadth_change is not None and "change_status" in breadth_change
         else {"change_status": "UNKNOWN", "delta": None}
     )
     env_display_status = "UNKNOWN"

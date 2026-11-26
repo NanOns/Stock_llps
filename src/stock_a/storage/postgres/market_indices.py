@@ -153,6 +153,13 @@ def persist_market_environment_series(
     calendar_id: str,
     calendar_revision: str,
     rule_version: str = "MARKET_PRESENTATION_R1",
+    formal_scope_key: str = "",
+    profile_revision: str = "",
+    universe_version_t: str = "",
+    universe_version_t3: str = "",
+    breadth_source_kind: str = "UNKNOWN",
+    prev_trade_date: date | None = None,
+    prev_formal_scope_key: str | None = None,
     initial_state: Mapping[str, Any] | None = None,
     cursor: Any | None = None,
 ) -> dict[str, Any]:
@@ -218,22 +225,34 @@ def persist_market_environment_series(
                     item["display_status"],
                     item["pending_label"],
                     int(item["pending_count"]),
+                    str(ax.get("breadth_source_kind") or breadth_source_kind),
+                    ax.get("prev_trade_date", prev_trade_date),
+                    ax.get("prev_formal_scope_key", prev_formal_scope_key),
                 )
                 cursor.execute(
                     """SELECT index_capture_id, index_config_version,
                               trend_axis, breadth_axis, participation_axis, pressure_axis,
                               raw_status, raw_label, displayed_label, display_status,
-                              pending_label, pending_count
+                              pending_label, pending_count,
+                              breadth_source_kind, prev_trade_date, prev_formal_scope_key
                        FROM stock.source_market_environment_day_facts
                        WHERE target_session = %s AND stock_capture_id = %s
                          AND primary_index_symbol = %s AND calendar_revision = %s
-                         AND rule_version = %s""",
+                         AND rule_version = %s
+                         AND formal_scope_key = %s
+                         AND profile_revision = %s
+                         AND universe_version_t = %s
+                         AND universe_version_t3 = %s""",
                     (
                         sess_dt,
                         stock_capture_id,
                         primary_index_symbol,
                         calendar_revision,
                         rule_version,
+                        formal_scope_key,
+                        profile_revision,
+                        universe_version_t,
+                        universe_version_t3,
                     ),
                 )
                 existing = cursor.fetchone()
@@ -249,12 +268,17 @@ def persist_market_environment_series(
                            target_session, stock_capture_id, index_capture_id,
                            primary_index_symbol, index_config_version,
                            calendar_id, calendar_revision, rule_version,
+                           formal_scope_key, profile_revision,
+                           universe_version_t, universe_version_t3,
                            trend_axis, breadth_axis, participation_axis, pressure_axis,
                            raw_status, raw_label, displayed_label, display_status,
-                           pending_label, pending_count
+                           pending_label, pending_count,
+                           breadth_source_kind, prev_trade_date, prev_formal_scope_key
                        ) VALUES (
                            %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                           %s, %s, %s, %s,
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s
                        )""",
                     (
                         sess_dt,
@@ -265,6 +289,10 @@ def persist_market_environment_series(
                         calendar_id,
                         calendar_revision,
                         rule_version,
+                        formal_scope_key,
+                        profile_revision,
+                        universe_version_t,
+                        universe_version_t3,
                         *vals[2:],
                     ),
                 )
@@ -438,6 +466,10 @@ def read_market_environment_display(
     index_capture_id: int | None = None,
     index_config_version: str | None = None,
     calendar_id: str | None = None,
+    formal_scope_key: str | None = None,
+    profile_revision: str | None = None,
+    universe_version_t: str | None = None,
+    universe_version_t3: str | None = None,
 ) -> dict[str, Any]:
     """只读查询目标日已存市场复合环境展示状态（未落库时诚实返回 NOT_COMPUTED）。"""
     if (
@@ -461,13 +493,35 @@ def read_market_environment_display(
         and (not isinstance(calendar_id, str) or not calendar_id.strip())
     ):
         raise ValueError("MARKET_ENVIRONMENT_READ_SCOPE_INVALID")
+    norm_scope = (
+        formal_scope_key.strip()
+        if isinstance(formal_scope_key, str) and formal_scope_key.strip()
+        else None
+    )
+    norm_prof = (
+        profile_revision.strip()
+        if isinstance(profile_revision, str) and profile_revision.strip()
+        else None
+    )
+    norm_ut = (
+        universe_version_t.strip()
+        if isinstance(universe_version_t, str) and universe_version_t.strip()
+        else None
+    )
+    norm_ut3 = (
+        universe_version_t3.strip()
+        if isinstance(universe_version_t3, str) and universe_version_t3.strip()
+        else None
+    )
     with _transaction(config, write=False, statement_timeout_ms=10000) as (
         _,
         cursor,
         _,
     ):
         cursor.execute(
-            """SELECT DISTINCT index_capture_id, index_config_version, calendar_id
+            """SELECT DISTINCT index_capture_id, index_config_version, calendar_id,
+                               formal_scope_key, profile_revision,
+                               universe_version_t, universe_version_t3
                FROM stock.source_market_environment_day_facts
                WHERE target_session=%s AND stock_capture_id=%s
                  AND primary_index_symbol=%s AND calendar_revision=%s
@@ -475,8 +529,13 @@ def read_market_environment_display(
                  AND (%s::bigint IS NULL OR index_capture_id IS NOT DISTINCT FROM %s)
                  AND (%s::text IS NULL OR index_config_version IS NOT DISTINCT FROM %s)
                  AND (%s::text IS NULL OR calendar_id=%s)
-               ORDER BY index_capture_id NULLS FIRST,index_config_version NULLS FIRST,
-                        calendar_id""",
+                 AND (%s::text IS NULL OR formal_scope_key=%s)
+                 AND (%s::text IS NULL OR profile_revision=%s)
+                 AND (%s::text IS NULL OR universe_version_t=%s)
+                 AND (%s::text IS NULL OR universe_version_t3=%s)
+               ORDER BY index_capture_id NULLS FIRST, index_config_version NULLS FIRST,
+                        calendar_id, formal_scope_key, profile_revision,
+                        universe_version_t, universe_version_t3""",
             (
                 target_session,
                 stock_capture_id,
@@ -489,6 +548,14 @@ def read_market_environment_display(
                 index_config_version,
                 calendar_id,
                 calendar_id,
+                norm_scope,
+                norm_scope,
+                norm_prof,
+                norm_prof,
+                norm_ut,
+                norm_ut,
+                norm_ut3,
+                norm_ut3,
             ),
         )
         scopes = cursor.fetchall()
@@ -506,6 +573,10 @@ def read_market_environment_display(
                         "index_capture_id": int(row[0]) if row[0] is not None else None,
                         "index_config_version": row[1],
                         "calendar_id": row[2],
+                        "formal_scope_key": row[3],
+                        "profile_revision": row[4],
+                        "universe_version_t": row[5],
+                        "universe_version_t3": row[6],
                     }
                     for row in scopes
                 ],
@@ -517,12 +588,17 @@ def read_market_environment_display(
                 selected_index_capture_id,
                 selected_index_config_version,
                 selected_calendar_id,
+                selected_formal_scope_key,
+                selected_profile_revision,
+                selected_u_t,
+                selected_u_t3,
             ) = scopes[0]
             cursor.execute(
                 """SELECT index_capture_id, index_config_version,
                       trend_axis, breadth_axis, participation_axis, pressure_axis,
                       raw_status, raw_label, displayed_label, display_status,
-                      pending_label, pending_count
+                      pending_label, pending_count,
+                      breadth_source_kind, prev_trade_date, prev_formal_scope_key
                FROM stock.source_market_environment_day_facts
                WHERE target_session = %s
                  AND stock_capture_id = %s
@@ -531,7 +607,11 @@ def read_market_environment_display(
                  AND index_config_version IS NOT DISTINCT FROM %s
                  AND calendar_id = %s
                  AND calendar_revision = %s
-                 AND rule_version = %s""",
+                 AND rule_version = %s
+                 AND formal_scope_key = %s
+                 AND profile_revision = %s
+                 AND universe_version_t = %s
+                 AND universe_version_t3 = %s""",
                 (
                     target_session,
                     stock_capture_id,
@@ -541,6 +621,10 @@ def read_market_environment_display(
                     selected_calendar_id,
                     calendar_revision,
                     rule_version,
+                    selected_formal_scope_key,
+                    selected_profile_revision,
+                    selected_u_t,
+                    selected_u_t3,
                 ),
             )
             row = cursor.fetchone()
@@ -564,6 +648,13 @@ def read_market_environment_display(
         "calendar_id": selected_calendar_id,
         "calendar_revision": calendar_revision,
         "rule_version": rule_version,
+        "formal_scope_key": selected_formal_scope_key or None,
+        "profile_revision": selected_profile_revision or None,
+        "universe_version_t": selected_u_t or None,
+        "universe_version_t3": selected_u_t3 or None,
+        "breadth_source_kind": row[12],
+        "prev_trade_date": row[13].isoformat() if row[13] is not None else None,
+        "prev_formal_scope_key": row[14],
         "axes": {
             "trend": row[2],
             "breadth": row[3],
@@ -806,7 +897,7 @@ def persist_market_indices_and_environment_for_session(
     target_session: date,
     research_cutoff: date,
     stock_capture_id: int,
-    index_capture_id: int,
+    index_capture_id: int | None,
     index_contract: Mapping[str, Any] | None = None,
     rule_version: str = "MARKET_PRESENTATION_R1",
     profile_revision: str | None = None,
@@ -880,24 +971,25 @@ def persist_market_indices_and_environment_for_session(
         cursor,
         _,
     ):
-        cursor.execute(
-            """SELECT source_symbol, session_date, close_points, preclose_points,
-                      price_quality, bar_status
-               FROM stock.source_market_index_daily
-               WHERE source_capture_id = %s
-                 AND source_symbol = ANY(%s)
-                 AND session_date <= %s
-               ORDER BY source_symbol, session_date""",
-            (index_capture_id, enabled_symbols, target_session),
-        )
-        for sym, sess, close_p, preclose_p, pq, bs in cursor.fetchall():
-            bars_by_symbol[str(sym)][sess] = IndexDailyBar(
-                session_date=sess,
-                close_points=close_p,
-                preclose_points=preclose_p,
-                price_quality=str(pq),
-                bar_status=str(bs),
+        if index_capture_id is not None:
+            cursor.execute(
+                """SELECT source_symbol, session_date, close_points, preclose_points,
+                          price_quality, bar_status
+                   FROM stock.source_market_index_daily
+                   WHERE source_capture_id = %s
+                     AND source_symbol = ANY(%s)
+                     AND session_date <= %s
+                   ORDER BY source_symbol, session_date""",
+                (index_capture_id, enabled_symbols, target_session),
             )
+            for sym, sess, close_p, preclose_p, pq, bs in cursor.fetchall():
+                bars_by_symbol[str(sym)][sess] = IndexDailyBar(
+                    session_date=sess,
+                    close_points=close_p,
+                    preclose_points=preclose_p,
+                    price_quality=str(pq),
+                    bar_status=str(bs),
+                )
 
         part_sql = """
             SELECT classification, status, profile_revision
@@ -953,8 +1045,8 @@ def persist_market_indices_and_environment_for_session(
         if norm_formal_scope_key is not None:
             formal_sql += " AND scope_key = %s"
             formal_params.append(norm_formal_scope_key)
-        if norm_profile_revision is not None:
-            formal_sql += " AND SPLIT_PART(scope_key, ':', 2) = %s"
+        elif norm_profile_revision is not None:
+            formal_sql += " AND SPLIT_PART(scope_key, ':', 2) IN (%s, 'MARKET_QFQ')"
             formal_params.append(f"PROF_{norm_profile_revision}")
         if norm_universe_t is not None:
             formal_sql += " AND universe_version_t = %s"
@@ -968,36 +1060,54 @@ def persist_market_indices_and_environment_for_session(
             (str(r[0]), str(r[1]), str(r[2])) for r in cursor.fetchall()
         ]
 
-        # E02：读取紧邻前一官方交易日的已存环境状态作为 initial_state，保障跨日两日确认/UNKNOWN保留语义
+        env_formal_scope_key = norm_formal_scope_key or ""
+        env_profile_revision = norm_profile_revision or ""
+        env_universe_t = norm_universe_t or ""
+        env_universe_t3 = norm_universe_t3 or ""
+        if len(formal_candidates) == 1:
+            env_formal_scope_key, env_universe_t, env_universe_t3 = formal_candidates[0]
+            if not env_profile_revision:
+                for part in env_formal_scope_key.split(":"):
+                    if part.startswith("PROF_"):
+                        env_profile_revision = part[5:]
+                        break
+
+        # E02：读取紧邻前一官方交易日的同口径已存环境状态作为 initial_state，保障跨日两日确认/UNKNOWN保留语义
         target_idx = calendar_sessions.index(target_session)
         prior_env_state: dict[str, Any] | None = None
+        prior_trade_date: date | None = None
+        prior_formal_scope_key: str | None = None
         if target_idx > 0:
             prev_session = calendar_sessions[target_idx - 1]
             cursor.execute(
                 """SELECT displayed_label, pending_label, pending_count,
-                          rule_version, primary_index_symbol
+                          rule_version, primary_index_symbol, formal_scope_key
                    FROM stock.source_market_environment_day_facts
                    WHERE target_session = %s
                      AND stock_capture_id = %s
-                     AND index_capture_id IS NOT DISTINCT FROM %s
-                     AND index_config_version IS NOT DISTINCT FROM %s
-                     AND calendar_id = %s
                      AND primary_index_symbol = %s
                      AND calendar_revision = %s
-                     AND rule_version = %s""",
+                     AND rule_version = %s
+                     AND formal_scope_key = %s
+                     AND profile_revision = %s
+                     AND universe_version_t = %s
+                     AND universe_version_t3 = %s""",
                 (
                     prev_session,
                     stock_capture_id,
-                    index_capture_id,
-                    config_version,
-                    calendar_id,
                     primary_symbol,
                     calendar_revision,
                     rule_version,
+                    env_formal_scope_key,
+                    env_profile_revision,
+                    env_universe_t,
+                    env_universe_t3,
                 ),
             )
             prev_row = cursor.fetchone()
             if prev_row is not None:
+                prior_trade_date = prev_session
+                prior_formal_scope_key = str(prev_row[5]) if prev_row[5] else None
                 prior_env_state = {
                     "displayed_label": prev_row[0],
                     "pending_label": prev_row[1],
@@ -1125,8 +1235,15 @@ def persist_market_indices_and_environment_for_session(
         write_cursor,
         _,
     ):
-        idx_report = persist_market_index_day_facts(
-            config, records=factor_records, cursor=write_cursor
+        idx_report = (
+            persist_market_index_day_facts(
+                config, records=factor_records, cursor=write_cursor
+            )
+            if index_capture_id is not None
+            else {"status": "NO_CHANGE", "inserted_count": 0, "unchanged_count": 0}
+        )
+        breadth_source_kind = (
+            "FORMAL_UNIVERSE" if breadth_axis != "UNKNOWN" else "UNKNOWN"
         )
         env_report = persist_market_environment_series(
             config,
@@ -1138,6 +1255,9 @@ def persist_market_indices_and_environment_for_session(
                     "breadth_axis": breadth_axis,
                     "participation_axis": participation_axis,
                     "pressure_axis": pressure_axis,
+                    "breadth_source_kind": breadth_source_kind,
+                    "prev_trade_date": prior_trade_date,
+                    "prev_formal_scope_key": prior_formal_scope_key,
                 },
             ),
             stock_capture_id=stock_capture_id,
@@ -1147,6 +1267,13 @@ def persist_market_indices_and_environment_for_session(
             calendar_id=calendar_id,
             calendar_revision=calendar_revision,
             rule_version=rule_version,
+            formal_scope_key=env_formal_scope_key,
+            profile_revision=env_profile_revision,
+            universe_version_t=env_universe_t,
+            universe_version_t3=env_universe_t3,
+            breadth_source_kind=breadth_source_kind,
+            prev_trade_date=prior_trade_date,
+            prev_formal_scope_key=prior_formal_scope_key,
             initial_state=prior_env_state,
             cursor=write_cursor,
         )

@@ -33,6 +33,58 @@ def _cluster_id(board_kind: str, board_ids: Sequence[str]) -> str:
     return f"{board_kind}:" + "+".join(sorted(board_ids))
 
 
+_EXHAUSTION_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+
+def _unknown_prio_can_beat(
+    board: Mapping[str, Any] | None,
+    prio_row: Mapping[str, Any],
+    best_sort_key: tuple[Any, ...],
+) -> bool:
+    """判断 priority_status=UNKNOWN 的成员在最乐观未知字段取值下是否可能超越当前最高 RANKABLE 成员。"""
+    b_neg_emg, b_neg_dq5, b_neg_bd3, b_neg_md3, b_neg_sw, b_exh, b_key = best_sort_key
+    board_data = board or {}
+
+    emg_rank = (board_data.get("emergence") or {}).get("rank")
+    if emg_rank is None:
+        emg_rank = prio_row.get("emergence_rank")
+    if emg_rank is None:
+        return True
+    u_neg_emg = -int(emg_rank)
+    if u_neg_emg != b_neg_emg:
+        return u_neg_emg < b_neg_emg
+
+    for field_val, b_neg_val in (
+        (board_data.get("dq5", prio_row.get("dq5")), b_neg_dq5),
+        (board_data.get("breadth_delta3", prio_row.get("breadth_delta3")), b_neg_bd3),
+        (board_data.get("ma20_delta3", prio_row.get("ma20_delta3")), b_neg_md3),
+        (
+            (board_data.get("seed_wilson") or {}).get(
+                "point_value", prio_row.get("seed_wilson_point")
+            ),
+            b_neg_sw,
+        ),
+    ):
+        if field_val is None:
+            return True
+        u_neg_val = -field_val
+        if u_neg_val != b_neg_val:
+            return bool(u_neg_val < b_neg_val)
+
+    exh_level = (board_data.get("exhaustion") or {}).get("level") or prio_row.get(
+        "exhaustion"
+    )
+    if exh_level not in _EXHAUSTION_RANK:
+        return True
+    u_exh = _EXHAUSTION_RANK[str(exh_level)]
+    if u_exh != b_exh:
+        return u_exh < b_exh
+
+    kind = str(board_data.get("board_kind", prio_row.get("board_kind", "")))
+    bid = str(board_data.get("board_id", prio_row.get("board_id", "")))
+    return (kind, bid) < b_key
+
+
 def compute_sector_overlap(
     *,
     boards: Sequence[Mapping[str, Any]],
@@ -40,13 +92,13 @@ def compute_sector_overlap(
     previous_clusters: Sequence[Mapping[str, Any]] | None = None,
     jaccard_threshold: Fraction = Fraction(3, 5),
 ) -> dict[str, Any]:
-    """按同类型合格板块计算 unique_share、连通分量簇、parent 追溯、代表及展示摘要。"""
+    """按同类型合格/安全未知板块计算 unique_share、连通分量簇、parent 追溯、代表及展示摘要。"""
     prio_by_key = {
         (str(p.get("board_kind", "")), str(p["board_id"])): p for p in priority_rows
     }
     by_kind: dict[str, list[Mapping[str, Any]]] = {"INDUSTRY": [], "CONCEPT": []}
     for b in boards:
-        if b["raw_qualification"]["safety"]["state"] == "TRUE":
+        if b["raw_qualification"]["safety"]["state"] in {"TRUE", "UNKNOWN"}:
             kind = str(b["board_kind"])
             if kind in by_kind:
                 by_kind[kind].append(b)
@@ -62,11 +114,17 @@ def compute_sector_overlap(
 
     for kind in ("INDUSTRY", "CONCEPT"):
         kind_boards = by_kind[kind]
+        board_by_id = {str(b["board_id"]): b for b in kind_boards}
         entity_sets: dict[str, frozenset[str] | None] = {}
         for b in kind_boards:
             bid = str(b["board_id"])
+            safety_state = b["raw_qualification"]["safety"]["state"]
             slots = b["members"]
-            if any(s.entity_id is None for s in slots):
+            if (
+                safety_state != "TRUE"
+                or not b.get("membership_complete", True)
+                or any(s.entity_id is None for s in slots)
+            ):
                 entity_sets[bid] = None
             else:
                 entity_sets[bid] = frozenset(
@@ -82,7 +140,12 @@ def compute_sector_overlap(
                 unique_shares[ukey] = {
                     "status": "UNKNOWN",
                     "value": None,
-                    "reason": "UNMAPPED_MEMBER_PRESENT",
+                    "reason": (
+                        "SAFETY_OR_MEMBERSHIP_UNKNOWN"
+                        if b["raw_qualification"]["safety"]["state"] != "TRUE"
+                        or not b.get("membership_complete", True)
+                        else "UNMAPPED_MEMBER_PRESENT"
+                    ),
                 }
                 continue
             if not own_set:
@@ -189,45 +252,62 @@ def compute_sector_overlap(
                 if str(pc["cluster_id"]) != cid
                 and (set(pc["member_board_ids"]) & comp_set)
             )
-            cluster_unknown = idx in unknown_affected_comps
+            has_unknown_safety = any(
+                board_by_id[bid]["raw_qualification"]["safety"]["state"] != "TRUE"
+                for bid in comp
+            )
+            cluster_unknown = idx in unknown_affected_comps or has_unknown_safety
             unknown_edge_count = sum(
                 1
                 for a_id, b_id in unknown_edges
                 if a_id in comp_set or b_id in comp_set
             )
             cluster_reason = (
-                "UNKNOWN_EDGE_CROSSES_COMPONENTS" if cluster_unknown else None
+                "UNKNOWN_EDGE_CROSSES_COMPONENTS"
+                if idx in unknown_affected_comps
+                else ("SAFETY_OR_MEMBERSHIP_UNKNOWN" if has_unknown_safety else None)
             )
 
-            # 按 Priority 选择代表；未知边界簇或存在 UNKNOWN Priority 候选则代表 UNKNOWN
+            # 按 Priority 选择代表；未知边界簇或未知成员可能超越最高 RANKABLE 时代表 UNKNOWN
             rankable_members = [
                 prio_by_key[(kind, bid)]
                 for bid in comp
                 if (kind, bid) in prio_by_key
                 and prio_by_key[(kind, bid)]["priority_status"] == "RANKABLE"
             ]
-            has_unknown_prio = any(
-                (kind, bid) in prio_by_key
-                and prio_by_key[(kind, bid)]["priority_status"] == "UNKNOWN"
+            rankable_members.sort(key=lambda p: p["sort_key"])
+            unknown_prio_members = [
+                (bid, prio_by_key[(kind, bid)])
                 for bid in comp
+                if (kind, bid) in prio_by_key
+                and prio_by_key[(kind, bid)]["priority_status"] == "UNKNOWN"
+            ]
+            best_sort_key = (
+                rankable_members[0]["sort_key"] if rankable_members else None
+            )
+            unknown_can_win = bool(unknown_prio_members) and (
+                best_sort_key is None
+                or any(
+                    _unknown_prio_can_beat(board_by_id.get(bid), pr, best_sort_key)
+                    for bid, pr in unknown_prio_members
+                )
             )
             if cluster_unknown:
                 rep_id = None
                 rep_status = "UNKNOWN"
                 rep_reason = "CLUSTER_BOUNDARY_UNKNOWN"
-            elif has_unknown_prio:
+            elif unknown_can_win:
                 rep_id = None
                 rep_status = "UNKNOWN"
                 rep_reason = "PRIORITY_UNKNOWN"
             elif rankable_members:
-                rankable_members.sort(key=lambda p: p["sort_key"])
                 rep_id = str(rankable_members[0]["board_id"])
                 rep_status = "SELECTED"
                 rep_reason = None
             else:
                 rep_id = sorted(comp)[0]
                 rep_status = "FALLBACK_ID"
-                rep_reason = "NO_RANKABLE_MEMBER_FALLBACK_ID"
+                rep_reason = "DIAGNOSTIC_FALLBACK_ONLY"
 
             clusters.append(
                 {

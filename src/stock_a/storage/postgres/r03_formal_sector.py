@@ -160,6 +160,8 @@ def write_r03_native_day_facts(
                 prev_td,
                 int(sg_raw) if sg_raw is not None else None,
                 row.get("prev_exhaustion_level"),
+                lc.get("last_known_display") or lc.get("last_known_maturity"),
+                lc.get("last_known_effective") or lc.get("last_known_maturity"),
             )
             cur.execute(
                 """
@@ -182,7 +184,8 @@ def write_r03_native_day_facts(
                        prewatch_raw_reason, warm_raw_reason, confirmed_raw_reason,
                        exhaustion_reason, emergence_reason, rs5_reason, rs20_reason,
                        breadth_reason, ma20_reason, amr20_reason,
-                       prev_trade_date, session_gap, prev_exhaustion_level
+                       prev_trade_date, session_gap, prev_exhaustion_level,
+                       last_known_display, last_known_effective
                 FROM stock.r03_sector_native_day_facts
                 WHERE trade_date=%s AND board_kind=%s AND board_id=%s
                   AND scope_key=%s AND member_version=%s AND contract_version=%s
@@ -235,6 +238,7 @@ def write_r03_native_day_facts(
                         exhaustion_reason=%s, emergence_reason=%s, rs5_reason=%s, rs20_reason=%s,
                         breadth_reason=%s, ma20_reason=%s, amr20_reason=%s,
                         prev_trade_date=%s, session_gap=%s, prev_exhaustion_level=%s,
+                        last_known_display=%s, last_known_effective=%s,
                         recorded_at=now()
                     WHERE trade_date=%s AND board_kind=%s AND board_id=%s
                       AND scope_key=%s AND member_version=%s AND contract_version=%s
@@ -275,7 +279,8 @@ def write_r03_native_day_facts(
                     prewatch_raw_reason, warm_raw_reason, confirmed_raw_reason,
                     exhaustion_reason, emergence_reason, rs5_reason, rs20_reason,
                     breadth_reason, ma20_reason, amr20_reason,
-                    prev_trade_date, session_gap, prev_exhaustion_level
+                    prev_trade_date, session_gap, prev_exhaustion_level,
+                    last_known_display, last_known_effective
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
@@ -283,7 +288,8 @@ def write_r03_native_day_facts(
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s
                 )
                 """,
                 (
@@ -371,10 +377,7 @@ def _read_r03_partition_progress_state(
     else:
         sql += " AND universe_version_t=%s AND universe_version_t3=%s"
         params.extend([str(universe_version_t), str(universe_version_t3)])
-    sql += (
-        " ORDER BY (CASE WHEN status = 'RUNNING' THEN 0 ELSE 1 END) ASC,"
-        " updated_at DESC, job_id DESC LIMIT 1"
-    )
+    sql += " ORDER BY updated_at DESC, job_id DESC LIMIT 1"
     cur.execute(sql, tuple(params))
     row = cur.fetchone()
     if row is None:
@@ -399,17 +402,33 @@ def read_r03_native_day_facts(
         cur,
         _,
     ):
-        where_sql = "WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s"
-        params: list[Any] = [trade_date, scope_key, member_version, contract_version]
+        full_where_sql = "WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s"
+        full_params: list[Any] = [
+            trade_date,
+            scope_key,
+            member_version,
+            contract_version,
+        ]
+        cur.execute(
+            f"SELECT count(*)::bigint FROM stock.r03_sector_native_day_facts {full_where_sql}",
+            tuple(full_params),
+        )
+        full_partition_count = int(cur.fetchone()[0])
+
+        where_sql = full_where_sql
+        params: list[Any] = list(full_params)
         if board_kind is not None:
             where_sql += " AND board_kind=%s"
             params.append(board_kind)
 
-        cur.execute(
-            f"SELECT count(*)::bigint FROM stock.r03_sector_native_day_facts {where_sql}",
-            tuple(params),
-        )
-        total_count = int(cur.fetchone()[0])
+        if board_kind is not None:
+            cur.execute(
+                f"SELECT count(*)::bigint FROM stock.r03_sector_native_day_facts {where_sql}",
+                tuple(params),
+            )
+            total_count = int(cur.fetchone()[0])
+        else:
+            total_count = full_partition_count
         prog_status, prog_expected = _read_r03_partition_progress_state(
             cur,
             trade_date=trade_date,
@@ -425,35 +444,33 @@ def read_r03_native_day_facts(
                 "items": [],
                 "reason": "该精确分区 R03 Native 任务状态未完成，禁止读取半成品。",
             }
-        if total_count == 0:
-            if prog_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"} and (
-                prog_expected == 0 or board_kind is not None
-            ):
-                return {
-                    "status": "AVAILABLE_EMPTY",
-                    "total_count": 0,
-                    "items": [],
-                    "reason": "该日期已完成计算且合法结果为空（0行）。",
-                }
-            if prog_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}:
-                return {
-                    "status": "INCOMPLETE",
-                    "total_count": 0,
-                    "items": [],
-                    "reason": "该精确分区进度为已完成但实际行数为 0（与预期行数不符），禁止读取半成品。",
-                }
-            return {
-                "status": "NOT_COMPUTED",
-                "total_count": 0,
-                "items": [],
-                "reason": "该日期与精确口径尚无已保存的 R03 Native 事实。",
-            }
         if prog_status not in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}:
+            if full_partition_count == 0:
+                return {
+                    "status": "NOT_COMPUTED",
+                    "total_count": 0,
+                    "items": [],
+                    "reason": "该日期与精确口径尚无已保存的 R03 Native 事实。",
+                }
             return {
                 "status": "INCOMPLETE",
                 "total_count": 0,
                 "items": [],
                 "reason": "该精确分区缺少已验证完成进度记录，禁止读取未闭合半成品。",
+            }
+        if prog_expected is not None and full_partition_count != prog_expected:
+            return {
+                "status": "INCOMPLETE",
+                "total_count": 0,
+                "items": [],
+                "reason": "该精确分区实际行数与预期行数不符，禁止读取半成品。",
+            }
+        if total_count == 0:
+            return {
+                "status": "AVAILABLE_EMPTY",
+                "total_count": 0,
+                "items": [],
+                "reason": "该日期已完成计算且合法结果为空（0行）。",
             }
 
         sql = f"""
@@ -476,7 +493,8 @@ def read_r03_native_day_facts(
                    prewatch_raw_reason, warm_raw_reason, confirmed_raw_reason,
                    exhaustion_reason, emergence_reason, rs5_reason, rs20_reason,
                    breadth_reason, ma20_reason, amr20_reason,
-                   prev_trade_date, session_gap, prev_exhaustion_level
+                   prev_trade_date, session_gap, prev_exhaustion_level,
+                   last_known_display, last_known_effective
             FROM stock.r03_sector_native_day_facts
             {where_sql}
             ORDER BY priority_rank ASC NULLS LAST, board_kind ASC, board_id ASC
@@ -505,11 +523,13 @@ def read_r03_previous_lifecycle_states(
     contract_version: str,
     previous_scope_key: str | None = None,
     previous_member_version: str | None = None,
+    prior_version_chain: Sequence[tuple[date, str, str]] | None = None,
     return_metadata: bool = False,
 ) -> dict[Any, Any]:
-    """从 PG 恢复上一官方交易日的板块成熟、降级目标与 PREWATCH 基准前态；区分冷启动与前日缺失/未完成。"""
+    """从 PG 恢复上一官方交易日（或同一合法版本链最近已完成前日）的板块成熟、降级目标与 PREWATCH 基准前态；区分首次冷启动与中间缺日。"""
     target_scope = previous_scope_key or scope_key
     target_mem = previous_member_version or member_version
+    actual_prev_td: date | None = previous_trade_date
     res = read_r03_native_day_facts(
         config,
         trade_date=previous_trade_date,
@@ -517,16 +537,43 @@ def read_r03_previous_lifecycle_states(
         member_version=target_mem,
         contract_version=contract_version,
     )
+    previous_session_missing = res["status"] not in {"AVAILABLE", "AVAILABLE_EMPTY"}
+    if previous_session_missing and prior_version_chain:
+        chain_candidates = sorted(
+            [
+                (d, str(sk), str(mv))
+                for d, sk, mv in prior_version_chain
+                if d < previous_trade_date
+            ],
+            key=lambda x: x[0],
+            reverse=True,
+        )
+        for cand_td, cand_sk, cand_mv in chain_candidates:
+            cand_res = read_r03_native_day_facts(
+                config,
+                trade_date=cand_td,
+                scope_key=cand_sk,
+                member_version=cand_mv,
+                contract_version=contract_version,
+            )
+            if cand_res["status"] in {"AVAILABLE", "AVAILABLE_EMPTY"}:
+                res = cand_res
+                actual_prev_td = cand_td
+                break
     items = (
         {(item["board_kind"], item["board_id"]): item for item in res["items"]}
         if res["status"] == "AVAILABLE"
         else {}
     )
+    has_prior_history = res["status"] in {"AVAILABLE", "AVAILABLE_EMPTY"}
+    if not has_prior_history:
+        actual_prev_td = None
     if return_metadata:
         return {
             "status": res["status"],
-            "previous_trade_date": previous_trade_date,
-            "previous_session_missing": res["status"] != "AVAILABLE",
+            "previous_trade_date": actual_prev_td,
+            "previous_session_missing": previous_session_missing,
+            "has_prior_history": has_prior_history,
             "items": items,
             "reason": res.get("reason"),
         }
@@ -1023,15 +1070,19 @@ def read_r03_rotation_recovery_states(
 
         out: dict[tuple[str, str], dict[str, Any]] = {}
         if previous_trade_date is not None:
-            if prev_scope is not None:
-                mem_filter = " AND b.member_version=%s" if prev_mem is not None else ""
+            exact_prev_scope = prev_scope or scope_key
+            exact_prev_mem = prev_mem or member_version
+            if exact_prev_scope is not None:
+                mem_filter = (
+                    " AND b.member_version=%s" if exact_prev_mem is not None else ""
+                )
                 params_ep: list[Any] = [
-                    prev_scope,
+                    exact_prev_scope,
                     contract_version,
                     previous_trade_date,
                 ]
-                if prev_mem is not None:
-                    params_ep.append(prev_mem)
+                if exact_prev_mem is not None:
+                    params_ep.append(exact_prev_mem)
                 cur.execute(
                     f"""
                     SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
@@ -1039,11 +1090,14 @@ def read_r03_rotation_recovery_states(
                            s.trade_date, s.rotation_state, s.last_known_state, s.stale,
                            s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
                            s.prev_mature_true, s.dq5, e.frozen_member_count,
-                           b.scope_key, b.member_version, e.scope_key
+                           b.scope_key, b.member_version, e.scope_key,
+                           s0.formation_r
                     FROM stock.r03_sector_rotation_board_day_facts b
                     JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
                     JOIN stock.r03_sector_rotation_day_states s
                       ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                    LEFT JOIN stock.r03_sector_rotation_day_states s0
+                      ON s0.episode_id = e.id AND s0.trade_date = e.t0_session
                     WHERE b.scope_key=%s AND b.contract_version=%s AND b.trade_date=%s
                     {mem_filter}
                     ORDER BY b.board_kind, b.board_id, e.id DESC
@@ -1075,6 +1129,9 @@ def read_r03_rotation_recovery_states(
                         "basket": basket,
                         "prev_trade_date": r[10],
                         "missing_previous_session": False,
+                        "formation_r_t0": Fraction(r[25])
+                        if r[25] is not None
+                        else None,
                         "state_dict": {
                             "state": str(r[11]),
                             "last_known_state": r[12],
@@ -1152,13 +1209,16 @@ def read_r03_rotation_recovery_states(
                            s.trade_date, s.rotation_state, s.last_known_state, s.stale,
                            s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
                            s.prev_mature_true, s.dq5, e.frozen_member_count,
-                           b.scope_key, b.member_version, e.scope_key
+                           b.scope_key, b.member_version, e.scope_key,
+                           s0.formation_r
                     FROM stock.r03_sector_rotation_board_day_facts b
                     JOIN unnest(%s::date[], %s::text[], %s::text[]) AS vc(td, sk, mv)
                       ON b.trade_date = vc.td AND b.scope_key = vc.sk AND b.member_version = vc.mv
                     JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
                     JOIN stock.r03_sector_rotation_day_states s
                       ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                    LEFT JOIN stock.r03_sector_rotation_day_states s0
+                      ON s0.episode_id = e.id AND s0.trade_date = e.t0_session
                     WHERE b.contract_version=%s AND b.trade_date <= %s
                     ORDER BY b.board_kind, b.board_id, b.trade_date DESC, e.id DESC
                     """,
@@ -1183,11 +1243,14 @@ def read_r03_rotation_recovery_states(
                            s.trade_date, s.rotation_state, s.last_known_state, s.stale,
                            s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
                            s.prev_mature_true, s.dq5, e.frozen_member_count,
-                           b.scope_key, b.member_version, e.scope_key
+                           b.scope_key, b.member_version, e.scope_key,
+                           s0.formation_r
                     FROM stock.r03_sector_rotation_board_day_facts b
                     JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
                     JOIN stock.r03_sector_rotation_day_states s
                       ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                    LEFT JOIN stock.r03_sector_rotation_day_states s0
+                      ON s0.episode_id = e.id AND s0.trade_date = e.t0_session
                     WHERE {miss_cond} {miss_mem}
                     ORDER BY b.board_kind, b.board_id, b.trade_date DESC, e.id DESC
                     """,
@@ -1220,6 +1283,9 @@ def read_r03_rotation_recovery_states(
                     "basket": basket_rec,
                     "prev_trade_date": mr_row[10],
                     "missing_previous_session": mr_row[10] < previous_trade_date,
+                    "formation_r_t0": Fraction(mr_row[25])
+                    if mr_row[25] is not None
+                    else None,
                     "state_dict": {
                         "state": str(mr_row[11]),
                         "last_known_state": mr_row[12],
@@ -1231,6 +1297,64 @@ def read_r03_rotation_recovery_states(
                         "out_neg_streak": int(mr_row[18]),
                         "prev_mature_true": bool(mr_row[19]),
                         "dq5": Fraction(mr_row[20]) if mr_row[20] is not None else None,
+                    },
+                }
+            # 补充回查 chain_items / trade_date < previous_trade_date 中 episode_id IS NULL 的 NONE/UNKNOWN 日事实，
+            # 防止已结束 Episode 后落了 NONE 日但中间缺日时错误复活更早的已结束 Episode。
+            if chain_items:
+                cur.execute(
+                    """
+                    SELECT b.board_kind, b.board_id, b.trade_date, b.episode_id,
+                           b.rotation_state, b.last_known_state, b.reason_code,
+                           b.scope_key, b.member_version
+                    FROM stock.r03_sector_rotation_board_day_facts b
+                    JOIN unnest(%s::date[], %s::text[], %s::text[]) AS vc(td, sk, mv)
+                      ON b.trade_date = vc.td AND b.scope_key = vc.sk AND b.member_version = vc.mv
+                    WHERE b.contract_version=%s AND b.trade_date <= %s
+                      AND b.episode_id IS NULL
+                    ORDER BY b.board_kind, b.board_id, b.trade_date DESC, b.id DESC
+                    """,
+                    (c_dates, c_scopes, c_mems, contract_version, previous_trade_date),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    SELECT b.board_kind, b.board_id, b.trade_date, b.episode_id,
+                           b.rotation_state, b.last_known_state, b.reason_code,
+                           b.scope_key, b.member_version
+                    FROM stock.r03_sector_rotation_board_day_facts b
+                    WHERE {miss_cond} {miss_mem} AND b.episode_id IS NULL
+                    ORDER BY b.board_kind, b.board_id, b.trade_date DESC, b.id DESC
+                    """,
+                    tuple(miss_params),
+                )
+            for bk, bid, b_td, _ep_id, rot_st, lk_st, rsn, b_sk, b_mv in cur.fetchall():
+                key = (str(bk), str(bid))
+                if not _is_partition_complete(b_td, str(b_sk), str(b_mv)):
+                    continue
+                existing_rec = out.get(key)
+                if existing_rec is not None and existing_rec["prev_trade_date"] >= b_td:
+                    continue
+                out[key] = {
+                    "episode_pg_id": None,
+                    "episode_scope_key": None,
+                    "parent_episode_id": None,
+                    "basket": None,
+                    "prev_trade_date": b_td,
+                    "missing_previous_session": b_td < previous_trade_date,
+                    "formation_r_t0": None,
+                    "state_dict": {
+                        "state": str(rot_st),
+                        "last_known_state": lk_st,
+                        "stale": False,
+                        "market_age": 0,
+                        "eval_age": 0,
+                        "accepted_once": False,
+                        "armed": False,
+                        "out_neg_streak": 0,
+                        "prev_mature_true": False,
+                        "dq5": None,
+                        "reason": rsn,
                     },
                 }
         else:
@@ -1251,11 +1375,14 @@ def read_r03_rotation_recovery_states(
                        e.s0_known, e.u0_known, e.h0_known, e.left_censored,
                        e.frozen_member_count, e.scope_key,
                        s.stale, s.market_age, s.eval_age, s.accepted_once,
-                       s.armed, s.out_neg_streak, s.prev_mature_true, s.dq5
+                       s.armed, s.out_neg_streak, s.prev_mature_true, s.dq5,
+                       s0.formation_r
                 FROM stock.r03_sector_rotation_board_day_facts b
                 LEFT JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
                 LEFT JOIN stock.r03_sector_rotation_day_states s
                   ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                LEFT JOIN stock.r03_sector_rotation_day_states s0
+                  ON s0.episode_id = e.id AND s0.trade_date = e.t0_session
                 WHERE b.scope_key=%s AND b.contract_version=%s AND b.trade_date < %s
                 {mem_filter}
                 ORDER BY b.board_kind, b.board_id, b.trade_date DESC, b.id DESC
@@ -1288,6 +1415,9 @@ def read_r03_rotation_recovery_states(
                         "basket": basket,
                         "prev_trade_date": b_td,
                         "missing_previous_session": False,
+                        "formation_r_t0": Fraction(r[27])
+                        if r[27] is not None
+                        else None,
                         "state_dict": {
                             "state": str(r[4]),
                             "last_known_state": r[5],
@@ -1309,6 +1439,9 @@ def read_r03_rotation_recovery_states(
                         "basket": None,
                         "prev_trade_date": b_td,
                         "missing_previous_session": False,
+                        "formation_r_t0": Fraction(r[27])
+                        if r[27] is not None
+                        else None,
                         "state_dict": {
                             "state": str(r[4]),
                             "last_known_state": r[5],
@@ -2663,7 +2796,7 @@ def read_r03_loo_support_fact(
         )
         c_cols = [d[0] for d in cur.description]
         candidates = [dict(zip(c_cols, cr, strict=True)) for cr in cur.fetchall()]
-        if cand_count > 0 and len(candidates) != cand_count:
+        if len(candidates) != cand_count:
             return {
                 "status": "INCOMPLETE",
                 "target_entity_id": target_entity_id,
@@ -2671,18 +2804,29 @@ def read_r03_loo_support_fact(
                 "candidates": [],
                 "reason": "LOO 候选子表与支持父表数量不闭合，禁止读取半成品。",
             }
-        if (
-            row[3] == "SELECTED"
-            and row[2] is not None
-            and cand_count > 0
-            and str(row[2]) not in {str(c["board_id"]) for c in candidates}
-        ):
+        selected_ids = [
+            str(c["board_id"]) for c in candidates if bool(c.get("is_selected_support"))
+        ]
+        if row[3] == "SELECTED":
+            if (
+                row[2] is None
+                or str(row[2]) not in {str(c["board_id"]) for c in candidates}
+                or selected_ids != [str(row[2])]
+            ):
+                return {
+                    "status": "INCOMPLETE",
+                    "target_entity_id": target_entity_id,
+                    "board_kind": board_kind,
+                    "candidates": [],
+                    "reason": "LOO 选中支持板块与候选子表选中标记不一致，父子表不闭合。",
+                }
+        elif selected_ids:
             return {
                 "status": "INCOMPLETE",
                 "target_entity_id": target_entity_id,
                 "board_kind": board_kind,
                 "candidates": [],
-                "reason": "LOO 选中支持板块不在候选子表中，父子表不闭合。",
+                "reason": "非 SELECTED 状态存在 is_selected_support=True 脏子行，父子表不闭合。",
             }
         return {
             "status": "AVAILABLE",
@@ -2860,6 +3004,70 @@ def read_r03_formal_market_breadth(
                 else "NOT_READY_HISTORICAL_UNIVERSE",
                 "reason": "该精确分区正式市场宽度尚未完成验证，禁止读取未闭合数据。",
             }
+        from stock_a.domain.market_presentation import classify_market_breadth
+
+        exact_obj = (
+            {"numerator": int(r[10]), "denominator": int(r[11])}
+            if r[10] is not None and r[11] is not None
+            else None
+        )
+        classification = "UNKNOWN"
+        if (
+            str(r[3]) == "OBSERVED"
+            and exact_obj is not None
+            and exact_obj["denominator"] > 0
+        ):
+            classification = classify_market_breadth(
+                Fraction(exact_obj["numerator"], exact_obj["denominator"])
+            )
+        n_common_val = int(r[7])
+        n_eligible_val = int(r[8])
+        coverage = (
+            float(Fraction(n_eligible_val, n_common_val)) if n_common_val > 0 else None
+        )
+        # 计算同口径最近已完成正式宽度的相邻变化（无前日事实则 FIRST_OBSERVED）
+        cur.execute(
+            """
+            SELECT trade_date, status, exact_numerator, exact_denominator
+            FROM stock.r03_formal_market_breadth_facts
+            WHERE trade_date < %s
+              AND contract_version = %s
+              AND scope_key = %s
+            ORDER BY trade_date DESC, recorded_at DESC, id DESC
+            LIMIT 1
+            """,
+            (trade_date, contract_version, str(r[0])),
+        )
+        prev_b_row = cur.fetchone()
+        if prev_b_row is None:
+            breadth_change: dict[str, Any] = {
+                "change_status": "FIRST_OBSERVED",
+                "delta": None,
+                "previous_trade_date": None,
+            }
+        elif (
+            str(r[3]) == "OBSERVED"
+            and exact_obj is not None
+            and exact_obj["denominator"] > 0
+            and str(prev_b_row[1]) == "OBSERVED"
+            and prev_b_row[2] is not None
+            and prev_b_row[3] is not None
+            and int(prev_b_row[3]) > 0
+        ):
+            delta_frac = Fraction(
+                exact_obj["numerator"], exact_obj["denominator"]
+            ) - Fraction(int(prev_b_row[2]), int(prev_b_row[3]))
+            breadth_change = {
+                "change_status": "OBSERVED",
+                "delta": float(delta_frac),
+                "previous_trade_date": prev_b_row[0].isoformat(),
+            }
+        else:
+            breadth_change = {
+                "change_status": "UNKNOWN",
+                "delta": None,
+                "previous_trade_date": prev_b_row[0].isoformat(),
+            }
         return {
             "status": str(r[3]),
             "scope_key": str(r[0]),
@@ -2868,15 +3076,14 @@ def read_r03_formal_market_breadth(
             "reason": r[4],
             "n_t": int(r[5]),
             "n_t3": int(r[6]),
-            "n_common": int(r[7]),
-            "n_eligible": int(r[8]),
+            "n_common": n_common_val,
+            "n_eligible": n_eligible_val,
             "unknown_count": int(r[9]),
-            "exact": (
-                {"numerator": int(r[10]), "denominator": int(r[11])}
-                if r[10] is not None and r[11] is not None
-                else None
-            ),
+            "exact": exact_obj,
             "breadth_value": str(r[12]) if r[12] is not None else None,
+            "classification": classification,
+            "coverage": coverage,
+            "breadth_change": breadth_change,
         }
 
 

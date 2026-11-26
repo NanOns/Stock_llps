@@ -1636,11 +1636,21 @@ def build_data_job_plan(
                 ):
                     return True
         if module == "MARKET_BREADTH":
+            from stock_a.application.r03_formal_sector import R03_CONTRACT_VERSION
+
             has_formal = any(
                 matches_price_key(cand)
                 and any(
                     row.get("business_table") == "stock.r03_formal_market_breadth_facts"
                     and row.get("calendar_revision") == expected_calendar_revision
+                    and row.get("producer_version") == R03_CONTRACT_VERSION
+                    and (
+                        expected_profile_revision is None
+                        or row.get("profile_revision")
+                        in {None, expected_profile_revision}
+                    )
+                    and bool(row.get("universe_version_t"))
+                    and bool(row.get("universe_version_t3"))
                     for row in (cand.get("business_tables") or ())
                 )
                 for cand in candidates
@@ -3152,7 +3162,7 @@ class DataJobCoordinator:
                 self.config, cutoff=date.fromisoformat(plan["research_cutoff"])
             )
             if any(m in request["selected_modules"] for m in _R03_TABLE_BY_MODULE)
-            and request["operation"] != "RECOMPUTE"
+            and request["operation"] not in {"RECOMPUTE", "CLEAR_AND_REGENERATE"}
             else {}
         )
         _default_price_cap = (
@@ -3177,7 +3187,8 @@ class DataJobCoordinator:
                     ) or day in set(plan.get("raw_input_unavailable_sessions", ())):
                         day_status = "NOT_COMPUTED"
                     elif (
-                        request["operation"] != "RECOMPUTE"
+                        request["operation"]
+                        not in {"RECOMPUTE", "CLEAR_AND_REGENERATE"}
                         and not sector_source_will_generate
                         and r03_completed_units
                     ):
@@ -3203,11 +3214,37 @@ class DataJobCoordinator:
                             if isinstance(day_snaps, Mapping)
                             else None
                         )
+                        from stock_a.application.r03_formal_sector import (
+                            R03_CONTRACT_VERSION,
+                        )
+
+                        cs_scope_day = (
+                            plan.get("_cross_section_scope_by_day", {}).get(day)
+                            if isinstance(
+                                plan.get("_cross_section_scope_by_day"), Mapping
+                            )
+                            else None
+                        )
+                        exp_u_t = (
+                            cs_scope_day.get("universe_version")
+                            if isinstance(cs_scope_day, Mapping)
+                            else None
+                        )
+                        exp_prof = plan.get("expected_profile_revision")
                         matched_complete = any(
                             u.get("target_session") == day
                             and u.get("source_capture_id") == day_cap
                             and u.get("industry_snapshot_id") == ind_id
                             and u.get("concept_snapshot_id") == con_id
+                            and u.get("producer_version") == R03_CONTRACT_VERSION
+                            and (
+                                exp_prof is None
+                                or u.get("profile_revision") == exp_prof
+                            )
+                            and (
+                                exp_u_t is None
+                                or u.get("universe_version_t") == exp_u_t
+                            )
                             for u in r03_completed_units
                         )
                         day_status = "NO_CHANGE" if matched_complete else "NOT_STARTED"
@@ -3457,23 +3494,32 @@ class DataJobCoordinator:
                 "R03_SECTOR_OVERLAP",
                 "R03_SECTOR_LOO",
             }:
-                from stock_a.application.source_sector_pulse import (
-                    resolve_source_sector_snapshot_pair,
-                )
-
-                snap_pair = resolve_source_sector_snapshot_pair(
-                    config=self.config,
-                    research_cutoff=self.research_cutoff,
-                )
+                snap_by_day_plan = plan.get("sector_snapshot_ids_by_session")
+                target_day_str = str(plan.get("target_session") or "")
                 sids = (
-                    snap_pair.get("snapshot_ids")
-                    if isinstance(snap_pair, Mapping)
+                    snap_by_day_plan.get(target_day_str)
+                    if isinstance(snap_by_day_plan, Mapping)
+                    and target_day_str in snap_by_day_plan
                     else None
                 )
+                if not (
+                    isinstance(sids, Mapping)
+                    and sids.get("INDUSTRY") is not None
+                    and sids.get("CONCEPT") is not None
+                ):
+                    from stock_a.application.source_sector_pulse import (
+                        resolve_source_sector_snapshot_pair,
+                    )
+
+                    snap_pair = resolve_source_sector_snapshot_pair(self.config)
+                    sids = (
+                        snap_pair.get("snapshot_ids")
+                        if isinstance(snap_pair, Mapping)
+                        and snap_pair.get("status") == "AVAILABLE"
+                        else None
+                    )
                 if (
-                    isinstance(snap_pair, Mapping)
-                    and snap_pair.get("status") == "AVAILABLE"
-                    and isinstance(sids, Mapping)
+                    isinstance(sids, Mapping)
                     and sids.get("INDUSTRY") is not None
                     and sids.get("CONCEPT") is not None
                 ):
@@ -6856,6 +6902,14 @@ def _execute_shared_production_chain_impl(
         profile_revision_t3: str | None = None,
         prev_scope_key: str | None = None,
         prev_member_version: str | None = None,
+        source_capture_id_t4: int | None = None,
+        prev_session_t: date | None = None,
+        prev_session_t3: date | None = None,
+        prev_trade_date: date | None = None,
+        industry_snapshot_id_t1: int | None = None,
+        concept_snapshot_id_t1: int | None = None,
+        industry_snapshot_id_t3: int | None = None,
+        concept_snapshot_id_t3: int | None = None,
     ) -> None:
         error_code = str(getattr(error, "code", type(error).__name__))
         for unit in units:
@@ -7538,6 +7592,7 @@ def _execute_shared_production_chain_impl(
                                 "source_capture_id_t4": cap_mkt_t4,
                                 "prev_session_t": mkt_prev_t,
                                 "prev_session_t3": mkt_prev_t3,
+                                "overwrite_nulls": True,
                             }
                         )
                     else:
@@ -8445,39 +8500,70 @@ def _execute_shared_production_chain_impl(
                         _,
                     ):
                         cur.execute(
-                            """SELECT MAX(source_capture_id)
+                            """SELECT DISTINCT source_capture_id
                                FROM stock.source_market_index_daily
-                               WHERE session_date = %s""",
+                               WHERE session_date = %s
+                               ORDER BY source_capture_id""",
                             (day,),
                         )
-                        idx_cap_row = cur.fetchone()
-                        idx_capture_id = (
-                            int(idx_cap_row[0])
-                            if idx_cap_row and idx_cap_row[0] is not None
-                            else None
+                        idx_cap_rows = [
+                            int(r[0]) for r in cur.fetchall() if r[0] is not None
+                        ]
+                        if len(idx_cap_rows) == 1:
+                            idx_capture_id = idx_cap_rows[0]
+                        elif len(idx_cap_rows) > 1:
+                            raise DataJobError(
+                                "MARKET_INDEX_CAPTURE_AMBIGUOUS",
+                                f"参考指数与市场环境({day})存在多个指数捕获 {idx_cap_rows}，禁止盲取最大捕获ID。",
+                                status=409,
+                            )
+                        else:
+                            idx_capture_id = None
+                env_prof_rev: str | None = plan.get("expected_profile_revision")
+                if not env_prof_rev:
+                    with _raw_tx(config, write=False, statement_timeout_ms=5000) as (
+                        _,
+                        _ecur,
+                        _,
+                    ):
+                        _ecur.execute(
+                            """SELECT DISTINCT profile_revision
+                               FROM stock.source_symbol_price_profiles
+                               WHERE source_capture_id=%s AND target_session=%s
+                                 AND price_coordinate='FORWARD_ADJUSTED'""",
+                            (source_capture_id, day),
                         )
-                if idx_capture_id is None:
-                    raise DataJobError(
-                        "MARKET_INDEX_DAILY_NOT_AVAILABLE",
-                        f"参考指数与市场环境({day})缺少已落库的通用参考指数日线捕获。",
-                        status=409,
-                    )
-                env_prof_rev: str | None = None
-                with _raw_tx(config, write=False, statement_timeout_ms=5000) as (
-                    _,
-                    _ecur,
-                    _,
-                ):
-                    _ecur.execute(
-                        """SELECT DISTINCT profile_revision
-                           FROM stock.source_symbol_price_profiles
-                           WHERE source_capture_id=%s AND target_session=%s
-                             AND price_coordinate='FORWARD_ADJUSTED'""",
-                        (source_capture_id, day),
-                    )
-                    _erevs = [str(r[0]) for r in _ecur.fetchall() if r[0]]
-                    if len(_erevs) == 1:
-                        env_prof_rev = _erevs[0]
+                        _erevs = [str(r[0]) for r in _ecur.fetchall() if r[0]]
+                        if len(_erevs) == 1:
+                            env_prof_rev = _erevs[0]
+                ordered_env_sessions = tuple(
+                    date.fromisoformat(s) if isinstance(s, str) else s
+                    for s in plan.get("ordered_sessions", ())
+                )
+                cs_by_day_env = (
+                    plan.get("_cross_section_scope_by_day")
+                    if isinstance(plan.get("_cross_section_scope_by_day"), Mapping)
+                    else {}
+                )
+                env_u_t: str | None = None
+                env_u_t3: str | None = None
+                if day in ordered_env_sessions:
+                    _d_idx = ordered_env_sessions.index(day)
+                    _cs_t = cs_by_day_env.get(day.isoformat())
+                    if isinstance(_cs_t, Mapping) and _cs_t.get("universe_version"):
+                        env_u_t = str(_cs_t["universe_version"])
+                    if _d_idx >= 3:
+                        _t3_day = ordered_env_sessions[_d_idx - 3]
+                        _cs_t3 = cs_by_day_env.get(_t3_day.isoformat())
+                        if isinstance(_cs_t3, Mapping) and _cs_t3.get(
+                            "universe_version"
+                        ):
+                            env_u_t3 = str(_cs_t3["universe_version"])
+                env_formal_scope_key = (
+                    f"BAOSTOCK_CAP_{int(source_capture_id)}:PROF_{env_prof_rev}:NON_PIT"
+                    if env_prof_rev
+                    else f"BAOSTOCK_CAP_{int(source_capture_id)}:MARKET_QFQ:NON_PIT"
+                )
                 report = persist_market_indices_and_environment_for_session(
                     config,
                     target_session=day,
@@ -8485,6 +8571,9 @@ def _execute_shared_production_chain_impl(
                     stock_capture_id=source_capture_id,
                     index_capture_id=idx_capture_id,
                     profile_revision=env_prof_rev,
+                    formal_scope_key=None,
+                    universe_version_t=env_u_t,
+                    universe_version_t3=env_u_t3,
                 )
                 expected_by_table = {
                     "stock.source_market_index_day_facts": (
@@ -8501,6 +8590,22 @@ def _execute_shared_production_chain_impl(
                 for unit in day_units:
                     table = unit["business_table"]
                     exp_rows, cap_val, prod_ver = expected_by_table[table]
+                    if (
+                        table == "stock.source_market_index_day_facts"
+                        and cap_val is None
+                    ):
+                        mark_units_incomplete(
+                            [unit],
+                            stage_code="MARKET_INDICES_ENV",
+                            error=DataJobError(
+                                "MARKET_INDEX_DAILY_NOT_AVAILABLE",
+                                f"参考指数({day})缺少指数日线捕获，保留趋势轴未知但独立完成环境轴持久化。",
+                                status=409,
+                            ),
+                            message_prefix="缺少参考指数捕获",
+                        )
+                        resolved_unit_keys.add(unit_key(unit))
+                        continue
                     actual_rows = data_job_pg.read_business_table_count(
                         config,
                         business_table=table,
@@ -8528,6 +8633,15 @@ def _execute_shared_production_chain_impl(
                         inserted_rows=exp_rows,
                         quality_status="COMPLETE_INDEX_ENV_CROSS_TRANSACTION_READBACK",
                         no_change=(report.get("status") == "NO_CHANGE"),
+                        profile_revision=env_prof_rev
+                        if table == "stock.source_market_environment_day_facts"
+                        else None,
+                        universe_version_t=env_u_t
+                        if table == "stock.source_market_environment_day_facts"
+                        else None,
+                        universe_version_t3=env_u_t3
+                        if table == "stock.source_market_environment_day_facts"
+                        else None,
                         producer_version=prod_ver,
                         calendar_revision=report["calendar_revision"],
                     )
@@ -9700,6 +9814,7 @@ def _execute_shared_production_chain_impl(
                             "concept_snapshot_id_t1": con_t1,
                             "industry_snapshot_id_t3": ind_t3,
                             "concept_snapshot_id_t3": con_t3,
+                            "overwrite_nulls": True,
                         }
                     )
                     bound_r03_units.append(bu)
@@ -9876,6 +9991,13 @@ def _execute_shared_production_chain_impl(
                             if isinstance(resolved_snapshots, Mapping)
                             else None
                         ),
+                        universe_version_t=u_ver_t,
+                        universe_version_t1=u_ver_t1,
+                        universe_version_t3=u_ver_t3,
+                        source_capture_id_t1=cap_t1,
+                        source_capture_id_t3=cap_t3,
+                        profile_revision_t1=prof_rev_t1,
+                        profile_revision_t3=prof_rev_t3,
                     )
                 incomplete_stage_errors.append(
                     (

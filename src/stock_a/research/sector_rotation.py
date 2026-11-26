@@ -574,17 +574,20 @@ def step_rotation_state_machine(
     next_age = prev_age + 1
     next_market_age = prev_market_age + session_gap
     accepted_once = bool(previous_episode_state.get("accepted_once", False))
+    can_continue_streak = not prev_was_unknown and session_gap == 1
     prev_out_streak = (
-        0 if prev_was_unknown else int(previous_episode_state.get("out_neg_streak", 0))
+        int(previous_episode_state.get("out_neg_streak", 0))
+        if can_continue_streak
+        else 0
     )
     prev_mature_true = (
-        False
-        if prev_was_unknown
-        else bool(
+        bool(
             previous_episode_state.get(
                 "prev_mature_true", previous_episode_state.get("mature_true", False)
             )
         )
+        if can_continue_streak
+        else False
     )
     prev_dq5 = None if prev_was_unknown else previous_episode_state.get("dq5")
 

@@ -110,13 +110,7 @@ _MODULE_PROGRESS_TABLES = {
         }
     ),
     "R03_SECTOR_NATIVE": frozenset({"stock.r03_sector_native_day_facts"}),
-    "R03_SECTOR_ROTATION": frozenset(
-        {
-            "stock.r03_sector_rotation_board_day_facts",
-            "stock.r03_sector_rotation_episodes",
-            "stock.r03_sector_rotation_day_states",
-        }
-    ),
+    "R03_SECTOR_ROTATION": frozenset({"stock.r03_sector_rotation_board_day_facts"}),
     "R03_SECTOR_OVERLAP": frozenset({"stock.r03_sector_overlap_clusters"}),
     "R03_SECTOR_LOO": frozenset({"stock.r03_sector_loo_support_facts"}),
     "PRICE_LIMITS": frozenset({"stock.source_price_limit_day_facts"}),
@@ -3250,7 +3244,10 @@ def _resolve_r03_upstream_cascade_plan(
         "counts_by_table": {},
         "affected_sessions": set(),
     }
-    if module_code not in {"D0", "CORE_PROFILE", "CROSS_SECTION"} or not versions:
+    if (
+        module_code not in {"D0", "CORE_PROFILE", "CROSS_SECTION", "TDX_SECTOR_MEMBERS"}
+        or not versions
+    ):
         return empty
 
     from stock_a.application.data_jobs import _load_official_sessions
@@ -3271,16 +3268,12 @@ def _resolve_r03_upstream_cascade_plan(
 
     def _add_sector_prog_rows(rows: Sequence[tuple[Any, ...]]) -> None:
         for td, cap, prof, ind_id, con_id, pver in rows:
-            if (
-                cap is None
-                or prof is None
-                or ind_id is None
-                or con_id is None
-                or not pver
-            ):
+            if cap is None or prof is None or not pver:
+                continue
+            if ind_id is None and con_id is None:
                 continue
             sk = f"BAOSTOCK_CAP_{int(cap)}:PROF_{prof}:NON_PIT"
-            mv = f"IND_{int(ind_id)}:CON_{int(con_id)}"
+            mv = f"IND_{int(ind_id or 0)}:CON_{int(con_id or 0)}"
             sector_partitions.add((td, sk, mv, str(pver)))
 
     def _collect_core_profile_deps(cap_id: int, prof_rev: str, p_day: date) -> None:
@@ -3293,6 +3286,11 @@ def _resolve_r03_upstream_cascade_plan(
         p_next_3 = (
             official_sessions[p_idx + 3]
             if p_idx is not None and p_idx + 3 < len(official_sessions)
+            else None
+        )
+        p_next_4 = (
+            official_sessions[p_idx + 4]
+            if p_idx is not None and p_idx + 4 < len(official_sessions)
             else None
         )
         exact_scope = f"BAOSTOCK_CAP_{cap_id}:PROF_{prof_rev}:NON_PIT"
@@ -3314,6 +3312,44 @@ def _resolve_r03_upstream_cascade_plan(
                      AND status IN ('COMPLETED', 'ALREADY_COMPLETE', 'NO_CHANGE')
                      AND source_capture_id_t3 = %s AND profile_revision_t3 = %s""",
                 (p_next_3, cap_id, prof_rev),
+            )
+            for td, m_cap, m_prof, ut, ut3, pver in cursor.fetchall():
+                if m_cap is not None and ut and ut3 and pver:
+                    m_sk = (
+                        f"BAOSTOCK_CAP_{int(m_cap)}:PROF_{m_prof}:NON_PIT"
+                        if m_prof
+                        else f"BAOSTOCK_CAP_{int(m_cap)}:MARKET_QFQ:NON_PIT"
+                    )
+                    market_partitions.add((td, m_sk, str(ut), str(ut3), str(pver)))
+        if p_next_1 is not None and p_next_1 <= cutoff:
+            cursor.execute(
+                """SELECT target_session, source_capture_id, profile_revision,
+                          universe_version_t, universe_version_t3, producer_version
+                   FROM stock.data_job_progress
+                   WHERE target_session = %s
+                     AND business_table = 'stock.r03_formal_market_breadth_facts'
+                     AND status IN ('COMPLETED', 'ALREADY_COMPLETE', 'NO_CHANGE')
+                     AND prev_session_t = %s AND source_capture_id_t1 = %s AND profile_revision_t1 = %s""",
+                (p_next_1, p_day, cap_id, prof_rev),
+            )
+            for td, m_cap, m_prof, ut, ut3, pver in cursor.fetchall():
+                if m_cap is not None and ut and ut3 and pver:
+                    m_sk = (
+                        f"BAOSTOCK_CAP_{int(m_cap)}:PROF_{m_prof}:NON_PIT"
+                        if m_prof
+                        else f"BAOSTOCK_CAP_{int(m_cap)}:MARKET_QFQ:NON_PIT"
+                    )
+                    market_partitions.add((td, m_sk, str(ut), str(ut3), str(pver)))
+        if p_next_4 is not None and p_next_4 <= cutoff:
+            cursor.execute(
+                """SELECT target_session, source_capture_id, profile_revision,
+                          universe_version_t, universe_version_t3, producer_version
+                   FROM stock.data_job_progress
+                   WHERE target_session = %s
+                     AND business_table = 'stock.r03_formal_market_breadth_facts'
+                     AND status IN ('COMPLETED', 'ALREADY_COMPLETE', 'NO_CHANGE')
+                     AND prev_session_t3 = %s AND source_capture_id_t4 = %s""",
+                (p_next_4, p_day, cap_id),
             )
             for td, m_cap, m_prof, ut, ut3, pver in cursor.fetchall():
                 if m_cap is not None and ut and ut3 and pver:
@@ -3348,6 +3384,7 @@ def _resolve_r03_upstream_cascade_plan(
                                   industry_snapshot_id, concept_snapshot_id, producer_version
                    FROM stock.data_job_progress
                    WHERE target_session = %s AND business_table = ANY(%s)
+                     AND status IN ('COMPLETED', 'ALREADY_COMPLETE', 'NO_CHANGE')
                      AND source_capture_id_t1 = %s AND profile_revision_t1 = %s""",
                 (p_next_1, r03_sector_prog_tables, cap_id, prof_rev),
             )
@@ -3358,6 +3395,7 @@ def _resolve_r03_upstream_cascade_plan(
                                   industry_snapshot_id, concept_snapshot_id, producer_version
                    FROM stock.data_job_progress
                    WHERE target_session = %s AND business_table = ANY(%s)
+                     AND status IN ('COMPLETED', 'ALREADY_COMPLETE', 'NO_CHANGE')
                      AND source_capture_id_t3 = %s AND profile_revision_t3 = %s""",
                 (p_next_3, r03_sector_prog_tables, cap_id, prof_rev),
             )
@@ -3415,6 +3453,7 @@ def _resolve_r03_upstream_cascade_plan(
                                                 industry_snapshot_id, concept_snapshot_id, producer_version
                                  FROM stock.data_job_progress
                                  WHERE target_session = %s AND business_table = ANY(%s)
+                                   AND status IN ('COMPLETED', 'ALREADY_COMPLETE', 'NO_CHANGE')
                                    AND {cap_col} = %s"""
                     args_d0: list[Any] = [dep_day, r03_sector_prog_tables, cap_id]
                     if prof_rev:
@@ -3422,6 +3461,59 @@ def _resolve_r03_upstream_cascade_plan(
                         args_d0.append(str(prof_rev))
                     cursor.execute(sql_d0, tuple(args_d0))
                     _add_sector_prog_rows(cursor.fetchall())
+
+        elif module_code == "TDX_SECTOR_MEMBERS":
+            snap_pairs: list[tuple[str, int]] = []
+            if v_key.get("industry_snapshot_id") is not None:
+                snap_pairs.append(("INDUSTRY", int(v_key["industry_snapshot_id"])))
+            if v_key.get("concept_snapshot_id") is not None:
+                snap_pairs.append(("CONCEPT", int(v_key["concept_snapshot_id"])))
+            if v_key.get("snapshot_id") is not None:
+                bk_hint = str(v_key.get("board_kind") or "").upper()
+                if bk_hint in {"INDUSTRY", "CONCEPT"}:
+                    snap_pairs.append((bk_hint, int(v_key["snapshot_id"])))
+                else:
+                    snap_pairs.append(("INDUSTRY", int(v_key["snapshot_id"])))
+                    snap_pairs.append(("CONCEPT", int(v_key["snapshot_id"])))
+            for s_kind, s_id in snap_pairs:
+                cols_to_check = (
+                    (
+                        "industry_snapshot_id",
+                        "industry_snapshot_id_t1",
+                        "industry_snapshot_id_t3",
+                    )
+                    if s_kind == "INDUSTRY"
+                    else (
+                        "concept_snapshot_id",
+                        "concept_snapshot_id_t1",
+                        "concept_snapshot_id_t3",
+                    )
+                )
+                for s_col in cols_to_check:
+                    cursor.execute(
+                        f"""SELECT DISTINCT target_session, source_capture_id, profile_revision,
+                                            industry_snapshot_id, concept_snapshot_id, producer_version
+                            FROM stock.data_job_progress
+                            WHERE target_session >= %s AND target_session <= %s
+                              AND business_table = ANY(%s)
+                              AND status IN ('COMPLETED', 'ALREADY_COMPLETE', 'NO_CHANGE')
+                              AND {s_col} = %s""",
+                        (v_day, cutoff, r03_sector_prog_tables, s_id),
+                    )
+                    _add_sector_prog_rows(cursor.fetchall())
+                mv_pattern = (
+                    f"IND_{s_id}:%" if s_kind == "INDUSTRY" else f"%:CON_{s_id}"
+                )
+                for tbl in r03_sector_prog_tables:
+                    cursor.execute(
+                        f"""SELECT DISTINCT trade_date, scope_key, member_version, contract_version
+                            FROM {tbl}
+                            WHERE trade_date >= %s AND trade_date <= %s
+                              AND member_version LIKE %s ESCAPE '\\'""",
+                        (v_day, cutoff, mv_pattern),
+                    )
+                    for td, sk, mv, cv in cursor.fetchall():
+                        sector_partitions.add((td, str(sk), str(mv), str(cv)))
 
         else:
             # CROSS_SECTION：精确匹配实际消费该 (price_capture_id, universe_version) 的市场与 R03 板块分区
@@ -3734,6 +3826,57 @@ def _resolve_r03_upstream_cascade_plan(
     }
 
 
+def _cascade_invalidate_market_environment_for_formal_breadth(
+    cursor: Any,
+    *,
+    deleted_formal_keys: Sequence[tuple[date, str, str, str]],
+    current_job_id: UUID | None = None,
+    error_code: str = "DERIVED_RESULT_CLEARED",
+) -> tuple[int, list[tuple[Any, Any]]]:
+    """清理或失效正式市场宽度时，精确级联删除依赖它的复合市场环境及后续滞后会话，并重置对应进度。"""
+    if not deleted_formal_keys:
+        return 0, []
+    deleted_env_rows: list[tuple[date, int, str]] = []
+    for td, sk, ut, ut3 in deleted_formal_keys:
+        cursor.execute(
+            """DELETE FROM stock.source_market_environment_day_facts
+               WHERE formal_scope_key = %s
+                 AND universe_version_t = %s
+                 AND universe_version_t3 = %s
+                 AND target_session >= %s
+               RETURNING target_session, stock_capture_id, profile_revision""",
+            (sk, ut, ut3, td),
+        )
+        deleted_env_rows.extend(cursor.fetchall())
+    inv_rows: list[tuple[Any, Any]] = []
+    for env_td, env_cap, env_prof in sorted(set(deleted_env_rows)):
+        conds = [
+            "p.target_session=%s",
+            "p.business_table='stock.source_market_environment_day_facts'",
+            "p.source_capture_id=%s",
+            "p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')",
+            "(%s::uuid IS NULL OR p.job_id<>%s)",
+        ]
+        args: list[Any] = [env_td, int(env_cap), current_job_id, current_job_id]
+        if env_prof:
+            conds.append("(p.profile_revision IS NULL OR p.profile_revision=%s)")
+            args.append(str(env_prof))
+        cursor.execute(
+            f"""UPDATE stock.data_job_progress AS p
+               SET status='NOT_COMPUTED',completed_units=0,expected_rows=NULL,
+                   verified_rows=NULL,inserted_rows=0,updated_rows=0,
+                   quality_status=NULL,error_code=%s,
+                   error_message='正式市场宽度已清理或修订；复合市场环境及后续滞后状态需重新生成。',
+                   deleted_rows=0,
+                   updated_at=clock_timestamp(),completed_at=NULL,verified_at=NULL
+               WHERE {" AND ".join(conds)}
+               RETURNING p.job_id, p.business_table""",
+            (error_code, *args),
+        )
+        inv_rows.extend(cursor.fetchall())
+    return len(deleted_env_rows), inv_rows
+
+
 def apply_r03_upstream_cascade_invalidation(
     cursor: Any,
     *,
@@ -3842,14 +3985,35 @@ def apply_r03_upstream_cascade_invalidation(
                WHERE f.trade_date=m.td AND f.scope_key=m.sk
                  AND f.universe_version_t=m.ut AND f.universe_version_t3=m.ut3
                  AND f.contract_version=m.cv
-               RETURNING f.trade_date""",
+               RETURNING f.trade_date, f.scope_key, f.universe_version_t, f.universe_version_t3""",
             (m_dates, m_scopes, m_ut, m_ut3, m_contracts),
         )
+        deleted_formal_env_keys: list[tuple[date, str, str, str]] = []
         for row in cursor.fetchall():
             r03_cascade_counts["stock.r03_formal_market_breadth_facts"] = (
                 r03_cascade_counts.get("stock.r03_formal_market_breadth_facts", 0) + 1
             )
             r03_cascade_sessions.add(row[0])
+            deleted_formal_env_keys.append(
+                (row[0], str(row[1]), str(row[2]), str(row[3]))
+            )
+        if deleted_formal_env_keys:
+            env_del_cnt, env_inv = (
+                _cascade_invalidate_market_environment_for_formal_breadth(
+                    cursor,
+                    deleted_formal_keys=deleted_formal_env_keys,
+                    current_job_id=current_job_id,
+                    error_code=error_code,
+                )
+            )
+            if env_del_cnt > 0:
+                r03_cascade_counts["stock.source_market_environment_day_facts"] = (
+                    r03_cascade_counts.get(
+                        "stock.source_market_environment_day_facts", 0
+                    )
+                    + env_del_cnt
+                )
+            invalidated_rows.extend(env_inv)
 
     if r03_plan["sector_partitions"]:
         r03_sector_prog_tables = [
@@ -4741,6 +4905,7 @@ def clear_derived_module(
                     deleted_by_session[target_session.isoformat()][
                         "stock.source_market_breadth_days"
                     ] += cursor.rowcount
+                deleted_formal_env_keys: list[tuple[date, str, str, str]] = []
                 for fkey in key.get("formal_breadth_keys", ()):
                     cursor.execute(
                         """DELETE FROM stock.r03_formal_market_breadth_facts
@@ -4761,6 +4926,31 @@ def clear_derived_module(
                     deleted_by_session[target_session.isoformat()][
                         "stock.r03_formal_market_breadth_facts"
                     ] += cursor.rowcount
+                    if cursor.rowcount > 0:
+                        deleted_formal_env_keys.append(
+                            (
+                                target_session,
+                                str(fkey["scope_key"]),
+                                str(fkey["universe_version_t"]),
+                                str(fkey["universe_version_t3"]),
+                            )
+                        )
+                if deleted_formal_env_keys:
+                    _env_del, _env_inv = (
+                        _cascade_invalidate_market_environment_for_formal_breadth(
+                            cursor,
+                            deleted_formal_keys=deleted_formal_env_keys,
+                            current_job_id=current_job_id,
+                            error_code="DERIVED_RESULT_CLEARED",
+                        )
+                    )
+                    if (
+                        _env_del > 0
+                        and "stock.source_market_environment_day_facts" in deleted_rows
+                    ):
+                        deleted_rows["stock.source_market_environment_day_facts"] += (
+                            _env_del
+                        )
             elif module_code == "D1":
                 cursor.execute(
                     """DELETE FROM stock.source_research_enrollments e
@@ -7814,62 +8004,53 @@ def mark_progress_running_batch(
                 raise DataJobPgError(
                     "DATA_JOB_SOURCE_CAPTURE_INVALID", "批量开始进度含无效来源捕获ID"
                 )
+            key_cols = (
+                "source_capture_id",
+                "profile_revision",
+                "producer_version",
+                "calendar_revision",
+                "industry_snapshot_id",
+                "concept_snapshot_id",
+                "universe_version_t",
+                "universe_version_t1",
+                "universe_version_t3",
+                "source_capture_id_t1",
+                "source_capture_id_t3",
+                "profile_revision_t1",
+                "profile_revision_t3",
+                "prev_scope_key",
+                "prev_member_version",
+                "prev_trade_date",
+                "industry_snapshot_id_t1",
+                "concept_snapshot_id_t1",
+                "industry_snapshot_id_t3",
+                "concept_snapshot_id_t3",
+                "source_capture_id_t4",
+                "prev_session_t",
+                "prev_session_t3",
+            )
+            overwrite_nulls = bool(unit.get("overwrite_nulls", False))
+            set_exprs = []
+            key_vals: list[Any] = []
+            for col in key_cols:
+                val = capture_id if col == "source_capture_id" else unit.get(col)
+                if overwrite_nulls or col in unit:
+                    set_exprs.append(f"{col}=%s")
+                else:
+                    set_exprs.append(f"{col}=coalesce(%s,{col})")
+                key_vals.append(val)
             cursor.execute(
-                """UPDATE stock.data_job_progress
+                f"""UPDATE stock.data_job_progress
                    SET status='RUNNING',attempt_count=attempt_count+1,
                        started_at=coalesce(started_at,clock_timestamp()),
                        updated_at=clock_timestamp(),error_code=NULL,error_message=NULL,
-                       source_capture_id=coalesce(%s,source_capture_id),
-                       profile_revision=coalesce(%s,profile_revision),
-                       producer_version=coalesce(%s,producer_version),
-                       calendar_revision=coalesce(%s,calendar_revision),
-                       industry_snapshot_id=coalesce(%s,industry_snapshot_id),
-                       concept_snapshot_id=coalesce(%s,concept_snapshot_id),
-                       universe_version_t=coalesce(%s,universe_version_t),
-                       universe_version_t1=coalesce(%s,universe_version_t1),
-                       universe_version_t3=coalesce(%s,universe_version_t3),
-                       source_capture_id_t1=coalesce(%s,source_capture_id_t1),
-                       source_capture_id_t3=coalesce(%s,source_capture_id_t3),
-                       profile_revision_t1=coalesce(%s,profile_revision_t1),
-                       profile_revision_t3=coalesce(%s,profile_revision_t3),
-                       prev_scope_key=coalesce(%s,prev_scope_key),
-                       prev_member_version=coalesce(%s,prev_member_version),
-                       prev_trade_date=coalesce(%s,prev_trade_date),
-                       industry_snapshot_id_t1=coalesce(%s,industry_snapshot_id_t1),
-                       concept_snapshot_id_t1=coalesce(%s,concept_snapshot_id_t1),
-                       industry_snapshot_id_t3=coalesce(%s,industry_snapshot_id_t3),
-                       concept_snapshot_id_t3=coalesce(%s,concept_snapshot_id_t3),
-                       source_capture_id_t4=coalesce(%s,source_capture_id_t4),
-                       prev_session_t=coalesce(%s,prev_session_t),
-                       prev_session_t3=coalesce(%s,prev_session_t3),
+                       {", ".join(set_exprs)},
                        deleted_rows=CASE WHEN coalesce(deleted_rows,0)>0 THEN deleted_rows ELSE 0 END
                    WHERE job_id=%s AND stage_code=%s AND target_session=%s
                      AND business_table=%s
                      AND status IN ('NOT_STARTED','FAILED','INTERRUPTED','INCOMPLETE','CLEARED')""",
                 (
-                    capture_id,
-                    unit.get("profile_revision"),
-                    unit.get("producer_version"),
-                    unit.get("calendar_revision"),
-                    unit.get("industry_snapshot_id"),
-                    unit.get("concept_snapshot_id"),
-                    unit.get("universe_version_t"),
-                    unit.get("universe_version_t1"),
-                    unit.get("universe_version_t3"),
-                    unit.get("source_capture_id_t1"),
-                    unit.get("source_capture_id_t3"),
-                    unit.get("profile_revision_t1"),
-                    unit.get("profile_revision_t3"),
-                    unit.get("prev_scope_key"),
-                    unit.get("prev_member_version"),
-                    unit.get("prev_trade_date"),
-                    unit.get("industry_snapshot_id_t1"),
-                    unit.get("concept_snapshot_id_t1"),
-                    unit.get("industry_snapshot_id_t3"),
-                    unit.get("concept_snapshot_id_t3"),
-                    unit.get("source_capture_id_t4"),
-                    unit.get("prev_session_t"),
-                    unit.get("prev_session_t3"),
+                    *key_vals,
                     job_id,
                     unit["stage_code"],
                     unit["target_session"],

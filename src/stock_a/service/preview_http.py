@@ -4717,8 +4717,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/market":
-                values = _query(self.path, {"target_session", "source_capture_id"})
-                if set(values) != {"target_session", "source_capture_id"}:
+                values = _query(
+                    self.path,
+                    {
+                        "target_session",
+                        "source_capture_id",
+                        "profile_revision",
+                        "universe_version_t",
+                        "universe_version_t3",
+                        "formal_scope_key",
+                    },
+                )
+                if not {"target_session", "source_capture_id"}.issubset(set(values)):
                     raise PreviewHttpError(
                         400, "QUERY_REQUIRED", "须提供目标日与来源捕获"
                     )
@@ -4826,12 +4836,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     for item in idx_contract["indices"]
                     if item["role"] == "PRIMARY_MARKET"
                 )
+                from stock_a.research.entry_context import (
+                    sessions as _entry_sessions,
+                )
+
+                _, _, index_env_cal_rev, _ = _entry_sessions._load_calendar(cutoff)
+                req_formal_scope_key = values.get("formal_scope_key")
+                req_profile_rev = values.get("profile_revision")
+                req_u_t = values.get("universe_version_t")
+                req_u_t3 = values.get("universe_version_t3")
                 environment_display = read_market_environment_display(
                     self.preview_server.state.config,
                     target_session=target,
                     stock_capture_id=capture_id_val,
                     primary_index_symbol=primary_idx_sym,
-                    calendar_revision=cal_rev,
+                    calendar_revision=index_env_cal_rev,
+                    formal_scope_key=req_formal_scope_key,
+                    profile_revision=req_profile_rev,
+                    universe_version_t=req_u_t,
+                    universe_version_t3=req_u_t3,
                 )
                 pinned_idx_capture_id = (
                     environment_display.get("index_capture_id")
@@ -4846,7 +4869,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 index_observations = read_market_indices_and_style_summary(
                     self.preview_server.state.config,
                     target_session=target,
-                    calendar_revision=cal_rev,
+                    calendar_revision=index_env_cal_rev,
                     index_contract=idx_contract,
                     index_capture_id=pinned_idx_capture_id,
                     config_version=pinned_idx_config_ver,
@@ -4930,9 +4953,27 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
 
                 mkt_scope_hint: str | None = None
-                req_profile_rev = values.get("profile_revision")
-                req_u_t = values.get("universe_version_t")
-                req_u_t3 = values.get("universe_version_t3")
+                env_avail = environment_display.get("status") == "AVAILABLE"
+                bound_scope_key = (
+                    (environment_display.get("formal_scope_key") or None)
+                    if env_avail
+                    else None
+                ) or req_formal_scope_key
+                bound_profile_rev = (
+                    (environment_display.get("profile_revision") or None)
+                    if env_avail
+                    else None
+                ) or req_profile_rev
+                bound_u_t = (
+                    (environment_display.get("universe_version_t") or None)
+                    if env_avail
+                    else None
+                ) or req_u_t
+                bound_u_t3 = (
+                    (environment_display.get("universe_version_t3") or None)
+                    if env_avail
+                    else None
+                ) or req_u_t3
                 effective_capture_id = capture_id_val
                 if effective_capture_id is None and market is not None:
                     effective_capture_id = getattr(
@@ -4953,10 +4994,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             target,
                             f"BAOSTOCK_CAP_{int(effective_capture_id)}:%",
                         ]
-                        if req_profile_rev:
+                        if bound_scope_key:
+                            scope_sql += " AND scope_key=%s"
+                            scope_params.append(bound_scope_key)
+                        elif bound_profile_rev:
                             scope_sql += " AND scope_key=%s"
                             scope_params.append(
-                                f"BAOSTOCK_CAP_{int(effective_capture_id)}:PROF_{req_profile_rev}:NON_PIT"
+                                f"BAOSTOCK_CAP_{int(effective_capture_id)}:PROF_{bound_profile_rev}:NON_PIT"
                             )
                         _cur.execute(scope_sql, tuple(scope_params))
                         matched_scopes = [str(r[0]) for r in _cur.fetchall()]
@@ -4976,8 +5020,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             self.preview_server.state.config,
                             trade_date=target,
                             scope_key=mkt_scope_hint,
-                            universe_version_t=req_u_t,
-                            universe_version_t3=req_u_t3,
+                            universe_version_t=bound_u_t,
+                            universe_version_t3=bound_u_t3,
                         )
                 else:
                     formal_breadth = {
@@ -4998,7 +5042,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     breadth_axis=breadth_for_risk,
                     participation_axis=participation,
                     formal_breadth=formal_breadth,
-                    breadth_change=breadth_change,
+                    breadth_change=formal_breadth.get("breadth_change"),
                     environment_display=environment_display,
                 )
                 self._send_json(
@@ -5087,19 +5131,45 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     board_kind=b_kind,
                 )
                 n_items = native_res.get("items") or ()
+                if native_res.get("status") == "AVAILABLE" and (
+                    offset_val > 0
+                    or len(n_items) < int(native_res.get("total_count", 0))
+                ):
+                    summary_res = read_r03_native_day_facts(
+                        self.preview_server.state.config,
+                        trade_date=trade_d,
+                        scope_key=values["scope_key"],
+                        member_version=values["member_version"],
+                        contract_version=values["contract_version"],
+                        board_kind=b_kind,
+                        limit=None,
+                        offset=0,
+                    )
+                    summary_items = summary_res.get("items") or ()
+                else:
+                    summary_items = n_items
+                exhaustion_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
                 exh_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0, "UNKNOWN": 0}
                 chg_counts: dict[str, int] = {}
-                for n_it in n_items:
+                for n_it in summary_items:
                     el = str(n_it.get("exhaustion_level") or "UNKNOWN")
                     exh_counts[el] = exh_counts.get(el, 0) + 1
                     pel = n_it.get("prev_exhaustion_level")
                     dq_lbl = str(n_it.get("display_quality") or "")
-                    if dq_lbl == "FIRST_OBSERVED" or pel is None:
+                    if el == "UNKNOWN":
+                        chg_key = "UNKNOWN"
+                    elif dq_lbl == "FIRST_OBSERVED":
                         chg_key = "FIRST_OBSERVED"
-                    elif pel == "UNKNOWN" and el != "UNKNOWN":
+                    elif pel in (None, "UNKNOWN"):
                         chg_key = "BECAME_KNOWN"
                     elif pel == el:
                         chg_key = "UNCHANGED"
+                    elif pel in exhaustion_order and el in exhaustion_order:
+                        chg_key = (
+                            "WORSENED"
+                            if exhaustion_order[el] > exhaustion_order[pel]
+                            else "IMPROVED"
+                        )
                     else:
                         chg_key = f"{pel}_TO_{el}"
                     chg_counts[chg_key] = chg_counts.get(chg_key, 0) + 1
@@ -5152,6 +5222,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 req_mem_ver = values.get("member_version")
                 if req_mem_ver is None:
                     from stock_a.storage.postgres import source_raw as _sr_rot
+                    from stock_a.storage.postgres.r03_formal_sector import (
+                        _read_r03_partition_progress_state,
+                    )
 
                     with _sr_rot._transaction(
                         self.preview_server.state.config,
@@ -5160,7 +5233,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ) as (_c, _cur_rot, _):
                         _cur_rot.execute(
                             """
-                            SELECT DISTINCT member_version
+                            SELECT DISTINCT trade_date, member_version
                             FROM stock.r03_sector_rotation_board_day_facts
                             WHERE board_kind=%s AND board_id=%s AND scope_key=%s
                               AND contract_version=%s AND trade_date <= %s
@@ -5173,7 +5246,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 as_of,
                             ),
                         )
-                        found_mvers = [str(r[0]) for r in _cur_rot.fetchall() if r[0]]
+                        completed_mvers: list[str] = []
+                        seen_mvers: set[str] = set()
+                        for td_val, mv_val in _cur_rot.fetchall():
+                            if not mv_val:
+                                continue
+                            mv_str = str(mv_val)
+                            if mv_str in seen_mvers:
+                                continue
+                            pst, _ = _read_r03_partition_progress_state(
+                                _cur_rot,
+                                trade_date=td_val,
+                                business_table="stock.r03_sector_rotation_board_day_facts",
+                                scope_key=values["scope_key"],
+                                member_version=mv_str,
+                                contract_version=values["contract_version"],
+                            )
+                            if pst in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}:
+                                seen_mvers.add(mv_str)
+                                completed_mvers.append(mv_str)
+                        found_mvers = completed_mvers
                     if len(found_mvers) > 1:
                         self._send_json(
                             200,
@@ -5458,163 +5550,407 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "sort_mode 仅允许 source_pulse 或 formal_priority",
                         )
                     prof_rev = _profile_revision(values["profile_revision"])
-                    result = read_source_sector_pulse_directory_page(
-                        self.preview_server.state.config,
-                        target_session=target,
-                        research_cutoff=cutoff,
-                        source_capture_id=source["source_capture_id"],
-                        source_pool_count=source["raw_row_count"],
-                        profile_revision=prof_rev,
-                        snapshot_ids={
-                            "INDUSTRY": industry_snapshot_id,
-                            "CONCEPT": concept_snapshot_id,
-                        },
-                        calendar_id=calendar["calendar_id"],
-                        calendar_revision=calendar["calendar_revision"],
-                        horizon_targets=horizon_targets,
-                        board_kind=board_kind,
-                        search=search,
-                        offset=0 if sort_mode == "formal_priority" else offset,
-                        limit=500 if sort_mode == "formal_priority" else limit,
-                    )
                     from stock_a.application.r03_formal_sector import (
                         R03_CONTRACT_VERSION,
                     )
+                    from stock_a.storage.postgres import source_raw as _sr_dir
                     from stock_a.storage.postgres.r03_formal_sector import (
+                        _read_r03_partition_progress_state,
                         read_r03_native_day_facts,
                         read_r03_overlap_day,
                         read_r03_rotation_board_day_summary,
+                    )
+                    from stock_a.storage.postgres.sector_pulse_facts import (
+                        _ALGORITHM as _PULSE_ALGO,
+                        _pulse_payload as _build_pulse_payload,
                     )
 
                     r03_scope = f"BAOSTOCK_CAP_{source['source_capture_id']}:PROF_{prof_rev}:NON_PIT"
                     r03_member_ver = (
                         f"IND_{industry_snapshot_id}:CON_{concept_snapshot_id}"
                     )
-                    r03_native = read_r03_native_day_facts(
-                        self.preview_server.state.config,
-                        trade_date=target,
-                        scope_key=r03_scope,
-                        member_version=r03_member_ver,
-                        contract_version=R03_CONTRACT_VERSION,
-                    )
-                    r03_overlap = read_r03_overlap_day(
-                        self.preview_server.state.config,
-                        trade_date=target,
-                        scope_key=r03_scope,
-                        member_version=r03_member_ver,
-                        contract_version=R03_CONTRACT_VERSION,
-                    )
-                    r03_rot_summary = read_r03_rotation_board_day_summary(
-                        self.preview_server.state.config,
-                        trade_date=target,
-                        scope_key=r03_scope,
-                        member_version=r03_member_ver,
-                        contract_version=R03_CONTRACT_VERSION,
-                    )
-                    rot_by_key: dict[tuple[str, str], dict[str, Any]] = dict(
-                        r03_rot_summary.get("items") or {}
-                    )
-                    native_by_key = {
-                        (str(it["board_kind"]), str(it["board_id"])): it
-                        for it in r03_native.get("items", ())
-                    }
-                    ov_by_key = {
-                        (str(it["board_kind"]), str(it["board_id"])): it
-                        for it in r03_overlap.get("board_facts", ())
-                    }
-                    for dir_item in result.get("items", ()):
-                        dk = (
-                            str(dir_item.get("board_kind", "")),
-                            str(dir_item.get("board_native_id", "")),
-                        )
-                        n_it = native_by_key.get(dk)
-                        o_it = ov_by_key.get(dk)
-                        rt_it = rot_by_key.get(dk)
-                        if n_it or o_it or rt_it:
-                            dir_item["r03_formal"] = {
-                                "effective_maturity": n_it.get("effective_maturity")
-                                if n_it
-                                else None,
-                                "display_maturity": n_it.get("display_maturity")
-                                if n_it
-                                else None,
-                                "health_state": n_it.get("health_state")
-                                if n_it
-                                else None,
-                                "exhaustion_level": n_it.get("exhaustion_level")
-                                if n_it
-                                else None,
-                                "exhaustion_reason": n_it.get("exhaustion_reason")
-                                if n_it
-                                else None,
-                                "prev_exhaustion_level": n_it.get(
-                                    "prev_exhaustion_level"
-                                )
-                                if n_it
-                                else None,
-                                "emergence_level": n_it.get("emergence_level")
-                                if n_it
-                                else None,
-                                "priority_status": n_it.get("priority_status")
-                                if n_it
-                                else None,
-                                "priority_rank": n_it.get("priority_rank")
-                                if n_it
-                                else None,
-                                "safety_state": n_it.get("safety_state")
-                                if n_it
-                                else None,
-                                "safety_reason": n_it.get("safety_reason")
-                                if n_it
-                                else None,
-                                "membership_complete": n_it.get("membership_complete")
-                                if n_it
-                                else None,
-                                "quote_coverage": str(n_it["quote_coverage"])
-                                if n_it and n_it.get("quote_coverage") is not None
-                                else None,
-                                "seed_k": n_it.get("seed_k") if n_it else None,
-                                "seed_f": n_it.get("seed_f") if n_it else None,
-                                "seed_u": n_it.get("seed_u") if n_it else None,
-                                "rs5_peer_count": n_it.get("rs5_peer_count")
-                                if n_it
-                                else None,
-                                "rs20_peer_count": n_it.get("rs20_peer_count")
-                                if n_it
-                                else None,
-                                "unique_share_status": o_it.get("unique_share_status")
-                                if o_it
-                                else None,
-                                "unique_share": str(o_it["unique_share"])
-                                if o_it and o_it.get("unique_share") is not None
-                                else None,
-                                "cluster_id": o_it.get("cluster_id") if o_it else None,
-                                "rotation_state": rt_it.get("rotation_state")
-                                if rt_it
-                                else None,
-                            }
+
+                    def _build_r03_formal_payload(
+                        n_it: Mapping[str, Any] | None,
+                        o_it: Mapping[str, Any] | None,
+                        rt_it: Mapping[str, Any] | None,
+                    ) -> dict[str, Any]:
+                        return {
+                            "effective_maturity": n_it.get("effective_maturity")
+                            if n_it
+                            else None,
+                            "display_maturity": n_it.get("display_maturity")
+                            if n_it
+                            else None,
+                            "health_state": n_it.get("health_state") if n_it else None,
+                            "exhaustion_level": n_it.get("exhaustion_level")
+                            if n_it
+                            else None,
+                            "exhaustion_reason": n_it.get("exhaustion_reason")
+                            if n_it
+                            else None,
+                            "prev_exhaustion_level": n_it.get("prev_exhaustion_level")
+                            if n_it
+                            else None,
+                            "emergence_level": n_it.get("emergence_level")
+                            if n_it
+                            else None,
+                            "priority_status": n_it.get("priority_status")
+                            if n_it
+                            else None,
+                            "priority_rank": n_it.get("priority_rank")
+                            if n_it
+                            else None,
+                            "safety_state": n_it.get("safety_state") if n_it else None,
+                            "safety_reason": n_it.get("safety_reason")
+                            if n_it
+                            else None,
+                            "membership_complete": n_it.get("membership_complete")
+                            if n_it
+                            else None,
+                            "quote_coverage": str(n_it["quote_coverage"])
+                            if n_it and n_it.get("quote_coverage") is not None
+                            else None,
+                            "seed_k": n_it.get("seed_k") if n_it else None,
+                            "seed_f": n_it.get("seed_f") if n_it else None,
+                            "seed_u": n_it.get("seed_u") if n_it else None,
+                            "rs5_peer_count": n_it.get("rs5_peer_count")
+                            if n_it
+                            else None,
+                            "rs20_peer_count": n_it.get("rs20_peer_count")
+                            if n_it
+                            else None,
+                            "unique_share_status": o_it.get("unique_share_status")
+                            if o_it
+                            else None,
+                            "unique_share": str(o_it["unique_share"])
+                            if o_it and o_it.get("unique_share") is not None
+                            else None,
+                            "cluster_id": o_it.get("cluster_id") if o_it else None,
+                            "rotation_state": rt_it.get("rotation_state")
+                            if rt_it
+                            else None,
+                        }
+
                     if sort_mode == "formal_priority":
-                        all_items = list(result.get("items") or ())
-                        all_items.sort(
-                            key=lambda it: (
-                                (it.get("r03_formal") or {}).get("priority_rank")
-                                is None,
-                                int(
-                                    (it.get("r03_formal") or {}).get("priority_rank")
-                                    or 999999
-                                ),
-                                str(it.get("board_kind", "")),
-                                str(it.get("board_native_id", "")),
+                        with _sr_dir._transaction(
+                            self.preview_server.state.config,
+                            write=False,
+                            statement_timeout_ms=10000,
+                        ) as (_c, _cur_dir, _):
+                            native_prog_status, _native_prog_expected = (
+                                _read_r03_partition_progress_state(
+                                    _cur_dir,
+                                    trade_date=target,
+                                    business_table="stock.r03_sector_native_day_facts",
+                                    scope_key=r03_scope,
+                                    member_version=r03_member_ver,
+                                    contract_version=R03_CONTRACT_VERSION,
+                                )
                             )
+                            complete_statuses = {
+                                "COMPLETED",
+                                "ALREADY_COMPLETE",
+                                "NO_CHANGE",
+                            }
+                            if native_prog_status not in complete_statuses:
+                                formal_status = (
+                                    "INCOMPLETE"
+                                    if native_prog_status
+                                    in {"FAILED", "INCOMPLETE", "RUNNING"}
+                                    else "NOT_COMPUTED"
+                                )
+                                result = {
+                                    "status": formal_status,
+                                    "reason_codes": [
+                                        f"R03_FORMAL_SECTOR_{formal_status}"
+                                    ],
+                                    "target_session": target.isoformat(),
+                                    "source_capture_id": source["source_capture_id"],
+                                    "profile_revision": prof_rev,
+                                    "snapshot_ids": {
+                                        "INDUSTRY": industry_snapshot_id,
+                                        "CONCEPT": concept_snapshot_id,
+                                    },
+                                    "board_kind": board_kind,
+                                    "search": search,
+                                    "offset": offset,
+                                    "limit": limit,
+                                    "total_board_count": 0,
+                                    "filtered_total": 0,
+                                    "total_count": 0,
+                                    "boards": [],
+                                    "sort_mode": "formal_priority",
+                                }
+                                r03_native_status = formal_status
+                                r03_overlap = {"status": formal_status}
+                                r03_rot_summary = {"status": formal_status}
+                            else:
+                                _cur_dir.execute(
+                                    """
+                                    SELECT count(*)::int
+                                    FROM stock.r03_sector_native_day_facts
+                                    WHERE trade_date=%s AND scope_key=%s
+                                      AND member_version=%s AND contract_version=%s
+                                    """,
+                                    (
+                                        target,
+                                        r03_scope,
+                                        r03_member_ver,
+                                        R03_CONTRACT_VERSION,
+                                    ),
+                                )
+                                total_board_count = int(_cur_dir.fetchone()[0])
+                                f_where = (
+                                    "n.trade_date=%s AND n.scope_key=%s "
+                                    "AND n.member_version=%s AND n.contract_version=%s"
+                                )
+                                f_params: list[Any] = [
+                                    target,
+                                    r03_scope,
+                                    r03_member_ver,
+                                    R03_CONTRACT_VERSION,
+                                ]
+                                if board_kind != "ALL":
+                                    f_where += " AND n.board_kind=%s"
+                                    f_params.append(board_kind)
+                                if search:
+                                    f_where += (
+                                        " AND (strpos(lower(coalesce(c.board_name, '')), lower(%s)) > 0"
+                                        " OR strpos(lower(n.board_id), lower(%s)) > 0)"
+                                    )
+                                    f_params.extend((search, search))
+                                join_sql = (
+                                    " FROM stock.r03_sector_native_day_facts n"
+                                    " LEFT JOIN stock.tdx_sector_catalog c"
+                                    "   ON c.snapshot_id = (CASE WHEN n.board_kind='INDUSTRY' THEN %s ELSE %s END)"
+                                    "  AND c.board_kind = n.board_kind"
+                                    "  AND c.board_native_id = n.board_id"
+                                    " LEFT JOIN stock.r03_sector_overlap_board_facts o"
+                                    "   ON o.trade_date = n.trade_date"
+                                    "  AND o.scope_key = n.scope_key"
+                                    "  AND o.member_version = n.member_version"
+                                    "  AND o.contract_version = n.contract_version"
+                                    "  AND o.board_kind = n.board_kind"
+                                    "  AND o.board_id = n.board_id"
+                                )
+                                join_params: list[Any] = [
+                                    industry_snapshot_id,
+                                    concept_snapshot_id,
+                                ]
+                                _cur_dir.execute(
+                                    f"SELECT count(*)::int {join_sql} WHERE {f_where}",
+                                    tuple(join_params + f_params),
+                                )
+                                filtered_total = int(_cur_dir.fetchone()[0])
+                                _cur_dir.execute(
+                                    f"""
+                                    SELECT n.board_kind, n.board_id,
+                                           n.effective_maturity, n.display_maturity,
+                                           n.health_state, n.exhaustion_level,
+                                           n.exhaustion_reason, n.prev_exhaustion_level,
+                                           n.emergence_level, n.priority_status,
+                                           n.priority_rank, n.safety_state,
+                                           n.safety_reason, n.membership_complete,
+                                           n.quote_coverage, n.seed_k, n.seed_f, n.seed_u,
+                                           n.rs5_peer_count, n.rs20_peer_count,
+                                           c.id AS catalog_id, c.snapshot_id AS catalog_snapshot_id,
+                                           c.board_name AS catalog_board_name,
+                                           o.unique_share_status, o.unique_share, o.cluster_id
+                                    {join_sql}
+                                    WHERE {f_where}
+                                    ORDER BY n.priority_rank ASC NULLS LAST, n.board_kind ASC, n.board_id ASC
+                                    LIMIT %s OFFSET %s
+                                    """,
+                                    tuple(join_params + f_params + [limit, offset]),
+                                )
+                                cols_dir = [d.name for d in _cur_dir.description]
+                                page_rows = [
+                                    dict(zip(cols_dir, row_vals, strict=True))
+                                    for row_vals in _cur_dir.fetchall()
+                                ]
+                                catalog_ids = [
+                                    int(pr["catalog_id"])
+                                    for pr in page_rows
+                                    if pr.get("catalog_id") is not None
+                                ]
+                                pulse_by_cat: dict[int, dict[str, Any]] = {}
+                                if catalog_ids:
+                                    _cur_dir.execute(
+                                        """
+                                        SELECT p.*
+                                        FROM stock.source_sector_cross_period_pulse_facts p
+                                        WHERE p.target_session=%s AND p.source_capture_id=%s
+                                          AND p.profile_revision=%s AND p.algorithm_contract=%s
+                                          AND p.catalog_id = ANY(%s)
+                                        """,
+                                        (
+                                            target,
+                                            source["source_capture_id"],
+                                            prof_rev,
+                                            _PULSE_ALGO,
+                                            catalog_ids,
+                                        ),
+                                    )
+                                    p_cols = [d.name for d in _cur_dir.description]
+                                    for p_vals in _cur_dir.fetchall():
+                                        p_row = dict(zip(p_cols, p_vals, strict=True))
+                                        pulse_by_cat[int(p_row["catalog_id"])] = {
+                                            **_build_pulse_payload(p_row),
+                                            "status": "AVAILABLE"
+                                            if (
+                                                p_row["calculation_status"]
+                                                == "COMPLETE"
+                                                and p_row["formal_rotation_state"]
+                                                == "NOT_EVALUATED"
+                                                and p_row["research_mode"]
+                                                == "NON_PIT_RETROSPECTIVE"
+                                                and p_row["membership_mode"]
+                                                == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+                                                and p_row["price_coordinate"]
+                                                == "FORWARD_ADJUSTED"
+                                                and int(p_row["source_pool_count"])
+                                                == source["raw_row_count"]
+                                            )
+                                            else "INCOMPLETE",
+                                        }
+                        r03_overlap = read_r03_overlap_day(
+                            self.preview_server.state.config,
+                            trade_date=target,
+                            scope_key=r03_scope,
+                            member_version=r03_member_ver,
+                            contract_version=R03_CONTRACT_VERSION,
                         )
-                        result["total_count"] = len(all_items)
-                        result["items"] = all_items[offset : offset + limit]
-                        result["sort_mode"] = "formal_priority"
+                        r03_rot_summary = read_r03_rotation_board_day_summary(
+                            self.preview_server.state.config,
+                            trade_date=target,
+                            scope_key=r03_scope,
+                            member_version=r03_member_ver,
+                            contract_version=R03_CONTRACT_VERSION,
+                        )
+                        rot_by_key = dict(r03_rot_summary.get("items") or {})
+                        boards_out: list[dict[str, Any]] = []
+                        for pr in page_rows:
+                            dk = (str(pr["board_kind"]), str(pr["board_id"]))
+                            cat_id = (
+                                int(pr["catalog_id"])
+                                if pr.get("catalog_id") is not None
+                                else None
+                            )
+                            snap_id = (
+                                int(pr["catalog_snapshot_id"])
+                                if pr.get("catalog_snapshot_id") is not None
+                                else (
+                                    industry_snapshot_id
+                                    if pr["board_kind"] == "INDUSTRY"
+                                    else concept_snapshot_id
+                                )
+                            )
+                            board_obj: dict[str, Any] = {
+                                "board_kind": pr["board_kind"],
+                                "board_native_id": pr["board_id"],
+                                "board_name": pr.get("catalog_board_name")
+                                or pr["board_id"],
+                                "snapshot_id": snap_id,
+                                "r03_formal": _build_r03_formal_payload(
+                                    pr, pr, rot_by_key.get(dk)
+                                ),
+                            }
+                            if cat_id is not None and cat_id in pulse_by_cat:
+                                board_obj["cross_period_pulse"] = pulse_by_cat[cat_id]
+                            boards_out.append(board_obj)
+                        r03_native_status = (
+                            "AVAILABLE" if total_board_count > 0 else "AVAILABLE_EMPTY"
+                        )
+                        result = {
+                            "status": "AVAILABLE",
+                            "reason_codes": [],
+                            "target_session": target.isoformat(),
+                            "source_capture_id": source["source_capture_id"],
+                            "profile_revision": prof_rev,
+                            "source_pool_count": source["raw_row_count"],
+                            "snapshot_ids": {
+                                "INDUSTRY": industry_snapshot_id,
+                                "CONCEPT": concept_snapshot_id,
+                            },
+                            "total_board_count": total_board_count,
+                            "filtered_total": filtered_total,
+                            "total_count": filtered_total,
+                            "offset": offset,
+                            "limit": limit,
+                            "board_kind": board_kind,
+                            "search": search,
+                            "boards": boards_out,
+                            "sort_mode": "formal_priority",
+                        }
+                    else:
+                        result = read_source_sector_pulse_directory_page(
+                            self.preview_server.state.config,
+                            target_session=target,
+                            research_cutoff=cutoff,
+                            source_capture_id=source["source_capture_id"],
+                            source_pool_count=source["raw_row_count"],
+                            profile_revision=prof_rev,
+                            snapshot_ids={
+                                "INDUSTRY": industry_snapshot_id,
+                                "CONCEPT": concept_snapshot_id,
+                            },
+                            calendar_id=calendar["calendar_id"],
+                            calendar_revision=calendar["calendar_revision"],
+                            horizon_targets=horizon_targets,
+                            board_kind=board_kind,
+                            search=search,
+                            offset=offset,
+                            limit=limit,
+                        )
+                        r03_native = read_r03_native_day_facts(
+                            self.preview_server.state.config,
+                            trade_date=target,
+                            scope_key=r03_scope,
+                            member_version=r03_member_ver,
+                            contract_version=R03_CONTRACT_VERSION,
+                        )
+                        r03_overlap = read_r03_overlap_day(
+                            self.preview_server.state.config,
+                            trade_date=target,
+                            scope_key=r03_scope,
+                            member_version=r03_member_ver,
+                            contract_version=R03_CONTRACT_VERSION,
+                        )
+                        r03_rot_summary = read_r03_rotation_board_day_summary(
+                            self.preview_server.state.config,
+                            trade_date=target,
+                            scope_key=r03_scope,
+                            member_version=r03_member_ver,
+                            contract_version=R03_CONTRACT_VERSION,
+                        )
+                        r03_native_status = r03_native.get("status")
+                        rot_by_key = dict(r03_rot_summary.get("items") or {})
+                        native_by_key = {
+                            (str(it["board_kind"]), str(it["board_id"])): it
+                            for it in r03_native.get("items", ())
+                        }
+                        ov_by_key = {
+                            (str(it["board_kind"]), str(it["board_id"])): it
+                            for it in r03_overlap.get("board_facts", ())
+                        }
+                        for dir_item in result.get("boards", ()):
+                            dk = (
+                                str(dir_item.get("board_kind", "")),
+                                str(dir_item.get("board_native_id", "")),
+                            )
+                            n_it = native_by_key.get(dk)
+                            o_it = ov_by_key.get(dk)
+                            rt_it = rot_by_key.get(dk)
+                            if n_it or o_it or rt_it:
+                                dir_item["r03_formal"] = _build_r03_formal_payload(
+                                    n_it, o_it, rt_it
+                                )
                     result["r03_formal_sector_context"] = {
                         "scope_key": r03_scope,
                         "member_version": r03_member_ver,
                         "contract_version": R03_CONTRACT_VERSION,
-                        "native_status": r03_native.get("status"),
+                        "native_status": r03_native_status,
                         "overlap_status": r03_overlap.get("status"),
                         "rotation_status": r03_rot_summary.get("status"),
                         "clusters": r03_overlap.get("clusters", []),

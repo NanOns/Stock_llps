@@ -1369,9 +1369,10 @@ def run_r03_formal_sector_day(
                     top1_concentration=nr["concentration"].get("top1_concentration"),
                     quote_states_u=rot_in["quote_states_t"],
                     last_actual_quotes_u=rot_in["last_actual_quotes_t"],
+                    formation_r_t0=rec_prev.get("formation_r_t0") if rec_prev else None,
                 )
 
-            if missing_prev_session and prev_state_dict is not None:
+            if missing_prev_session and prev_state_dict is not None and active_prev:
                 st_res = _call_step_rotation(
                     session_gap=rot_session_gap,
                     contract_valid=contract_ok,
@@ -1625,6 +1626,8 @@ def run_r03_formal_sector_day(
                 ok_t1 = bool(scoped_t1) and all(
                     bool(b.get("membership_complete", True)) for b in scoped_t1
                 )
+            elif prev_trade_date is not None or previous_session_missing:
+                ok_t1 = False
             ok_t3 = True
             if boards_t3:
                 scoped_t3 = [
@@ -1633,6 +1636,8 @@ def run_r03_formal_sector_day(
                 ok_t3 = bool(scoped_t3) and all(
                     bool(b.get("membership_complete", True)) for b in scoped_t3
                 )
+            elif prev_trade_date is not None or previous_session_missing:
+                ok_t3 = False
             kind_membership_known_map[bk] = ok_t1 and ok_t3
 
         loo_batch: list[tuple[str, Mapping[str, Any]]] = []
@@ -1719,6 +1724,7 @@ def run_r03_formal_sector_day(
 
     return {
         "trade_date": trade_date.isoformat(),
+        "prev_trade_date": prev_trade_date,
         "scope_key": scope_key,
         "member_version": member_version,
         "contract_version": R03_CONTRACT_VERSION,
@@ -2116,7 +2122,9 @@ def run_r03_formal_sector_for_session(
         native_previous_session_missing = False
         native_prev_trade_date: date | None = None
         native_session_gap: int | None = None
-    elif prev_scope_key is None or prev_member_ver is None:
+    elif (
+        prev_scope_key is None or prev_member_ver is None
+    ) and not prior_version_chain:
         prev_states = {}
         native_previous_session_missing = True
         native_prev_trade_date = None
@@ -2130,11 +2138,12 @@ def run_r03_formal_sector_for_session(
             contract_version=R03_CONTRACT_VERSION,
             previous_scope_key=prev_scope_key,
             previous_member_version=prev_member_ver,
+            prior_version_chain=prior_version_chain,
             return_metadata=True,
         )
         prev_states = prev_meta["items"]
         native_previous_session_missing = bool(prev_meta["previous_session_missing"])
-        native_prev_trade_date = None if native_previous_session_missing else t1_session
+        native_prev_trade_date = prev_meta.get("previous_trade_date")
         native_session_gap = (
             _compute_session_gap(native_prev_trade_date, target_session)
             if native_prev_trade_date is not None
@@ -2180,4 +2189,5 @@ def run_r03_formal_sector_for_session(
     day_res["universe_version_t3"] = assembled.get("universe_version_t3")
     day_res["prev_scope_key"] = prev_scope_key
     day_res["prev_member_version"] = prev_member_ver
+    day_res["prev_trade_date"] = native_prev_trade_date
     return day_res
