@@ -7358,6 +7358,63 @@ def _execute_shared_production_chain_impl(
                         )
                     bound_day_units.append(bu)
                 begin_callback(job_id=job_id, units=bound_day_units)
+                formal_breadth_res = None
+                formal_unit = next(
+                    (
+                        unit
+                        for unit in day_units
+                        if unit.get("business_table")
+                        == "stock.r03_formal_market_breadth_facts"
+                    ),
+                    None,
+                )
+                if cap_mkt_t is None and formal_unit is not None:
+                    # R03 uses the date-effective market universe and coordinate
+                    # facts; it remains independent when the source fixed-roster
+                    # cohort has no unique capture identity.
+                    formal_breadth_res = produce_formal_market_breadth_for_session(
+                        config,
+                        target_session=day,
+                        t3_session=mkt_t3_day,
+                        source_capture_id=None,
+                        source_capture_id_t3=cap_mkt_t3,
+                        prev_session_t=mkt_prev_t,
+                        prev_session_t3=mkt_prev_t3,
+                        allow_revision=bool(plan.get("allow_revision", False)),
+                    )
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table="stock.r03_formal_market_breadth_facts",
+                        target_session=day,
+                        research_cutoff=cutoff,
+                        producer_version=R03_CONTRACT_VERSION,
+                    )
+                    if actual_rows != 1:
+                        raise DataJobError(
+                            "FORMAL_MARKET_BREADTH_READBACK_MISMATCH",
+                            "正式市场宽度按日期键独立读回没有唯一事实。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="MARKET_BREADTH",
+                        target_session=day,
+                        business_table="stock.r03_formal_market_breadth_facts",
+                        source_capture_id=None,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=1,
+                        inserted_rows=0,
+                        quality_status=(
+                            "COMPLETE_FORMAL_MARKET_"
+                            f"{formal_breadth_res.get('status', 'UNKNOWN')}"
+                        ),
+                        no_change=False,
+                        profile_revision=None,
+                        calendar_revision=plan.get("calendar_revision"),
+                        producer_version=R03_CONTRACT_VERSION,
+                    )
+                    resolved_unit_keys.add(unit_key(formal_unit))
                 market = compute_source_market_context(
                     config,
                     target_session=day,
@@ -7368,16 +7425,17 @@ def _execute_shared_production_chain_impl(
                 persisted = persist_market_breadth(
                     config, market, breadth_change=breadth_change
                 )
-                formal_breadth_res = produce_formal_market_breadth_for_session(
-                    config,
-                    target_session=day,
-                    t3_session=mkt_t3_day,
-                    source_capture_id=cap_mkt_t,
-                    source_capture_id_t3=cap_mkt_t3,
-                    prev_session_t=mkt_prev_t,
-                    prev_session_t3=mkt_prev_t3,
-                    allow_revision=bool(plan.get("allow_revision", False)),
-                )
+                if formal_breadth_res is None:
+                    formal_breadth_res = produce_formal_market_breadth_for_session(
+                        config,
+                        target_session=day,
+                        t3_session=mkt_t3_day,
+                        source_capture_id=cap_mkt_t,
+                        source_capture_id_t3=cap_mkt_t3,
+                        prev_session_t=mkt_prev_t,
+                        prev_session_t3=mkt_prev_t3,
+                        allow_revision=bool(plan.get("allow_revision", False)),
+                    )
                 readback = read_source_market_context(
                     config,
                     target_session=day,
@@ -7562,6 +7620,8 @@ def _execute_shared_production_chain_impl(
                 )
 
                 for failed_mkt_unit in day_units:
+                    if unit_key(failed_mkt_unit) in resolved_unit_keys:
+                        continue
                     if (
                         failed_mkt_unit.get("business_table")
                         == "stock.r03_formal_market_breadth_facts"
@@ -8393,19 +8453,34 @@ def _execute_shared_production_chain_impl(
                 item
                 for item in profile_catalog.get("snapshots", ())
                 if item.get("target_session") == day_text
-                and item.get("source_capture_id") == ep_cap
+                and (ep_cap is None or item.get("source_capture_id") == ep_cap)
                 and (
                     expected_window is None
                     or item.get("history_session_count") == expected_window
                 )
                 and item.get("complete") is True
             ]
-            if len(profile_candidates) != 1:
+            candidate_scopes = {
+                (
+                    item.get("history_session_count"),
+                    item.get("history_calendar_id"),
+                    item.get("history_calendar_revision"),
+                    item.get("price_coordinate"),
+                )
+                for item in profile_candidates
+            }
+            if (
+                not profile_candidates
+                or len(candidate_scopes) != 1
+                or any(item.get("complete") is not True for item in profile_candidates)
+            ):
                 raise DataJobError(
                     "SECTOR_PROFILE_REVISION_AMBIGUOUS",
                     f"{day_text}(capture={ep_cap})没有唯一完整的Core/Profile与窗口。",
                     status=409,
                 )
+            # 当前短键下capture只作溯源；多行捕获元数据可折叠为同一
+            # 日期/窗口/日历Profile scope。Seed Reader按该唯一scope读回。
             expected_revision = None
         seed_scope = read_source_pool_seed_forward_scope(
             config,

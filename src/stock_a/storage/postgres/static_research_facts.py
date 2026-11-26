@@ -1041,7 +1041,7 @@ def read_source_pool_seed_forward_scope(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_capture_id: int,
+    source_capture_id: int | None,
     expected_source_count: int | None,
     profile_revision: str | None = None,
     history_session_count: int | None = None,
@@ -1053,8 +1053,8 @@ def read_source_pool_seed_forward_scope(
     """读取唯一闭合Seed范围，供已存T0来源池的后继生产复用。"""
     if (
         type(target_session) is not date
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
+        or source_capture_id is not None
+        and (type(source_capture_id) is not int or source_capture_id <= 0)
         or expected_source_count is not None
         and (type(expected_source_count) is not int or expected_source_count <= 0)
         or history_session_count is not None
