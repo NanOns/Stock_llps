@@ -111,14 +111,14 @@ def _check_captures_qfq_comparable(
     cap_b: int,
     *,
     overlap_session: date | None,
+    symbols: Sequence[str] | None = None,
 ) -> bool:
-    """检查两个捕获的前复权坐标在共同端点会话上是否价格重基一致（同捕获直接返回True）。"""
+    """检查两个捕获的前复权坐标在共同端点会话与必要证券集合上是否价格重基一致（同捕获直接返回True）。"""
     if cap_a == cap_b:
         return True
     if overlap_session is None:
         return False
-    cur.execute(
-        """
+    sql = """
         SELECT a.source_symbol, a.qfq_close, b.qfq_close
         FROM stock.source_raw_daily a
         JOIN stock.source_raw_daily b
@@ -127,14 +127,18 @@ def _check_captures_qfq_comparable(
         WHERE a.source_capture_id = %s
           AND b.source_capture_id = %s
           AND a.session_date = %s
-          AND a.qfq_bar_status = 'PRESENT'
-          AND b.qfq_bar_status = 'PRESENT'
+          AND a.qfq_bar_status = 'TARGET_PRESENT'
+          AND b.qfq_bar_status = 'TARGET_PRESENT'
+          AND a.qfq_price_quality = 'OBSERVED'
+          AND b.qfq_price_quality = 'OBSERVED'
           AND a.qfq_close > 0
           AND b.qfq_close > 0
-        LIMIT 50
-        """,
-        (cap_a, cap_b, overlap_session),
-    )
+    """
+    params: list[Any] = [cap_a, cap_b, overlap_session]
+    if symbols:
+        sql += " AND a.source_symbol = ANY(%s)"
+        params.append(sorted(set(symbols)))
+    cur.execute(sql, tuple(params))
     rows = cur.fetchall()
     if not rows:
         return False
@@ -577,7 +581,7 @@ def assemble_r03_session_inputs(
     source_capture_id: int,
     profile_revision: str,
     snapshot_ids: Mapping[str, int],
-    snapshot_ids_by_session: Mapping[str, Mapping[str, int]] | None = None,
+    snapshot_ids_by_session: Mapping[str, Mapping[str, int] | None] | None = None,
     source_capture_id_t1: int | None = None,
     source_capture_id_t3: int | None = None,
     profile_revision_t1: str | None = None,
@@ -586,12 +590,23 @@ def assemble_r03_session_inputs(
     universe_version_t1: str | None = None,
     universe_version_t3: str | None = None,
     universe_capture_id: int | None = None,
+    universe_capture_id_t1: int | None = None,
+    universe_capture_id_t3: int | None = None,
+    strict_endpoints: bool = False,
     extra_research_entities: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """从现役 PG 表组装 R03 板块三端独立输入、成员槽位、日期有效 Universe 与 LOO 目标列表（只读事务）。"""
     cap_t = int(source_capture_id)
-    cap_t1 = int(source_capture_id_t1) if source_capture_id_t1 is not None else cap_t
-    cap_t3 = int(source_capture_id_t3) if source_capture_id_t3 is not None else cap_t
+    cap_t1 = (
+        int(source_capture_id_t1)
+        if source_capture_id_t1 is not None
+        else (None if strict_endpoints else cap_t)
+    )
+    cap_t3 = (
+        int(source_capture_id_t3)
+        if source_capture_id_t3 is not None
+        else (None if strict_endpoints else cap_t)
+    )
     prof_t = str(profile_revision)
     prof_t1 = str(profile_revision_t1) if profile_revision_t1 is not None else None
     prof_t3 = str(profile_revision_t3) if profile_revision_t3 is not None else None
@@ -601,24 +616,40 @@ def assemble_r03_session_inputs(
         cur,
         _,
     ):
-        snaps_t = (snapshot_ids_by_session or {}).get("t", snapshot_ids)
+        snaps_t = (
+            snapshot_ids_by_session.get("t", snapshot_ids)
+            if snapshot_ids_by_session is not None
+            else snapshot_ids
+        )
         snaps_t1 = (
-            (snapshot_ids_by_session or {}).get("t1", snapshot_ids)
+            (
+                snapshot_ids_by_session.get("t1")
+                if snapshot_ids_by_session is not None
+                else snapshot_ids
+            )
             if t1_session is not None
             else None
         )
         snaps_t3 = (
-            (snapshot_ids_by_session or {}).get("t3", snapshot_ids)
+            (
+                snapshot_ids_by_session.get("t3")
+                if snapshot_ids_by_session is not None
+                else snapshot_ids
+            )
             if t3_session is not None
             else None
         )
 
         known_t = _load_known_basic_symbols(cur, cap_t)
         known_t1 = (
-            _load_known_basic_symbols(cur, cap_t1) if t1_session is not None else set()
+            _load_known_basic_symbols(cur, cap_t1)
+            if t1_session is not None and cap_t1 is not None
+            else set()
         )
         known_t3 = (
-            _load_known_basic_symbols(cur, cap_t3) if t3_session is not None else set()
+            _load_known_basic_symbols(cur, cap_t3)
+            if t3_session is not None and cap_t3 is not None
+            else set()
         )
 
         meta_t, syms_t, primary_industry = _load_snapshot_boards(
@@ -645,12 +676,10 @@ def assemble_r03_session_inputs(
                 config=config,
                 session=t1_session,
                 price_capture_id=cap_t1,
-                universe_version=universe_version_t1
-                if universe_version_t1 is not None
-                else universe_version,
-                universe_capture_id=universe_capture_id,
+                universe_version=universe_version_t1,
+                universe_capture_id=universe_capture_id_t1,
             )
-            if t1_session is not None
+            if t1_session is not None and cap_t1 is not None
             else (None, set())
         )
         u_ver_t3, u_syms_t3 = (
@@ -659,12 +688,10 @@ def assemble_r03_session_inputs(
                 config=config,
                 session=t3_session,
                 price_capture_id=cap_t3,
-                universe_version=universe_version_t3
-                if universe_version_t3 is not None
-                else universe_version,
-                universe_capture_id=universe_capture_id,
+                universe_version=universe_version_t3,
+                universe_capture_id=universe_capture_id_t3,
             )
-            if t3_session is not None
+            if t3_session is not None and cap_t3 is not None
             else (None, set())
         )
 
@@ -683,27 +710,35 @@ def assemble_r03_session_inputs(
         coord_t = _check_capture_dual_coordinates(cur, cap_t)
         coord_t1 = (
             _check_capture_dual_coordinates(cur, cap_t1)
-            if t1_session is not None
+            if t1_session is not None and cap_t1 is not None
             else False
         )
         coord_t3 = (
             _check_capture_dual_coordinates(cur, cap_t3)
-            if t3_session is not None
+            if t3_session is not None and cap_t3 is not None
             else False
         )
         qfq_comparable_t1 = (
             _check_captures_qfq_comparable(
-                cur, cap_t, cap_t1, overlap_session=t1_session
+                cur,
+                cap_t,
+                cap_t1,
+                overlap_session=t1_session,
+                symbols=sym_list,
             )
-            if t1_session is not None
-            else True
+            if t1_session is not None and cap_t1 is not None
+            else (False if t1_session is not None else True)
         )
         qfq_comparable_t3 = (
             _check_captures_qfq_comparable(
-                cur, cap_t, cap_t3, overlap_session=t3_session
+                cur,
+                cap_t,
+                cap_t3,
+                overlap_session=t3_session,
+                symbols=sym_list,
             )
-            if t3_session is not None
-            else True
+            if t3_session is not None and cap_t3 is not None
+            else (False if t3_session is not None else True)
         )
 
         obs_t = _load_endpoint_observations(
@@ -723,7 +758,7 @@ def assemble_r03_session_inputs(
                 symbols=sym_list,
                 universe_version=u_ver_t1,
             )
-            if t1_session is not None
+            if t1_session is not None and cap_t1 is not None
             else {}
         )
         obs_t3 = (
@@ -735,7 +770,7 @@ def assemble_r03_session_inputs(
                 symbols=sym_list,
                 universe_version=u_ver_t3,
             )
-            if t3_session is not None
+            if t3_session is not None and cap_t3 is not None
             else {}
         )
 
@@ -803,6 +838,7 @@ def assemble_r03_session_inputs(
             "boards_t1": boards_t1,
             "boards_t3": boards_t3,
             "loo_targets": loo_targets,
+            "universe_ready_t": u_ver_t is not None,
             "universe_version_t": u_ver_t,
             "universe_version_t3": u_ver_t3,
             "universe_ret1_t": universe_ret1_t,
@@ -968,9 +1004,24 @@ def run_r03_formal_sector_day(
             rot_in = _extract_rotation_inputs(bt, bt1, prev_basket=prev_basket)
             active_prev = prev_state_dict is not None and prev_state_dict.get(
                 "last_known_state", prev_state_dict.get("state")
-            ) not in {None, "NONE", "FAILED", "OUT"}
+            ) not in {None, "NONE", "FAILED", "OUT", "REJECTED"}
             basket_metrics = None
-            if active_prev and prev_basket is not None:
+            origin_comparable = (
+                bool(rec_prev.get("origin_coordinate_comparable", True))
+                if rec_prev
+                else True
+            )
+            contract_ok = (
+                bool(bt.get("coordinate_ready", True))
+                and bool(coordinate_comparable_t1)
+                and origin_comparable
+            )
+            if (
+                active_prev
+                and prev_basket is not None
+                and not missing_prev_session
+                and contract_ok
+            ):
                 basket_metrics = evaluate_basket_metrics(
                     prev_basket,
                     prices_u=rot_in["prices_t"],
@@ -983,9 +1034,6 @@ def run_r03_formal_sector_day(
                     last_actual_quotes_u=rot_in["last_actual_quotes_t"],
                 )
 
-            contract_ok = bool(bt.get("coordinate_ready", True)) and bool(
-                coordinate_comparable_t1
-            )
             if missing_prev_session and prev_state_dict is not None:
                 st_res = step_rotation_state_machine(
                     contract_valid=contract_ok,
@@ -998,6 +1046,7 @@ def run_r03_formal_sector_day(
                         "reason": "ROTATION_MISSING_PREVIOUS_SESSION",
                     },
                     basket_metrics=None,
+                    input_missing_reason="ROTATION_MISSING_PREVIOUS_SESSION",
                 )
             else:
                 st_res = step_rotation_state_machine(
@@ -1009,6 +1058,8 @@ def run_r03_formal_sector_day(
                     pulse_raw=pulse_raw,
                     basket_metrics=basket_metrics,
                 )
+            if not origin_comparable and st_res.get("state") == "REJECTED":
+                st_res = {**st_res, "reason": "ROTATION_COORDINATE_INCOMPARABLE"}
 
             new_basket = None
             parent_ep_id = None
@@ -1118,12 +1169,8 @@ def run_r03_formal_sector_day(
                 breadth_delta1=None,
                 pulse_raw={"state": "UNKNOWN", "reason": "BOARD_CATALOG_MISSING"},
                 basket_metrics=None,
+                input_missing_reason="BOARD_CATALOG_MISSING",
             )
-            miss_res = {
-                **miss_res,
-                "state": "UNKNOWN",
-                "reason": "BOARD_CATALOG_MISSING",
-            }
             rot_records.append(
                 {
                     "board_kind": bkey[0],
@@ -1514,7 +1561,7 @@ def run_r03_formal_sector_for_session(
     source_capture_id: int,
     profile_revision: str,
     snapshot_ids: Mapping[str, int],
-    snapshot_ids_by_session: Mapping[str, Mapping[str, int]] | None = None,
+    snapshot_ids_by_session: Mapping[str, Mapping[str, int] | None] | None = None,
     profile_revision_t1: str | None = None,
     profile_revision_t3: str | None = None,
     source_capture_id_t1: int | None = None,
@@ -1523,6 +1570,9 @@ def run_r03_formal_sector_for_session(
     universe_version_t1: str | None = None,
     universe_version_t3: str | None = None,
     universe_capture_id: int | None = None,
+    universe_capture_id_t1: int | None = None,
+    universe_capture_id_t3: int | None = None,
+    strict_endpoints: bool = False,
     scope_key: str | None = None,
     modules: set[str] | None = None,
     allow_revision: bool = False,
@@ -1534,22 +1584,26 @@ def run_r03_formal_sector_for_session(
     member_ver = (
         f"IND_{snapshot_ids.get('INDUSTRY', 0)}:CON_{snapshot_ids.get('CONCEPT', 0)}"
     )
-    prev_cap = (
-        int(source_capture_id_t1)
-        if source_capture_id_t1 is not None
-        else int(source_capture_id)
-    )
-    prev_prof = (
-        profile_revision_t1 if profile_revision_t1 is not None else profile_revision
-    )
+    prev_cap = int(source_capture_id_t1) if source_capture_id_t1 is not None else None
+    prev_prof = profile_revision_t1
     prev_scope_key = (
         scope_key
         if scope_key is not None
-        else f"BAOSTOCK_CAP_{prev_cap}:PROF_{prev_prof}:NON_PIT"
+        else (
+            f"BAOSTOCK_CAP_{prev_cap}:PROF_{prev_prof}:NON_PIT"
+            if prev_cap is not None and prev_prof is not None
+            else None
+        )
     )
-    snaps_t1 = (snapshot_ids_by_session or {}).get("t1", snapshot_ids)
+    snaps_t1 = (
+        snapshot_ids_by_session.get("t1")
+        if snapshot_ids_by_session is not None
+        else snapshot_ids
+    )
     prev_member_ver = (
         f"IND_{snaps_t1.get('INDUSTRY', 0)}:CON_{snaps_t1.get('CONCEPT', 0)}"
+        if isinstance(snaps_t1, Mapping)
+        else None
     )
     rot_recovery = (
         read_r03_rotation_recovery_states(
@@ -1560,10 +1614,51 @@ def run_r03_formal_sector_for_session(
             previous_scope_key=prev_scope_key,
             member_version=member_ver,
             previous_member_version=prev_member_ver,
+            allow_cross_version_recovery=True,
         )
         if t1_session is not None
         else {}
     )
+    if rot_recovery:
+        with source_raw._transaction(
+            config, write=False, statement_timeout_ms=10000
+        ) as (
+            _conn,
+            _cur_chk,
+            _,
+        ):
+            for _bk_k, _rec in rot_recovery.items():
+                _bask = _rec.get("basket")
+                _ep_scope = _rec.get("episode_scope_key")
+                if _bask is None or not _ep_scope:
+                    continue
+                _ep_cap = None
+                for _part in str(_ep_scope).split(":"):
+                    if (
+                        _part.startswith("BAOSTOCK_CAP_")
+                        and _part[len("BAOSTOCK_CAP_") :].isdigit()
+                    ):
+                        _ep_cap = int(_part[len("BAOSTOCK_CAP_") :])
+                        break
+                if _ep_cap is not None and _ep_cap != int(source_capture_id):
+                    _t0_d = date.fromisoformat(_bask.t0_session)
+                    _comp = _check_captures_qfq_comparable(
+                        _cur_chk,
+                        _ep_cap,
+                        int(source_capture_id),
+                        overlap_session=_t0_d,
+                        symbols=list(_bask.members),
+                    )
+                    if not _comp and t1_session is not None and t1_session != _t0_d:
+                        _comp = _check_captures_qfq_comparable(
+                            _cur_chk,
+                            _ep_cap,
+                            int(source_capture_id),
+                            overlap_session=t1_session,
+                            symbols=list(_bask.members),
+                        )
+                    _rec["origin_coordinate_comparable"] = _comp
+
     active_frozen_entities = sorted(
         {
             eid
@@ -1589,8 +1684,22 @@ def run_r03_formal_sector_for_session(
         universe_version_t1=universe_version_t1,
         universe_version_t3=universe_version_t3,
         universe_capture_id=universe_capture_id,
+        universe_capture_id_t1=universe_capture_id_t1,
+        universe_capture_id_t3=universe_capture_id_t3,
+        strict_endpoints=strict_endpoints,
         extra_research_entities=active_frozen_entities,
     )
+    active_mods = modules or {
+        "R03_SECTOR_NATIVE",
+        "R03_SECTOR_ROTATION",
+        "R03_SECTOR_OVERLAP",
+        "R03_SECTOR_LOO",
+    }
+    if "R03_SECTOR_LOO" in active_mods and not assembled.get("universe_ready_t", False):
+        raise R03FormalSectorPgError(
+            "R03_UNIVERSE_MISSING",
+            f"交易日 {target_session} 缺少权威日期有效 Research Universe，禁止将 LOO 空结果标记为已完成。",
+        )
     prev_states = (
         read_r03_previous_lifecycle_states(
             config,
@@ -1602,6 +1711,8 @@ def run_r03_formal_sector_for_session(
             previous_member_version=prev_member_ver,
         )
         if t1_session is not None
+        and prev_scope_key is not None
+        and prev_member_ver is not None
         else {}
     )
     prev_clusters_res = (
@@ -1613,6 +1724,8 @@ def run_r03_formal_sector_for_session(
             contract_version=R03_CONTRACT_VERSION,
         )
         if t1_session is not None
+        and prev_scope_key is not None
+        and prev_member_ver is not None
         else {"status": "NOT_COMPUTED", "clusters": []}
     )
 

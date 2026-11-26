@@ -5103,7 +5103,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/product/r03-sector-rotation":
                 required = {"board_kind", "board_id", "scope_key", "contract_version"}
-                allowed = required | {"as_of_date"}
+                allowed = required | {"member_version", "as_of_date"}
                 values = _query(self.path, allowed)
                 if not required.issubset(set(values)):
                     raise PreviewHttpError(
@@ -5128,6 +5128,47 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "RESEARCH_CUTOFF_EXCEEDED",
                         f"Rotation 截至日 {as_of.isoformat()} 超过研究截止日 {self.preview_server.state.research_cutoff.isoformat()}。",
                     )
+                req_mem_ver = values.get("member_version")
+                if req_mem_ver is None:
+                    from stock_a.storage.postgres import source_raw as _sr_rot
+
+                    with _sr_rot._transaction(
+                        self.preview_server.state.config,
+                        write=False,
+                        statement_timeout_ms=5000,
+                    ) as (_c, _cur_rot, _):
+                        _cur_rot.execute(
+                            """
+                            SELECT DISTINCT member_version
+                            FROM stock.r03_sector_rotation_board_day_facts
+                            WHERE board_kind=%s AND board_id=%s AND scope_key=%s
+                              AND contract_version=%s AND trade_date <= %s
+                            """,
+                            (
+                                values["board_kind"],
+                                values["board_id"],
+                                values["scope_key"],
+                                values["contract_version"],
+                                as_of,
+                            ),
+                        )
+                        found_mvers = [str(r[0]) for r in _cur_rot.fetchall() if r[0]]
+                    if len(found_mvers) > 1:
+                        self._send_json(
+                            200,
+                            {
+                                "ok": True,
+                                "as_of_date": as_of.isoformat(),
+                                "status": "AMBIGUOUS_MEMBER_VERSION",
+                                "episodes": [],
+                                "board_day_facts": [],
+                                "reason": f"存在多个 member_version({found_mvers})，须显式指定 member_version。",
+                            },
+                        )
+                        return
+                    if len(found_mvers) == 1:
+                        req_mem_ver = found_mvers[0]
+
                 from stock_a.storage.postgres.r03_formal_sector import (
                     read_r03_rotation_timeline,
                 )
@@ -5138,6 +5179,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     board_id=values["board_id"],
                     scope_key=values["scope_key"],
                     contract_version=values["contract_version"],
+                    member_version=req_mem_ver,
                     as_of_date=as_of,
                 )
                 self._send_json(

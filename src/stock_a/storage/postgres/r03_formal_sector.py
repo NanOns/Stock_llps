@@ -267,31 +267,31 @@ def _read_r03_partition_progress_state(
     member_version: str | None,
     contract_version: str,
 ) -> tuple[str | None, int | None]:
-    """精确查询 R03 业务分区在 data_job_progress 的最新状态，绝不跨独立版本串扰。"""
+    """精确查询 R03 业务分区在 data_job_progress 的最新状态，绝不跨独立版本串扰或通配缺失键。"""
     cap_id, prof_rev, ind_id, con_id = _parse_r03_partition_progress_filters(
         scope_key=scope_key, member_version=member_version
     )
+    is_sector_table = business_table != "stock.r03_formal_market_breadth_facts"
+    if cap_id is None:
+        return None, None
+    if is_sector_table and (prof_rev is None or ind_id is None or con_id is None):
+        return None, None
     sql = """
         SELECT status, expected_rows
         FROM stock.data_job_progress
         WHERE target_session=%s AND business_table=%s
-          AND (producer_version=%s OR producer_version IS NULL)
+          AND producer_version=%s
+          AND source_capture_id=%s
     """
-    params: list[Any] = [trade_date, business_table, contract_version]
-    if cap_id is not None:
-        sql += " AND source_capture_id=%s"
-        params.append(cap_id)
+    params: list[Any] = [trade_date, business_table, contract_version, cap_id]
     if prof_rev is not None:
         sql += " AND profile_revision=%s"
         params.append(prof_rev)
-    elif business_table == "stock.r03_formal_market_breadth_facts":
+    elif not is_sector_table:
         sql += " AND profile_revision IS NULL"
-    if ind_id is not None:
-        sql += " AND industry_snapshot_id=%s"
-        params.append(ind_id)
-    if con_id is not None:
-        sql += " AND concept_snapshot_id=%s"
-        params.append(con_id)
+    if is_sector_table:
+        sql += " AND industry_snapshot_id=%s AND concept_snapshot_id=%s"
+        params.extend([ind_id, con_id])
     sql += " ORDER BY updated_at DESC LIMIT 1"
     cur.execute(sql, tuple(params))
     row = cur.fetchone()
@@ -759,83 +759,48 @@ def read_r03_rotation_recovery_states(
     previous_scope_key: str | None = None,
     member_version: str | None = None,
     previous_member_version: str | None = None,
+    allow_cross_version_recovery: bool = False,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """跨重启从 PG 恢复各板块精确上一官方会话或历史最新 Rotation Episode、冻结篮子与最近日状态前态（精确绑定 scope 与 member_version）。"""
+    """跨重启从 PG 恢复各板块精确上一官方会话或历史最新 Rotation Episode、冻结篮子与最近日状态前态（严格校验已完成进度）。"""
     if previous_trade_date is None and before_trade_date is None:
         return {}
-    prev_scope = previous_scope_key or scope_key
+    prev_scope = previous_scope_key
     prev_mem = previous_member_version or member_version
+    complete_statuses = {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}
+
     with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
         _conn,
         cur,
         _,
     ):
-        if previous_trade_date is not None:
-            mem_filter = " AND b.member_version=%s" if prev_mem is not None else ""
-            params_ep: list[Any] = [prev_scope, contract_version, previous_trade_date]
-            if prev_mem is not None:
-                params_ep.append(prev_mem)
-            cur.execute(
-                f"""
-                SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
-                       e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
-                       s.trade_date, s.rotation_state, s.last_known_state, s.stale,
-                       s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
-                       s.prev_mature_true, s.dq5, e.frozen_member_count
-                FROM stock.r03_sector_rotation_board_day_facts b
-                JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
-                JOIN stock.r03_sector_rotation_day_states s
-                  ON s.episode_id = e.id AND s.trade_date = b.trade_date
-                WHERE b.scope_key=%s AND b.contract_version=%s AND b.trade_date=%s
-                {mem_filter}
-                ORDER BY b.board_kind, b.board_id, e.id DESC
-                """,
-                tuple(params_ep),
-            )
-            rows = cur.fetchall()
-            if not rows and prev_mem is None:
-                cur.execute(
-                    """
-                    SELECT DISTINCT ON (e.board_kind, e.board_id)
-                           e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
-                           e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
-                           s.trade_date, s.rotation_state, s.last_known_state, s.stale,
-                           s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
-                           s.prev_mature_true, s.dq5, e.frozen_member_count
-                    FROM stock.r03_sector_rotation_episodes e
-                    JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
-                    WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date = %s
-                    ORDER BY e.board_kind, e.board_id, e.id DESC
-                    """,
-                    (prev_scope, contract_version, previous_trade_date),
+        prog_cache: dict[tuple[date, str, str], bool] = {}
+
+        def _is_partition_complete(td: date, sk: str, mv: str) -> bool:
+            ck = (td, sk, mv)
+            if ck not in prog_cache:
+                pst, _ = _read_r03_partition_progress_state(
+                    cur,
+                    trade_date=td,
+                    business_table="stock.r03_sector_rotation_board_day_facts",
+                    scope_key=sk,
+                    member_version=mv,
+                    contract_version=contract_version,
                 )
-                rows = cur.fetchall()
-        else:
-            mem_filter = " AND e.member_version=%s" if prev_mem is not None else ""
-            params_hist: list[Any] = [prev_scope, contract_version, before_trade_date]
-            if prev_mem is not None:
-                params_hist.append(prev_mem)
-            cur.execute(
-                f"""
-                SELECT DISTINCT ON (e.board_kind, e.board_id)
-                       e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
-                       e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
-                       s.trade_date, s.rotation_state, s.last_known_state, s.stale,
-                       s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
-                       s.prev_mature_true, s.dq5, e.frozen_member_count
-                FROM stock.r03_sector_rotation_episodes e
-                JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
-                WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date < %s
-                {mem_filter}
-                ORDER BY e.board_kind, e.board_id, s.trade_date DESC, e.id DESC
-                """,
-                tuple(params_hist),
-            )
-            rows = cur.fetchall()
-        out: dict[tuple[str, str], dict[str, Any]] = {}
-        for r in rows:
-            ep_id = int(r[0])
-            expected_frozen_count = int(r[21])
+                prog_cache[ck] = pst in complete_statuses
+            return prog_cache[ck]
+
+        def _build_basket(
+            ep_id: int,
+            ep_key: str,
+            bk: str,
+            bid: str,
+            t0_s: date,
+            s0k: bool,
+            u0k: bool,
+            h0k: bool,
+            lc: bool,
+            exp_fc: int,
+        ) -> FrozenRotationBasket:
             cur.execute(
                 """
                 SELECT entity_id, weight, b_price, p_price, in_s0, in_u0, in_h0
@@ -846,13 +811,12 @@ def read_r03_rotation_recovery_states(
                 (ep_id,),
             )
             m_rows = cur.fetchall()
-            if expected_frozen_count <= 0 or len(m_rows) != expected_frozen_count:
+            if exp_fc <= 0 or len(m_rows) != exp_fc:
                 raise R03FormalSectorPgError(
                     "R03_ROTATION_BASKET_CORRUPT",
-                    f"Episode({ep_id})冻结成员数声明{expected_frozen_count}，实际子行{len(m_rows)}，拒绝静默重算权重。",
+                    f"Episode({ep_id})冻结成员数声明{exp_fc}，实际子行{len(m_rows)}，拒绝静默重算权重。",
                 )
-            members = tuple(mr[0] for mr in m_rows)
-            exact_eq_weight = Fraction(1, expected_frozen_count)
+            exact_eq_weight = Fraction(1, exp_fc)
             weights: dict[str, Fraction] = {}
             for mr in m_rows:
                 stored_w = Fraction(mr[1])
@@ -862,65 +826,119 @@ def read_r03_rotation_recovery_states(
                         f"Episode({ep_id})成员{mr[0]}存储权重{stored_w}偏离契约等权{exact_eq_weight}。",
                     )
                 weights[mr[0]] = exact_eq_weight
-            b_prices = {mr[0]: Fraction(mr[2]) for mr in m_rows}
-            p_prices = {mr[0]: Fraction(mr[3]) for mr in m_rows}
-            s0 = frozenset(mr[0] for mr in m_rows if mr[4])
-            u0 = frozenset(mr[0] for mr in m_rows if mr[5])
-            h0 = frozenset(mr[0] for mr in m_rows if mr[6])
-            basket = FrozenRotationBasket(
-                episode_id=str(r[1]),
-                board_id=str(r[3]),
-                board_kind=str(r[2]),
-                t0_session=r[4].isoformat(),
-                members=members,
+            return FrozenRotationBasket(
+                episode_id=ep_key,
+                board_id=bid,
+                board_kind=bk,
+                t0_session=t0_s.isoformat(),
+                members=tuple(mr[0] for mr in m_rows),
                 weights=weights,
-                b_prices=b_prices,
-                p_prices=p_prices,
-                s0_seed=s0,
-                u0_up=u0,
-                h0_strong=h0,
-                s0_known=bool(r[6]),
-                u0_known=bool(r[7]),
-                h0_known=bool(r[8]),
-                left_censored=bool(r[9]),
+                b_prices={mr[0]: Fraction(mr[2]) for mr in m_rows},
+                p_prices={mr[0]: Fraction(mr[3]) for mr in m_rows},
+                s0_seed=frozenset(mr[0] for mr in m_rows if mr[4]),
+                u0_up=frozenset(mr[0] for mr in m_rows if mr[5]),
+                h0_strong=frozenset(mr[0] for mr in m_rows if mr[6]),
+                s0_known=bool(s0k),
+                u0_known=bool(u0k),
+                h0_known=bool(h0k),
+                left_censored=bool(lc),
             )
-            out[(str(r[2]), str(r[3]))] = {
-                "episode_pg_id": ep_id,
-                "parent_episode_id": r[5],
-                "basket": basket,
-                "prev_trade_date": r[10],
-                "missing_previous_session": False,
-                "state_dict": {
-                    "state": str(r[11]),
-                    "last_known_state": r[12],
-                    "stale": bool(r[13]),
-                    "market_age": int(r[14]),
-                    "eval_age": int(r[15]),
-                    "accepted_once": bool(r[16]),
-                    "armed": bool(r[17]),
-                    "out_neg_streak": int(r[18]),
-                    "prev_mature_true": bool(r[19]),
-                    "dq5": Fraction(r[20]) if r[20] is not None else None,
-                },
-            }
+
+        out: dict[tuple[str, str], dict[str, Any]] = {}
         if previous_trade_date is not None:
-            bd_sql = """
-                SELECT DISTINCT ON (board_kind, board_id)
-                       board_kind, board_id, episode_id, rotation_state, last_known_state, reason_code
-                FROM stock.r03_sector_rotation_board_day_facts
-                WHERE scope_key=%s AND contract_version=%s AND trade_date = %s
-            """
-            bd_params: list[Any] = [prev_scope, contract_version, previous_trade_date]
-            if prev_mem is not None:
-                bd_sql += " AND member_version=%s"
-                bd_params.append(prev_mem)
-            bd_sql += " ORDER BY board_kind, board_id, id DESC"
-            cur.execute(bd_sql, tuple(bd_params))
-            for bk, bid, bd_ep_id, rot_st, lk_st, rsn in cur.fetchall():
-                key = (str(bk), str(bid))
-                if key not in out and bd_ep_id is None:
+            if prev_scope is not None:
+                mem_filter = " AND b.member_version=%s" if prev_mem is not None else ""
+                params_ep: list[Any] = [
+                    prev_scope,
+                    contract_version,
+                    previous_trade_date,
+                ]
+                if prev_mem is not None:
+                    params_ep.append(prev_mem)
+                cur.execute(
+                    f"""
+                    SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+                           e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
+                           s.trade_date, s.rotation_state, s.last_known_state, s.stale,
+                           s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
+                           s.prev_mature_true, s.dq5, e.frozen_member_count,
+                           b.scope_key, b.member_version, e.scope_key
+                    FROM stock.r03_sector_rotation_board_day_facts b
+                    JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
+                    JOIN stock.r03_sector_rotation_day_states s
+                      ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                    WHERE b.scope_key=%s AND b.contract_version=%s AND b.trade_date=%s
+                    {mem_filter}
+                    ORDER BY b.board_kind, b.board_id, e.id DESC
+                    """,
+                    tuple(params_ep),
+                )
+                for r in cur.fetchall():
+                    key = (str(r[2]), str(r[3]))
+                    if key in out or not _is_partition_complete(
+                        r[10], str(r[22]), str(r[23])
+                    ):
+                        continue
+                    basket = _build_basket(
+                        int(r[0]),
+                        str(r[1]),
+                        str(r[2]),
+                        str(r[3]),
+                        r[4],
+                        bool(r[6]),
+                        bool(r[7]),
+                        bool(r[8]),
+                        bool(r[9]),
+                        int(r[21]),
+                    )
+                    out[key] = {
+                        "episode_pg_id": int(r[0]),
+                        "episode_scope_key": str(r[24]),
+                        "parent_episode_id": r[5],
+                        "basket": basket,
+                        "prev_trade_date": r[10],
+                        "missing_previous_session": False,
+                        "state_dict": {
+                            "state": str(r[11]),
+                            "last_known_state": r[12],
+                            "stale": bool(r[13]),
+                            "market_age": int(r[14]),
+                            "eval_age": int(r[15]),
+                            "accepted_once": bool(r[16]),
+                            "armed": bool(r[17]),
+                            "out_neg_streak": int(r[18]),
+                            "prev_mature_true": bool(r[19]),
+                            "dq5": Fraction(r[20]) if r[20] is not None else None,
+                        },
+                    }
+                bd_sql = """
+                    SELECT DISTINCT ON (board_kind, board_id)
+                           board_kind, board_id, episode_id, rotation_state, last_known_state,
+                           reason_code, scope_key, member_version
+                    FROM stock.r03_sector_rotation_board_day_facts
+                    WHERE scope_key=%s AND contract_version=%s AND trade_date = %s
+                """
+                bd_params: list[Any] = [
+                    prev_scope,
+                    contract_version,
+                    previous_trade_date,
+                ]
+                if prev_mem is not None:
+                    bd_sql += " AND member_version=%s"
+                    bd_params.append(prev_mem)
+                bd_sql += " ORDER BY board_kind, board_id, id DESC"
+                cur.execute(bd_sql, tuple(bd_params))
+                for bk, bid, bd_ep_id, rot_st, lk_st, rsn, b_sk, b_mv in cur.fetchall():
+                    key = (str(bk), str(bid))
+                    if key in out or bd_ep_id is not None:
+                        continue
+                    if not _is_partition_complete(
+                        previous_trade_date, str(b_sk), str(b_mv)
+                    ):
+                        continue
                     out[key] = {
                         "episode_pg_id": None,
+                        "episode_scope_key": None,
                         "parent_episode_id": None,
                         "basket": None,
                         "prev_trade_date": previous_trade_date,
@@ -939,71 +957,72 @@ def read_r03_rotation_recovery_states(
                             "reason": rsn,
                         },
                     }
-            miss_sql = """
-                SELECT DISTINCT ON (e.board_kind, e.board_id)
-                       e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+
+            # 缺中间日或跨版本前态恢复：先查同 prev_scope，若 allow_cross_version_recovery 则允许沿同 contract_version 最近已完成日接续
+            miss_cond = (
+                "b.contract_version=%s AND b.trade_date <= %s"
+                if allow_cross_version_recovery
+                else "b.scope_key=%s AND b.contract_version=%s AND b.trade_date < %s"
+            )
+            miss_params: list[Any] = (
+                [contract_version, previous_trade_date]
+                if allow_cross_version_recovery
+                else [prev_scope or scope_key, contract_version, previous_trade_date]
+            )
+            miss_mem = (
+                ""
+                if (allow_cross_version_recovery or prev_mem is None)
+                else " AND b.member_version=%s"
+            )
+            if miss_mem:
+                miss_params.append(prev_mem)
+            cur.execute(
+                f"""
+                SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
                        e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
                        s.trade_date, s.rotation_state, s.last_known_state, s.stale,
                        s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
-                       s.prev_mature_true, s.dq5, e.frozen_member_count
+                       s.prev_mature_true, s.dq5, e.frozen_member_count,
+                       b.scope_key, b.member_version, e.scope_key
                 FROM stock.r03_sector_rotation_board_day_facts b
                 JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
                 JOIN stock.r03_sector_rotation_day_states s
                   ON s.episode_id = e.id AND s.trade_date = b.trade_date
-                WHERE b.scope_key=%s AND b.contract_version=%s AND b.trade_date < %s
-            """
-            miss_params: list[Any] = [prev_scope, contract_version, previous_trade_date]
-            if prev_mem is not None:
-                miss_sql += " AND b.member_version=%s"
-                miss_params.append(prev_mem)
-            miss_sql += (
-                " ORDER BY e.board_kind, e.board_id, b.trade_date DESC, e.id DESC"
+                WHERE {miss_cond} {miss_mem}
+                ORDER BY b.board_kind, b.board_id, b.trade_date DESC,
+                         (b.scope_key = %s) DESC,
+                         (b.member_version = %s) DESC,
+                         e.id DESC
+                """,
+                tuple(miss_params) + (prev_scope or scope_key, prev_mem or ""),
             )
-            cur.execute(miss_sql, tuple(miss_params))
             for mr_row in cur.fetchall():
                 key = (str(mr_row[2]), str(mr_row[3]))
                 if key in out:
                     continue
-                ep_id = int(mr_row[0])
-                expected_fc = int(mr_row[21])
-                cur.execute(
-                    """
-                    SELECT entity_id, weight, b_price, p_price, in_s0, in_u0, in_h0
-                    FROM stock.r03_sector_rotation_basket_members
-                    WHERE episode_id=%s ORDER BY entity_id
-                    """,
-                    (ep_id,),
-                )
-                bm_rows = cur.fetchall()
-                if expected_fc <= 0 or len(bm_rows) != expected_fc:
-                    raise R03FormalSectorPgError(
-                        "R03_ROTATION_BASKET_CORRUPT",
-                        f"Episode({ep_id})冻结成员数声明{expected_fc}，实际子行{len(bm_rows)}，拒绝静默恢复。",
-                    )
-                eq_w = Fraction(1, expected_fc)
-                basket_rec = FrozenRotationBasket(
-                    episode_id=str(mr_row[1]),
-                    board_id=str(mr_row[3]),
-                    board_kind=str(mr_row[2]),
-                    t0_session=mr_row[4].isoformat(),
-                    members=tuple(x[0] for x in bm_rows),
-                    weights={x[0]: eq_w for x in bm_rows},
-                    b_prices={x[0]: Fraction(x[2]) for x in bm_rows},
-                    p_prices={x[0]: Fraction(x[3]) for x in bm_rows},
-                    s0_seed=frozenset(x[0] for x in bm_rows if x[4]),
-                    u0_up=frozenset(x[0] for x in bm_rows if x[5]),
-                    h0_strong=frozenset(x[0] for x in bm_rows if x[6]),
-                    s0_known=bool(mr_row[6]),
-                    u0_known=bool(mr_row[7]),
-                    h0_known=bool(mr_row[8]),
-                    left_censored=bool(mr_row[9]),
+                if not _is_partition_complete(
+                    mr_row[10], str(mr_row[22]), str(mr_row[23])
+                ):
+                    continue
+                basket_rec = _build_basket(
+                    int(mr_row[0]),
+                    str(mr_row[1]),
+                    str(mr_row[2]),
+                    str(mr_row[3]),
+                    mr_row[4],
+                    bool(mr_row[6]),
+                    bool(mr_row[7]),
+                    bool(mr_row[8]),
+                    bool(mr_row[9]),
+                    int(mr_row[21]),
                 )
                 out[key] = {
-                    "episode_pg_id": ep_id,
+                    "episode_pg_id": int(mr_row[0]),
+                    "episode_scope_key": str(mr_row[24]),
                     "parent_episode_id": mr_row[5],
                     "basket": basket_rec,
                     "prev_trade_date": mr_row[10],
-                    "missing_previous_session": True,
+                    "missing_previous_session": mr_row[10] < previous_trade_date,
                     "state_dict": {
                         "state": str(mr_row[11]),
                         "last_known_state": mr_row[12],
@@ -1015,6 +1034,69 @@ def read_r03_rotation_recovery_states(
                         "out_neg_streak": int(mr_row[18]),
                         "prev_mature_true": bool(mr_row[19]),
                         "dq5": Fraction(mr_row[20]) if mr_row[20] is not None else None,
+                    },
+                }
+        else:
+            mem_filter = " AND e.member_version=%s" if prev_mem is not None else ""
+            params_hist: list[Any] = [
+                prev_scope or scope_key,
+                contract_version,
+                before_trade_date,
+            ]
+            if prev_mem is not None:
+                params_hist.append(prev_mem)
+            cur.execute(
+                f"""
+                SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+                       e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
+                       s.trade_date, s.rotation_state, s.last_known_state, s.stale,
+                       s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
+                       s.prev_mature_true, s.dq5, e.frozen_member_count,
+                       e.scope_key, e.member_version
+                FROM stock.r03_sector_rotation_episodes e
+                JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
+                WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date < %s
+                {mem_filter}
+                ORDER BY e.board_kind, e.board_id, s.trade_date DESC, e.id DESC
+                """,
+                tuple(params_hist),
+            )
+            for r in cur.fetchall():
+                key = (str(r[2]), str(r[3]))
+                if key in out or not _is_partition_complete(
+                    r[10], str(r[22]), str(r[23])
+                ):
+                    continue
+                basket = _build_basket(
+                    int(r[0]),
+                    str(r[1]),
+                    str(r[2]),
+                    str(r[3]),
+                    r[4],
+                    bool(r[6]),
+                    bool(r[7]),
+                    bool(r[8]),
+                    bool(r[9]),
+                    int(r[21]),
+                )
+                out[key] = {
+                    "episode_pg_id": int(r[0]),
+                    "episode_scope_key": str(r[22]),
+                    "parent_episode_id": r[5],
+                    "basket": basket,
+                    "prev_trade_date": r[10],
+                    "missing_previous_session": False,
+                    "state_dict": {
+                        "state": str(r[11]),
+                        "last_known_state": r[12],
+                        "stale": bool(r[13]),
+                        "market_age": int(r[14]),
+                        "eval_age": int(r[15]),
+                        "accepted_once": bool(r[16]),
+                        "armed": bool(r[17]),
+                        "out_neg_streak": int(r[18]),
+                        "prev_mature_true": bool(r[19]),
+                        "dq5": Fraction(r[20]) if r[20] is not None else None,
                     },
                 }
         return out
@@ -1030,7 +1112,8 @@ def read_r03_rotation_timeline(
     member_version: str | None = None,
     as_of_date: date | None = None,
 ) -> dict[str, Any]:
-    """只读板块完整 Rotation Episode、冻结篮子成员、逐日状态及无 Episode 日级状态时间线（支持跨日新 scope 与完成状态校验）。"""
+    """只读板块完整 Rotation Episode、冻结篮子成员、逐日状态及跨版已完成状态时间线（按日逐分区校验完成态）。"""
+    complete_statuses = {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}
     with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
         _conn,
         cur,
@@ -1052,73 +1135,125 @@ def read_r03_rotation_timeline(
         bd_sql += " ORDER BY b.trade_date ASC"
         cur.execute(bd_sql, tuple(bd_params))
         bd_cols = [d[0] for d in cur.description]
-        board_day_facts = [
-            {
-                **dict(zip(bd_cols, br, strict=True)),
-                "trade_date": br[0].isoformat(),
-            }
-            for br in cur.fetchall()
-        ]
-        bd_ep_ids = sorted(
-            {
-                int(item["episode_id"])
-                for item in board_day_facts
-                if item.get("episode_id") is not None
-            }
-        )
-        ep_sql = """
-            SELECT id, episode_key, t0_session, parent_episode_id,
-                   frozen_member_count, s0_count, u0_count, h0_count,
-                   s0_known, u0_known, h0_known, left_censored
-            FROM stock.r03_sector_rotation_episodes
-            WHERE board_kind=%s AND board_id=%s AND contract_version=%s
-              AND (
-                  (scope_key=%s {mem_ep_clause})
-                  {id_ep_clause}
-              )
-        """.format(
-            mem_ep_clause="AND member_version=%s" if member_version is not None else "",
-            id_ep_clause="OR id = ANY(%s)" if bd_ep_ids else "",
-        )
-        ep_params: list[Any] = [board_kind, board_id, contract_version, scope_key]
-        if member_version is not None:
-            ep_params.append(member_version)
-        if bd_ep_ids:
-            ep_params.append(bd_ep_ids)
-        if as_of_date is not None:
-            ep_sql += " AND t0_session <= %s"
-            ep_params.append(as_of_date)
-        ep_sql += " ORDER BY t0_session ASC, id ASC"
-        cur.execute(ep_sql, tuple(ep_params))
-        ep_rows = cur.fetchall()
-        if not ep_rows and not board_day_facts:
+        raw_bd_rows = cur.fetchall()
+        if not raw_bd_rows:
             return {
                 "status": "NOT_COMPUTED",
                 "episodes": [],
                 "board_day_facts": [],
                 "reason": "该板块尚无正式 Rotation Episode 或日级状态事实。",
             }
-        check_day = as_of_date or (
-            date.fromisoformat(board_day_facts[-1]["trade_date"])
-            if board_day_facts
-            else None
-        )
-        if check_day is not None:
-            rot_prog_status, _rot_prog_exp = _read_r03_partition_progress_state(
-                cur,
-                trade_date=check_day,
-                business_table="stock.r03_sector_rotation_board_day_facts",
-                scope_key=scope_key,
-                member_version=member_version,
-                contract_version=contract_version,
+
+        prog_cache: dict[tuple[date, str, str], str | None] = {}
+
+        def _prog_status(td: date, sk: str, mv: str) -> str | None:
+            ck = (td, sk, mv)
+            if ck not in prog_cache:
+                pst, _ = _read_r03_partition_progress_state(
+                    cur,
+                    trade_date=td,
+                    business_table="stock.r03_sector_rotation_board_day_facts",
+                    scope_key=sk,
+                    member_version=mv,
+                    contract_version=contract_version,
+                )
+                prog_cache[ck] = pst
+            return prog_cache[ck]
+
+        latest_row = raw_bd_rows[-1]
+        latest_pst = _prog_status(latest_row[0], str(latest_row[6]), str(latest_row[7]))
+        if latest_pst not in complete_statuses:
+            return {
+                "status": "INCOMPLETE",
+                "episodes": [],
+                "board_day_facts": [],
+                "reason": "该板块 Rotation 目标日分区尚未完成验证，禁止读取半成品。",
+            }
+
+        completed_bd_rows = [
+            br
+            for br in raw_bd_rows
+            if _prog_status(br[0], str(br[6]), str(br[7])) in complete_statuses
+        ]
+        # 沿 episode_id -> parent_episode_id 收集跨版家族 episode_id，并回溯更早版本的已完成 board_day_facts
+        family_ep_ids: set[int] = {
+            int(br[1]) for br in completed_bd_rows if br[1] is not None
+        }
+        frontier = set(family_ep_ids)
+        while frontier:
+            cur.execute(
+                """
+                SELECT parent_episode_id
+                FROM stock.r03_sector_rotation_episodes
+                WHERE id = ANY(%s) AND parent_episode_id IS NOT NULL
+                """,
+                (sorted(frontier),),
             )
-            if rot_prog_status not in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}:
-                return {
-                    "status": "INCOMPLETE",
-                    "episodes": [],
-                    "board_day_facts": [],
-                    "reason": "该板块 Rotation 目标日分区尚未完成验证，禁止读取半成品。",
-                }
+            parents = {
+                int(r[0]) for r in cur.fetchall() if r[0] is not None
+            } - family_ep_ids
+            if not parents:
+                break
+            family_ep_ids.update(parents)
+            frontier = parents
+
+        all_bd_by_day: dict[date, Any] = {br[0]: br for br in completed_bd_rows}
+        if family_ep_ids:
+            hist_sql = """
+                SELECT b.trade_date, b.episode_id, b.rotation_state, b.pulse_raw_state,
+                       b.last_known_state, b.reason_code, b.scope_key, b.member_version
+                FROM stock.r03_sector_rotation_board_day_facts b
+                WHERE b.board_kind=%s AND b.board_id=%s AND b.contract_version=%s
+                  AND b.episode_id = ANY(%s)
+            """
+            hist_params: list[Any] = [
+                board_kind,
+                board_id,
+                contract_version,
+                sorted(family_ep_ids),
+            ]
+            if as_of_date is not None:
+                hist_sql += " AND b.trade_date <= %s"
+                hist_params.append(as_of_date)
+            hist_sql += " ORDER BY b.trade_date ASC"
+            cur.execute(hist_sql, tuple(hist_params))
+            for hbr in cur.fetchall():
+                if (
+                    hbr[0] not in all_bd_by_day
+                    and _prog_status(hbr[0], str(hbr[6]), str(hbr[7]))
+                    in complete_statuses
+                ):
+                    all_bd_by_day[hbr[0]] = hbr
+
+        ordered_bd_rows = [all_bd_by_day[d] for d in sorted(all_bd_by_day)]
+        board_day_facts = [
+            {
+                **dict(zip(bd_cols, br, strict=True)),
+                "trade_date": br[0].isoformat(),
+            }
+            for br in ordered_bd_rows
+        ]
+        completed_days_by_ep: dict[int, set[date]] = {}
+        for br in ordered_bd_rows:
+            if br[1] is not None:
+                completed_days_by_ep.setdefault(int(br[1]), set()).add(br[0])
+
+        ep_rows: list[Any] = []
+        if family_ep_ids:
+            ep_sql = """
+                SELECT id, episode_key, t0_session, parent_episode_id,
+                       frozen_member_count, s0_count, u0_count, h0_count,
+                       s0_known, u0_known, h0_known, left_censored
+                FROM stock.r03_sector_rotation_episodes
+                WHERE id = ANY(%s)
+            """
+            ep_params: list[Any] = [sorted(family_ep_ids)]
+            if as_of_date is not None:
+                ep_sql += " AND t0_session <= %s"
+                ep_params.append(as_of_date)
+            ep_sql += " ORDER BY t0_session ASC, id ASC"
+            cur.execute(ep_sql, tuple(ep_params))
+            ep_rows = cur.fetchall()
         episodes = []
         for ep in ep_rows:
             ep_id = int(ep[0])
@@ -1148,7 +1283,12 @@ def read_r03_rotation_timeline(
             st_sql += " ORDER BY trade_date ASC"
             cur.execute(st_sql, tuple(st_params))
             s_cols = [d[0] for d in cur.description]
-            states = [dict(zip(s_cols, sr, strict=True)) for sr in cur.fetchall()]
+            allowed_days = completed_days_by_ep.get(ep_id, set())
+            states = [
+                dict(zip(s_cols, sr, strict=True))
+                for sr in cur.fetchall()
+                if not allowed_days or sr[0] in allowed_days
+            ]
             episodes.append(
                 {
                     "episode_pg_id": ep_id,

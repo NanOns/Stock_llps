@@ -6728,6 +6728,11 @@ def _execute_shared_production_chain_impl(
         stage_code: str | None,
         error: Exception,
         message_prefix: str,
+        unit_source_capture_id: int | None = None,
+        profile_revision: str | None = None,
+        producer_version: str | None = None,
+        industry_snapshot_id: int | None = None,
+        concept_snapshot_id: int | None = None,
     ) -> None:
         error_code = str(getattr(error, "code", type(error).__name__))
         for unit in units:
@@ -6756,160 +6761,89 @@ def _execute_shared_production_chain_impl(
                 status="INCOMPLETE",
                 error_code=error_code,
                 error_message=f"{message_prefix}：{str(error)[:500]}",
-                source_capture_id=source_capture_id,
+                source_capture_id=unit_source_capture_id
+                if unit_source_capture_id is not None
+                else source_capture_id,
+                profile_revision=profile_revision,
+                producer_version=producer_version,
+                industry_snapshot_id=industry_snapshot_id,
+                concept_snapshot_id=concept_snapshot_id,
             )
             resolved_unit_keys.add(unit_key(unit))
 
     def _invalidate_r03_for_upstream_recompute(
         from_session: date,
         *,
+        upstream_module: str = "CORE_PROFILE",
         profile_revision_filter: str | None = None,
+        universe_version_filter: str | None = None,
     ) -> None:
+        """与清理路径共享同一 _resolve_r03_upstream_cascade_plan 与精确事务失效实现。"""
         from stock_a.storage.postgres import source_raw as _sr_inv
-        from stock_a.storage.postgres.data_jobs import (
-            _escape_like_literal,
-            _parse_r03_scope_and_member,
-        )
-        from stock_a.storage.postgres.r03_formal_sector import invalidate_r03_from_date
 
-        if profile_revision_filter:
-            scope_cond = "scope_key = %s"
-            scope_arg = f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision_filter}:NON_PIT"
+        if upstream_module == "CROSS_SECTION":
+            v_key: dict[str, Any] = {
+                "price_capture_id": source_capture_id,
+                "universe_version": universe_version_filter,
+            }
+        elif upstream_module == "CORE_PROFILE":
+            if not profile_revision_filter:
+                return
+            v_key = {
+                "source_capture_id": source_capture_id,
+                "profile_revision": profile_revision_filter,
+            }
         else:
-            scope_cond = "scope_key LIKE %s ESCAPE '\\'"
-            scope_arg = _escape_like_literal(f"BAOSTOCK_CAP_{source_capture_id}:") + "%"
-
-        affected_partitions: set[tuple[date, str, str]] = set()
-        affected_scopes_by_min_day: dict[str, date] = {}
-        with _sr_inv._transaction(config, write=False, statement_timeout_ms=5000) as (
+            v_key = {
+                "source_capture_id": source_capture_id,
+                "profile_revision": profile_revision_filter,
+            }
+        versions_arg = [{"target_session": from_session, "version_key": v_key}]
+        with _sr_inv._transaction(config, write=True, statement_timeout_ms=10000) as (
             _c,
             _cur,
             _,
         ):
-            for tbl in (
-                "stock.r03_sector_native_day_facts",
-                "stock.r03_sector_rotation_board_day_facts",
-            ):
-                _cur.execute(
-                    f"""
-                    SELECT DISTINCT trade_date, scope_key, member_version
-                    FROM {tbl}
-                    WHERE trade_date >= %s AND {scope_cond}
-                    """,
-                    (from_session, scope_arg),
-                )
-                for td, sk, mv in _cur.fetchall():
-                    if sk:
-                        affected_partitions.add((td, str(sk), str(mv)))
-                        if (
-                            str(sk) not in affected_scopes_by_min_day
-                            or td < affected_scopes_by_min_day[str(sk)]
-                        ):
-                            affected_scopes_by_min_day[str(sk)] = td
-            _cur.execute(
-                f"""
-                SELECT DISTINCT episode_id, trade_date
-                FROM stock.r03_sector_rotation_board_day_facts
-                WHERE episode_id IS NOT NULL AND trade_date >= %s AND {scope_cond}
-                """,
-                (from_session, scope_arg),
+            r03_plan = data_job_pg._resolve_r03_upstream_cascade_plan(
+                _cur,
+                module_code=upstream_module,
+                versions=versions_arg,
+                cutoff=cutoff,
             )
-            ep_cutoffs: dict[int, date] = {}
-            for ep_id, td in _cur.fetchall():
-                ep_i = int(ep_id)
-                if ep_i not in ep_cutoffs or td < ep_cutoffs[ep_i]:
-                    ep_cutoffs[ep_i] = td
-            for ep_i, min_ep_d in ep_cutoffs.items():
+            if not (
+                r03_plan["sector_partitions"]
+                or r03_plan["rotation_episode_cutoffs"]
+                or r03_plan["market_partitions"]
+            ):
+                return
+            _cnts, _sess, inv_rows = (
+                data_job_pg.apply_r03_upstream_cascade_invalidation(
+                    _cur,
+                    r03_plan=r03_plan,
+                    cutoff=cutoff,
+                    current_job_id=job_id,
+                    error_code="UPSTREAM_RECOMPUTED",
+                    error_message="上游输入已修订重算，R03后继需按依赖重算。",
+                )
+            )
+            for inv_jid in {r[0] for r in inv_rows}:
                 _cur.execute(
                     """
-                    SELECT DISTINCT trade_date, scope_key, member_version
-                    FROM stock.r03_sector_rotation_board_day_facts
-                    WHERE episode_id = %s AND trade_date >= %s
+                    UPDATE stock.data_jobs j
+                    SET status='INCOMPLETE',
+                        completed_units=(
+                            SELECT count(*) FROM stock.data_job_progress p
+                            WHERE p.job_id=j.job_id
+                              AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE','CLEARED',
+                                               'SKIPPED_BY_USER','SKIPPED_NOT_IMPLEMENTED')
+                        ),
+                        last_error_code='UPSTREAM_RECOMPUTED',
+                        last_error_message='上游输入已修订重算，R03板块后继需重算。',
+                        updated_at=clock_timestamp(), completed_at=clock_timestamp()
+                    WHERE job_id=%s AND status IN ('COMPLETED','NO_CHANGE')
                     """,
-                    (ep_i, min_ep_d),
+                    (inv_jid,),
                 )
-                for td, sk, mv in _cur.fetchall():
-                    if sk:
-                        affected_partitions.add((td, str(sk), str(mv)))
-                        if (
-                            str(sk) not in affected_scopes_by_min_day
-                            or td < affected_scopes_by_min_day[str(sk)]
-                        ):
-                            affected_scopes_by_min_day[str(sk)] = td
-        for sk, min_d in affected_scopes_by_min_day.items():
-            invalidate_r03_from_date(
-                config,
-                from_trade_date=min_d,
-                scope_key=sk,
-                include_formal_market=False,
-            )
-        if affected_partitions:
-            r03_prog_tables = [
-                "stock.r03_sector_native_day_facts",
-                "stock.r03_sector_rotation_board_day_facts",
-                "stock.r03_sector_rotation_episodes",
-                "stock.r03_sector_rotation_day_states",
-                "stock.r03_sector_overlap_clusters",
-                "stock.r03_sector_loo_support_facts",
-            ]
-            with _sr_inv._transaction(
-                config, write=True, statement_timeout_ms=5000
-            ) as (
-                _c,
-                _cur,
-                _,
-            ):
-                inv_job_ids: set[Any] = set()
-                for td, sk, mv in sorted(affected_partitions):
-                    c_id, p_rev, i_id, co_id = _parse_r03_scope_and_member(sk, mv)
-                    p_conds = ["target_session=%s", "business_table=ANY(%s)"]
-                    p_args: list[Any] = [td, r03_prog_tables]
-                    if c_id is not None:
-                        p_conds.append("source_capture_id=%s")
-                        p_args.append(c_id)
-                    if p_rev is not None:
-                        p_conds.append("profile_revision=%s")
-                        p_args.append(p_rev)
-                    if i_id is not None:
-                        p_conds.append("industry_snapshot_id=%s")
-                        p_args.append(i_id)
-                    if co_id is not None:
-                        p_conds.append("concept_snapshot_id=%s")
-                        p_args.append(co_id)
-                    p_args.extend([job_id, job_id])
-                    _cur.execute(
-                        f"""
-                        UPDATE stock.data_job_progress
-                        SET status='NOT_COMPUTED', completed_units=0, expected_rows=NULL,
-                            verified_rows=NULL, error_code='UPSTREAM_RECOMPUTED',
-                            error_message='上游输入已修订重算，R03板块后继需重算。',
-                            updated_at=clock_timestamp(), completed_at=NULL, verified_at=NULL
-                        WHERE {" AND ".join(p_conds)}
-                          AND status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
-                          AND (%s::uuid IS NULL OR job_id<>%s)
-                        RETURNING job_id
-                        """,
-                        tuple(p_args),
-                    )
-                    inv_job_ids.update(r[0] for r in _cur.fetchall())
-                for inv_jid in inv_job_ids:
-                    _cur.execute(
-                        """
-                        UPDATE stock.data_jobs j
-                        SET status='INCOMPLETE',
-                            completed_units=(
-                                SELECT count(*) FROM stock.data_job_progress p
-                                WHERE p.job_id=j.job_id
-                                  AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE','CLEARED',
-                                                   'SKIPPED_BY_USER','SKIPPED_NOT_IMPLEMENTED')
-                            ),
-                            last_error_code='UPSTREAM_RECOMPUTED',
-                            last_error_message='上游输入已修订重算，R03板块后继需重算。',
-                            updated_at=clock_timestamp(), completed_at=clock_timestamp()
-                        WHERE job_id=%s AND status IN ('COMPLETED','NO_CHANGE')
-                        """,
-                        (inv_jid,),
-                    )
 
     prepared_sector_snapshots = plan.get("_prepared_sector_snapshots")
     if (
@@ -7298,7 +7232,11 @@ def _execute_shared_production_chain_impl(
                     plan.get("operation") == "RECOMPUTE"
                     and report.get("status") != "NO_CHANGE"
                 ):
-                    _invalidate_r03_for_upstream_recompute(day)
+                    _invalidate_r03_for_upstream_recompute(
+                        day,
+                        upstream_module="CROSS_SECTION",
+                        universe_version_filter=report.get("universe_version"),
+                    )
             except Exception as error:  # noqa: BLE001
                 mark_units_incomplete(
                     day_units,
@@ -7505,6 +7443,9 @@ def _execute_shared_production_chain_impl(
                             universe_version=formal_breadth_res.get(
                                 "universe_version_t"
                             ),
+                            universe_version_t3=formal_breadth_res.get(
+                                "universe_version_t3"
+                            ),
                             research_cutoff=cutoff,
                         )
                         expected_rows = 1
@@ -7516,6 +7457,43 @@ def _execute_shared_production_chain_impl(
                             raise DataJobError(
                                 "MARKET_BREADTH_ROW_COUNT_MISMATCH",
                                 "正式市场宽度日级事实行数与预期(1)不一致。",
+                                status=409,
+                            )
+                        with _sr_mkt._transaction(
+                            config, write=False, statement_timeout_ms=5000
+                        ) as (_rc, _rcur, _):
+                            _rcur.execute(
+                                """
+                                SELECT status, n_t, n_t3, n_common, n_eligible,
+                                       exact_numerator, exact_denominator
+                                FROM stock.r03_formal_market_breadth_facts
+                                WHERE trade_date=%s AND scope_key=%s
+                                  AND universe_version_t=%s AND universe_version_t3=%s
+                                  AND contract_version=%s
+                                """,
+                                (
+                                    day,
+                                    formal_breadth_res["scope_key"],
+                                    str(formal_breadth_res["universe_version_t"]),
+                                    str(formal_breadth_res["universe_version_t3"]),
+                                    R03_CONTRACT_VERSION,
+                                ),
+                            )
+                            _rb_row = _rcur.fetchone()
+                        _exp_ex = formal_breadth_res.get("exact") or {}
+                        _exp_tup = (
+                            str(formal_breadth_res["status"]),
+                            int(formal_breadth_res["n_t"]),
+                            int(formal_breadth_res["n_t3"]),
+                            int(formal_breadth_res["n_common"]),
+                            int(formal_breadth_res["n_eligible"]),
+                            _exp_ex.get("numerator"),
+                            _exp_ex.get("denominator"),
+                        )
+                        if _rb_row is None or tuple(_rb_row) != _exp_tup:
+                            raise DataJobError(
+                                "MARKET_BREADTH_CROSS_TRANSACTION_READBACK_MISMATCH",
+                                f"正式市场宽度异连接读回与计算不一致：readback={_rb_row}, expected={_exp_tup}",
                                 status=409,
                             )
                         progress_callback(
@@ -7687,6 +7665,7 @@ def _execute_shared_production_chain_impl(
         ):
             _invalidate_r03_for_upstream_recompute(
                 day,
+                upstream_module="CORE_PROFILE",
                 profile_revision_filter=profile.get("profile_revision"),
             )
 
@@ -8171,7 +8150,11 @@ def _execute_shared_production_chain_impl(
                 if plan.get("operation") == "RECOMPUTE" and str(
                     source_result.get("status")
                 ) not in {"IDEMPOTENT_READBACK", "NO_CHANGE"}:
-                    _invalidate_r03_for_upstream_recompute(day)
+                    _invalidate_r03_for_upstream_recompute(
+                        day,
+                        upstream_module="D0",
+                        profile_revision_filter=profile_revision,
+                    )
             except Exception as error:  # noqa: BLE001 - 故障按真实单日域披露。
                 mark_units_incomplete(
                     day_units,
@@ -9227,6 +9210,9 @@ def _execute_shared_production_chain_impl(
             ]
             if not day_units:
                 continue
+            cap_t = source_capture_id
+            profile_revision = None
+            resolved_snapshots: dict[str, int] | None = None
             try:
                 cap_by_day = plan.get("endpoint_capture_ids_by_session")
                 cap_t = (
@@ -9255,25 +9241,64 @@ def _execute_shared_production_chain_impl(
                     if isinstance(cap_by_day, Mapping)
                     and t1_day is not None
                     and t1_day.isoformat() in cap_by_day
-                    else cap_t
+                    else (
+                        None
+                        if (
+                            t1_day is not None
+                            and isinstance(cap_by_day, Mapping)
+                            and cap_by_day
+                        )
+                        else cap_t
+                    )
                 )
                 cap_t3 = (
                     int(cap_by_day[t3_day.isoformat()])
                     if isinstance(cap_by_day, Mapping)
                     and t3_day is not None
                     and t3_day.isoformat() in cap_by_day
-                    else cap_t
+                    else (
+                        None
+                        if (
+                            t3_day is not None
+                            and isinstance(cap_by_day, Mapping)
+                            and cap_by_day
+                        )
+                        else cap_t
+                    )
                 )
 
                 def _safe_endpoint_profile_rev(
-                    ep_day: date | None, *, ep_cap: int
+                    ep_day: date | None, *, ep_cap: int | None
                 ) -> str | None:
-                    if ep_day is None:
+                    if ep_day is None or ep_cap is None:
                         return None
                     try:
                         return profile_revision_for_session(ep_day, capture_id=ep_cap)
-                    except DataJobError:
-                        return None
+                    except DataJobError as err:
+                        if err.code in {
+                            "SECTOR_PROFILE_SOURCE_NOT_CLOSED",
+                            "SECTOR_SEED_SCOPE_MISSING",
+                        }:
+                            return None
+                        if err.code == "SECTOR_PROFILE_REVISION_AMBIGUOUS":
+                            # 区分确实缺 Profile（0条）与多条完整 Profile 真歧义
+                            from stock_a.application.pg_price_profiles import (
+                                source_symbol_price_profile_snapshots,
+                            )
+
+                            cat = source_symbol_price_profile_snapshots(
+                                config, max_target_session=ep_day
+                            )
+                            cands = {
+                                it.get("profile_revision")
+                                for it in cat.get("snapshots", ())
+                                if it.get("target_session") == ep_day.isoformat()
+                                and it.get("source_capture_id") == ep_cap
+                                and it.get("complete") is True
+                            }
+                            if not cands:
+                                return None
+                        raise
 
                 prof_rev_t1 = _safe_endpoint_profile_rev(t1_day, ep_cap=cap_t1)
                 prof_rev_t3 = _safe_endpoint_profile_rev(t3_day, ep_cap=cap_t3)
@@ -9334,6 +9359,7 @@ def _execute_shared_production_chain_impl(
                     universe_version_t1=u_ver_t1,
                     universe_version_t3=u_ver_t3,
                     universe_capture_id=plan.get("_universe_source_capture_id"),
+                    strict_endpoints=True,
                     snapshot_ids=resolved_snapshots,
                     snapshot_ids_by_session=snaps_for_endpoints,
                     modules=day_modules,
@@ -9439,6 +9465,19 @@ def _execute_shared_production_chain_impl(
                         stage_code=str(failed_unit["stage_code"]),
                         error=error,
                         message_prefix="R03正式板块生产或独立读回未闭合",
+                        unit_source_capture_id=cap_t,
+                        profile_revision=profile_revision,
+                        producer_version=R03_CONTRACT_VERSION,
+                        industry_snapshot_id=(
+                            resolved_snapshots.get("INDUSTRY")
+                            if isinstance(resolved_snapshots, Mapping)
+                            else None
+                        ),
+                        concept_snapshot_id=(
+                            resolved_snapshots.get("CONCEPT")
+                            if isinstance(resolved_snapshots, Mapping)
+                            else None
+                        ),
                     )
                 incomplete_stage_errors.append(
                     (

@@ -3088,7 +3088,7 @@ def _resolve_r03_upstream_cascade_plan(
     versions: Sequence[Mapping[str, Any]],
     cutoff: date,
 ) -> dict[str, Any]:
-    """根据实际上游版本精确解析受影响的 R03 板块分区（含跨版 Episode 后继）与正式市场分区。"""
+    """根据实际上游版本精确解析受影响的 R03 板块分区（含无 Episode 后继、t+1/t+3 端点依赖与跨版 Episode 后继）与正式市场五元组分区。"""
     empty: dict[str, Any] = {
         "sector_partitions": set(),
         "rotation_episode_cutoffs": {},
@@ -3099,9 +3099,14 @@ def _resolve_r03_upstream_cascade_plan(
     if module_code not in {"D0", "CORE_PROFILE", "CROSS_SECTION"} or not versions:
         return empty
 
+    from stock_a.application.data_jobs import _load_official_sessions
+
+    _cal_id, _cal_rev, official_sessions = _load_official_sessions(cutoff)
+    sess_index = {d: idx for idx, d in enumerate(official_sessions)}
+
     sector_partitions: set[tuple[date, str, str, str]] = set()
     rotation_episode_cutoffs: dict[int, date] = {}
-    market_partitions: set[tuple[date, str, str]] = set()
+    market_partitions: set[tuple[date, str, str, str, str]] = set()
 
     for v in versions:
         v_day = (
@@ -3110,20 +3115,36 @@ def _resolve_r03_upstream_cascade_plan(
             else date.fromisoformat(str(v["target_session"]))
         )
         v_key = v["version_key"]
+        idx_v = sess_index.get(v_day)
+        next_1 = (
+            official_sessions[idx_v + 1]
+            if idx_v is not None and idx_v + 1 < len(official_sessions)
+            else None
+        )
+        next_3 = (
+            official_sessions[idx_v + 3]
+            if idx_v is not None and idx_v + 3 < len(official_sessions)
+            else None
+        )
+        endpoint_dep_days = [
+            d for d in (v_day, next_1, next_3) if d is not None and d <= cutoff
+        ]
+
         if module_code == "CORE_PROFILE":
             cap_id = int(v_key["source_capture_id"])
             prof_rev = str(v_key["profile_revision"])
             exact_scope = f"BAOSTOCK_CAP_{cap_id}:PROF_{prof_rev}:NON_PIT"
             scope_cond = "scope_key = %s"
             scope_arg = exact_scope
+            mkt_end = next_3 if (next_3 is not None and next_3 <= cutoff) else cutoff
             cursor.execute(
-                """SELECT trade_date, scope_key, contract_version
+                """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
                    FROM stock.r03_formal_market_breadth_facts
                    WHERE trade_date >= %s AND trade_date <= %s AND scope_key = %s""",
-                (v_day, cutoff, exact_scope),
+                (v_day, mkt_end, exact_scope),
             )
-            for td, sk, cv in cursor.fetchall():
-                market_partitions.add((td, str(sk), str(cv)))
+            for td, sk, ut, ut3, cv in cursor.fetchall():
+                market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
         elif module_code == "D0":
             cap_id = int(v_key["source_capture_id"])
             prof_rev = v_key.get("profile_revision")
@@ -3140,18 +3161,21 @@ def _resolve_r03_upstream_cascade_plan(
             scope_arg = _escape_like_literal(f"BAOSTOCK_CAP_{cap_id}:") + "%"
             if u_ver:
                 cursor.execute(
-                    """SELECT trade_date, scope_key, contract_version
+                    """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
                        FROM stock.r03_formal_market_breadth_facts
                        WHERE trade_date >= %s AND trade_date <= %s
                          AND (universe_version_t = %s OR universe_version_t3 = %s)""",
                     (v_day, cutoff, str(u_ver), str(u_ver)),
                 )
-                for td, sk, cv in cursor.fetchall():
-                    market_partitions.add((td, str(sk), str(cv)))
+                for td, sk, ut, ut3, cv in cursor.fetchall():
+                    market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
 
+        # 1. 扫描四张 R03 板块主表（含无 Episode 的 Overlap / LOO 独立分区）
         for tbl in (
             "stock.r03_sector_native_day_facts",
             "stock.r03_sector_rotation_board_day_facts",
+            "stock.r03_sector_overlap_clusters",
+            "stock.r03_sector_loo_support_facts",
         ):
             cursor.execute(
                 f"""SELECT DISTINCT trade_date, scope_key, member_version, contract_version
@@ -3161,6 +3185,22 @@ def _resolve_r03_upstream_cascade_plan(
             )
             for td, sk, mv, cv in cursor.fetchall():
                 sector_partitions.add((td, str(sk), str(mv), str(cv)))
+
+            # 2. 跨版 t+1 / t+3 端点依赖：若后续版本（换了 capture/profile/member）在 next_1/next_3 使用了前态，同样纳入（即使无 episode）
+            if len(endpoint_dep_days) > 1:
+                cursor.execute(
+                    f"""SELECT DISTINCT trade_date, scope_key, member_version, contract_version
+                        FROM {tbl}
+                        WHERE trade_date = ANY(%s)""",
+                    (endpoint_dep_days[1:],),
+                )
+                for td, sk, mv, cv in cursor.fetchall():
+                    # 若同 scope_key 或同 capture 或同日依赖，均受 v_day 变更影响（排除明确无关的其他 capture 且非跨版接续需谨慎：若为 t+1/t+3 官方端点，仅当同 capture 或存在跨版任务覆盖该端点时）
+                    if (
+                        str(sk).startswith(f"BAOSTOCK_CAP_{cap_id}:")
+                        or module_code == "CROSS_SECTION"
+                    ):
+                        sector_partitions.add((td, str(sk), str(mv), str(cv)))
 
         cursor.execute(
             f"""SELECT DISTINCT episode_id, trade_date
@@ -3176,8 +3216,27 @@ def _resolve_r03_upstream_cascade_plan(
             ):
                 rotation_episode_cutoffs[ep_i] = td
 
-    # 通过 Rotation Episode 追踪跨版（不同 capture/profile/member）的后继日级事实
+    # 通过 Rotation Episode 及 parent_episode_id 链追踪跨版（不同 capture/profile/member）的后继日级事实
     if rotation_episode_cutoffs:
+        ep_frontier = set(rotation_episode_cutoffs.keys())
+        while ep_frontier:
+            cursor.execute(
+                """SELECT id, t0_session
+                   FROM stock.r03_sector_rotation_episodes
+                   WHERE parent_episode_id = ANY(%s) AND t0_session <= %s""",
+                (sorted(ep_frontier), cutoff),
+            )
+            new_children = set()
+            for ch_id, ch_t0 in cursor.fetchall():
+                ch_i = int(ch_id)
+                if (
+                    ch_i not in rotation_episode_cutoffs
+                    or ch_t0 < rotation_episode_cutoffs[ch_i]
+                ):
+                    rotation_episode_cutoffs[ch_i] = ch_t0
+                    new_children.add(ch_i)
+            ep_frontier = new_children
+
         for ep_i, min_ep_d in list(rotation_episode_cutoffs.items()):
             cursor.execute(
                 """SELECT DISTINCT trade_date, scope_key, member_version, contract_version
@@ -3284,14 +3343,19 @@ def _resolve_r03_upstream_cascade_plan(
         m_list = sorted(market_partitions)
         m_dates = [m[0] for m in m_list]
         m_scopes = [m[1] for m in m_list]
-        m_contracts = [m[2] for m in m_list]
+        m_ut = [m[2] for m in m_list]
+        m_ut3 = [m[3] for m in m_list]
+        m_contracts = [m[4] for m in m_list]
         affected_sessions.update(m_dates)
         cursor.execute(
             """SELECT count(*)::bigint
                FROM stock.r03_formal_market_breadth_facts f
-               JOIN unnest(%s::date[], %s::text[], %s::text[]) AS m(td, sk, cv)
-                 ON f.trade_date=m.td AND f.scope_key=m.sk AND f.contract_version=m.cv""",
-            (m_dates, m_scopes, m_contracts),
+               JOIN unnest(%s::date[], %s::text[], %s::text[], %s::text[], %s::text[])
+                 AS m(td, sk, ut, ut3, cv)
+                 ON f.trade_date=m.td AND f.scope_key=m.sk
+                AND f.universe_version_t=m.ut AND f.universe_version_t3=m.ut3
+                AND f.contract_version=m.cv""",
+            (m_dates, m_scopes, m_ut, m_ut3, m_contracts),
         )
         cnt_m = int(cursor.fetchone()[0])
         if cnt_m:
@@ -3304,6 +3368,204 @@ def _resolve_r03_upstream_cascade_plan(
         "counts_by_table": counts_by_table,
         "affected_sessions": affected_sessions,
     }
+
+
+def apply_r03_upstream_cascade_invalidation(
+    cursor: Any,
+    *,
+    r03_plan: Mapping[str, Any],
+    cutoff: date,
+    current_job_id: UUID | None = None,
+    error_code: str = "DERIVED_RESULT_CLEARED",
+    error_message: str = "对应派生结果或其依赖的上游横截面/Profile/前态已清理；需按依赖重新生成。",
+) -> tuple[dict[str, int], set[date], list[tuple[Any, str]]]:
+    """根据 _resolve_r03_upstream_cascade_plan 的结果精确事务删除受影响 R03 分区并失效对应 data_job_progress。"""
+    r03_cascade_counts: dict[str, int] = {}
+    r03_cascade_sessions: set[date] = set()
+    invalidated_rows: list[tuple[Any, str]] = []
+
+    if r03_plan["sector_partitions"]:
+        part_list = sorted(r03_plan["sector_partitions"])
+        p_dates = [p[0] for p in part_list]
+        p_scopes = [p[1] for p in part_list]
+        p_mems = [p[2] for p in part_list]
+        p_contracts = [p[3] for p in part_list]
+        cursor.execute(
+            """DELETE FROM stock.r03_sector_loo_candidate_facts c
+               USING stock.r03_sector_loo_support_facts f,
+                     unnest(%s::date[], %s::text[], %s::text[], %s::text[]) AS p(td, sk, mv, cv)
+               WHERE c.loo_fact_id=f.id AND f.trade_date=p.td AND f.scope_key=p.sk
+                 AND f.member_version=p.mv AND f.contract_version=p.cv
+               RETURNING f.trade_date""",
+            (p_dates, p_scopes, p_mems, p_contracts),
+        )
+        for row in cursor.fetchall():
+            r03_cascade_counts["stock.r03_sector_loo_candidate_facts"] = (
+                r03_cascade_counts.get("stock.r03_sector_loo_candidate_facts", 0) + 1
+            )
+            r03_cascade_sessions.add(row[0])
+        for tbl in (
+            "stock.r03_sector_loo_support_facts",
+            "stock.r03_sector_overlap_pair_facts",
+            "stock.r03_sector_overlap_board_facts",
+            "stock.r03_sector_overlap_clusters",
+            "stock.r03_sector_rotation_board_day_facts",
+            "stock.r03_sector_native_day_facts",
+        ):
+            cursor.execute(
+                f"""DELETE FROM {tbl} t
+                    USING unnest(%s::date[], %s::text[], %s::text[], %s::text[]) AS p(td, sk, mv, cv)
+                    WHERE t.trade_date=p.td AND t.scope_key=p.sk
+                      AND t.member_version=p.mv AND t.contract_version=p.cv
+                    RETURNING t.trade_date""",
+                (p_dates, p_scopes, p_mems, p_contracts),
+            )
+            for row in cursor.fetchall():
+                r03_cascade_counts[tbl] = r03_cascade_counts.get(tbl, 0) + 1
+                r03_cascade_sessions.add(row[0])
+
+    if r03_plan["rotation_episode_cutoffs"]:
+        ep_ids = list(r03_plan["rotation_episode_cutoffs"].keys())
+        ep_dates = [r03_plan["rotation_episode_cutoffs"][eid] for eid in ep_ids]
+        cursor.execute(
+            """DELETE FROM stock.r03_sector_rotation_day_states s
+               USING unnest(%s::bigint[], %s::date[]) AS ep(eid, min_d)
+               WHERE s.episode_id=ep.eid AND s.trade_date>=ep.min_d AND s.trade_date<=%s
+               RETURNING s.trade_date""",
+            (ep_ids, ep_dates, cutoff),
+        )
+        for row in cursor.fetchall():
+            r03_cascade_counts["stock.r03_sector_rotation_day_states"] = (
+                r03_cascade_counts.get("stock.r03_sector_rotation_day_states", 0) + 1
+            )
+            r03_cascade_sessions.add(row[0])
+        cursor.execute(
+            """DELETE FROM stock.r03_sector_rotation_basket_members bm
+               WHERE bm.episode_id = ANY(%s::bigint[])
+                 AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=bm.episode_id)""",
+            (ep_ids,),
+        )
+        if cursor.rowcount:
+            r03_cascade_counts["stock.r03_sector_rotation_basket_members"] = (
+                cursor.rowcount
+            )
+        cursor.execute(
+            """UPDATE stock.r03_sector_rotation_episodes e SET parent_episode_id=NULL
+               WHERE e.parent_episode_id = ANY(%s::bigint[])
+                 AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=e.parent_episode_id)""",
+            (ep_ids,),
+        )
+        cursor.execute(
+            """DELETE FROM stock.r03_sector_rotation_episodes e
+               WHERE e.id = ANY(%s::bigint[])
+                 AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=e.id)""",
+            (ep_ids,),
+        )
+        if cursor.rowcount:
+            r03_cascade_counts["stock.r03_sector_rotation_episodes"] = cursor.rowcount
+
+    if r03_plan["market_partitions"]:
+        m_list = sorted(r03_plan["market_partitions"])
+        m_dates = [m[0] for m in m_list]
+        m_scopes = [m[1] for m in m_list]
+        m_ut = [m[2] for m in m_list]
+        m_ut3 = [m[3] for m in m_list]
+        m_contracts = [m[4] for m in m_list]
+        cursor.execute(
+            """DELETE FROM stock.r03_formal_market_breadth_facts f
+               USING unnest(%s::date[], %s::text[], %s::text[], %s::text[], %s::text[])
+                 AS m(td, sk, ut, ut3, cv)
+               WHERE f.trade_date=m.td AND f.scope_key=m.sk
+                 AND f.universe_version_t=m.ut AND f.universe_version_t3=m.ut3
+                 AND f.contract_version=m.cv
+               RETURNING f.trade_date""",
+            (m_dates, m_scopes, m_ut, m_ut3, m_contracts),
+        )
+        for row in cursor.fetchall():
+            r03_cascade_counts["stock.r03_formal_market_breadth_facts"] = (
+                r03_cascade_counts.get("stock.r03_formal_market_breadth_facts", 0) + 1
+            )
+            r03_cascade_sessions.add(row[0])
+
+    if r03_plan["sector_partitions"]:
+        r03_sector_prog_tables = [
+            "stock.r03_sector_native_day_facts",
+            "stock.r03_sector_rotation_board_day_facts",
+            "stock.r03_sector_rotation_episodes",
+            "stock.r03_sector_rotation_basket_members",
+            "stock.r03_sector_rotation_day_states",
+            "stock.r03_sector_overlap_clusters",
+            "stock.r03_sector_overlap_board_facts",
+            "stock.r03_sector_overlap_pair_facts",
+            "stock.r03_sector_loo_support_facts",
+            "stock.r03_sector_loo_candidate_facts",
+        ]
+        for td, sk, mv, _cv in sorted(r03_plan["sector_partitions"]):
+            c_id, p_rev, i_id, co_id = _parse_r03_scope_and_member(sk, mv)
+            p_conds = ["p.target_session=%s", "p.business_table=ANY(%s)"]
+            p_args: list[Any] = [td, r03_sector_prog_tables]
+            if c_id is not None:
+                p_conds.append("p.source_capture_id=%s")
+                p_args.append(c_id)
+            if p_rev is not None:
+                p_conds.append("p.profile_revision=%s")
+                p_args.append(p_rev)
+            if i_id is not None:
+                p_conds.append("p.industry_snapshot_id=%s")
+                p_args.append(i_id)
+            if co_id is not None:
+                p_conds.append("p.concept_snapshot_id=%s")
+                p_args.append(co_id)
+            p_args.extend([current_job_id, current_job_id])
+            cursor.execute(
+                f"""UPDATE stock.data_job_progress AS p
+                   SET status='NOT_COMPUTED',completed_units=0,expected_rows=NULL,
+                       verified_rows=NULL,inserted_rows=0,updated_rows=0,
+                       quality_status=NULL,error_code=%s,error_message=%s,
+                       deleted_rows=0,
+                       updated_at=clock_timestamp(),completed_at=NULL,verified_at=NULL
+                   WHERE {" AND ".join(p_conds)}
+                     AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
+                     AND (%s::uuid IS NULL OR p.job_id<>%s)
+                   RETURNING job_id, business_table""",
+                (error_code, error_message, *p_args),
+            )
+            invalidated_rows.extend(cursor.fetchall())
+
+    if r03_plan["market_partitions"]:
+        for td, sk, _ut, _ut3, _cv in sorted(r03_plan["market_partitions"]):
+            c_id, p_rev, _i_id, _co_id = _parse_r03_scope_and_member(sk, None)
+            m_conds = [
+                "p.target_session=%s",
+                "p.business_table='stock.r03_formal_market_breadth_facts'",
+            ]
+            m_args: list[Any] = [td]
+            if c_id is not None:
+                m_conds.append("p.source_capture_id=%s")
+                m_args.append(c_id)
+            if p_rev is not None:
+                m_conds.append("p.profile_revision=%s")
+                m_args.append(p_rev)
+            else:
+                m_conds.append("p.profile_revision IS NULL")
+            m_args.extend([current_job_id, current_job_id])
+            cursor.execute(
+                f"""UPDATE stock.data_job_progress AS p
+                   SET status='NOT_COMPUTED',completed_units=0,expected_rows=NULL,
+                       verified_rows=NULL,inserted_rows=0,updated_rows=0,
+                       quality_status=NULL,error_code=%s,
+                       error_message='正式市场宽度依赖的Profile或Universe已清理；需重新生成。',
+                       deleted_rows=0,
+                       updated_at=clock_timestamp(),completed_at=NULL,verified_at=NULL
+                   WHERE {" AND ".join(m_conds)}
+                     AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
+                     AND (%s::uuid IS NULL OR p.job_id<>%s)
+                   RETURNING job_id, business_table""",
+                (error_code, *m_args),
+            )
+            invalidated_rows.extend(cursor.fetchall())
+
+    return r03_cascade_counts, r03_cascade_sessions, invalidated_rows
 
 
 def _cleanup_preview_in_cursor(
@@ -5183,125 +5445,18 @@ def clear_derived_module(
                 "清理影响行数与预览不一致；事务回滚并保留原事实",
             )
 
-        r03_cascade_tables: list[str] = []
-        r03_cascade_sessions: set[date] = set()
-        r03_cascade_counts: dict[str, int] = {}
         r03_plan = _resolve_r03_upstream_cascade_plan(
             cursor, module_code=module_code, versions=preview["versions"], cutoff=cutoff
         )
-        if (
-            r03_plan["sector_partitions"]
-            or r03_plan["rotation_episode_cutoffs"]
-            or r03_plan["market_partitions"]
-        ):
-            r03_cascade_counts = {}
-            if r03_plan["sector_partitions"]:
-                part_list = sorted(r03_plan["sector_partitions"])
-                p_dates = [p[0] for p in part_list]
-                p_scopes = [p[1] for p in part_list]
-                p_mems = [p[2] for p in part_list]
-                p_contracts = [p[3] for p in part_list]
-                cursor.execute(
-                    """DELETE FROM stock.r03_sector_loo_candidate_facts c
-                       USING stock.r03_sector_loo_support_facts f,
-                             unnest(%s::date[], %s::text[], %s::text[], %s::text[]) AS p(td, sk, mv, cv)
-                       WHERE c.loo_fact_id=f.id AND f.trade_date=p.td AND f.scope_key=p.sk
-                         AND f.member_version=p.mv AND f.contract_version=p.cv
-                       RETURNING f.trade_date""",
-                    (p_dates, p_scopes, p_mems, p_contracts),
-                )
-                for row in cursor.fetchall():
-                    r03_cascade_counts["stock.r03_sector_loo_candidate_facts"] = (
-                        r03_cascade_counts.get(
-                            "stock.r03_sector_loo_candidate_facts", 0
-                        )
-                        + 1
-                    )
-                    r03_cascade_sessions.add(row[0])
-                for tbl in (
-                    "stock.r03_sector_loo_support_facts",
-                    "stock.r03_sector_overlap_pair_facts",
-                    "stock.r03_sector_overlap_board_facts",
-                    "stock.r03_sector_overlap_clusters",
-                    "stock.r03_sector_rotation_board_day_facts",
-                    "stock.r03_sector_native_day_facts",
-                ):
-                    cursor.execute(
-                        f"""DELETE FROM {tbl} t
-                            USING unnest(%s::date[], %s::text[], %s::text[], %s::text[]) AS p(td, sk, mv, cv)
-                            WHERE t.trade_date=p.td AND t.scope_key=p.sk
-                              AND t.member_version=p.mv AND t.contract_version=p.cv
-                            RETURNING t.trade_date""",
-                        (p_dates, p_scopes, p_mems, p_contracts),
-                    )
-                    for row in cursor.fetchall():
-                        r03_cascade_counts[tbl] = r03_cascade_counts.get(tbl, 0) + 1
-                        r03_cascade_sessions.add(row[0])
-            if r03_plan["rotation_episode_cutoffs"]:
-                ep_ids = list(r03_plan["rotation_episode_cutoffs"].keys())
-                ep_dates = [r03_plan["rotation_episode_cutoffs"][eid] for eid in ep_ids]
-                cursor.execute(
-                    """DELETE FROM stock.r03_sector_rotation_day_states s
-                       USING unnest(%s::bigint[], %s::date[]) AS ep(eid, min_d)
-                       WHERE s.episode_id=ep.eid AND s.trade_date>=ep.min_d AND s.trade_date<=%s
-                       RETURNING s.trade_date""",
-                    (ep_ids, ep_dates, cutoff),
-                )
-                for row in cursor.fetchall():
-                    r03_cascade_counts["stock.r03_sector_rotation_day_states"] = (
-                        r03_cascade_counts.get(
-                            "stock.r03_sector_rotation_day_states", 0
-                        )
-                        + 1
-                    )
-                    r03_cascade_sessions.add(row[0])
-                cursor.execute(
-                    """DELETE FROM stock.r03_sector_rotation_basket_members bm
-                       WHERE bm.episode_id = ANY(%s::bigint[])
-                         AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=bm.episode_id)""",
-                    (ep_ids,),
-                )
-                if cursor.rowcount:
-                    r03_cascade_counts["stock.r03_sector_rotation_basket_members"] = (
-                        cursor.rowcount
-                    )
-                cursor.execute(
-                    """UPDATE stock.r03_sector_rotation_episodes e SET parent_episode_id=NULL
-                       WHERE e.parent_episode_id = ANY(%s::bigint[])
-                         AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=e.parent_episode_id)""",
-                    (ep_ids,),
-                )
-                cursor.execute(
-                    """DELETE FROM stock.r03_sector_rotation_episodes e
-                       WHERE e.id = ANY(%s::bigint[])
-                         AND NOT EXISTS (SELECT 1 FROM stock.r03_sector_rotation_day_states s WHERE s.episode_id=e.id)""",
-                    (ep_ids,),
-                )
-                if cursor.rowcount:
-                    r03_cascade_counts["stock.r03_sector_rotation_episodes"] = (
-                        cursor.rowcount
-                    )
-            if r03_plan["market_partitions"]:
-                m_list = sorted(r03_plan["market_partitions"])
-                m_dates = [m[0] for m in m_list]
-                m_scopes = [m[1] for m in m_list]
-                m_contracts = [m[2] for m in m_list]
-                cursor.execute(
-                    """DELETE FROM stock.r03_formal_market_breadth_facts f
-                       USING unnest(%s::date[], %s::text[], %s::text[]) AS m(td, sk, cv)
-                       WHERE f.trade_date=m.td AND f.scope_key=m.sk AND f.contract_version=m.cv
-                       RETURNING f.trade_date""",
-                    (m_dates, m_scopes, m_contracts),
-                )
-                for row in cursor.fetchall():
-                    r03_cascade_counts["stock.r03_formal_market_breadth_facts"] = (
-                        r03_cascade_counts.get(
-                            "stock.r03_formal_market_breadth_facts", 0
-                        )
-                        + 1
-                    )
-                    r03_cascade_sessions.add(row[0])
-            r03_cascade_tables = [k for k, v in r03_cascade_counts.items() if v > 0]
+        r03_cascade_counts, r03_cascade_sessions, r03_inv_rows = (
+            apply_r03_upstream_cascade_invalidation(
+                cursor,
+                r03_plan=r03_plan,
+                cutoff=cutoff,
+                current_job_id=current_job_id,
+            )
+        )
+        r03_cascade_tables = [k for k, v in r03_cascade_counts.items() if v > 0]
 
         invalidated_tables = list(
             dict.fromkeys([*cleanup_count_tables, *r03_cascade_tables])
@@ -5432,83 +5587,7 @@ def clear_derived_module(
             ),
         )
         invalidated_rows = list(cursor.fetchall())
-        if r03_plan["sector_partitions"]:
-            r03_sector_prog_tables = [
-                "stock.r03_sector_native_day_facts",
-                "stock.r03_sector_rotation_board_day_facts",
-                "stock.r03_sector_rotation_episodes",
-                "stock.r03_sector_rotation_basket_members",
-                "stock.r03_sector_rotation_day_states",
-                "stock.r03_sector_overlap_clusters",
-                "stock.r03_sector_overlap_board_facts",
-                "stock.r03_sector_overlap_pair_facts",
-                "stock.r03_sector_loo_support_facts",
-                "stock.r03_sector_loo_candidate_facts",
-            ]
-            for td, sk, mv, _cv in sorted(r03_plan["sector_partitions"]):
-                c_id, p_rev, i_id, co_id = _parse_r03_scope_and_member(sk, mv)
-                p_conds = ["p.target_session=%s", "p.business_table=ANY(%s)"]
-                p_args: list[Any] = [td, r03_sector_prog_tables]
-                if c_id is not None:
-                    p_conds.append("p.source_capture_id=%s")
-                    p_args.append(c_id)
-                if p_rev is not None:
-                    p_conds.append("p.profile_revision=%s")
-                    p_args.append(p_rev)
-                if i_id is not None:
-                    p_conds.append("p.industry_snapshot_id=%s")
-                    p_args.append(i_id)
-                if co_id is not None:
-                    p_conds.append("p.concept_snapshot_id=%s")
-                    p_args.append(co_id)
-                p_args.extend([current_job_id, current_job_id])
-                cursor.execute(
-                    f"""UPDATE stock.data_job_progress AS p
-                       SET status='NOT_COMPUTED',completed_units=0,expected_rows=NULL,
-                           verified_rows=NULL,inserted_rows=0,updated_rows=0,
-                           quality_status=NULL,error_code='DERIVED_RESULT_CLEARED',
-                           error_message='对应派生结果或其依赖的上游横截面/Profile/前态已清理；需按依赖重新生成。',
-                           deleted_rows=0,
-                           updated_at=clock_timestamp(),completed_at=NULL,verified_at=NULL
-                       WHERE {" AND ".join(p_conds)}
-                         AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
-                         AND (%s::uuid IS NULL OR p.job_id<>%s)
-                       RETURNING job_id, business_table""",
-                    tuple(p_args),
-                )
-                invalidated_rows.extend(cursor.fetchall())
-        if r03_plan["market_partitions"]:
-            for td, sk, _cv in sorted(r03_plan["market_partitions"]):
-                c_id, p_rev, _i_id, _co_id = _parse_r03_scope_and_member(sk, None)
-                m_conds = [
-                    "p.target_session=%s",
-                    "p.business_table='stock.r03_formal_market_breadth_facts'",
-                ]
-                m_args: list[Any] = [td]
-                if c_id is not None:
-                    m_conds.append("p.source_capture_id=%s")
-                    m_args.append(c_id)
-                if p_rev is not None:
-                    m_conds.append("p.profile_revision=%s")
-                    m_args.append(p_rev)
-                else:
-                    m_conds.append("p.profile_revision IS NULL")
-                m_args.extend([current_job_id, current_job_id])
-                cursor.execute(
-                    f"""UPDATE stock.data_job_progress AS p
-                       SET status='NOT_COMPUTED',completed_units=0,expected_rows=NULL,
-                           verified_rows=NULL,inserted_rows=0,updated_rows=0,
-                           quality_status=NULL,error_code='DERIVED_RESULT_CLEARED',
-                           error_message='正式市场宽度依赖的Profile或Universe已清理；需重新生成。',
-                           deleted_rows=0,
-                           updated_at=clock_timestamp(),completed_at=NULL,verified_at=NULL
-                       WHERE {" AND ".join(m_conds)}
-                         AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
-                         AND (%s::uuid IS NULL OR p.job_id<>%s)
-                       RETURNING job_id, business_table""",
-                    tuple(m_args),
-                )
-                invalidated_rows.extend(cursor.fetchall())
+        invalidated_rows.extend(r03_inv_rows)
         invalidated_job_ids = {row[0] for row in invalidated_rows}
         downstream_invalidated_progress_count = sum(
             1 for row in invalidated_rows if row[1] in downstream_invalidated_tables
@@ -5701,6 +5780,7 @@ def read_business_table_count(
     followup_target_sessions: Sequence[date] | None = None,
     research_cutoff: date | None = None,
     universe_version: str | None = None,
+    universe_version_t3: str | None = None,
     universe_capture_id: int | None = None,
     cross_section_universe_capture_id: int | None = None,
     cross_section_universe_version: str | None = None,
@@ -6141,7 +6221,8 @@ def read_business_table_count(
             """SELECT count(*) FROM stock.r03_formal_market_breadth_facts
                WHERE trade_date=%s AND contract_version=%s
                  AND (%s::text IS NULL OR scope_key=%s)
-                 AND (%s::text IS NULL OR universe_version_t=%s)""",
+                 AND (%s::text IS NULL OR universe_version_t=%s)
+                 AND (%s::text IS NULL OR universe_version_t3=%s)""",
             lambda: (
                 target_session,
                 producer_version or "R03_FORMAL_SECTOR_V1",
@@ -6161,6 +6242,8 @@ def read_business_table_count(
                 ),
                 universe_version,
                 universe_version,
+                universe_version_t3,
+                universe_version_t3,
             ),
         ),
         "stock.source_market_participation_days": (
@@ -7807,8 +7890,12 @@ def mark_progress_unavailable(
     error_code: str,
     error_message: str,
     source_capture_id: int | None = None,
+    profile_revision: str | None = None,
+    producer_version: str | None = None,
+    industry_snapshot_id: int | None = None,
+    concept_snapshot_id: int | None = None,
 ) -> None:
-    """将有局部输入缺口的表单元留为未计算，不阻断其它独立阶段。"""
+    """将有局部输入缺口的表单元留为未计算，保留精确版本绑定以防被其他版本完成记录遮挡。"""
     if status not in {"NOT_COMPUTED", "NOT_DUE", "BLOCKED", "INCOMPLETE"}:
         raise DataJobPgError("DATA_JOB_STATUS_INVALID", "局部未计算状态不在允许范围")
     if source_capture_id is not None and (
@@ -7821,11 +7908,13 @@ def mark_progress_unavailable(
         cursor.execute(
             """UPDATE stock.data_job_progress
                SET status=%s,error_code=%s,error_message=%s,
-
                    source_capture_id=coalesce(%s,source_capture_id),
-                   profile_revision=NULL,producer_version=NULL,
+                   profile_revision=coalesce(%s,profile_revision),
+                   producer_version=coalesce(%s,producer_version),
                    profile_history_session_count=NULL,d1_history_session_count=NULL,
-                   calendar_revision=NULL,industry_snapshot_id=NULL,concept_snapshot_id=NULL,
+                   calendar_revision=NULL,
+                   industry_snapshot_id=coalesce(%s,industry_snapshot_id),
+                   concept_snapshot_id=coalesce(%s,concept_snapshot_id),
                    updated_at=clock_timestamp(),completed_at=NULL
                WHERE job_id=%s AND stage_code=%s AND target_session=%s
                  AND business_table=%s AND status IN ('NOT_STARTED','RUNNING')""",
@@ -7834,6 +7923,10 @@ def mark_progress_unavailable(
                 error_code,
                 error_message,
                 source_capture_id,
+                profile_revision,
+                producer_version,
+                industry_snapshot_id,
+                concept_snapshot_id,
                 job_id,
                 stage_code,
                 target_session,

@@ -334,6 +334,7 @@ def step_rotation_state_machine(
     breadth_delta1: Fraction | None,
     pulse_raw: Mapping[str, Any],
     basket_metrics: Mapping[str, Any] | None,
+    input_missing_reason: str | None = None,
 ) -> dict[str, Any]:
     """严格按 §11.3 10 步有序合同推进单个 Rotation 状态步。"""
     # 1. 精确合同/前态/坐标/日历错 -> 拒绝，不改旧终态
@@ -354,9 +355,39 @@ def step_rotation_state_machine(
     )
     is_active_state = (
         previous_episode_state is not None
-        and effective_prev_state not in {None, "NONE", "FAILED", "OUT"}
+        and effective_prev_state not in {None, "NONE", "FAILED", "OUT", "REJECTED"}
     )
     if is_active_state and basket_metrics is None:
+        if input_missing_reason is not None:
+            prev_age = int(previous_episode_state.get("eval_age", 0))
+            prev_market_age = int(previous_episode_state.get("market_age", prev_age))
+            prev_was_unknown = raw_prev_state == "UNKNOWN"
+            prev_mature_true = (
+                False
+                if prev_was_unknown
+                else bool(
+                    previous_episode_state.get(
+                        "prev_mature_true",
+                        previous_episode_state.get("mature_true", False),
+                    )
+                )
+            )
+            prev_dq5 = None if prev_was_unknown else previous_episode_state.get("dq5")
+            return {
+                "state": "UNKNOWN",
+                "last_known_state": str(effective_prev_state),
+                "stale": True,
+                "armed": False,
+                "market_age": prev_market_age + 1,
+                "eval_age": prev_age,
+                "accepted_once": bool(
+                    previous_episode_state.get("accepted_once", False)
+                ),
+                "out_neg_streak": 0,
+                "prev_mature_true": prev_mature_true,
+                "dq5": prev_dq5,
+                "reason": input_missing_reason,
+            }
         return {
             "state": "REJECTED",
             "reason": "ACTIVE_EPISODE_BASKET_MISSING",
