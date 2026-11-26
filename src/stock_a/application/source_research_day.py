@@ -818,6 +818,7 @@ def _persist_static_research_day(
         config, max_target_session=research_cutoff
     )
     matches = []
+    target_profile_candidates = []
     for snapshot in catalog["snapshots"]:
         if (
             snapshot["target_session"] != target_session.isoformat()
@@ -836,6 +837,21 @@ def _persist_static_research_day(
         _target, window, revision = resolve_pg_history_window(
             target_session.isoformat(), count
         )
+        target_profile_candidates.append(
+            {
+                "capture_id": snapshot.get("source_capture_id"),
+                "complete": snapshot.get("complete"),
+                "rows": snapshot.get("source_symbol_count"),
+                "expected_rows": snapshot.get("expected_source_symbol_count"),
+                "count": count,
+                "stored_calendar_revision": snapshot.get("history_calendar_revision"),
+                "expected_calendar_revision": revision,
+                "stored_start": snapshot.get("window_start"),
+                "expected_start": window[0].isoformat(),
+                "stored_end": snapshot.get("window_end"),
+                "expected_end": window[-1].isoformat(),
+            }
+        )
         if (
             snapshot["history_calendar_revision"] == revision
             and snapshot["window_start"] == window[0].isoformat()
@@ -845,7 +861,11 @@ def _persist_static_research_day(
     if len(matches) != 1:
         raise SourceResearchDayError(
             "STATIC_PROFILE_WINDOW_AMBIGUOUS",
-            "目标日没有唯一完整且符合现行语义的画像窗口",
+            "目标日没有唯一完整且符合现行语义的画像窗口："
+            f"target={target_session.isoformat()} capture={source_capture_id} "
+            f"expected_count={history_session_count!r} "
+            f"expected_rows={data_universe_expected_count!r} "
+            f"candidates={target_profile_candidates!r}",
         )
     history_count, history_window, profile_revision = matches[0]
     seed = compute_source_pool_seed(

@@ -4168,12 +4168,16 @@ def read_baostock_price_catalog(
         raise BaoStockPriceFactsError("CAPTURE_ID_INVALID", "来源捕获数字键无效")
     raw_filter = "" if source_capture_id is None else " AND d.raw_source_capture_id=%s"
     qfq_filter = "" if source_capture_id is None else " AND d.qfq_source_capture_id=%s"
+    expected_capture_filter = (
+        "" if source_capture_id is None else " AND r.capture_id=%s"
+    )
     parameters: tuple[Any, ...] = (
         cutoff,
         *((source_capture_id,) if source_capture_id is not None else ()),
         cutoff,
         *((source_capture_id,) if source_capture_id is not None else ()),
         cutoff,
+        *((source_capture_id,) if source_capture_id is not None else ()),
         cutoff,
     )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
@@ -4210,6 +4214,7 @@ def read_baostock_price_catalog(
                       AND s.session_date BETWEEN r.eligible_start_session
                                              AND r.eligible_end_session
                       AND r.range_end_session<=%s
+                      {expected_capture_filter}
                     GROUP BY s.session_date,s.coordinate
                ), fact_counts AS (
                    SELECT f.session_date,f.coordinate,
