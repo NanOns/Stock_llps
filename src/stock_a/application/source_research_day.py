@@ -9,9 +9,7 @@ import time
 from typing import Any, Mapping
 
 from stock_a.application.pg_price_profiles import (
-    SOURCE_SYMBOL_PROFILE_SCOPE,
     PG_PROFILE_MAX_HISTORY_SESSIONS,
-    _profile_revision,
     source_symbol_price_profile_snapshots,
 )
 from stock_a.application.research_window import resolve_pg_history_window
@@ -375,7 +373,7 @@ def persist_source_t1_forward_from_saved(
         "research_cutoff": research_cutoff.isoformat(),
         "source_capture_id": source_capture_id,
         "endpoint_source_capture_id": endpoint_source["source_capture_id"],
-        "profile_revision": seed_scope["profile_revision"],
+        "profile_revision": seed_scope.get("profile_revision"),
         "producer_contract": seed_scope["producer_contract"],
         "producer_version": seed_scope["producer_version"],
         "history_session_count": seed_scope["history_session_count"],
@@ -763,19 +761,12 @@ def _persist_static_research_day(
         _target, window, revision = resolve_pg_history_window(
             target_session.isoformat(), count
         )
-        expected_revision = _profile_revision(
-            scope=SOURCE_SYMBOL_PROFILE_SCOPE,
-            calendar_id=calendar["calendar_id"],
-            calendar_revision=revision,
-            history_session_count=count,
-        )
         if (
             snapshot["history_calendar_revision"] == revision
             and snapshot["window_start"] == window[0].isoformat()
             and snapshot["window_end"] == window[-1].isoformat()
-            and snapshot["profile_revision"] == expected_revision
         ):
-            matches.append((count, window, expected_revision))
+            matches.append((count, window, None))
     if len(matches) != 1:
         raise SourceResearchDayError(
             "STATIC_PROFILE_WINDOW_AMBIGUOUS",
@@ -796,8 +787,7 @@ def _persist_static_research_day(
         cross_section_universe_capture_id=cross_section_universe_capture_id,
     )
     if (
-        seed.get("profile_revision_matches_runtime") is not True
-        or seed.get("stored_profile_status") != "AVAILABLE"
+        seed.get("stored_profile_status") != "AVAILABLE"
         or seed.get("source_pool_total") != research_universe_expected_count
         or seed.get("price_coordinate") != "FORWARD_ADJUSTED"
     ):
@@ -841,12 +831,7 @@ def _persist_static_research_day(
         history_window=history_window,
         profile_revision=profile_revision,
     )
-    result["profile_revision"] = profile_revision
     for field in (
-        "cross_section_universe_capture_id",
-        "cross_section_universe_version",
-        "cross_section_contract_version",
-        "universe_match_status",
         "ranking_universe_count",
         "evaluation_universe_count",
         "rps_source",
@@ -1558,21 +1543,6 @@ def prepare_source_research_day(
         d0_facts=d0_rows,
         d1_structure_facts=d1_rows,
         d1_anchor_facts=anchor_rows,
-        cross_section_universe_capture_id=(
-            d1_cross_section_scope.get("universe_capture_id")
-            if isinstance(d1_cross_section_scope, Mapping)
-            else None
-        ),
-        cross_section_universe_version=(
-            d1_cross_section_scope.get("universe_version")
-            if isinstance(d1_cross_section_scope, Mapping)
-            else None
-        ),
-        cross_section_contract_version=(
-            d1_cross_section_scope.get("contract_version")
-            if isinstance(d1_cross_section_scope, Mapping)
-            else None
-        ),
     )
     _validate_day_facts(facts, include_d0=include_d0, include_d1=include_d1)
     report = _summarize_day(
@@ -1716,11 +1686,6 @@ def _summarize_day(
             ),
             "execution": d1.get("execution", {}),
             "reader_wall_seconds": d1_wall_seconds,
-            "cross_section_scope": {
-                "universe_capture_id": facts.cross_section_universe_capture_id,
-                "universe_version": facts.cross_section_universe_version,
-                "contract_version": facts.cross_section_contract_version,
-            },
         }
         if include_d1
         else {

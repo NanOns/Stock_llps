@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
-
 from datetime import date, datetime, timezone
-import re
 from typing import Any, Mapping
 
 from stock_a.domain.tri_state import (
@@ -18,8 +15,6 @@ from stock_a.storage.postgres.static_research_facts import (
     read_source_stock_seed_fact,
 )
 
-
-_PROFILE_REVISION = re.compile(PROFILE_REVISION_PATTERN)
 
 _SEED_QUALITY_FIELDS = (
     ("core.bias20_atr", "core_bias20_atr"),
@@ -81,7 +76,7 @@ def query_source_stock_seed_context(
     target_session: date,
     source_capture_id: int,
     source_symbol: str,
-    profile_revision: str | None,
+    profile_revision: str | None = None,
     expected_source_count: int,
     source_time_quality: str,
     source_clock_role: str,
@@ -92,32 +87,13 @@ def query_source_stock_seed_context(
         "target_session": target_session.isoformat(),
         "source_symbol": source_symbol,
         "source_capture_id": source_capture_id,
-        "profile_revision": profile_revision,
     }
-    if profile_revision is None:
-        return _unavailable(
-            status="NOT_COMPARABLE",
-            reason_code="PROFILE_REVISION_UNAVAILABLE",
-            message="没有唯一适用的画像修订；拒绝从其他修订选择Seed。",
-            identity=identity,
-        )
-    if (
-        not isinstance(profile_revision, str)
-        or _PROFILE_REVISION.fullmatch(profile_revision) is None
-    ):
-        return _unavailable(
-            status="NOT_COMPARABLE",
-            reason_code="PROFILE_REVISION_INVALID",
-            message="画像修订不是已登记的显式PROFILE修订标签。",
-            identity=identity,
-        )
 
     try:
         stored = read_source_stock_seed_fact(
             config,
             target_session=target_session,
             source_capture_id=source_capture_id,
-            profile_revision=profile_revision,
             source_symbol=source_symbol,
             expected_source_count=expected_source_count,
         )
@@ -150,7 +126,6 @@ def query_source_stock_seed_context(
         row["target_session"] != target_session
         or row["source_symbol"] != source_symbol
         or row["source_capture_id"] != source_capture_id
-        or str(row["profile_revision"]).strip() != profile_revision
         or row["source_time_quality"] != source_time_quality
         or row["source_clock_role"] != source_clock_role
         or _timestamp_identity(row["source_available_at"])

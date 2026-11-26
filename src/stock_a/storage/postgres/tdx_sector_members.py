@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
-
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -181,11 +179,10 @@ def _read_strength_inputs(
                       p.ret20::text,p.ret20_exact_numerator::text,
                       p.ret20_exact_denominator::text,p.ret20_quality,p.ret20_reason
                FROM stock.source_symbol_price_profiles p
-               WHERE p.target_session=%s AND p.source_capture_id=%s
-                 AND p.profile_revision=%s AND p.source_symbol=ANY(%s::text[])
+               WHERE p.target_session=%s AND p.source_symbol=ANY(%s::text[])
                ORDER BY p.source_symbol COLLATE "C"
             """,
-            (target_session, source_capture_id, profile_revision, list(missing)),
+            (target_session, list(missing)),
         )
         columns = [item.name for item in cursor.description]
         profile_records = [
@@ -214,10 +211,10 @@ def _read_strength_inputs(
             """SELECT source_symbol,session_date,count(*)::bigint,
                       count(DISTINCT source_capture_id)::bigint
                FROM stock.source_raw_daily
-               WHERE source_capture_id=%s AND source_symbol=ANY(%s::text[])
+               WHERE source_symbol=ANY(%s::text[])
                  AND session_date=ANY(%s::date[])
                GROUP BY source_symbol,session_date""",
-            (source_capture_id, list(missing), list(window_sessions)),
+            (list(missing), list(window_sessions)),
         )
         revision_rows = cursor.fetchall()
         fetched["revision_groups"] = len(revision_rows)
@@ -253,10 +250,10 @@ def _read_strength_inputs(
                       returned_fields,unit_contract_version,source_clock_role,
                       observed_started_at,observed_completed_at
                FROM stock.source_raw_daily
-               WHERE source_capture_id=%s AND source_symbol=ANY(%s::text[])
+               WHERE source_symbol=ANY(%s::text[])
                  AND session_date=ANY(%s::date[])
                ORDER BY source_symbol COLLATE "C",session_date""",
-            (source_capture_id, list(missing), list(window_sessions)),
+            (list(missing), list(window_sessions)),
         )
         columns = [item.name for item in cursor.description]
         fetched_rows = [
@@ -264,10 +261,6 @@ def _read_strength_inputs(
         ]
         fetched["raw_rows"] = len(fetched_rows)
         for row in fetched_rows:
-            if row.get("source_capture_id") != source_capture_id:
-                raise TdxSectorMembersPgError(
-                    "STRENGTH_RAW_CAPTURE_MISMATCH", "历史Raw行source_capture_id不一致"
-                )
             row["source_capture_id"] = int(row["source_capture_id"])
             row["raw_price_coordinate"] = "RAW_UNADJUSTED"
             row["qfq_price_coordinate"] = "FORWARD_ADJUSTED"
@@ -915,9 +908,7 @@ def query_latest_sector_source_observation(
         and profile.get("source_capture_id") == source_capture_id
     )
     source_capture_id = profile.get("source_capture_id") if has_exact_profile else None
-    profile_revision = (
-        selected_profile.get("profile_revision") if has_exact_profile else None
-    )
+    profile_revision = None
     try:
         with _transaction(config, write=False) as (_connection, cursor, _scope):
             cursor.execute(
@@ -977,17 +968,16 @@ LEFT JOIN LATERAL (
            )::bigint AS history_75_session_overlap_symbols
     FROM tdx_sector_members m
     JOIN source_symbol_price_profiles p
-      ON p.target_session=%s::date AND p.source_capture_id=%s
-     AND p.profile_revision=%s
+      ON %s
+     AND p.target_session=%s::date
      AND p.source_symbol=m.source_symbol
     JOIN tdx_sector_catalog c ON c.id=m.catalog_id
     WHERE c.snapshot_id=s.snapshot_id
 ) o ON TRUE
 ORDER BY s.source_kind""",
                 (
+                    has_exact_profile,
                     target_session,
-                    source_capture_id,
-                    profile_revision,
                 ),
             )
             columns = [column.name for column in cursor.description]
@@ -1856,13 +1846,6 @@ def query_sector_members(
         raise TdxSectorMembersPgError(
             "SOURCE_PACKAGE_ID_INVALID", "来源包ID必须是正BIGINT"
         )
-    if (
-        profile_revision is not None
-        and re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
-    ):
-        raise TdxSectorMembersPgError(
-            "PROFILE_REVISION_INVALID", "画像修订必须是显式完整画像修订标签"
-        )
 
     try:
         with _transaction(config, write=False) as (_connection, cursor, _scope):
@@ -1895,29 +1878,7 @@ FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
             source_time_quality = source_version["source_time_quality"]
             source_clock_role = source_version["source_clock_role"]
             source_available_at = source_version["source_available_at"]
-            cursor.execute(
-                """SELECT DISTINCT profile_revision COLLATE "C" AS profile_revision
-FROM source_symbol_price_profiles
-WHERE source_capture_id=%s AND target_session=%s::date
-ORDER BY 1""",
-                (source_capture_id, target_session),
-            )
-            profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
-            selected_profile = profile_revision
-            if selected_profile is None and len(profile_revisions) == 1:
-                selected_profile = profile_revisions[0]
-            elif selected_profile is None and len(profile_revisions) > 1:
-                raise TdxSectorMembersPgError(
-                    "PROFILE_REVISION_REQUIRED",
-                    "该来源集合有多个画像修订；必须显式选择profile revision",
-                )
-            elif (
-                selected_profile is not None
-                and selected_profile not in profile_revisions
-            ):
-                raise TdxSectorMembersPgError(
-                    "PROFILE_REVISION_NOT_FOUND", "精确来源集合中没有指定画像修订"
-                )
+            selected_profile = None
             cursor.execute(
                 """SELECT count(*)::bigint,
        count(r.source_symbol)::bigint,
@@ -1927,19 +1888,14 @@ ORDER BY 1""",
        count(p.source_symbol)::bigint
 FROM tdx_sector_members m
 JOIN tdx_sector_catalog c ON c.id=m.catalog_id
-LEFT JOIN source_raw_daily r ON r.source_capture_id=%s
-  AND r.source_symbol=m.source_symbol
+LEFT JOIN source_raw_daily r ON r.source_symbol=m.source_symbol
   AND r.session_date=%s::date
-LEFT JOIN source_symbol_price_profiles p ON p.source_capture_id=%s
-  AND p.target_session=%s::date
-  AND p.source_symbol=m.source_symbol AND p.profile_revision=%s
+LEFT JOIN source_symbol_price_profiles p ON p.target_session=%s::date
+  AND p.source_symbol=m.source_symbol
 WHERE c.snapshot_id=%s AND m.board_kind=%s AND m.board_native_id=%s""",
                 (
-                    source_capture_id,
                     target_session,
-                    source_capture_id,
                     target_session,
-                    selected_profile,
                     snapshot_id,
                     board_kind,
                     board_native_id,
@@ -1964,7 +1920,7 @@ WHERE snapshot_id=%s AND board_kind=%s AND board_native_id=%s""",
        (r.source_symbol IS NOT NULL) AS matched_b_t,
        r.bar_status, r.bar_reason, r.price_quality, r.price_reason,
        r.raw_open::text, r.raw_high::text, r.raw_low::text, r.raw_close::text,
-       p.profile_revision, p.price_window_status, p.price_window_reason,
+       NULL::text AS profile_revision, p.price_window_status, p.price_window_reason,
        p.target_bar_status, p.target_price_quality,
        p.ma5::text, p.ma5_quality, p.ma5_reason,
        p.ma10::text, p.ma10_quality, p.ma10_reason,
@@ -1980,20 +1936,15 @@ WHERE snapshot_id=%s AND board_kind=%s AND board_native_id=%s""",
        p.profile_reasons
 FROM tdx_sector_members m
 JOIN tdx_sector_catalog c ON c.id=m.catalog_id
-LEFT JOIN source_raw_daily r ON r.source_capture_id=%s
-  AND r.source_symbol=m.source_symbol
+LEFT JOIN source_raw_daily r ON r.source_symbol=m.source_symbol
   AND r.session_date=%s::date
-LEFT JOIN source_symbol_price_profiles p ON p.source_capture_id=%s
-  AND p.target_session=%s::date
-  AND p.source_symbol=m.source_symbol AND p.profile_revision=%s
+LEFT JOIN source_symbol_price_profiles p ON p.target_session=%s::date
+  AND p.source_symbol=m.source_symbol
 WHERE c.snapshot_id=%s AND m.board_kind=%s AND m.board_native_id=%s
 ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                 (
-                    source_capture_id,
                     target_session,
-                    source_capture_id,
                     target_session,
-                    selected_profile,
                     snapshot_id,
                     board_kind,
                     board_native_id,
@@ -2206,7 +2157,7 @@ def _breadth_source_version(
     *,
     target_session: date,
     source_capture_id: int,
-    profile_revision: str,
+    profile_revision: str | None,
     research_cutoff: date,
 ) -> dict[str, Any]:
     source = _read_baostock_capture_day(
@@ -2226,9 +2177,8 @@ def _breadth_source_version(
        count(DISTINCT source_symbol)::bigint,
        count(DISTINCT source_capture_id)::bigint
 FROM source_symbol_price_profiles
-WHERE source_capture_id=%s AND target_session=%s::date
-  AND profile_revision=%s""",
-        (source_capture_id, target_session, profile_revision),
+WHERE target_session=%s::date""",
+        (target_session,),
     )
     profile_counts = cursor.fetchone()
     if (
@@ -2307,15 +2257,10 @@ def _validate_breadth_request(
         or type(identities[2]) is not int
         or identities[0] <= 0
         or identities[2] <= 0
-        or any(
-            not isinstance(value, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, value) is None
-            for value in (identities[1], identities[3])
-        )
     ):
         raise TdxSectorMembersPgError(
             "BREADTH_PROFILE_IDENTITY_INVALID",
-            "两端必须提供正数来源包ID及显式完整画像修订",
+            "两端必须提供正数来源包ID",
         )
     if (
         type(offset) is not int
@@ -3274,13 +3219,6 @@ def query_sector_strength(
             "SOURCE_PACKAGE_ID_INVALID", "来源包ID必须是正BIGINT"
         )
     if (
-        profile_revision is not None
-        and re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
-    ):
-        raise TdxSectorMembersPgError(
-            "PROFILE_REVISION_INVALID", "画像修订必须为显式完整画像修订标签"
-        )
-    if (
         not official_calendar_id
         or not official_calendar_revision
         or not isinstance(window_sessions, (tuple, list))
@@ -3344,32 +3282,7 @@ FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
                 source_capture_id=source_capture_id,
                 research_cutoff=research_cutoff,
             )
-            cursor.execute(
-                """SELECT DISTINCT profile_revision
-FROM source_symbol_price_profiles
-               WHERE target_session=%s::date AND source_capture_id=%s
-ORDER BY profile_revision""",
-                (target_session, source_capture_id),
-            )
-            profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
-            selected_profile = profile_revision
-            if selected_profile is None and len(profile_revisions) == 1:
-                selected_profile = profile_revisions[0]
-            elif selected_profile is None and len(profile_revisions) > 1:
-                raise TdxSectorMembersPgError(
-                    "PROFILE_REVISION_REQUIRED",
-                    "目标日画像有多个修订，必须显式选择profile revision",
-                )
-            elif selected_profile is None:
-                raise TdxSectorMembersPgError(
-                    "PROFILE_REVISION_NOT_FOUND",
-                    "目标日画像没有已保存的Core修订",
-                )
-            elif selected_profile not in profile_revisions:
-                raise TdxSectorMembersPgError(
-                    "PROFILE_REVISION_NOT_FOUND",
-                    "目标日精确来源版本中不存在指定画像修订",
-                )
+            selected_profile = None
 
             validation_key = (
                 source_capture_id,
@@ -3678,9 +3591,11 @@ def _member_payload(row: Sequence[Any]) -> dict[str, Any]:
         profile_reasons,
     ) = row
     profile = None
-    if profile_revision is not None:
+    if price_window_status is not None:
         profile = {
-            "revision": str(profile_revision).strip(),
+            "revision": str(profile_revision).strip()
+            if profile_revision is not None
+            else None,
             "price_window_status": price_window_status,
             "price_window_reason": price_window_reason,
             "target_bar_status": target_bar_status,

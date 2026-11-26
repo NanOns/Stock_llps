@@ -192,7 +192,7 @@ def read_market_observation_sessions(
     research_cutoff: date,
     source_capture_id: int,
     price_coordinate: str = "FORWARD_ADJUSTED",
-    profile_revision: str,
+    profile_revision: str | None = None,
     profile_contract: dict[str, Any],
     history_session_count: int,
     allow_missing_market: bool = False,
@@ -214,7 +214,6 @@ def read_market_observation_sessions(
 
     previous: dict[str, dict[str, str]] = {}
     previous_scenarios = None
-    previous_profile_revision = None
     outputs = []
     for session in sessions:
         scenarios = {}
@@ -260,7 +259,6 @@ def read_market_observation_sessions(
                 target_session=session,
                 research_cutoff=research_cutoff,
                 source_capture_id=source_capture_id,
-                profile_revision=profile_revision,
                 profile_contract=profile_contract,
                 history_session_count=history_session_count,
                 include_rps_read=True,
@@ -278,13 +276,6 @@ def read_market_observation_sessions(
                     for symbol in indexes["LAUNCH_CONFIRM"]
                 },
             }
-        runtime_profile_revision = seed.get("runtime_profile_revision")
-        if (
-            previous_profile_revision is not None
-            and runtime_profile_revision is not None
-            and previous_profile_revision != runtime_profile_revision
-        ):
-            raise SourceObservationError("相邻会话即时画像计算修订不一致")
         symbols = set(seed["facts"])
         if any(set(index) != symbols for index in indexes.values()):
             raise SourceObservationError("D0和Seed来源池分母不一致")
@@ -359,7 +350,6 @@ def read_market_observation_sessions(
             }
         )
         previous, previous_scenarios = current, scenarios
-        previous_profile_revision = runtime_profile_revision
     return outputs
 
 
@@ -419,10 +409,6 @@ def assemble_observation_changes(
                                 ]["source_capture_id"],
                                 "price_coordinate": "FORWARD_ADJUSTED",
                                 "time_role": "NON_PIT_RETROSPECTIVE",
-                                "profile_revision": day["seed"].get("profile_revision"),
-                                "runtime_profile_revision": day["seed"].get(
-                                    "runtime_profile_revision"
-                                ),
                                 "stored_profile_status": day["seed"].get(
                                     "stored_profile_status"
                                 ),
@@ -436,7 +422,7 @@ def assemble_observation_changes(
                                 "producer_version"
                             ]
                             if signal in day["scenarios"]
-                            else day["seed"].get("runtime_profile_revision"),
+                            else day["seed"].get("producer_version"),
                             "memberships": memberships.get(symbol, []),
                             "membership_reason": None
                             if symbol in memberships
@@ -811,7 +797,7 @@ def attach_board_strengths(
     research_cutoff: date,
     source_capture_id: int,
     price_coordinate: str = "FORWARD_ADJUSTED",
-    profile_revision: str,
+    profile_revision: str | None = None,
 ) -> None:
     """在完整行业/GN成员上复用现役跨期强弱，缺画像时局部未知。"""
     if price_coordinate != "FORWARD_ADJUSTED":
@@ -893,7 +879,7 @@ def attach_board_strengths(
                     target_session=day["session"],
                     research_cutoff=research_cutoff,
                     source_capture_id=source_capture_id,
-                    profile_revision=profile_revision,
+                    profile_revision=None,
                     changed_only=False,
                     sort_by="delta20",
                     direction="STRONGER",
@@ -1629,8 +1615,6 @@ def prepare_d1_material_observation(
     concept_snapshot_id: str | None,
     include_source_symbol_structure_results: bool = False,
     include_impulse: bool = True,
-    cross_section_universe_version: str | None = None,
-    cross_section_universe_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """一次只读准备全池D1与成员事实，供同进程筛选分页复用。"""
     _target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1653,8 +1637,6 @@ def prepare_d1_material_observation(
             include_source_symbol_structure_results
         ),
         include_impulse=include_impulse,
-        cross_section_universe_version=cross_section_universe_version,
-        cross_section_universe_capture_id=cross_section_universe_capture_id,
     )
     snapshots = [
         read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)
@@ -1684,9 +1666,6 @@ def prepare_saved_d1_material_observation(
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
-    cross_section_universe_capture_id: int | None = None,
-    cross_section_universe_version: str | None = None,
-    cross_section_contract_version: str | None = None,
 ) -> dict[str, Any]:
     """只从D0/D1 typed PG事实组装现有全池材料视图，不扫描或计算Raw行情。"""
     _target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1700,9 +1679,6 @@ def prepare_saved_d1_material_observation(
         industry_snapshot_id=industry_snapshot_id,
         concept_snapshot_id=concept_snapshot_id,
         include_all_results=True,
-        cross_section_universe_capture_id=cross_section_universe_capture_id,
-        cross_section_universe_version=cross_section_universe_version,
-        cross_section_contract_version=cross_section_contract_version,
     )
     if saved.get("storage_status") != "SAVED":
         raise SourceObservationError("PG没有完整D1 typed事实，拒绝读时重算")
@@ -2327,7 +2303,6 @@ def read_d1_material_observation(
         "source_capture_id": source_capture_id,
         "price_coordinate": price_coordinate,
         "time_role": "NON_PIT_RETROSPECTIVE",
-        "profile_revision": "NOT_REQUIRED_FOR_D1_QFQ_MATERIAL_VIEW",
         "membership_availability": {
             "INDUSTRY": "AVAILABLE" if industry_snapshot_id is not None else "UNKNOWN",
             "CONCEPT": "AVAILABLE" if concept_snapshot_id is not None else "UNKNOWN",
@@ -2448,7 +2423,7 @@ def read_observation_board_details(
     board_native_id: str,
     source_capture_id: int,
     price_coordinate: str = "FORWARD_ADJUSTED",
-    profile_revision: str,
+    profile_revision: str | None = None,
     research_cutoff: date,
     rotation_start: date,
     profile_contract: dict[str, Any],
@@ -2514,7 +2489,7 @@ def read_observation_board_details(
         target_session=day["session"],
         research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
-        profile_revision=profile_revision,
+        profile_revision=None,
         changed_only=False,
         sort_by="delta20",
         direction="STRONGER",
@@ -2553,7 +2528,6 @@ def read_observation_board_details(
         research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
         price_coordinate=price_coordinate,
-        profile_revision=profile_revision,
         profile_contract=profile_contract,
         profile_history_session_count=day["seed"]["history_session_count"],
     )

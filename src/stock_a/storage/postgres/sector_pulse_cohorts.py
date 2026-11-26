@@ -34,7 +34,6 @@ _GROUP_COLUMNS = (
     "t0_session",
     "research_cutoff",
     "t0_source_capture_id",
-    "t0_profile_revision",
     "snapshot_id",
     "pulse_algorithm_contract",
     "cohort_contract",
@@ -81,18 +80,10 @@ _GROUP_BUSINESS_COLUMNS = _GROUP_COLUMNS
 _GROUP_KEY = (
     "t0_session",
     "research_cutoff",
-    "t0_source_capture_id",
-    "t0_profile_revision",
-    "snapshot_id",
-    "pulse_algorithm_contract",
-    "cohort_contract",
-    "followup_contract",
     "board_kind",
     "cohort_axis",
     "cohort_state",
     "horizon_sessions",
-    "calendar_id",
-    "calendar_revision",
 )
 
 
@@ -161,12 +152,9 @@ def prepare_sector_pulse_cohort_rows(
 
     pulse_identity = pulses[0]
     source_capture_id = t0_source.get("source_capture_id")
-    profile_revision = pulse_identity.get("profile_revision")
     if (
         type(source_capture_id) is not int
         or source_capture_id <= 0
-        or not isinstance(profile_revision, str)
-        or not profile_revision
         or pulse_identity.get("source_capture_id") != source_capture_id
     ):
         raise SectorPulseCohortPgError(
@@ -183,7 +171,6 @@ def prepare_sector_pulse_cohort_rows(
         snapshots = {row.get("snapshot_id") for row in kind_rows}
         versions = {
             (
-                row.get("profile_revision"),
                 row.get("source_capture_id"),
                 row.get("algorithm_contract"),
                 row.get("source_time_quality"),
@@ -220,7 +207,6 @@ def prepare_sector_pulse_cohort_rows(
             "t0_session": t0_session,
             "research_cutoff": research_cutoff,
             "t0_source_capture_id": source_capture_id,
-            "t0_profile_revision": profile_revision,
             "snapshot_id": identity["snapshot_id"],
             "pulse_algorithm_contract": _PULSE_CONTRACT,
             "cohort_contract": _COHORT_CONTRACT,
@@ -300,9 +286,7 @@ def _read_group_batch(
     *,
     t0_session: date,
     research_cutoff: date,
-    t0_source_capture_id: int,
-    t0_profile_revision: str,
-    snapshot_ids: Mapping[str, int],
+    board_kinds: Sequence[str],
     calendar_id: str,
     calendar_revision: str,
 ) -> list[dict[str, Any]]:
@@ -310,17 +294,14 @@ def _read_group_batch(
         f"""SELECT id,{", ".join(_GROUP_COLUMNS)}
 FROM {_GROUP_TABLE}
 WHERE t0_session=%s AND research_cutoff=%s
-  AND t0_source_capture_id=%s
-  AND t0_profile_revision=%s AND snapshot_id=ANY(%s::bigint[])
+  AND board_kind=ANY(%s::text[])
   AND pulse_algorithm_contract=%s AND cohort_contract=%s
   AND followup_contract=%s AND calendar_id=%s AND calendar_revision=%s
 ORDER BY board_kind,cohort_axis,horizon_sessions,cohort_state""",
         (
             t0_session,
             research_cutoff,
-            t0_source_capture_id,
-            t0_profile_revision,
-            list(snapshot_ids.values()),
+            list(board_kinds),
             _PULSE_CONTRACT,
             _COHORT_CONTRACT,
             _FOLLOWUP_CONTRACT,
@@ -349,14 +330,6 @@ def persist_sector_pulse_cohort_rows(
     calendar_identity: Mapping[str, str],
 ) -> dict[str, Any]:
     """在现有PULSE后继事务中原子幂等写入分组事实及原因计数。"""
-    pulse_rows = context["pulse_rows"]
-    identity = pulse_rows[0]
-    snapshot_ids = {
-        kind: next(
-            row["snapshot_id"] for row in pulse_rows if row["board_kind"] == kind
-        )
-        for kind in _KINDS
-    }
     expected_by_key = {
         tuple(
             row[index]
@@ -373,40 +346,30 @@ def persist_sector_pulse_cohort_rows(
         cursor,
         t0_session=context["t0_session"],
         research_cutoff=context["research_cutoff"],
-        t0_source_capture_id=context["t0_source_version"]["source_capture_id"],
-        t0_profile_revision=identity["profile_revision"],
-        snapshot_ids=snapshot_ids,
+        board_kinds=_KINDS,
         calendar_id=calendar_identity["calendar_id"],
         calendar_revision=calendar_identity["calendar_revision"],
     )
-    if existing and len(existing) != len(group_rows):
-        raise SectorPulseCohortPgError(
-            "PULSE_COHORT_PARTIAL_BATCH", "PG已有部分分组统计；拒绝覆盖不完整批次"
-        )
-    if existing and any(
-        not _group_matches(expected_by_key[_group_identity(row)], row)
-        for row in existing
-    ):
-        raise SectorPulseCohortPgError(
-            "PULSE_COHORT_CONTENT_CONFLICT", "同一T0分组业务键已有不同统计内容"
-        )
+    already_matched = len(existing) == len(group_rows) and all(
+        _group_matches(expected_by_key[_group_identity(row)], row) for row in existing
+    )
     inserted_groups = 0
-    if not existing:
+    if not already_matched:
         placeholders = ",".join(["%s"] * len(_GROUP_INSERT_COLUMNS))
         columns = ",".join(_GROUP_INSERT_COLUMNS)
+        update_columns = [col for col in _GROUP_INSERT_COLUMNS if col not in _GROUP_KEY]
+        update_clause = ",".join(f"{col}=EXCLUDED.{col}" for col in update_columns)
         cursor.executemany(
             f"INSERT INTO {_GROUP_TABLE} ({columns}) VALUES ({placeholders}) "
-            f"ON CONFLICT ({','.join(_GROUP_KEY)}) DO NOTHING",
+            f"ON CONFLICT ({','.join(_GROUP_KEY)}) DO UPDATE SET {update_clause}",
             list(group_rows),
         )
-        inserted_groups = cursor.rowcount
+        inserted_groups = len(group_rows)
     actual = _read_group_batch(
         cursor,
         t0_session=context["t0_session"],
         research_cutoff=context["research_cutoff"],
-        t0_source_capture_id=context["t0_source_version"]["source_capture_id"],
-        t0_profile_revision=identity["profile_revision"],
-        snapshot_ids=snapshot_ids,
+        board_kinds=_KINDS,
         calendar_id=calendar_identity["calendar_id"],
         calendar_revision=calendar_identity["calendar_revision"],
     )
@@ -441,23 +404,25 @@ def persist_sector_pulse_cohort_rows(
         (fact_id, scope, status, code): count
         for fact_id, scope, status, code, count in cursor.fetchall()
     }
-    if existing and existing_reasons != expected_reasons:
-        raise SectorPulseCohortPgError(
-            "PULSE_COHORT_REASON_CONTENT_CONFLICT", "同一分组原因业务键已有不同计数"
-        )
     inserted_reasons = 0
-    if not existing and expected_reasons:
-        cursor.executemany(
-            f"INSERT INTO {_REASON_TABLE} "
-            "(cohort_group_fact_id,reason_scope,quality_status,reason_code,board_relation_count) "
-            "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-            [
-                (*key, count)
-                for key, count in sorted(
-                    expected_reasons.items(), key=lambda item: item[0]
-                )
-            ],
+    if existing_reasons != expected_reasons:
+        cursor.execute(
+            f"DELETE FROM {_REASON_TABLE} WHERE cohort_group_fact_id=ANY(%s::bigint[])",
+            (parent_ids,),
         )
+        if expected_reasons:
+            cursor.executemany(
+                f"INSERT INTO {_REASON_TABLE} "
+                "(cohort_group_fact_id,reason_scope,quality_status,reason_code,board_relation_count) "
+                "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                [
+                    (*key, count)
+                    for key, count in sorted(
+                        expected_reasons.items(), key=lambda item: item[0]
+                    )
+                ],
+            )
+            inserted_reasons = cursor.rowcount
         inserted_reasons = cursor.rowcount
     cursor.execute(
         f"SELECT cohort_group_fact_id,reason_scope,quality_status,reason_code,board_relation_count "
@@ -602,9 +567,6 @@ def read_source_sector_pulse_cohort_groups(
     *,
     target_session: date,
     research_cutoff: date,
-    source_capture_id: int,
-    profile_revision: str,
-    snapshot_ids: Mapping[str, int],
     expected_board_counts: Mapping[str, int],
     calendar_id: str,
     calendar_revision: str,
@@ -615,9 +577,6 @@ def read_source_sector_pulse_cohort_groups(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or any(type(value) is not int or value <= 0 for value in (source_capture_id,))
-        or not isinstance(profile_revision, str)
-        or set(snapshot_ids) != set(_KINDS)
         or set(expected_board_counts) != set(_KINDS)
         or any(
             type(value) is not int or value < 0
@@ -639,9 +598,7 @@ def read_source_sector_pulse_cohort_groups(
             cursor,
             t0_session=target_session,
             research_cutoff=research_cutoff,
-            t0_source_capture_id=source_capture_id,
-            t0_profile_revision=profile_revision,
-            snapshot_ids={kind: snapshot_ids[kind] for kind in selected_kinds},
+            board_kinds=selected_kinds,
             calendar_id=calendar_id,
             calendar_revision=calendar_revision,
         )

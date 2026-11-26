@@ -76,7 +76,6 @@ def _readback_pulse_day(context: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "status": "AVAILABLE",
         "target_session": identity["target_session"].isoformat(),
-        "profile_revision": identity["profile_revision"],
         "source_version": context["t0_source_version"],
         "by_kind": by_kind,
     }
@@ -308,7 +307,6 @@ def run_source_sector_pulse_followup_day(
         "readback_saved_through": readback.get("saved_through"),
         "input": {
             "t0_source_capture_id": context["t0_source_version"]["source_capture_id"],
-            "profile_revision": context["pulse_rows"][0]["profile_revision"],
             "snapshot_ids": {
                 kind: next(
                     row["snapshot_id"]

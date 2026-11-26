@@ -19,7 +19,6 @@ from stock_a.domain.source_s2_t1_cohort import (
 from stock_a.storage.postgres.source_raw import _transaction
 
 _SEED_SCOPE_COLUMNS = (
-    "profile_revision",
     "producer_contract",
     "producer_version",
     "history_session_count",
@@ -34,7 +33,7 @@ _SEED_SCOPE_COLUMNS = (
     "source_count",
     "distinct_source_count",
 )
-_SCOPE_SELECT = """SELECT profile_revision, producer_contract, producer_version,
+_SCOPE_SELECT = """SELECT producer_contract, producer_version,
        history_session_count, calendar_id, calendar_revision, research_mode,
        price_coordinate, source_capture_id, source_time_quality,
        source_clock_role, source_available_at, count(*)::bigint,
@@ -42,11 +41,11 @@ _SCOPE_SELECT = """SELECT profile_revision, producer_contract, producer_version,
     FROM source_pool_seed_day_facts
     WHERE target_session=%s AND source_capture_id=%s
       AND producer_version='SOURCE_POOL_SEED_CORE_PROFILE_R2'
-    GROUP BY profile_revision, producer_contract, producer_version,
+    GROUP BY producer_contract, producer_version,
              history_session_count, calendar_id, calendar_revision,
              research_mode, price_coordinate, source_capture_id,
              source_time_quality, source_clock_role, source_available_at
-    ORDER BY profile_revision, producer_version"""
+    ORDER BY producer_version"""
 
 
 class SourceS2T1CohortReadError(ValueError):
@@ -67,8 +66,10 @@ def _seed_scope(cursor: Any, *, session: date, source_capture_id: int):
     cursor.execute(_SCOPE_SELECT, (session, source_capture_id))
     scopes = cursor.fetchall()
     if len(scopes) != 1:
-        raise SourceS2T1CohortError("T0或T+1 Seed scope缺失或存在多个画像版本")
-    return dict(zip(_SEED_SCOPE_COLUMNS, scopes[0], strict=True))
+        raise SourceS2T1CohortError("T0或T+1 Seed scope缺失或存在多个有效分区")
+    scope = dict(zip(_SEED_SCOPE_COLUMNS, scopes[0], strict=True))
+    scope["profile_revision"] = ""
+    return scope
 
 
 def persist_source_s2_t1_cohort_in_transaction(
@@ -128,7 +129,6 @@ def persist_source_s2_t1_cohort_in_transaction(
              ON t1.source_symbol=t0.source_symbol
             AND t1.target_session=%s
             AND t1.source_capture_id=%s
-            AND t1.profile_revision=%s
             AND t1.producer_contract=%s
             AND t1.producer_version=%s
             AND t1.history_session_count=%s
@@ -148,7 +148,6 @@ def persist_source_s2_t1_cohort_in_transaction(
             AND p.scope='NON_PIT_EXPLORATORY'
            WHERE t0.target_session=%s
              AND t0.source_capture_id=%s
-             AND t0.profile_revision=%s
              AND t0.producer_contract=%s
              AND t0.producer_version=%s
              AND t0.history_session_count=%s
@@ -160,7 +159,6 @@ def persist_source_s2_t1_cohort_in_transaction(
         (
             endpoint_session,
             endpoint_source_capture_id,
-            endpoint_scope["profile_revision"],
             endpoint_scope["producer_contract"],
             endpoint_scope["producer_version"],
             endpoint_scope["history_session_count"],
@@ -173,7 +171,6 @@ def persist_source_s2_t1_cohort_in_transaction(
             calendar_revision,
             target_session,
             source_capture_id,
-            t0_scope["profile_revision"],
             t0_scope["producer_contract"],
             t0_scope["producer_version"],
             t0_scope["history_session_count"],

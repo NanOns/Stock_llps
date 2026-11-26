@@ -194,10 +194,8 @@ def _load_endpoint_observations(
     *,
     session: date,
     source_capture_id: int,
-    profile_revision: str | None,
     symbols: Sequence[str],
     price_coordinate: str = "FORWARD_ADJUSTED",
-    universe_version: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not symbols:
         return {}
@@ -209,99 +207,45 @@ def _load_endpoint_observations(
                raw_tradestatus_value, raw_tradestatus_quality,
                qfq_bar_status, qfq_open, qfq_high, qfq_low, qfq_close, qfq_price_quality
         FROM stock.source_raw_daily
-        WHERE source_capture_id=%s AND session_date=%s AND source_symbol=ANY(%s)
+        WHERE session_date=%s AND source_symbol=ANY(%s)
         """,
-        (source_capture_id, session, sym_list),
+        (session, sym_list),
     )
     raw_by_sym = {r[0]: r for r in cur.fetchall()}
 
-    prof_by_sym: dict[str, Any] = {}
-    prof_ambiguous: set[str] = set()
-    seed_by_sym: dict[str, str] = {}
-    seed_ambiguous: set[str] = set()
-    if profile_revision is not None:
-        prof_sql = """
-            SELECT source_symbol, ret1_exact_numerator, ret1_exact_denominator, ret1_quality,
-                   ret5_exact_numerator, ret5_exact_denominator, ret5_quality,
-                   ret20_exact_numerator, ret20_exact_denominator, ret20_quality,
-                   amount_ratio20_exact_numerator, amount_ratio20_exact_denominator, amount_ratio20_quality,
-                   ma20_exact_numerator, ma20_exact_denominator, ma20_quality
-            FROM stock.source_symbol_price_profiles
-            WHERE source_capture_id=%s AND target_session=%s AND profile_revision=%s
-              AND price_coordinate=%s AND source_symbol=ANY(%s)
+    cur.execute(
         """
-        prof_params: list[Any] = [
-            source_capture_id,
-            session,
-            profile_revision,
-            price_coordinate,
-            sym_list,
-        ]
-        cur.execute(prof_sql, tuple(prof_params))
-        for row in cur.fetchall():
-            sym = row[0]
-            if sym in prof_ambiguous:
-                continue
-            if sym in prof_by_sym:
-                prof_ambiguous.add(sym)
-                prof_by_sym.pop(sym, None)
-            else:
-                prof_by_sym[sym] = row
+        SELECT source_symbol, ret1_exact_numerator, ret1_exact_denominator, ret1_quality,
+               ret5_exact_numerator, ret5_exact_denominator, ret5_quality,
+               ret20_exact_numerator, ret20_exact_denominator, ret20_quality,
+               amount_ratio20_exact_numerator, amount_ratio20_exact_denominator, amount_ratio20_quality,
+               ma20_exact_numerator, ma20_exact_denominator, ma20_quality
+        FROM stock.source_symbol_price_profiles
+        WHERE target_session=%s AND price_coordinate=%s AND source_symbol=ANY(%s)
+        """,
+        (session, price_coordinate, sym_list),
+    )
+    prof_by_sym = {row[0]: row for row in cur.fetchall()}
 
-        seed_sql = """
-            SELECT source_symbol, source_seed_state, universe_match_status,
-                   cross_section_universe_version
-            FROM stock.source_pool_seed_day_facts
-            WHERE source_capture_id=%s AND target_session=%s AND profile_revision=%s
-              AND price_coordinate=%s AND source_symbol=ANY(%s)
+    cur.execute(
         """
-        seed_params: list[Any] = [
-            source_capture_id,
-            session,
-            profile_revision,
-            price_coordinate,
-            sym_list,
-        ]
-        if universe_version is not None:
-            seed_sql += " AND cross_section_universe_version=%s"
-            seed_params.append(universe_version)
-        cur.execute(seed_sql, tuple(seed_params))
-        for sym, s_state, u_match, _cs_u_ver in cur.fetchall():
-            if universe_version is None:
-                seed_by_sym[sym] = "UNKNOWN"
-                continue
-            if sym in seed_ambiguous:
-                continue
-            if sym in seed_by_sym:
-                seed_ambiguous.add(sym)
-                seed_by_sym[sym] = "UNKNOWN"
-            elif u_match != "EXACT_MATCH":
-                seed_by_sym[sym] = "UNKNOWN"
-            else:
-                seed_by_sym[sym] = s_state
+        SELECT source_symbol, source_seed_state
+        FROM stock.source_pool_seed_day_facts
+        WHERE target_session=%s AND price_coordinate=%s AND source_symbol=ANY(%s)
+        """,
+        (session, price_coordinate, sym_list),
+    )
+    seed_by_sym = {sym: s_state for sym, s_state in cur.fetchall()}
 
-    cs_by_sym: dict[str, Any] = {}
-    cs_ambiguous: set[str] = set()
-    if universe_version is not None:
-        cs_sql = """
-            SELECT source_symbol, rps20, rps20_exact, rps20_quality
-            FROM stock.source_cross_section_day_facts
-            WHERE price_capture_id=%s AND target_session=%s AND price_coordinate=%s
-              AND universe_version=%s AND source_symbol=ANY(%s)
+    cur.execute(
         """
-        cur.execute(
-            cs_sql,
-            (source_capture_id, session, price_coordinate, universe_version, sym_list),
-        )
-        for row in cur.fetchall():
-            sym = row[0]
-            if sym in cs_ambiguous:
-                continue
-            if sym in cs_by_sym:
-                cs_ambiguous.add(sym)
-                cs_by_sym.pop(sym, None)
-            else:
-                cs_by_sym[sym] = row
+        SELECT source_symbol, rps20, rps20_exact, rps20_quality
+        FROM stock.source_cross_section_day_facts
+        WHERE target_session=%s AND price_coordinate=%s AND source_symbol=ANY(%s)
+        """,
+        (session, price_coordinate, sym_list),
+    )
+    cs_by_sym = {row[0]: row for row in cur.fetchall()}
 
     obs: dict[str, dict[str, Any]] = {}
     for sym in sym_list:
@@ -335,11 +279,15 @@ def _load_endpoint_observations(
                 q_pq,
             ) = raw[1:]
             raw_ohlc_ok = _is_valid_ohlc(r_open, r_high, r_low, r_close)
+            qfq_ohlc_ok = _is_valid_ohlc(q_open, q_high, q_low, q_close)
             if (
                 bar_status == "TARGET_PRESENT"
                 and r_ts_q == "OBSERVED"
                 and str(r_ts) == "1"
                 and raw_ohlc_ok
+                and qfq_bs == "TARGET_PRESENT"
+                and q_pq == "OBSERVED"
+                and qfq_ohlc_ok
             ):
                 q_state = "TRUE"
                 raw_close = Fraction(str(r_close))
@@ -348,7 +296,14 @@ def _load_endpoint_observations(
                 raw_close = None
             else:
                 q_state = "UNKNOWN"
-                raw_close = None
+                raw_close = (
+                    Fraction(str(r_close))
+                    if bar_status == "TARGET_PRESENT"
+                    and r_ts_q == "OBSERVED"
+                    and str(r_ts) == "1"
+                    and raw_ohlc_ok
+                    else None
+                )
             eff_amt_q = amt_q or r_amt_q
             raw_amount = (
                 Fraction(str(r_amt))
@@ -360,7 +315,6 @@ def _load_endpoint_observations(
                 and Fraction(str(r_amt)) >= 0
                 else None
             )
-            qfq_ohlc_ok = _is_valid_ohlc(q_open, q_high, q_low, q_close)
             qfq_close = (
                 Fraction(str(q_close))
                 if qfq_bs == "TARGET_PRESENT"
@@ -710,11 +664,9 @@ def _resolve_session_universe_members(
     config: Mapping[str, Any] | None = None,
     session: date,
     price_capture_id: int,
-    price_coordinate: str = "FORWARD_ADJUSTED",
-    universe_version: str | None = None,
     universe_capture_id: int | None = None,
-) -> tuple[str | None, set[str]]:
-    """按日期与捕获解析日期有效 Research Universe 版本及全部成员（含无归属股票）；优先使用权威日期有效总体，多版本未指定时拒绝。"""
+) -> tuple[bool, set[str]]:
+    """解析日期有效 Research Universe 成员（含无归属股票）；返回 (是否就绪, 成员集合)。"""
     if config is not None:
         from stock_a.storage.postgres.baostock_universe import (
             resolve_date_effective_universe,
@@ -727,21 +679,15 @@ def _resolve_session_universe_members(
                 SELECT DISTINCT source_capture_id
                 FROM stock.source_baostock_session_directory
                 WHERE session_date=%s
-                ORDER BY source_capture_id
+                ORDER BY source_capture_id DESC
                 """,
                 (session,),
             )
             dir_caps = [int(r[0]) for r in cur.fetchall() if r[0] is not None]
-            if len(dir_caps) > 1:
-                if int(price_capture_id) in dir_caps:
-                    dir_cap = int(price_capture_id)
-                else:
-                    raise R03FormalSectorPgError(
-                        "R03_UNIVERSE_CAPTURE_AMBIGUOUS",
-                        f"交易日 {session} 存在多个 session_directory 捕获({dir_caps})，拒绝静默选首行。",
-                    )
-            else:
-                dir_cap = dir_caps[0] if len(dir_caps) == 1 else None
+            if int(price_capture_id) in dir_caps:
+                dir_cap = int(price_capture_id)
+            elif dir_caps:
+                dir_cap = dir_caps[0]
         if dir_cap is not None:
             resolved_u = resolve_date_effective_universe(
                 config,
@@ -750,19 +696,11 @@ def _resolve_session_universe_members(
                 stock_basic_capture_id=dir_cap,
                 research_eligible_only=True,
             )
-            if resolved_u.get("status") == "AVAILABLE" and resolved_u.get(
-                "universe_version"
-            ):
-                auth_ver = str(resolved_u["universe_version"])
-                if universe_version is not None and universe_version != auth_ver:
-                    raise R03FormalSectorPgError(
-                        "R03_UNIVERSE_VERSION_MISMATCH",
-                        f"交易日 {session} 指定 universe_version={universe_version} 与权威日期有效版本 {auth_ver} 不一致。",
-                    )
-                return auth_ver, {str(m) for m in resolved_u.get("members", ()) if m}
+            if resolved_u.get("status") == "AVAILABLE":
+                return True, {str(m) for m in resolved_u.get("members", ()) if m}
 
     # 权威日期有效 Universe 不可用时，禁止从 cross_section 现存行或虚构空总体推正式总体
-    return None, set()
+    return False, set()
 
 
 def assemble_r03_session_inputs(
@@ -772,16 +710,10 @@ def assemble_r03_session_inputs(
     t1_session: date | None,
     t3_session: date | None,
     source_capture_id: int,
-    profile_revision: str,
     snapshot_ids: Mapping[str, int],
     snapshot_ids_by_session: Mapping[str, Mapping[str, int] | None] | None = None,
     source_capture_id_t1: int | None = None,
     source_capture_id_t3: int | None = None,
-    profile_revision_t1: str | None = None,
-    profile_revision_t3: str | None = None,
-    universe_version: str | None = None,
-    universe_version_t1: str | None = None,
-    universe_version_t3: str | None = None,
     universe_capture_id: int | None = None,
     universe_capture_id_t1: int | None = None,
     universe_capture_id_t3: int | None = None,
@@ -801,9 +733,6 @@ def assemble_r03_session_inputs(
         if source_capture_id_t3 is not None
         else (None if strict_endpoints else cap_t)
     )
-    prof_t = str(profile_revision)
-    prof_t1 = str(profile_revision_t1) if profile_revision_t1 is not None else None
-    prof_t3 = str(profile_revision_t3) if profile_revision_t3 is not None else None
 
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _conn,
@@ -856,12 +785,11 @@ def assemble_r03_session_inputs(
             cur, snaps_t3, known_symbols=known_t3
         )
 
-        u_ver_t, u_syms_t = _resolve_session_universe_members(
+        u_ready_t, u_syms_t = _resolve_session_universe_members(
             cur,
             config=config,
             session=target_session,
             price_capture_id=cap_t,
-            universe_version=universe_version,
             universe_capture_id=universe_capture_id,
         )
         eff_u_cap_t1 = (
@@ -874,29 +802,27 @@ def assemble_r03_session_inputs(
             if universe_capture_id_t3 is not None
             else universe_capture_id
         )
-        u_ver_t1, u_syms_t1 = (
+        u_ready_t1, u_syms_t1 = (
             _resolve_session_universe_members(
                 cur,
                 config=config,
                 session=t1_session,
                 price_capture_id=cap_t1,
-                universe_version=universe_version_t1,
                 universe_capture_id=eff_u_cap_t1,
             )
             if t1_session is not None and cap_t1 is not None
-            else (None, set())
+            else (False, set())
         )
-        u_ver_t3, u_syms_t3 = (
+        u_ready_t3, u_syms_t3 = (
             _resolve_session_universe_members(
                 cur,
                 config=config,
                 session=t3_session,
                 price_capture_id=cap_t3,
-                universe_version=universe_version_t3,
                 universe_capture_id=eff_u_cap_t3,
             )
             if t3_session is not None and cap_t3 is not None
-            else (None, set())
+            else (False, set())
         )
 
         all_entities = (
@@ -980,18 +906,14 @@ def assemble_r03_session_inputs(
             cur,
             session=target_session,
             source_capture_id=cap_t,
-            profile_revision=prof_t,
             symbols=sym_list,
-            universe_version=u_ver_t,
         )
         obs_t1 = (
             _load_endpoint_observations(
                 cur,
                 session=t1_session,
                 source_capture_id=cap_t1,
-                profile_revision=prof_t1,
                 symbols=sym_list,
-                universe_version=u_ver_t1,
             )
             if t1_session is not None and cap_t1 is not None
             else {}
@@ -1001,9 +923,7 @@ def assemble_r03_session_inputs(
                 cur,
                 session=t3_session,
                 source_capture_id=cap_t3,
-                profile_revision=prof_t3,
                 symbols=sym_list,
-                universe_version=u_ver_t3,
             )
             if t3_session is not None and cap_t3 is not None
             else {}
@@ -1073,10 +993,9 @@ def assemble_r03_session_inputs(
             "boards_t1": boards_t1,
             "boards_t3": boards_t3,
             "loo_targets": loo_targets,
-            "universe_ready_t": u_ver_t is not None,
-            "universe_version_t": u_ver_t,
-            "universe_version_t1": u_ver_t1,
-            "universe_version_t3": u_ver_t3,
+            "universe_ready_t": u_ready_t,
+            "universe_ready_t1": u_ready_t1,
+            "universe_ready_t3": u_ready_t3,
             "universe_ret1_t": universe_ret1_t,
             "universe_ret1_t3": universe_ret1_t3,
             "qfq_comparable_t1": qfq_comparable_t1,
@@ -1214,8 +1133,6 @@ def run_r03_formal_sector_day(
     config: Mapping[str, Any],
     *,
     trade_date: date,
-    scope_key: str,
-    member_version: str,
     boards_t: Sequence[Mapping[str, Any]],
     boards_t1: Mapping[Any, Mapping[str, Any]],
     boards_t3: Mapping[Any, Mapping[str, Any]],
@@ -1268,9 +1185,6 @@ def run_r03_formal_sector_day(
         native_pg = write_r03_native_day_facts(
             config,
             trade_date=trade_date,
-            scope_key=scope_key,
-            member_version=member_version,
-            contract_version=R03_CONTRACT_VERSION,
             rows=native_rows,
             allow_revision=allow_revision,
         )
@@ -1562,9 +1476,6 @@ def run_r03_formal_sector_day(
             rotation_pg = write_r03_rotation_day(
                 config,
                 trade_date=trade_date,
-                scope_key=scope_key,
-                member_version=member_version,
-                contract_version=R03_CONTRACT_VERSION,
                 records=rot_records,
                 allow_revision=allow_revision,
             )
@@ -1589,9 +1500,6 @@ def run_r03_formal_sector_day(
         overlap_pg = write_r03_overlap_results(
             config,
             trade_date=trade_date,
-            scope_key=scope_key,
-            member_version=member_version,
-            contract_version=R03_CONTRACT_VERSION,
             overlap=overlap,
             native_rows=native_rows,
             allow_revision=allow_revision,
@@ -1658,9 +1566,6 @@ def run_r03_formal_sector_day(
             res = write_r03_loo_day_batch(
                 config,
                 trade_date=trade_date,
-                scope_key=scope_key,
-                member_version=member_version,
-                contract_version=R03_CONTRACT_VERSION,
                 targets_and_results=loo_batch,
                 allow_revision=allow_revision,
             )
@@ -1725,9 +1630,6 @@ def run_r03_formal_sector_day(
     return {
         "trade_date": trade_date.isoformat(),
         "prev_trade_date": prev_trade_date,
-        "scope_key": scope_key,
-        "member_version": member_version,
-        "contract_version": R03_CONTRACT_VERSION,
         "native_count": len(native_rows),
         "native_pg": native_pg,
         "rotation_pg": rotation_pg,
@@ -1809,24 +1711,14 @@ def produce_formal_market_breadth_for_session(
     target_session: date,
     t3_session: date | None,
     source_capture_id: int,
-    profile_revision: str | None = None,
-    profile_revision_t3: str | None = None,
     source_capture_id_t3: int | None = None,
     prev_session_t: date | None = None,
     prev_session_t3: date | None = None,
-    universe_version_t: str | None = None,
-    universe_version_t3: str | None = None,
     universe_capture_id: int | None = None,
     universe_capture_id_t3: int | None = None,
-    scope_key: str | None = None,
     allow_revision: bool = False,
 ) -> dict[str, Any]:
     """独立生产并幂等持久化 R03 正式市场宽度（不依赖板块研究模块；缺 Profile 时复用合法 QFQ ret1，缺端点时诚实保存 UNKNOWN）。"""
-    resolved_scope = scope_key or (
-        f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
-        if profile_revision is not None
-        else f"BAOSTOCK_CAP_{source_capture_id}:MARKET_QFQ:NON_PIT"
-    )
     cap_t = int(source_capture_id)
     eff_u_cap_t3 = (
         universe_capture_id_t3
@@ -1838,20 +1730,17 @@ def produce_formal_market_breadth_for_session(
         cur,
         _,
     ):
-        u_ver_t, u_syms_t = _resolve_session_universe_members(
+        u_ready_t, u_syms_t = _resolve_session_universe_members(
             cur,
             config=config,
             session=target_session,
             price_capture_id=cap_t,
-            universe_version=universe_version_t,
             universe_capture_id=universe_capture_id,
         )
         if t3_session is None:
             res = {
                 "status": "UNKNOWN",
                 "reason": "MISSING_T3_SESSION",
-                "universe_version_t": str(u_ver_t or "MISSING"),
-                "universe_version_t3": "MISSING",
                 "n_t": len(u_syms_t),
                 "n_t3": 0,
                 "n_common": 0,
@@ -1864,8 +1753,6 @@ def produce_formal_market_breadth_for_session(
             res = {
                 "status": "UNKNOWN",
                 "reason": "MISSING_T3_CAPTURE",
-                "universe_version_t": str(u_ver_t or "MISSING"),
-                "universe_version_t3": "MISSING",
                 "n_t": len(u_syms_t),
                 "n_t3": 0,
                 "n_common": 0,
@@ -1876,20 +1763,17 @@ def produce_formal_market_breadth_for_session(
             }
         else:
             cap_t3 = int(source_capture_id_t3)
-            u_ver_t3, u_syms_t3 = _resolve_session_universe_members(
+            u_ready_t3, u_syms_t3 = _resolve_session_universe_members(
                 cur,
                 config=config,
                 session=t3_session,
                 price_capture_id=cap_t3,
-                universe_version=universe_version_t3,
                 universe_capture_id=eff_u_cap_t3,
             )
-            if u_ver_t is None or u_ver_t3 is None:
+            if not u_ready_t or not u_ready_t3:
                 res = {
                     "status": "UNKNOWN",
                     "reason": "MISSING_UNIVERSE_ENDPOINT",
-                    "universe_version_t": str(u_ver_t or "MISSING"),
-                    "universe_version_t3": str(u_ver_t3 or "MISSING"),
                     "n_t": len(u_syms_t),
                     "n_t3": len(u_syms_t3),
                     "n_common": 0,
@@ -1904,17 +1788,13 @@ def produce_formal_market_breadth_for_session(
                     cur,
                     session=target_session,
                     source_capture_id=cap_t,
-                    profile_revision=profile_revision,
                     symbols=sym_list,
-                    universe_version=u_ver_t,
                 )
                 obs_t3 = _load_endpoint_observations(
                     cur,
                     session=t3_session,
                     source_capture_id=cap_t3,
-                    profile_revision=profile_revision_t3,
                     symbols=sym_list,
-                    universe_version=u_ver_t3,
                 )
                 ret1_t = {
                     eid: obs_t.get(eid, {}).get("ret1") for eid in sorted(u_syms_t)
@@ -1925,7 +1805,6 @@ def produce_formal_market_breadth_for_session(
                 if (
                     any(v is None for v in ret1_t.values())
                     and prev_session_t is not None
-                    and profile_revision is None
                 ):
                     raw_ret1_t = _load_qfq_ret1_from_raw(
                         cur,
@@ -1940,7 +1819,6 @@ def produce_formal_market_breadth_for_session(
                 if (
                     any(v is None for v in ret1_t3.values())
                     and prev_session_t3 is not None
-                    and profile_revision_t3 is None
                 ):
                     raw_ret1_t3 = _load_qfq_ret1_from_raw(
                         cur,
@@ -1955,18 +1833,14 @@ def produce_formal_market_breadth_for_session(
                 res = compute_formal_market_breadth_from_universes(
                     universe_t=ret1_t,
                     universe_t3=ret1_t3,
-                    universe_version_t=str(u_ver_t),
-                    universe_version_t3=str(u_ver_t3),
                 )
     pg_res = write_r03_formal_market_breadth(
         config,
         trade_date=target_session,
-        scope_key=resolved_scope,
-        contract_version=R03_CONTRACT_VERSION,
         result=res,
         allow_revision=allow_revision,
     )
-    return {**res, "scope_key": resolved_scope, "pg_result": pg_res}
+    return {**res, "pg_result": pg_res}
 
 
 def run_r03_formal_sector_for_session(
@@ -1976,64 +1850,22 @@ def run_r03_formal_sector_for_session(
     t1_session: date | None,
     t3_session: date | None,
     source_capture_id: int,
-    profile_revision: str,
     snapshot_ids: Mapping[str, int],
     snapshot_ids_by_session: Mapping[str, Mapping[str, int] | None] | None = None,
-    profile_revision_t1: str | None = None,
-    profile_revision_t3: str | None = None,
     source_capture_id_t1: int | None = None,
     source_capture_id_t3: int | None = None,
-    universe_version: str | None = None,
-    universe_version_t1: str | None = None,
-    universe_version_t3: str | None = None,
     universe_capture_id: int | None = None,
     universe_capture_id_t1: int | None = None,
     universe_capture_id_t3: int | None = None,
     strict_endpoints: bool = False,
-    scope_key: str | None = None,
     modules: set[str] | None = None,
     allow_revision: bool = False,
-    prior_version_chain: Sequence[tuple[date, str, str]] | None = None,
 ) -> dict[str, Any]:
     """正常业务入口：从 PG 读取组装全部上游三端独立输入并恢复前态后执行 R03 正式生产。"""
-    resolved_scope = scope_key or (
-        f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
-    )
-    member_ver = (
-        f"IND_{snapshot_ids.get('INDUSTRY', 0)}:CON_{snapshot_ids.get('CONCEPT', 0)}"
-    )
-    prev_cap = int(source_capture_id_t1) if source_capture_id_t1 is not None else None
-    prev_prof = profile_revision_t1
-    prev_scope_key = (
-        scope_key
-        if scope_key is not None
-        else (
-            f"BAOSTOCK_CAP_{prev_cap}:PROF_{prev_prof}:NON_PIT"
-            if prev_cap is not None and prev_prof is not None
-            else None
-        )
-    )
-    snaps_t1 = (
-        snapshot_ids_by_session.get("t1")
-        if snapshot_ids_by_session is not None
-        else snapshot_ids
-    )
-    prev_member_ver = (
-        f"IND_{snaps_t1.get('INDUSTRY', 0)}:CON_{snaps_t1.get('CONCEPT', 0)}"
-        if isinstance(snaps_t1, Mapping)
-        else None
-    )
     rot_recovery = (
         read_r03_rotation_recovery_states(
             config,
             previous_trade_date=t1_session,
-            scope_key=resolved_scope,
-            contract_version=R03_CONTRACT_VERSION,
-            previous_scope_key=prev_scope_key,
-            member_version=member_ver,
-            previous_member_version=prev_member_ver,
-            prior_version_chain=prior_version_chain,
-            allow_cross_version_recovery=False,
         )
         if t1_session is not None
         else {}
@@ -2048,19 +1880,20 @@ def run_r03_formal_sector_for_session(
         ):
             for _bk_k, _rec in rot_recovery.items():
                 _bask = _rec.get("basket")
-                _ep_scope = _rec.get("episode_scope_key")
-                if _bask is None or not _ep_scope:
+                if _bask is None:
                     continue
-                _ep_cap = None
-                for _part in str(_ep_scope).split(":"):
-                    if (
-                        _part.startswith("BAOSTOCK_CAP_")
-                        and _part[len("BAOSTOCK_CAP_") :].isdigit()
-                    ):
-                        _ep_cap = int(_part[len("BAOSTOCK_CAP_") :])
-                        break
+                _t0_d = date.fromisoformat(_bask.t0_session)
+                _cur_chk.execute(
+                    "SELECT source_capture_id FROM stock.source_raw_daily WHERE session_date=%s LIMIT 1",
+                    (_t0_d,),
+                )
+                _cap_row = _cur_chk.fetchone()
+                _ep_cap = (
+                    int(_cap_row[0])
+                    if _cap_row is not None and _cap_row[0] is not None
+                    else None
+                )
                 if _ep_cap is not None and _ep_cap != int(source_capture_id):
-                    _t0_d = date.fromisoformat(_bask.t0_session)
                     _comp = _check_captures_qfq_comparable(
                         _cur_chk,
                         _ep_cap,
@@ -2089,16 +1922,10 @@ def run_r03_formal_sector_for_session(
         t1_session=t1_session,
         t3_session=t3_session,
         source_capture_id=source_capture_id,
-        profile_revision=profile_revision,
         snapshot_ids=snapshot_ids,
         snapshot_ids_by_session=snapshot_ids_by_session,
         source_capture_id_t1=source_capture_id_t1,
         source_capture_id_t3=source_capture_id_t3,
-        profile_revision_t1=profile_revision_t1,
-        profile_revision_t3=profile_revision_t3,
-        universe_version=universe_version,
-        universe_version_t1=universe_version_t1,
-        universe_version_t3=universe_version_t3,
         universe_capture_id=universe_capture_id,
         universe_capture_id_t1=universe_capture_id_t1,
         universe_capture_id_t3=universe_capture_id_t3,
@@ -2122,23 +1949,10 @@ def run_r03_formal_sector_for_session(
         native_previous_session_missing = False
         native_prev_trade_date: date | None = None
         native_session_gap: int | None = None
-    elif (
-        prev_scope_key is None or prev_member_ver is None
-    ) and not prior_version_chain:
-        prev_states = {}
-        native_previous_session_missing = True
-        native_prev_trade_date = None
-        native_session_gap = None
     else:
         prev_meta = read_r03_previous_lifecycle_states(
             config,
             previous_trade_date=t1_session,
-            scope_key=resolved_scope,
-            member_version=member_ver,
-            contract_version=R03_CONTRACT_VERSION,
-            previous_scope_key=prev_scope_key,
-            previous_member_version=prev_member_ver,
-            prior_version_chain=prior_version_chain,
             return_metadata=True,
         )
         prev_states = prev_meta["items"]
@@ -2153,21 +1967,14 @@ def run_r03_formal_sector_for_session(
         read_r03_overlap_day(
             config,
             trade_date=t1_session,
-            scope_key=prev_scope_key,
-            member_version=prev_member_ver,
-            contract_version=R03_CONTRACT_VERSION,
         )
         if t1_session is not None
-        and prev_scope_key is not None
-        and prev_member_ver is not None
         else {"status": "NOT_COMPUTED", "clusters": []}
     )
 
     day_res = run_r03_formal_sector_day(
         config,
         trade_date=target_session,
-        scope_key=resolved_scope,
-        member_version=member_ver,
         boards_t=assembled["boards_t"],
         boards_t1=assembled["boards_t1"],
         boards_t3=assembled["boards_t3"],
@@ -2184,10 +1991,5 @@ def run_r03_formal_sector_for_session(
         session_gap=native_session_gap,
     )
     day_res["formal_market_breadth"] = None
-    day_res["universe_version_t"] = assembled.get("universe_version_t")
-    day_res["universe_version_t1"] = assembled.get("universe_version_t1")
-    day_res["universe_version_t3"] = assembled.get("universe_version_t3")
-    day_res["prev_scope_key"] = prev_scope_key
-    day_res["prev_member_version"] = prev_member_ver
     day_res["prev_trade_date"] = native_prev_trade_date
     return day_res

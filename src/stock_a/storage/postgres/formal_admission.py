@@ -7,10 +7,6 @@ from datetime import date
 import re
 from typing import Any
 
-from stock_a.contracts.profile_revision import (
-    PROFILE_REVISION_PATTERN,
-    profile_revision_history_session_count,
-)
 from . import source_raw
 
 
@@ -187,23 +183,19 @@ def read_saved_source_fact_ids(
     ):
         cursor.execute(
             """SELECT d.id, d.source_symbol,
-                      s.id, s.profile_revision, s.producer_version
+                      s.id, s.producer_version
                FROM source_d0_scenario_day_facts d
                LEFT JOIN source_pool_seed_day_facts s
                  ON s.target_session=d.target_session
                 AND s.source_symbol=d.source_symbol
-                AND s.source_capture_id=d.source_capture_id
-                AND s.profile_revision=%s
                 AND s.producer_version=%s
-               WHERE d.target_session=%s AND d.source_capture_id=%s AND d.scenario='LAUNCH_CONFIRM'
+               WHERE d.target_session=%s AND d.scenario='LAUNCH_CONFIRM'
                  AND d.producer_version=%s AND d.algorithm_contract=%s
                  AND d.session_contract=%s AND d.calendar_revision=%s
                ORDER BY d.source_symbol""",
             (
-                profile_revision,
                 seed_producer_version,
                 target_session,
-                source_capture_id,
                 producer_version,
                 algorithm_contract,
                 session_contract,
@@ -217,7 +209,7 @@ def read_saved_source_fact_ids(
             "精确LAUNCH原始事实行未闭合到来源池分母",
         )
     result: dict[str, dict[str, Any]] = {}
-    for raw_id, symbol, seed_id, profile, seed_version in rows:
+    for raw_id, symbol, seed_id, seed_version in rows:
         if symbol in result:
             raise FormalAdmissionPgError(
                 "FORMAL_ADMISSION_RAW_SYMBOL_DUPLICATED",
@@ -226,7 +218,7 @@ def read_saved_source_fact_ids(
         result[symbol] = {
             "raw_fact_id": int(raw_id),
             "seed_fact_id": int(seed_id) if seed_id is not None else None,
-            "profile_revision": profile,
+            "profile_revision": None,
             "seed_producer_version": seed_version,
         }
     return result
@@ -306,26 +298,50 @@ def persist_source_formal_admission_rows(
             rows[0]["session_contract"],
             rows[0]["calendar_revision"],
         )
+        target_session = rows[0]["target_session"]
+        scenario = rows[0]["scenario"]
         cursor.execute(
             f"SELECT count(*)::bigint FROM {_TABLE} "
-            "WHERE target_session=%s AND source_capture_id=%s "
-            "AND scenario=%s AND raw_producer_version=%s AND algorithm_contract=%s "
-            "AND session_contract=%s AND calendar_revision=%s",
-            exact_scope,
+            "WHERE target_session=%s AND scenario=%s",
+            (target_session, scenario),
         )
         before_count = int(cursor.fetchone()[0])
-        cursor.executemany(
-            f"INSERT INTO {_TABLE} ({columns_sql}) VALUES ({placeholders}) "
-            "ON CONFLICT ON CONSTRAINT source_d0_formal_admission_unique_input DO NOTHING",
-            values,
-        )
         cursor.execute(
             f"SELECT {columns_sql} FROM {_TABLE} "
-            "WHERE target_session=%s AND source_capture_id=%s "
-            "AND scenario='LAUNCH_CONFIRM' AND raw_producer_version=%s "
-            "AND algorithm_contract=%s AND session_contract=%s "
-            "AND calendar_revision=%s ORDER BY source_symbol",
-            (*exact_scope[:2], *exact_scope[3:]),
+            "WHERE target_session=%s AND scenario=%s ORDER BY source_symbol",
+            (target_session, scenario),
+        )
+        existing_rows = cursor.fetchall()
+        expected_sorted = [
+            expected_by_symbol[sym] for sym in sorted(expected_by_symbol)
+        ]
+        unchanged = len(existing_rows) == len(expected_sorted) and all(
+            tuple(actual) == expected
+            for actual, expected in zip(existing_rows, expected_sorted, strict=True)
+        )
+        if not unchanged:
+            target_symbols = sorted(expected_by_symbol)
+            if target_symbols:
+                cursor.execute(
+                    f"DELETE FROM {_TABLE} WHERE target_session=%s AND scenario=%s "
+                    "AND NOT (source_symbol = ANY(%s::text[]))",
+                    (target_session, scenario, target_symbols),
+                )
+            update_cols = [
+                col
+                for col in _ROW_COLUMNS
+                if col not in ("target_session", "source_symbol", "scenario")
+            ]
+            update_sql = ", ".join(f"{col}=EXCLUDED.{col}" for col in update_cols)
+            cursor.executemany(
+                f"INSERT INTO {_TABLE} ({columns_sql}) VALUES ({placeholders}) "
+                f"ON CONFLICT (target_session, source_symbol, scenario) DO UPDATE SET {update_sql}",
+                values,
+            )
+        cursor.execute(
+            f"SELECT {columns_sql} FROM {_TABLE} "
+            "WHERE target_session=%s AND scenario=%s ORDER BY source_symbol",
+            (target_session, scenario),
         )
         existing = cursor.fetchall()
         if len(existing) != expected_source_count:
@@ -348,11 +364,8 @@ def persist_source_formal_admission_rows(
             f"count(*) FILTER (WHERE admission_status='BLOCKED')::bigint, "
             f"count(*) FILTER (WHERE admission_status='NOT_READY')::bigint, "
             f"count(*) FILTER (WHERE admission_status='NOT_REQUIRED')::bigint "
-            f"FROM {_TABLE} WHERE target_session=%s AND source_capture_id=%s "
-            "AND scenario='LAUNCH_CONFIRM' "
-            "AND raw_producer_version=%s AND algorithm_contract=%s "
-            "AND session_contract=%s AND calendar_revision=%s",
-            (*exact_scope[:2], *exact_scope[3:]),
+            f"FROM {_TABLE} WHERE target_session=%s AND scenario=%s",
+            (target_session, scenario),
         )
         stored, distinct_symbols, ready, blocked, not_ready, not_required = (
             cursor.fetchone()
@@ -418,17 +431,6 @@ def read_source_formal_admission_day(
             type(profile_history_session_count) is not int
             or not 1 <= profile_history_session_count <= 250
         )
-        or profile_revision is not None
-        and (
-            not isinstance(profile_revision, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
-        )
-        or profile_history_session_count is not None
-        and profile_revision is None
-        or profile_revision is not None
-        and profile_history_session_count is not None
-        and profile_revision_history_session_count(profile_revision)
-        != profile_history_session_count
     ):
         raise ValueError("准入Reader必须绑定日期、来源版本和闭合分母")
     selected = None if source_symbols is None else tuple(source_symbols)
@@ -444,29 +446,22 @@ def read_source_formal_admission_day(
         _,
     ):
         scope_predicate = (
-            "target_session=%s AND source_capture_id=%s "
+            "target_session=%s "
             "AND scenario='LAUNCH_CONFIRM' AND raw_producer_version=%s "
             "AND algorithm_contract=%s AND session_contract=%s "
-            "AND calendar_revision=%s AND admission_contract=%s "
-            "AND seed_producer_version IS NOT DISTINCT FROM %s"
+            "AND admission_contract=%s"
         )
         scope_parameters: tuple[Any, ...] = (
             target_session,
-            source_capture_id,
             _D0_LAUNCH_PRODUCER_VERSION,
             algorithm_contract,
             session_contract,
-            calendar_revision,
             _ADMISSION_CONTRACT,
-            seed_producer_version,
         )
-        if profile_revision is not None:
-            scope_predicate += " AND profile_revision=%s"
-            scope_parameters += (profile_revision,)
         cursor.execute(
-            f"SELECT DISTINCT history_session_count,profile_revision FROM {_TABLE} "
+            f"SELECT DISTINCT history_session_count FROM {_TABLE} "
             f"WHERE {scope_predicate} "
-            "ORDER BY history_session_count,profile_revision LIMIT 2",
+            "ORDER BY history_session_count LIMIT 2",
             scope_parameters,
         )
         scopes = cursor.fetchall()
@@ -482,7 +477,7 @@ def read_source_formal_admission_day(
                 "seed_producer_version": seed_producer_version,
                 "source_count": expected_source_count,
                 "profile_history_session_count": profile_history_session_count,
-                "profile_revision": profile_revision,
+                "profile_revision": None,
                 "counts": None,
                 "by_symbol": {},
                 "transaction": "REPEATABLE READ READ ONLY",
@@ -500,39 +495,15 @@ def read_source_formal_admission_day(
                 "seed_producer_version": seed_producer_version,
                 "source_count": expected_source_count,
                 "profile_history_session_count": profile_history_session_count,
-                "profile_revision": profile_revision,
+                "profile_revision": None,
                 "counts": None,
                 "by_symbol": {},
                 "transaction": "REPEATABLE READ READ ONLY",
                 "database_write_attempted": False,
             }
-        selected_d0_history_session_count, selected_profile_revision = scopes[0]
-        selected_profile_history_session_count = (
-            profile_revision_history_session_count(selected_profile_revision)
-            if selected_profile_revision is not None
-            else None
-        )
-        if (
-            profile_history_session_count is not None
-            and selected_profile_history_session_count != profile_history_session_count
-        ):
-            return {
-                "status": "NOT_COMPUTED",
-                "reason_code": "FORMAL_ADMISSION_PROFILE_REVISION_MISMATCH",
-                "target_session": target_session.isoformat(),
-                "source_capture_id": source_capture_id,
-                "algorithm_contract": algorithm_contract,
-                "session_contract": session_contract,
-                "calendar_revision": calendar_revision,
-                "seed_producer_version": seed_producer_version,
-                "source_count": expected_source_count,
-                "profile_history_session_count": profile_history_session_count,
-                "profile_revision": selected_profile_revision,
-                "counts": None,
-                "by_symbol": {},
-                "transaction": "REPEATABLE READ READ ONLY",
-                "database_write_attempted": False,
-            }
+        selected_d0_history_session_count = scopes[0][0]
+        selected_profile_revision = None
+        selected_profile_history_session_count = profile_history_session_count
         cursor.execute(
             f"""SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint,
                        min(source_count), max(source_count),
@@ -541,26 +512,19 @@ def read_source_formal_admission_day(
                        count(*) FILTER (WHERE admission_status='NOT_READY')::bigint,
                        count(*) FILTER (WHERE admission_status='NOT_REQUIRED')::bigint
                 FROM {_TABLE}
-                WHERE target_session=%s AND source_capture_id=%s
+                WHERE target_session=%s
                   AND scenario='LAUNCH_CONFIRM'
                   AND raw_producer_version=%s
                   AND algorithm_contract=%s AND session_contract=%s
-                  AND calendar_revision=%s
                   AND admission_contract=%s
-                  AND seed_producer_version IS NOT DISTINCT FROM %s
-                  AND history_session_count IS NOT DISTINCT FROM %s
-                  AND profile_revision IS NOT DISTINCT FROM %s""",
+                  AND history_session_count IS NOT DISTINCT FROM %s""",
             (
                 target_session,
-                source_capture_id,
                 _D0_LAUNCH_PRODUCER_VERSION,
                 algorithm_contract,
                 session_contract,
-                calendar_revision,
                 _ADMISSION_CONTRACT,
-                seed_producer_version,
                 selected_d0_history_session_count,
-                selected_profile_revision,
             ),
         )
         row_count, distinct_count, min_source_count, max_source_count, *counts = (
@@ -670,26 +634,20 @@ def read_source_formal_admission_day(
             )
             cursor.execute(
                 f"SELECT {', '.join(columns)} FROM {_TABLE} "
-                "WHERE target_session=%s AND source_capture_id=%s "
+                "WHERE target_session=%s "
                 "AND scenario='LAUNCH_CONFIRM' "
                 "AND raw_producer_version=%s "
                 "AND algorithm_contract=%s AND session_contract=%s "
-                "AND calendar_revision=%s AND admission_contract=%s "
-                "AND seed_producer_version IS NOT DISTINCT FROM %s "
+                "AND admission_contract=%s "
                 "AND history_session_count IS NOT DISTINCT FROM %s "
-                "AND profile_revision IS NOT DISTINCT FROM %s "
                 "AND source_symbol=ANY(%s) ORDER BY source_symbol",
                 (
                     target_session,
-                    source_capture_id,
                     _D0_LAUNCH_PRODUCER_VERSION,
                     algorithm_contract,
                     session_contract,
-                    calendar_revision,
                     _ADMISSION_CONTRACT,
-                    seed_producer_version,
                     selected_d0_history_session_count,
-                    selected_profile_revision,
                     list(selected),
                 ),
             )

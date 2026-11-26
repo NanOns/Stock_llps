@@ -7,7 +7,6 @@ from datetime import date
 from decimal import Decimal
 from fractions import Fraction
 from typing import Any, Mapping
-from urllib.parse import unquote
 
 from stock_a.domain import FieldValue
 from stock_a.application.research_window import resolve_pg_history_window
@@ -155,7 +154,7 @@ def _rule_row(
     source_capture_id: int,
     source_symbol: str,
     rule_id: str,
-    profile_revision: str,
+    profile_revision: str | None,
     history_session_count: int,
     d1_history_session_count: int,
     event_window_start: date,
@@ -179,7 +178,7 @@ def _rule_row(
         source_capture_id,
         rule_id,
         RULE_VERSION,
-        profile_revision,
+        profile_revision or "",
         history_session_count,
         d1_history_session_count,
         event_window_start,
@@ -205,14 +204,10 @@ def persist_source_computable_rules_from_saved(
     target_session: date,
     research_cutoff: date,
     source_capture_id: int,
-    profile_revision: str,
+    profile_revision: str | None = None,
     history_session_count: int,
     snapshot_ids: Mapping[str, int] | None = None,
     include_diagnostics: bool = True,
-    cross_section_universe_capture_id: int | None = None,
-    cross_section_universe_version: str | None = None,
-    cross_section_contract_version: str | None = None,
-    universe_match_status: str | None = None,
 ) -> dict[str, Any]:
     """只组合已保存的D0/Seed/D1输入与既有QFQ诊断，不采集或重算基础事实。"""
     history_session_limit = _configured_history_session_limit(config)
@@ -222,29 +217,13 @@ def persist_source_computable_rules_from_saved(
         or target_session > research_cutoff
         or type(source_capture_id) is not int
         or source_capture_id <= 0
-        or not isinstance(profile_revision, str)
-        or not profile_revision
+        or (profile_revision is not None and not isinstance(profile_revision, str))
         or type(history_session_count) is not int
         or not 1 <= history_session_count <= history_session_limit
         or type(include_diagnostics) is not bool
-        or cross_section_universe_capture_id is not None
-        and (
-            type(cross_section_universe_capture_id) is not int
-            or cross_section_universe_capture_id <= 0
-        )
-        or cross_section_universe_version is not None
-        and (
-            not isinstance(cross_section_universe_version, str)
-            or not cross_section_universe_version.strip()
-        )
-        or cross_section_contract_version is not None
-        and (
-            not isinstance(cross_section_contract_version, str)
-            or not cross_section_contract_version.strip()
-        )
     ):
         raise SourceFrozenRulesError(
-            "SOURCE_RULE_SCOPE_INVALID", "冻结规则目标、来源或Profile键无效"
+            "SOURCE_RULE_SCOPE_INVALID", "冻结规则目标、来源或历史窗口无效"
         )
 
     scenario_pages = {
@@ -281,12 +260,7 @@ def persist_source_computable_rules_from_saved(
         research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
         price_coordinate="FORWARD_ADJUSTED",
-        profile_revision=profile_revision,
         producer_version=_SEED_PRODUCER_VERSION,
-        cross_section_universe_capture_id=cross_section_universe_capture_id,
-        cross_section_universe_version=cross_section_universe_version,
-        cross_section_contract_version=cross_section_contract_version,
-        universe_match_status=universe_match_status,
     )
     symbols = {row["source_symbol"] for row in launch["results"]}
     if (
@@ -294,7 +268,6 @@ def persist_source_computable_rules_from_saved(
         or {row["source_symbol"] for row in seed_rows} != symbols
         or any(
             row.get("producer_version") != _SEED_PRODUCER_VERSION
-            or row.get("profile_revision") != profile_revision
             or row.get("history_session_count") != history_session_count
             or row.get("price_coordinate") != "FORWARD_ADJUSTED"
             or row.get("research_mode") != "NON_PIT_RETROSPECTIVE"
@@ -358,21 +331,6 @@ def persist_source_computable_rules_from_saved(
             "SOURCE_RULE_SEED_WINDOW_INVALID",
             "Seed日历修订链未覆盖目标日和完整画像窗口",
         )
-    profile_revision_parts = profile_revision.split("|")
-    profile_calendar_id = (
-        unquote(profile_revision_parts[2]) if len(profile_revision_parts) == 4 else None
-    )
-    profile_calendar_revision = (
-        unquote(profile_revision_parts[3]) if len(profile_revision_parts) == 4 else None
-    )
-    if (
-        profile_calendar_id != seed_calendar_id
-        or profile_calendar_revision != expected_seed_calendar_revision
-    ):
-        raise SourceFrozenRulesError(
-            "SOURCE_RULE_SEED_WINDOW_INVALID",
-            "Seed画像修订没有绑定其完整官方日历历史窗口",
-        )
 
     evidence = read_source_launch_watch_evidence(
         config,
@@ -380,12 +338,7 @@ def persist_source_computable_rules_from_saved(
         source_capture_id=source_capture_id,
         expected_source_count=len(symbols),
         source_symbols=(min(symbols),),
-        selected_profile_revision=profile_revision,
         selected_history_session_count=history_session_count,
-        cross_section_universe_capture_id=cross_section_universe_capture_id,
-        cross_section_universe_version=cross_section_universe_version,
-        cross_section_contract_version=cross_section_contract_version,
-        universe_match_status=universe_match_status,
     )
     d1_scope = evidence.get("d1_scope")
     if (
@@ -401,37 +354,6 @@ def persist_source_computable_rules_from_saved(
         raise SourceFrozenRulesError(
             "SOURCE_RULE_D1_SCOPE_NOT_CLOSED",
             "冻结规则没有唯一完整的D1 QFQ五类或七类窗口",
-        )
-    d1_scope_tuple = (
-        d1_scope.get("cross_section_universe_capture_id"),
-        d1_scope.get("cross_section_universe_version"),
-        d1_scope.get("cross_section_contract_version"),
-    )
-    if any(
-        (
-            row.get("cross_section_universe_capture_id"),
-            row.get("cross_section_universe_version"),
-            row.get("cross_section_contract_version"),
-        )
-        != d1_scope_tuple
-        for row in seed_rows
-    ):
-        raise SourceFrozenRulesError(
-            "SOURCE_RULE_SEED_D1_CROSS_SECTION_SCOPE_MISMATCH",
-            "冻结规则Seed与D1保存事实横截面Universe范围不一致",
-        )
-    selected_scope_tuple = (
-        cross_section_universe_capture_id,
-        cross_section_universe_version,
-        cross_section_contract_version,
-    )
-    if (
-        any(value is not None for value in selected_scope_tuple)
-        and d1_scope_tuple != selected_scope_tuple
-    ):
-        raise SourceFrozenRulesError(
-            "SOURCE_RULE_D1_CROSS_SECTION_SCOPE_MISMATCH",
-            "冻结规则D1保存事实与任务选定横截面Universe范围不一致",
         )
     rule_calendar_revision = d1_scope["calendar_revision"]
     d1_history_session_count = d1_scope["history_session_count"]

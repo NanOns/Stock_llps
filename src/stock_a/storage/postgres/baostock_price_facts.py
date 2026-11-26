@@ -2196,11 +2196,10 @@ def persist_baostock_price_batch(
         if symbols and sessions:
             cursor.execute(
                 f"""SELECT {",".join(_PRICE_COLUMNS)} FROM stock.source_raw_daily
-                    WHERE source_capture_id=%s
-                      AND source_symbol=ANY(%s::text[])
+                    WHERE source_symbol=ANY(%s::text[])
                       AND session_date=ANY(%s::date[])
                     FOR UPDATE""",
-                (source_capture_id, symbols, sessions),
+                (symbols, sessions),
             )
             for row in cursor.fetchall():
                 existing = dict(zip(_PRICE_COLUMNS, row, strict=True))
@@ -2309,20 +2308,21 @@ def persist_baostock_price_batch(
                 raw_rows_unchanged += 1
 
         if desired_rows:
-            insert_sql = (
-                f"INSERT INTO stock.source_raw_daily ({','.join(_PRICE_COLUMNS)}) "
-                f"VALUES ({','.join(['%s'] * len(_PRICE_COLUMNS))}) "
-                "ON CONFLICT (source_capture_id,source_symbol,session_date) DO NOTHING"
-            )
             update_columns = tuple(
                 name
                 for name in _PRICE_COLUMNS
-                if name not in {"source_capture_id", "source_symbol", "session_date"}
+                if name not in {"source_symbol", "session_date"}
+            )
+            insert_sql = (
+                f"INSERT INTO stock.source_raw_daily ({','.join(_PRICE_COLUMNS)}) "
+                f"VALUES ({','.join(['%s'] * len(_PRICE_COLUMNS))}) "
+                "ON CONFLICT (source_symbol,session_date) DO UPDATE SET "
+                + ",".join(f"{name}=EXCLUDED.{name}" for name in update_columns)
             )
             update_sql = (
                 "UPDATE stock.source_raw_daily SET "
                 + ",".join(f"{name}=%s" for name in update_columns)
-                + " WHERE source_capture_id=%s AND source_symbol=%s AND session_date=%s"
+                + " WHERE source_symbol=%s AND session_date=%s"
             )
             for key, desired in desired_rows.items():
                 existing = existing_rows.get(key)
@@ -2337,7 +2337,7 @@ def persist_baostock_price_batch(
                     cursor.execute(
                         update_sql,
                         tuple(desired[name] for name in update_columns)
-                        + (source_capture_id, key[0], key[1]),
+                        + (key[0], key[1]),
                     )
                     if cursor.rowcount != 1:
                         raise BaoStockPriceFactsError(
@@ -2346,11 +2346,9 @@ def persist_baostock_price_batch(
 
             cursor.execute(
                 f"""SELECT {",".join(_PRICE_COLUMNS)} FROM stock.source_raw_daily
-                    WHERE source_capture_id=%s
-                      AND source_symbol=ANY(%s::text[])
+                    WHERE source_symbol=ANY(%s::text[])
                       AND session_date=ANY(%s::date[])""",
                 (
-                    source_capture_id,
                     sorted({key[0] for key in desired_rows}),
                     sorted({key[1] for key in desired_rows}),
                 ),
@@ -2761,16 +2759,18 @@ def read_baostock_price_history_rows_cursor(
     cursor: Any,
     *,
     source_symbols: Sequence[str],
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     sessions: Sequence[date],
     cutoff: date,
     price_coordinate: str,
 ) -> list[dict[str, Any]]:
-    """在调用方同一只读快照内读取指定捕获的RAW或QFQ typed日线。"""
+    """在调用方同一只读快照内读取RAW或QFQ typed日线（可选兼容source_capture_id过滤）。"""
     _require_price_field_quality_migration(cursor)
     if (
-        type(source_capture_id) is not int
-        or source_capture_id <= 0
+        (
+            source_capture_id is not None
+            and (type(source_capture_id) is not int or source_capture_id <= 0)
+        )
         or type(cutoff) is not date
         or price_coordinate not in (RAW_COORDINATE, QFQ_COORDINATE)
         or not isinstance(source_symbols, Sequence)
@@ -2793,21 +2793,22 @@ def read_baostock_price_history_rows_cursor(
             "PRICE_SYMBOL_SCOPE_INVALID", "同事务历史价格读取证券为空或重复"
         )
     chunk_size = max(1, min(100, 1500 // len(sessions)))
+    capture_filter = "" if source_capture_id is None else " AND d.source_capture_id=%s"
     result = []
     for start in range(0, len(normalized_symbols), chunk_size):
+        params: list[Any] = [cutoff, cutoff]
+        if source_capture_id is not None:
+            params.append(source_capture_id)
+        params.extend(
+            [list(normalized_symbols[start : start + chunk_size]), list(sessions)]
+        )
         cursor.execute(
             _PRICE_READ_SELECT
-            + " AND d.source_capture_id=%s"
+            + capture_filter
             + " AND d.source_symbol=ANY(%s::text[])"
             + " AND d.session_date=ANY(%s::date[])"
             + " ORDER BY d.session_date,d.source_symbol",
-            (
-                cutoff,
-                cutoff,
-                source_capture_id,
-                list(normalized_symbols[start : start + chunk_size]),
-                list(sessions),
-            ),
+            tuple(params),
         )
         names = [column.name for column in cursor.description]
         result.extend(

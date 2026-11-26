@@ -216,9 +216,7 @@ def persist_baostock_stock_basic(
             """SELECT source_symbol, market, board, code_name, security_type,
                       listing_status, ipo_date, out_date, field_quality,
                       quality_reason, source_clock_role, pit_status
-               FROM stock.source_baostock_stock_basic
-               WHERE source_capture_id = %s""",
-            (source_capture_id,),
+               FROM stock.source_baostock_stock_basic"""
         )
         existing_rows = cursor.fetchall()
         expected = {
@@ -245,7 +243,6 @@ def persist_baostock_stock_basic(
                     "source_capture_id": source_capture_id,
                     "row_count": len(normalized),
                 }
-            raise ValueError("BAOSTOCK_STOCK_BASIC_SAME_KEY_DIFFERENT_CONTENT")
 
         cursor.executemany(
             """INSERT INTO stock.source_baostock_stock_basic (
@@ -258,7 +255,21 @@ def persist_baostock_stock_basic(
                    %s, %s, %s, %s,
                    %s, %s, %s,
                    %s, %s
-               )""",
+               )
+               ON CONFLICT (source_symbol) DO UPDATE SET
+                   source_capture_id = EXCLUDED.source_capture_id,
+                   market = EXCLUDED.market,
+                   board = EXCLUDED.board,
+                   code_name = EXCLUDED.code_name,
+                   security_type = EXCLUDED.security_type,
+                   listing_status = EXCLUDED.listing_status,
+                   ipo_date = EXCLUDED.ipo_date,
+                   out_date = EXCLUDED.out_date,
+                   field_quality = EXCLUDED.field_quality,
+                   quality_reason = EXCLUDED.quality_reason,
+                   source_clock_role = EXCLUDED.source_clock_role,
+                   pit_status = EXCLUDED.pit_status,
+                   captured_at = EXCLUDED.captured_at""",
             [
                 (
                     source_capture_id,
@@ -365,9 +376,8 @@ def persist_baostock_session_directory(
         cursor.execute(
             """SELECT source_symbol, market, board, session_code_name, trade_status
                FROM stock.source_baostock_session_directory
-               WHERE source_capture_id = %s
-                 AND session_date = %s""",
-            (source_capture_id, session_date),
+               WHERE session_date = %s""",
+            (session_date,),
         )
         existing_rows = cursor.fetchall()
         expected = {
@@ -388,13 +398,19 @@ def persist_baostock_session_directory(
                     "session_date": session_date.isoformat(),
                     "row_count": len(normalized),
                 }
-            raise ValueError("BAOSTOCK_SESSION_DIRECTORY_SAME_KEY_DIFFERENT_CONTENT")
 
         cursor.executemany(
             """INSERT INTO stock.source_baostock_session_directory (
                    source_capture_id, session_date, source_symbol, market,
                    board, session_code_name, trade_status, captured_at
-               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (session_date, source_symbol) DO UPDATE SET
+                   source_capture_id = EXCLUDED.source_capture_id,
+                   market = EXCLUDED.market,
+                   board = EXCLUDED.board,
+                   session_code_name = EXCLUDED.session_code_name,
+                   trade_status = EXCLUDED.trade_status,
+                   captured_at = EXCLUDED.captured_at""",
             [
                 (
                     source_capture_id,
@@ -429,27 +445,37 @@ def read_stock_basic_ipo_dates(
         cursor,
         _,
     ):
-        selected_capture_id = source_capture_id
-        if selected_capture_id is None:
+        if source_capture_id is not None:
             cursor.execute(
-                """SELECT MAX(source_capture_id)
-                   FROM stock.source_baostock_stock_basic"""
+                """SELECT source_symbol, ipo_date
+                   FROM stock.source_baostock_stock_basic
+                   WHERE source_capture_id = %s
+                     AND field_quality <> 'CONFLICT_QUARANTINED'
+                     AND ipo_date IS NOT NULL""",
+                (source_capture_id,),
             )
-            row = cursor.fetchone()
-            selected_capture_id = int(row[0]) if row and row[0] is not None else None
-        if selected_capture_id is None:
+            return (
+                source_capture_id,
+                {str(sym): ipo for sym, ipo in cursor.fetchall()},
+            )
+
+        cursor.execute(
+            """SELECT MAX(source_capture_id)
+               FROM stock.source_baostock_stock_basic"""
+        )
+        row = cursor.fetchone()
+        latest_capture_id = int(row[0]) if row and row[0] is not None else None
+        if latest_capture_id is None:
             return (None, {})
 
         cursor.execute(
             """SELECT source_symbol, ipo_date
                FROM stock.source_baostock_stock_basic
-               WHERE source_capture_id = %s
-                 AND field_quality <> 'CONFLICT_QUARANTINED'
-                 AND ipo_date IS NOT NULL""",
-            (selected_capture_id,),
+               WHERE field_quality <> 'CONFLICT_QUARANTINED'
+                 AND ipo_date IS NOT NULL"""
         )
         return (
-            selected_capture_id,
+            latest_capture_id,
             {str(sym): ipo for sym, ipo in cursor.fetchall()},
         )
 
@@ -478,72 +504,63 @@ def resolve_date_effective_universe(
         cursor,
         _,
     ):
-        dir_cap = directory_capture_id
-        if dir_cap is None:
+        if directory_capture_id is not None:
             cursor.execute(
-                """SELECT MAX(source_capture_id)
+                """SELECT source_symbol, market, board, session_code_name, trade_status, source_capture_id
                    FROM stock.source_baostock_session_directory
-                   WHERE session_date = %s""",
+                   WHERE session_date = %s AND source_capture_id = %s
+                   ORDER BY source_symbol""",
+                (session_date, directory_capture_id),
+            )
+        else:
+            cursor.execute(
+                """SELECT source_symbol, market, board, session_code_name, trade_status, source_capture_id
+                   FROM stock.source_baostock_session_directory
+                   WHERE session_date = %s
+                   ORDER BY source_symbol""",
                 (session_date,),
             )
-            row = cursor.fetchone()
-            dir_cap = int(row[0]) if row and row[0] is not None else None
-        if dir_cap is None:
-            return {
-                "status": "NOT_COMPUTED",
-                "reason": "SESSION_DIRECTORY_NOT_AVAILABLE",
-                "session_date": session_date.isoformat(),
-                "directory_capture_id": None,
-                "stock_basic_capture_id": None,
-                "universe_version": None,
-                "pit_status": "NON_PIT_RETROSPECTIVE",
-                "members": (),
-                "trade_status_by_symbol": {},
-                "excluded_by_date_bounds": 0,
-            }
-
-        cursor.execute(
-            """SELECT source_symbol, market, board, session_code_name, trade_status
-               FROM stock.source_baostock_session_directory
-               WHERE source_capture_id = %s
-                 AND session_date = %s
-               ORDER BY source_symbol""",
-            (dir_cap, session_date),
-        )
         dir_rows = cursor.fetchall()
         if not dir_rows:
             return {
                 "status": "NOT_COMPUTED",
-                "reason": "SESSION_DIRECTORY_CAPTURE_EMPTY",
+                "reason": "SESSION_DIRECTORY_NOT_AVAILABLE"
+                if directory_capture_id is None
+                else "SESSION_DIRECTORY_CAPTURE_EMPTY",
                 "session_date": session_date.isoformat(),
-                "directory_capture_id": dir_cap,
+                "directory_capture_id": directory_capture_id,
                 "stock_basic_capture_id": None,
-                "universe_version": None,
                 "pit_status": "NON_PIT_RETROSPECTIVE",
                 "members": (),
                 "trade_status_by_symbol": {},
                 "excluded_by_date_bounds": 0,
             }
+        dir_cap = (
+            directory_capture_id
+            if directory_capture_id is not None
+            else max(int(row[5]) for row in dir_rows)
+        )
 
-        basic_cap = stock_basic_capture_id
-        if basic_cap is None:
+        if stock_basic_capture_id is not None:
             cursor.execute(
-                """SELECT MAX(source_capture_id)
-                   FROM stock.source_baostock_stock_basic"""
-            )
-            brow = cursor.fetchone()
-            basic_cap = int(brow[0]) if brow and brow[0] is not None else None
-
-        basic_by_symbol: dict[str, tuple[str, date | None, date | None, str]] = {}
-        if basic_cap is not None:
-            cursor.execute(
-                """SELECT source_symbol, security_type, ipo_date, out_date, field_quality
+                """SELECT source_symbol, security_type, ipo_date, out_date, field_quality, source_capture_id
                    FROM stock.source_baostock_stock_basic
                    WHERE source_capture_id = %s""",
-                (basic_cap,),
+                (stock_basic_capture_id,),
             )
-            for sym, sec_type, ipo_d, out_d, fq in cursor.fetchall():
-                basic_by_symbol[str(sym)] = (str(sec_type), ipo_d, out_d, str(fq))
+        else:
+            cursor.execute(
+                """SELECT source_symbol, security_type, ipo_date, out_date, field_quality, source_capture_id
+                   FROM stock.source_baostock_stock_basic"""
+            )
+        basic_rows = cursor.fetchall()
+        basic_cap: int | None = stock_basic_capture_id
+        if basic_cap is None and basic_rows:
+            basic_cap = max(int(row[5]) for row in basic_rows)
+
+        basic_by_symbol: dict[str, tuple[str, date | None, date | None, str]] = {}
+        for sym, sec_type, ipo_d, out_d, fq, _cap_id in basic_rows:
+            basic_by_symbol[str(sym)] = (str(sec_type), ipo_d, out_d, str(fq))
 
     members: list[str] = []
     quarantined_symbols: list[str] = []
@@ -551,7 +568,7 @@ def resolve_date_effective_universe(
     missing_basic_symbols: list[str] = []
     trade_status_by_symbol: dict[str, str] = {}
     excluded_by_date_bounds = 0
-    for sym, _market, board, _name, trade_status in dir_rows:
+    for sym, _market, board, _name, trade_status, _dir_cap in dir_rows:
         symbol = str(sym)
         if research_eligible_only and board not in _RESEARCH_ELIGIBLE_BOARDS:
             continue
@@ -577,9 +594,6 @@ def resolve_date_effective_universe(
         members.append(symbol)
         trade_status_by_symbol[symbol] = str(trade_status)
 
-    universe_version = (
-        f"BAOSTOCK_DATE_EFFECTIVE_DIR_{dir_cap}_BASIC_{basic_cap or 'NONE'}"
-    )
     return {
         "status": "AVAILABLE",
         "reason": None,
@@ -587,7 +601,6 @@ def resolve_date_effective_universe(
         "directory_capture_id": dir_cap,
         "stock_basic_capture_id": basic_cap,
         "universe_capture_id": dir_cap,
-        "universe_version": universe_version,
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "members": tuple(members),
         "member_count": len(members),

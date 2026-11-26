@@ -160,7 +160,6 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 research_cutoff=_parse_session_date(args.research_cutoff),
                 source_capture_id=source_capture_id,
                 history_session_count=getattr(args, "history_session_count", None),
-                profile_revision=getattr(args, "profile_revision", None),
             )
             report["configuration_path"] = str(config_path)
             report["ok"] = report.get("status") in {

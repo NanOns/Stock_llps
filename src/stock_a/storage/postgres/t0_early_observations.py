@@ -6,7 +6,6 @@ from datetime import date
 import re
 from typing import Any, Mapping, Sequence
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.storage.postgres import source_raw
 
 
@@ -28,7 +27,6 @@ _SNAPSHOT_ROLES = {
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _SEED_SCOPE_FIELDS = (
-    "profile_revision",
     "producer_contract",
     "producer_version",
     "history_session_count",
@@ -127,14 +125,14 @@ def read_source_t0_early_observation_inputs(
         _,
     ):
         cursor.execute(
-            """SELECT s.profile_revision,s.producer_contract,s.producer_version,
+            """SELECT s.producer_contract,s.producer_version,
                       s.history_session_count,s.calendar_id,s.calendar_revision,
                       s.research_mode,s.price_coordinate,count(*)::bigint,
                       count(DISTINCT s.source_symbol)::bigint
                FROM source_pool_seed_day_facts s
                WHERE s.target_session=%s AND s.source_capture_id=%s
                  AND s.producer_version=%s
-               GROUP BY s.profile_revision,s.producer_contract,s.producer_version,
+               GROUP BY s.producer_contract,s.producer_version,
                         s.history_session_count,s.calendar_id,s.calendar_revision,
                         s.research_mode,s.price_coordinate""",
             (target_session, source_capture_id, _SEED_PRODUCER_VERSION),
@@ -150,6 +148,7 @@ def read_source_t0_early_observation_inputs(
                 "指定来源版本的Seed/Profile分区不唯一或未闭合到Raw来源池分母",
             )
         seed_scope = dict(zip(_SEED_SCOPE_FIELDS, seed_scopes[0][:-2], strict=True))
+        seed_scope["profile_revision"] = ""
         seed_scope["source_count"] = expected_source_count
 
         cursor.execute(
@@ -228,7 +227,7 @@ def read_source_t0_early_observation_inputs(
 SELECT p.enrollment_id,p.enrollment_kind,p.reason_code,
        p.parent_d0_fact_id,p.rule_fact_id,p.target_session,
        p.source_capture_id,p.target_capture_id,p.source_symbol,
-       s.id AS seed_fact_id,s.profile_revision,s.producer_contract,
+       s.id AS seed_fact_id,''::text AS profile_revision,s.producer_contract,
        s.producer_version,s.history_session_count,s.calendar_id,
        s.calendar_revision,s.research_mode AS seed_research_mode,
        s.price_coordinate AS seed_price_coordinate,
@@ -246,7 +245,6 @@ JOIN source_pool_seed_day_facts s
   ON s.target_session=p.target_session
  AND s.source_capture_id=p.source_capture_id
  AND s.source_symbol=p.source_symbol
- AND s.profile_revision=%s
  AND s.producer_contract=%s
  AND s.producer_version=%s
  AND s.history_session_count=%s
@@ -363,10 +361,10 @@ def read_source_t0_pulse_transition_facts(
     target_session: date,
     previous_source_capture_id: int | None,
     target_source_capture_id: int,
-    previous_profile_revision: str | None,
-    target_profile_revision: str,
+    previous_profile_revision: str | None = None,
+    target_profile_revision: str | None = None,
 ) -> dict[int, dict[str, Any]]:
-    """读取绑定两端独立来源捕获和Profile修订的既存PULSE转移。"""
+    """读取绑定两端独立来源捕获的既存PULSE转移。"""
     from stock_a.research.entry_context.sessions import _load_calendar
     from stock_a.research.source_forward_path import (
         forward_calendar_revision_compatible,
@@ -385,24 +383,11 @@ def read_source_t0_pulse_transition_facts(
         raise T0EarlyObservationPgError(
             "T0_EARLY_TRANSITION_SCOPE_INVALID", "相邻PULSE转移读取键无效"
         )
-    if (
-        not pulse_ids
-        or previous_source_capture_id is None
-        or previous_profile_revision is None
-    ):
+    if not pulse_ids or previous_source_capture_id is None:
         return {}
     if type(previous_source_capture_id) is not int or previous_source_capture_id <= 0:
         raise T0EarlyObservationPgError(
             "T0_EARLY_PREVIOUS_CAPTURE_INVALID", "前一Raw捕获ID无效"
-        )
-    if (
-        not isinstance(previous_profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, previous_profile_revision) is None
-        or not isinstance(target_profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, target_profile_revision) is None
-    ):
-        raise T0EarlyObservationPgError(
-            "T0_EARLY_PROFILE_REVISION_INVALID", "相邻两端Profile修订必须分别显式绑定"
         )
 
     calendar, _, official_revision_chain, official_sessions = _load_calendar(
@@ -452,10 +437,8 @@ def read_source_t0_pulse_transition_facts(
                WHERE t.target_pulse_id=ANY(%s)
                  AND previous.target_session=%s
                  AND previous.source_capture_id=%s
-                 AND previous.profile_revision=%s
                  AND target.target_session=%s
                  AND target.source_capture_id=%s
-                 AND target.profile_revision=%s
                  AND t.transition_contract='SOURCE_CROSS_PERIOD_PULSE_TRANSITION_R1'
                  AND t.research_mode='NON_PIT_RETROSPECTIVE'
                  AND t.price_coordinate='FORWARD_ADJUSTED'
@@ -464,10 +447,8 @@ def read_source_t0_pulse_transition_facts(
                 list(pulse_ids),
                 previous_session,
                 previous_source_capture_id,
-                previous_profile_revision,
                 target_session,
                 target_source_capture_id,
-                target_profile_revision,
             ),
         )
         rows = cursor.fetchall()

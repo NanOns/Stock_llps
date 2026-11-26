@@ -1568,9 +1568,6 @@ def discover_source_d1_structures(
                 config,
                 target_session=q_day,
                 price_capture_id=source_capture_id,
-                universe_version=(
-                    cross_section_universe_version if is_target_scope else None
-                ),
                 universe_capture_id=(
                     cross_section_universe_capture_id if is_target_scope else None
                 ),
@@ -1583,20 +1580,16 @@ def discover_source_d1_structures(
                 )
             if (
                 is_target_scope
-                and (
-                    cross_section_universe_version is not None
-                    or cross_section_universe_capture_id is not None
-                )
+                and cross_section_universe_capture_id is not None
                 and bundle.get("status") != "AVAILABLE"
             ):
                 raise PgResearchBindingError(
                     "D1_SELECTED_CROSS_SECTION_SCOPE_UNAVAILABLE",
-                    "D1目标日指定的横截面版本/捕获没有完整事实",
+                    "D1目标日指定的横截面捕获没有完整事实",
                 )
-            if is_target_scope and bundle.get("universe_version"):
+            if is_target_scope and bundle.get("status") == "AVAILABLE":
                 target_cross_section_scope = {
                     "universe_capture_id": bundle.get("universe_capture_id"),
-                    "universe_version": bundle.get("universe_version"),
                     "contract_version": bundle.get("contract_version"),
                     "status": bundle.get("status"),
                     "reason": bundle.get("reason"),

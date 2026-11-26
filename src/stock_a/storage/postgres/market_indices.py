@@ -91,19 +91,26 @@ def persist_market_index_day_facts(
                           ret5_fraction, ret5_quality, ret5_reason,
                           ret20_fraction, ret20_quality, ret20_reason,
                           close_vs_ma20_fraction, close_vs_ma20_quality, close_vs_ma20_reason,
-                          trend_state, trend_reason
+                          trend_state, trend_reason,
+                          official_code, index_capture_id, config_version,
+                          index_role_at_run, calendar_id, calendar_revision, contract_version
                    FROM stock.source_market_index_day_facts
-                   WHERE target_session = %s AND source_symbol = %s
-                     AND index_capture_id = %s AND calendar_revision = %s
-                     AND contract_version = %s""",
-                (target_session, sym, idx_cap, cal_rev, contract_ver),
+                   WHERE target_session = %s AND source_symbol = %s""",
+                (target_session, sym),
             )
             existing = cursor.fetchone()
-            if existing is not None:
-                if existing == vals:
-                    unchanged += 1
-                    continue
-                raise ValueError(f"MARKET_INDEX_FACTS_SAME_KEY_DIFFERENT_CONTENT:{sym}")
+            full_meta = (
+                rec["official_code"],
+                idx_cap,
+                rec["config_version"],
+                rec["index_role_at_run"],
+                rec["calendar_id"],
+                cal_rev,
+                contract_ver,
+            )
+            if existing is not None and existing == (*vals, *full_meta):
+                unchanged += 1
+                continue
 
             cursor.execute(
                 """INSERT INTO stock.source_market_index_day_facts (
@@ -119,17 +126,36 @@ def persist_market_index_day_facts(
                    ) VALUES (
                        %s, %s, %s, %s, %s, %s, %s, %s, %s,
                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                   )""",
+                   )
+                   ON CONFLICT (target_session, source_symbol) DO UPDATE SET
+                       official_code = EXCLUDED.official_code,
+                       index_capture_id = EXCLUDED.index_capture_id,
+                       config_version = EXCLUDED.config_version,
+                       index_role_at_run = EXCLUDED.index_role_at_run,
+                       calendar_id = EXCLUDED.calendar_id,
+                       calendar_revision = EXCLUDED.calendar_revision,
+                       contract_version = EXCLUDED.contract_version,
+                       close_points = EXCLUDED.close_points,
+                       ma20_points = EXCLUDED.ma20_points,
+                       ma20_5d_ago_points = EXCLUDED.ma20_5d_ago_points,
+                       ret1_fraction = EXCLUDED.ret1_fraction,
+                       ret1_quality = EXCLUDED.ret1_quality,
+                       ret1_reason = EXCLUDED.ret1_reason,
+                       ret5_fraction = EXCLUDED.ret5_fraction,
+                       ret5_quality = EXCLUDED.ret5_quality,
+                       ret5_reason = EXCLUDED.ret5_reason,
+                       ret20_fraction = EXCLUDED.ret20_fraction,
+                       ret20_quality = EXCLUDED.ret20_quality,
+                       ret20_reason = EXCLUDED.ret20_reason,
+                       close_vs_ma20_fraction = EXCLUDED.close_vs_ma20_fraction,
+                       close_vs_ma20_quality = EXCLUDED.close_vs_ma20_quality,
+                       close_vs_ma20_reason = EXCLUDED.close_vs_ma20_reason,
+                       trend_state = EXCLUDED.trend_state,
+                       trend_reason = EXCLUDED.trend_reason""",
                 (
                     target_session,
                     sym,
-                    rec["official_code"],
-                    idx_cap,
-                    rec["config_version"],
-                    rec["index_role_at_run"],
-                    rec["calendar_id"],
-                    cal_rev,
-                    contract_ver,
+                    *full_meta,
                     *vals,
                 ),
             )
@@ -153,17 +179,12 @@ def persist_market_environment_series(
     calendar_id: str,
     calendar_revision: str,
     rule_version: str = "MARKET_PRESENTATION_R1",
-    formal_scope_key: str = "",
-    profile_revision: str = "",
-    universe_version_t: str = "",
-    universe_version_t3: str = "",
     breadth_source_kind: str = "UNKNOWN",
     prev_trade_date: date | None = None,
-    prev_formal_scope_key: str | None = None,
     initial_state: Mapping[str, Any] | None = None,
     cursor: Any | None = None,
 ) -> dict[str, Any]:
-    """按严格官方相邻会话离线归约市场复合环境展示状态并幂等持久化。"""
+    """按严格官方相邻会话离线归约市场复合环境展示状态并幂等持久化（单一有效事实替换）。"""
     raw_obs = []
     axes_by_session: dict[str, Mapping[str, Any]] = {}
     for row in day_axis_inputs:
@@ -212,9 +233,18 @@ def persist_market_environment_series(
                 sess_str = str(item["session"])
                 sess_dt = date.fromisoformat(sess_str)
                 ax = axes_by_session.get(sess_str, {})
+                raw_bsk = str(ax.get("breadth_source_kind") or breadth_source_kind)
+                norm_bsk = (
+                    "FORMAL_UNIVERSE" if raw_bsk == "FORMAL_UNIVERSE" else "UNKNOWN"
+                )
                 vals = (
+                    stock_capture_id,
                     index_capture_id,
+                    primary_index_symbol,
                     index_config_version,
+                    calendar_id,
+                    calendar_revision,
+                    rule_version,
                     str(ax.get("trend_axis") or "UNKNOWN"),
                     str(ax.get("breadth_axis") or "UNKNOWN"),
                     str(ax.get("participation_axis") or "UNKNOWN"),
@@ -225,76 +255,58 @@ def persist_market_environment_series(
                     item["display_status"],
                     item["pending_label"],
                     int(item["pending_count"]),
-                    str(ax.get("breadth_source_kind") or breadth_source_kind),
+                    norm_bsk,
                     ax.get("prev_trade_date", prev_trade_date),
-                    ax.get("prev_formal_scope_key", prev_formal_scope_key),
                 )
                 cursor.execute(
-                    """SELECT index_capture_id, index_config_version,
+                    """SELECT stock_capture_id, index_capture_id, primary_index_symbol,
+                              index_config_version, calendar_id, calendar_revision, rule_version,
                               trend_axis, breadth_axis, participation_axis, pressure_axis,
                               raw_status, raw_label, displayed_label, display_status,
                               pending_label, pending_count,
-                              breadth_source_kind, prev_trade_date, prev_formal_scope_key
+                              breadth_source_kind, prev_trade_date
                        FROM stock.source_market_environment_day_facts
-                       WHERE target_session = %s AND stock_capture_id = %s
-                         AND primary_index_symbol = %s AND calendar_revision = %s
-                         AND rule_version = %s
-                         AND formal_scope_key = %s
-                         AND profile_revision = %s
-                         AND universe_version_t = %s
-                         AND universe_version_t3 = %s""",
-                    (
-                        sess_dt,
-                        stock_capture_id,
-                        primary_index_symbol,
-                        calendar_revision,
-                        rule_version,
-                        formal_scope_key,
-                        profile_revision,
-                        universe_version_t,
-                        universe_version_t3,
-                    ),
+                       WHERE target_session = %s""",
+                    (sess_dt,),
                 )
                 existing = cursor.fetchone()
-                if existing is not None:
-                    if existing == vals:
-                        unchanged += 1
-                        continue
-                    raise ValueError(
-                        f"MARKET_ENVIRONMENT_SAME_KEY_DIFFERENT_CONTENT:{sess_str}"
-                    )
+                if existing is not None and existing == vals:
+                    unchanged += 1
+                    continue
                 cursor.execute(
                     """INSERT INTO stock.source_market_environment_day_facts (
                            target_session, stock_capture_id, index_capture_id,
                            primary_index_symbol, index_config_version,
                            calendar_id, calendar_revision, rule_version,
-                           formal_scope_key, profile_revision,
-                           universe_version_t, universe_version_t3,
                            trend_axis, breadth_axis, participation_axis, pressure_axis,
                            raw_status, raw_label, displayed_label, display_status,
                            pending_label, pending_count,
-                           breadth_source_kind, prev_trade_date, prev_formal_scope_key
+                           breadth_source_kind, prev_trade_date
                        ) VALUES (
                            %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s
-                       )""",
-                    (
-                        sess_dt,
-                        stock_capture_id,
-                        index_capture_id,
-                        primary_index_symbol,
-                        index_config_version,
-                        calendar_id,
-                        calendar_revision,
-                        rule_version,
-                        formal_scope_key,
-                        profile_revision,
-                        universe_version_t,
-                        universe_version_t3,
-                        *vals[2:],
-                    ),
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                       )
+                       ON CONFLICT (target_session) DO UPDATE SET
+                           stock_capture_id = EXCLUDED.stock_capture_id,
+                           index_capture_id = EXCLUDED.index_capture_id,
+                           primary_index_symbol = EXCLUDED.primary_index_symbol,
+                           index_config_version = EXCLUDED.index_config_version,
+                           calendar_id = EXCLUDED.calendar_id,
+                           calendar_revision = EXCLUDED.calendar_revision,
+                           rule_version = EXCLUDED.rule_version,
+                           trend_axis = EXCLUDED.trend_axis,
+                           breadth_axis = EXCLUDED.breadth_axis,
+                           participation_axis = EXCLUDED.participation_axis,
+                           pressure_axis = EXCLUDED.pressure_axis,
+                           raw_status = EXCLUDED.raw_status,
+                           raw_label = EXCLUDED.raw_label,
+                           displayed_label = EXCLUDED.displayed_label,
+                           display_status = EXCLUDED.display_status,
+                           pending_label = EXCLUDED.pending_label,
+                           pending_count = EXCLUDED.pending_count,
+                           breadth_source_kind = EXCLUDED.breadth_source_kind,
+                           prev_trade_date = EXCLUDED.prev_trade_date""",
+                    (sess_dt, *vals),
                 )
                 inserted += 1
     except RawSourcePgError as exc:
@@ -312,60 +324,15 @@ def read_market_indices_and_style_summary(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    calendar_revision: str,
     index_contract: Mapping[str, Any],
-    index_capture_id: int | None = None,
-    config_version: str | None = None,
+    calendar_revision: str | None = None,
 ) -> dict[str, Any]:
-    """只读查询目标日单一选定捕获与配置版本下的参考指数因子与风格剪刀差（杜绝跨捕获混算）。"""
+    """只读查询目标日单一有效参考指数因子与风格剪刀差。"""
     with _transaction(config, write=False, statement_timeout_ms=10000) as (
         _,
         cursor,
         _,
     ):
-        selected_capture_id = index_capture_id
-        selected_config_version = config_version
-        if selected_capture_id is None or selected_config_version is None:
-            # 优先锁定主参考指数（PRIMARY_MARKET）的最新 (index_capture_id, config_version)
-            cursor.execute(
-                """SELECT index_capture_id, config_version
-                   FROM stock.source_market_index_day_facts
-                   WHERE target_session = %s
-                     AND calendar_revision = %s
-                     AND contract_version = %s
-                     AND (%s::bigint IS NULL OR index_capture_id = %s)
-                     AND (%s::text IS NULL OR config_version = %s)
-                   ORDER BY
-                     CASE WHEN index_role_at_run = 'PRIMARY_MARKET' THEN 0 ELSE 1 END,
-                     index_capture_id DESC,
-                     config_version DESC
-                   LIMIT 1""",
-                (
-                    target_session,
-                    calendar_revision,
-                    MARKET_INDEX_CONTRACT_VERSION,
-                    selected_capture_id,
-                    selected_capture_id,
-                    selected_config_version,
-                    selected_config_version,
-                ),
-            )
-            scope_row = cursor.fetchone()
-            if scope_row is None:
-                return {
-                    "status": "NOT_COMPUTED",
-                    "target_session": target_session.isoformat(),
-                    "calendar_revision": calendar_revision,
-                    "contract_version": MARKET_INDEX_CONTRACT_VERSION,
-                    "index_capture_id": selected_capture_id,
-                    "config_version": selected_config_version,
-                    "indices": [],
-                    "style_spreads": [],
-                    "reason": "MARKET_INDEX_FACTS_NOT_PERSISTED",
-                }
-            selected_capture_id = int(scope_row[0])
-            selected_config_version = str(scope_row[1])
-
         cursor.execute(
             """SELECT source_symbol, official_code, index_capture_id,
                       index_role_at_run, close_points,
@@ -373,21 +340,11 @@ def read_market_indices_and_style_summary(
                       ret5_fraction, ret5_quality, ret5_reason,
                       ret20_fraction, ret20_quality, ret20_reason,
                       close_vs_ma20_fraction, close_vs_ma20_quality, close_vs_ma20_reason,
-                      trend_state, trend_reason
+                      trend_state, trend_reason, config_version, calendar_revision
                FROM stock.source_market_index_day_facts
                WHERE target_session = %s
-                 AND calendar_revision = %s
-                 AND contract_version = %s
-                 AND index_capture_id = %s
-                 AND config_version = %s
                ORDER BY source_symbol""",
-            (
-                target_session,
-                calendar_revision,
-                MARKET_INDEX_CONTRACT_VERSION,
-                selected_capture_id,
-                selected_config_version,
-            ),
+            (target_session,),
         )
         rows = cursor.fetchall()
 
@@ -397,12 +354,18 @@ def read_market_indices_and_style_summary(
             "target_session": target_session.isoformat(),
             "calendar_revision": calendar_revision,
             "contract_version": MARKET_INDEX_CONTRACT_VERSION,
-            "index_capture_id": selected_capture_id,
-            "config_version": selected_config_version,
+            "index_capture_id": None,
+            "config_version": None,
             "indices": [],
             "style_spreads": [],
             "reason": "MARKET_INDEX_FACTS_NOT_PERSISTED",
         }
+
+    selected_capture_id = int(rows[0][2]) if rows[0][2] is not None else None
+    selected_config_version = str(rows[0][19]) if rows[0][19] is not None else None
+    selected_cal_rev = (
+        str(rows[0][20]) if rows[0][20] is not None else calendar_revision
+    )
 
     by_official: dict[str, dict[str, Any]] = {}
     items: list[dict[str, Any]] = []
@@ -446,7 +409,7 @@ def read_market_indices_and_style_summary(
     return {
         "status": "AVAILABLE",
         "target_session": target_session.isoformat(),
-        "calendar_revision": calendar_revision,
+        "calendar_revision": selected_cal_rev,
         "contract_version": MARKET_INDEX_CONTRACT_VERSION,
         "index_capture_id": selected_capture_id,
         "config_version": selected_config_version,
@@ -459,215 +422,58 @@ def read_market_environment_display(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    stock_capture_id: int,
-    primary_index_symbol: str,
-    calendar_revision: str,
-    rule_version: str = "MARKET_PRESENTATION_R1",
-    index_capture_id: int | None = None,
-    index_config_version: str | None = None,
-    calendar_id: str | None = None,
-    formal_scope_key: str | None = None,
-    profile_revision: str | None = None,
-    universe_version_t: str | None = None,
-    universe_version_t3: str | None = None,
 ) -> dict[str, Any]:
-    """只读查询目标日已存市场复合环境展示状态（未落库时诚实返回 NOT_COMPUTED）。"""
-    if (
-        type(target_session) is not date
-        or type(stock_capture_id) is not int
-        or stock_capture_id <= 0
-        or not isinstance(primary_index_symbol, str)
-        or not primary_index_symbol.strip()
-        or not isinstance(calendar_revision, str)
-        or not calendar_revision.strip()
-        or not isinstance(rule_version, str)
-        or not rule_version.strip()
-        or index_capture_id is not None
-        and (type(index_capture_id) is not int or index_capture_id <= 0)
-        or index_config_version is not None
-        and (
-            not isinstance(index_config_version, str)
-            or not index_config_version.strip()
-        )
-        or calendar_id is not None
-        and (not isinstance(calendar_id, str) or not calendar_id.strip())
-    ):
+    """只读查询目标日单一有效市场复合环境展示状态（未落库时诚实返回 NOT_COMPUTED）。"""
+    if type(target_session) is not date:
         raise ValueError("MARKET_ENVIRONMENT_READ_SCOPE_INVALID")
-    norm_scope = (
-        formal_scope_key.strip()
-        if isinstance(formal_scope_key, str) and formal_scope_key.strip()
-        else None
-    )
-    norm_prof = (
-        profile_revision.strip()
-        if isinstance(profile_revision, str) and profile_revision.strip()
-        else None
-    )
-    norm_ut = (
-        universe_version_t.strip()
-        if isinstance(universe_version_t, str) and universe_version_t.strip()
-        else None
-    )
-    norm_ut3 = (
-        universe_version_t3.strip()
-        if isinstance(universe_version_t3, str) and universe_version_t3.strip()
-        else None
-    )
     with _transaction(config, write=False, statement_timeout_ms=10000) as (
         _,
         cursor,
         _,
     ):
         cursor.execute(
-            """SELECT DISTINCT index_capture_id, index_config_version, calendar_id,
-                               formal_scope_key, profile_revision,
-                               universe_version_t, universe_version_t3
-               FROM stock.source_market_environment_day_facts
-               WHERE target_session=%s AND stock_capture_id=%s
-                 AND primary_index_symbol=%s AND calendar_revision=%s
-                 AND rule_version=%s
-                 AND (%s::bigint IS NULL OR index_capture_id IS NOT DISTINCT FROM %s)
-                 AND (%s::text IS NULL OR index_config_version IS NOT DISTINCT FROM %s)
-                 AND (%s::text IS NULL OR calendar_id=%s)
-                 AND (%s::text IS NULL OR formal_scope_key=%s)
-                 AND (%s::text IS NULL OR profile_revision=%s)
-                 AND (%s::text IS NULL OR universe_version_t=%s)
-                 AND (%s::text IS NULL OR universe_version_t3=%s)
-               ORDER BY index_capture_id NULLS FIRST, index_config_version NULLS FIRST,
-                        calendar_id, formal_scope_key, profile_revision,
-                        universe_version_t, universe_version_t3""",
-            (
-                target_session,
-                stock_capture_id,
-                primary_index_symbol,
-                calendar_revision,
-                rule_version,
-                index_capture_id,
-                index_capture_id,
-                index_config_version,
-                index_config_version,
-                calendar_id,
-                calendar_id,
-                norm_scope,
-                norm_scope,
-                norm_prof,
-                norm_prof,
-                norm_ut,
-                norm_ut,
-                norm_ut3,
-                norm_ut3,
-            ),
-        )
-        scopes = cursor.fetchall()
-        if len(scopes) > 1:
-            return {
-                "status": "INCOMPLETE",
-                "target_session": target_session.isoformat(),
-                "stock_capture_id": stock_capture_id,
-                "primary_index_symbol": primary_index_symbol,
-                "calendar_revision": calendar_revision,
-                "rule_version": rule_version,
-                "reason": "MARKET_ENVIRONMENT_SCOPE_AMBIGUOUS",
-                "candidate_scopes": [
-                    {
-                        "index_capture_id": int(row[0]) if row[0] is not None else None,
-                        "index_config_version": row[1],
-                        "calendar_id": row[2],
-                        "formal_scope_key": row[3],
-                        "profile_revision": row[4],
-                        "universe_version_t": row[5],
-                        "universe_version_t3": row[6],
-                    }
-                    for row in scopes
-                ],
-            }
-        if not scopes:
-            row = None
-        else:
-            (
-                selected_index_capture_id,
-                selected_index_config_version,
-                selected_calendar_id,
-                selected_formal_scope_key,
-                selected_profile_revision,
-                selected_u_t,
-                selected_u_t3,
-            ) = scopes[0]
-            cursor.execute(
-                """SELECT index_capture_id, index_config_version,
+            """SELECT stock_capture_id, index_capture_id, primary_index_symbol,
+                      index_config_version, calendar_id, calendar_revision, rule_version,
                       trend_axis, breadth_axis, participation_axis, pressure_axis,
                       raw_status, raw_label, displayed_label, display_status,
                       pending_label, pending_count,
-                      breadth_source_kind, prev_trade_date, prev_formal_scope_key
+                      breadth_source_kind, prev_trade_date
                FROM stock.source_market_environment_day_facts
-               WHERE target_session = %s
-                 AND stock_capture_id = %s
-                 AND primary_index_symbol = %s
-                 AND index_capture_id IS NOT DISTINCT FROM %s
-                 AND index_config_version IS NOT DISTINCT FROM %s
-                 AND calendar_id = %s
-                 AND calendar_revision = %s
-                 AND rule_version = %s
-                 AND formal_scope_key = %s
-                 AND profile_revision = %s
-                 AND universe_version_t = %s
-                 AND universe_version_t3 = %s""",
-                (
-                    target_session,
-                    stock_capture_id,
-                    primary_index_symbol,
-                    selected_index_capture_id,
-                    selected_index_config_version,
-                    selected_calendar_id,
-                    calendar_revision,
-                    rule_version,
-                    selected_formal_scope_key,
-                    selected_profile_revision,
-                    selected_u_t,
-                    selected_u_t3,
-                ),
-            )
-            row = cursor.fetchone()
+               WHERE target_session = %s""",
+            (target_session,),
+        )
+        row = cursor.fetchone()
     if row is None:
         return {
             "status": "NOT_COMPUTED",
             "target_session": target_session.isoformat(),
-            "stock_capture_id": stock_capture_id,
-            "primary_index_symbol": primary_index_symbol,
-            "calendar_revision": calendar_revision,
-            "rule_version": rule_version,
             "reason": "MARKET_ENVIRONMENT_DISPLAY_NOT_PERSISTED",
         }
     return {
         "status": "AVAILABLE",
         "target_session": target_session.isoformat(),
-        "stock_capture_id": stock_capture_id,
-        "index_capture_id": int(row[0]) if row[0] is not None else None,
-        "primary_index_symbol": primary_index_symbol,
-        "index_config_version": row[1],
-        "calendar_id": selected_calendar_id,
-        "calendar_revision": calendar_revision,
-        "rule_version": rule_version,
-        "formal_scope_key": selected_formal_scope_key or None,
-        "profile_revision": selected_profile_revision or None,
-        "universe_version_t": selected_u_t or None,
-        "universe_version_t3": selected_u_t3 or None,
-        "breadth_source_kind": row[12],
-        "prev_trade_date": row[13].isoformat() if row[13] is not None else None,
-        "prev_formal_scope_key": row[14],
+        "stock_capture_id": int(row[0]) if row[0] is not None else None,
+        "index_capture_id": int(row[1]) if row[1] is not None else None,
+        "primary_index_symbol": row[2],
+        "index_config_version": row[3],
+        "calendar_id": row[4],
+        "calendar_revision": row[5],
+        "rule_version": row[6],
+        "breadth_source_kind": row[17],
+        "prev_trade_date": row[18].isoformat() if row[18] is not None else None,
         "axes": {
-            "trend": row[2],
-            "breadth": row[3],
-            "participation": row[4],
-            "pressure": row[5],
+            "trend": row[7],
+            "breadth": row[8],
+            "participation": row[9],
+            "pressure": row[10],
         },
-        "raw_status": row[6],
-        "raw_label": row[7],
-        "displayed_label": row[8],
-        "display_label": row[8],
-        "display_status": row[9],
-        "pending_label": row[10],
-        "pending_count": int(row[11]),
+        "raw_status": row[11],
+        "raw_label": row[12],
+        "displayed_label": row[13],
+        "display_label": row[13],
+        "display_status": row[14],
+        "pending_label": row[15],
+        "pending_count": int(row[16]),
     }
 
 
@@ -763,22 +569,19 @@ def persist_market_index_daily_bars(
                 pit_status,
             )
             cursor.execute(
-                """SELECT official_code, bar_status, open_points, high_points,
+                """SELECT source_capture_id, official_code, bar_status, open_points, high_points,
                           low_points, close_points, preclose_points,
                           volume_raw, amount_raw, pct_chg_reported,
                           price_quality, price_reason, pit_status
                    FROM stock.source_market_index_daily
-                   WHERE source_capture_id = %s
-                     AND source_symbol = %s
+                   WHERE source_symbol = %s
                      AND session_date = %s""",
-                (source_capture_id, item["source_symbol"], item["session_date"]),
+                (item["source_symbol"], item["session_date"]),
             )
             existing = cursor.fetchone()
-            if existing is not None:
-                if tuple(existing) == vals:
-                    unchanged += 1
-                    continue
-                raise ValueError("MARKET_INDEX_DAILY_SAME_KEY_DIFFERENT_CONTENT")
+            if existing is not None and tuple(existing) == (source_capture_id, *vals):
+                unchanged += 1
+                continue
             cursor.execute(
                 """INSERT INTO stock.source_market_index_daily (
                        source_capture_id, source_symbol, official_code, session_date,
@@ -792,7 +595,23 @@ def persist_market_index_daily_bars(
                        %s, %s, %s, %s, %s,
                        %s, %s, %s,
                        %s, %s, %s, %s
-                   )""",
+                   )
+                   ON CONFLICT (source_symbol, session_date) DO UPDATE SET
+                       source_capture_id = EXCLUDED.source_capture_id,
+                       official_code = EXCLUDED.official_code,
+                       bar_status = EXCLUDED.bar_status,
+                       open_points = EXCLUDED.open_points,
+                       high_points = EXCLUDED.high_points,
+                       low_points = EXCLUDED.low_points,
+                       close_points = EXCLUDED.close_points,
+                       preclose_points = EXCLUDED.preclose_points,
+                       volume_raw = EXCLUDED.volume_raw,
+                       amount_raw = EXCLUDED.amount_raw,
+                       pct_chg_reported = EXCLUDED.pct_chg_reported,
+                       price_quality = EXCLUDED.price_quality,
+                       price_reason = EXCLUDED.price_reason,
+                       pit_status = EXCLUDED.pit_status,
+                       captured_at = EXCLUDED.captured_at""",
                 (
                     source_capture_id,
                     item["source_symbol"],
@@ -882,15 +701,6 @@ def read_market_index_daily_scope(
     )
 
 
-def _normalize_optional_text_arg(value: str | None, *, name: str) -> str | None:
-    """校验可选文本参数，非空时返回去除首尾空白的字符串，空字符串拒绝。"""
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"INVALID_{name.upper()}")
-    return value.strip()
-
-
 def persist_market_indices_and_environment_for_session(
     config: Mapping[str, Any],
     *,
@@ -900,31 +710,15 @@ def persist_market_indices_and_environment_for_session(
     index_capture_id: int | None,
     index_contract: Mapping[str, Any] | None = None,
     rule_version: str = "MARKET_PRESENTATION_R1",
-    profile_revision: str | None = None,
-    formal_scope_key: str | None = None,
-    universe_version_t: str | None = None,
-    universe_version_t3: str | None = None,
 ) -> dict[str, Any]:
     """离线生产单日全部启用参考指数日因子与目标日四轴复合市场环境展示状态。
 
     宽度轴优先并仅消费 `stock.r03_formal_market_breadth_facts` 的已闭合正式宽度；
-    正式宽度缺失、未完成、非 OBSERVED 或口径歧义时均标 `UNKNOWN`，严禁回退使用
-    `b_fixed_source` 冒充正式宽度。参与度轴按合同版本与可选 `profile_revision` 精确过滤。
+    正式宽度缺失、未完成或非 OBSERVED 时均标 `UNKNOWN`，严禁回退使用
+    `b_fixed_source` 冒充正式宽度。
     """
     if target_session > research_cutoff:
         raise ValueError("市场指数与环境目标日不得晚于研究截止日")
-    norm_profile_revision = _normalize_optional_text_arg(
-        profile_revision, name="profile_revision"
-    )
-    norm_formal_scope_key = _normalize_optional_text_arg(
-        formal_scope_key, name="formal_scope_key"
-    )
-    norm_universe_t = _normalize_optional_text_arg(
-        universe_version_t, name="universe_version_t"
-    )
-    norm_universe_t3 = _normalize_optional_text_arg(
-        universe_version_t3, name="universe_version_t3"
-    )
     calendar_data, _, calendar_revision, calendar_sessions = _load_calendar(
         research_cutoff
     )
@@ -957,15 +751,13 @@ def persist_market_indices_and_environment_for_session(
     primary_symbol = str(primary_item["source_symbol"])
     enabled_symbols = [str(item["source_symbol"]) for item in enabled_indices]
 
-    from stock_a.storage.postgres.market_participation import (
-        MARKET_PARTICIPATION_CONTRACT,
-    )
-
-    # 1. 读取该 index_capture_id 下全部启用指数 <= target_session 的日线点位、参与度与正式宽度候选
+    # 1. 读取该启用指数 <= target_session 的日线点位、参与度与前一官方交易日环境状态
     bars_by_symbol: dict[str, dict[date, IndexDailyBar]] = {
         sym: {} for sym in enabled_symbols
     }
-    formal_candidates: list[tuple[str, str, str]] = []
+    target_idx = calendar_sessions.index(target_session)
+    prior_env_state: dict[str, Any] | None = None
+    prior_trade_date: date | None = None
     with _transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
@@ -976,11 +768,10 @@ def persist_market_indices_and_environment_for_session(
                 """SELECT source_symbol, session_date, close_points, preclose_points,
                           price_quality, bar_status
                    FROM stock.source_market_index_daily
-                   WHERE source_capture_id = %s
-                     AND source_symbol = ANY(%s)
+                   WHERE source_symbol = ANY(%s)
                      AND session_date <= %s
                    ORDER BY source_symbol, session_date""",
-                (index_capture_id, enabled_symbols, target_session),
+                (enabled_symbols, target_session),
             )
             for sym, sess, close_p, preclose_p, pq, bs in cursor.fetchall():
                 bars_by_symbol[str(sym)][sess] = IndexDailyBar(
@@ -991,35 +782,19 @@ def persist_market_indices_and_environment_for_session(
                     bar_status=str(bs),
                 )
 
-        part_sql = """
-            SELECT classification, status, profile_revision
+        cursor.execute(
+            """
+            SELECT classification, status
             FROM stock.source_market_participation_days
             WHERE target_session = %s
-              AND source_capture_id = %s
-              AND calendar_revision = %s
-              AND contract_version = %s
-        """
-        part_params: list[Any] = [
-            target_session,
-            stock_capture_id,
-            calendar_revision,
-            MARKET_PARTICIPATION_CONTRACT,
-        ]
-        if norm_profile_revision is not None:
-            part_sql += " AND profile_revision = %s"
-            part_params.append(norm_profile_revision)
-        part_sql += " ORDER BY profile_revision, id"
-        cursor.execute(part_sql, tuple(part_params))
-        part_rows = cursor.fetchall()
-        if len(part_rows) == 0:
+            """,
+            (target_session,),
+        )
+        part_row = cursor.fetchone()
+        if part_row is None:
             participation_axis = "UNKNOWN"
             participation_source_status = "MISSING"
-        elif len(part_rows) > 1:
-            # 拒绝任意取最新行，多 profile_revision 歧义时显式标未知
-            participation_axis = "UNKNOWN"
-            participation_source_status = "AMBIGUOUS_PROFILE_REVISION"
         else:
-            part_row = part_rows[0]
             participation_axis = (
                 str(part_row[0])
                 if part_row[1] not in {"NOT_COMPUTED", "NOT_COMPARABLE", "INCOMPLETE"}
@@ -1030,84 +805,19 @@ def persist_market_indices_and_environment_for_session(
                 "OBSERVED" if participation_axis != "UNKNOWN" else str(part_row[1])
             )
 
-        formal_sql = """
-            SELECT scope_key, universe_version_t, universe_version_t3
-            FROM stock.r03_formal_market_breadth_facts
-            WHERE trade_date = %s
-              AND contract_version = %s
-              AND SPLIT_PART(scope_key, ':', 1) = %s
-        """
-        formal_params: list[Any] = [
-            target_session,
-            "R03_FORMAL_SECTOR_V1",
-            f"BAOSTOCK_CAP_{int(stock_capture_id)}",
-        ]
-        if norm_formal_scope_key is not None:
-            formal_sql += " AND scope_key = %s"
-            formal_params.append(norm_formal_scope_key)
-        elif norm_profile_revision is not None:
-            formal_sql += " AND SPLIT_PART(scope_key, ':', 2) IN (%s, 'MARKET_QFQ')"
-            formal_params.append(f"PROF_{norm_profile_revision}")
-        if norm_universe_t is not None:
-            formal_sql += " AND universe_version_t = %s"
-            formal_params.append(norm_universe_t)
-        if norm_universe_t3 is not None:
-            formal_sql += " AND universe_version_t3 = %s"
-            formal_params.append(norm_universe_t3)
-        formal_sql += " ORDER BY scope_key, universe_version_t, universe_version_t3"
-        cursor.execute(formal_sql, tuple(formal_params))
-        formal_candidates = [
-            (str(r[0]), str(r[1]), str(r[2])) for r in cursor.fetchall()
-        ]
-
-        env_formal_scope_key = norm_formal_scope_key or ""
-        env_profile_revision = norm_profile_revision or ""
-        env_universe_t = norm_universe_t or ""
-        env_universe_t3 = norm_universe_t3 or ""
-        if len(formal_candidates) == 1:
-            env_formal_scope_key, env_universe_t, env_universe_t3 = formal_candidates[0]
-            if not env_profile_revision:
-                for part in env_formal_scope_key.split(":"):
-                    if part.startswith("PROF_"):
-                        env_profile_revision = part[5:]
-                        break
-
-        # E02：读取紧邻前一官方交易日的同口径已存环境状态作为 initial_state，保障跨日两日确认/UNKNOWN保留语义
-        target_idx = calendar_sessions.index(target_session)
-        prior_env_state: dict[str, Any] | None = None
-        prior_trade_date: date | None = None
-        prior_formal_scope_key: str | None = None
+        # E02：读取紧邻前一官方交易日已存环境状态作为 initial_state，保障跨日两日确认/UNKNOWN保留语义
         if target_idx > 0:
             prev_session = calendar_sessions[target_idx - 1]
             cursor.execute(
                 """SELECT displayed_label, pending_label, pending_count,
-                          rule_version, primary_index_symbol, formal_scope_key
+                          rule_version, primary_index_symbol
                    FROM stock.source_market_environment_day_facts
-                   WHERE target_session = %s
-                     AND stock_capture_id = %s
-                     AND primary_index_symbol = %s
-                     AND calendar_revision = %s
-                     AND rule_version = %s
-                     AND formal_scope_key = %s
-                     AND profile_revision = %s
-                     AND universe_version_t = %s
-                     AND universe_version_t3 = %s""",
-                (
-                    prev_session,
-                    stock_capture_id,
-                    primary_symbol,
-                    calendar_revision,
-                    rule_version,
-                    env_formal_scope_key,
-                    env_profile_revision,
-                    env_universe_t,
-                    env_universe_t3,
-                ),
+                   WHERE target_session = %s""",
+                (prev_session,),
             )
             prev_row = cursor.fetchone()
             if prev_row is not None:
                 prior_trade_date = prev_session
-                prior_formal_scope_key = str(prev_row[5]) if prev_row[5] else None
                 prior_env_state = {
                     "displayed_label": prev_row[0],
                     "pending_label": prev_row[1],
@@ -1117,41 +827,30 @@ def persist_market_indices_and_environment_for_session(
                 }
 
     # C03：仅使用正式市场宽度 r03_formal_market_breadth_facts 驱动 breadth_axis，严禁回退到 b_fixed_source
-    breadth_axis = "UNKNOWN"
-    formal_breadth_status = "MISSING"
-    formal_breadth_scope: dict[str, str] | None = None
-    if len(formal_candidates) > 1:
-        formal_breadth_status = "AMBIGUOUS_SCOPE"
-    elif len(formal_candidates) == 1:
-        from stock_a.storage.postgres.r03_formal_sector import (
-            read_r03_formal_market_breadth,
-        )
+    from stock_a.storage.postgres.r03_formal_sector import (
+        read_r03_formal_market_breadth,
+    )
 
-        matched_scope_key, matched_u_t, matched_u_t3 = formal_candidates[0]
-        formal_breadth_scope = {
-            "scope_key": matched_scope_key,
-            "universe_version_t": matched_u_t,
-            "universe_version_t3": matched_u_t3,
-        }
-        formal_breadth = read_r03_formal_market_breadth(
-            config,
-            trade_date=target_session,
-            scope_key=matched_scope_key,
-            universe_version_t=matched_u_t,
-            universe_version_t3=matched_u_t3,
+    breadth_axis = "UNKNOWN"
+    formal_breadth = read_r03_formal_market_breadth(
+        config,
+        trade_date=target_session,
+        previous_trade_date=calendar_sessions[target_idx - 1]
+        if target_idx > 0
+        else None,
+    )
+    formal_breadth_status = str(formal_breadth.get("status") or "UNKNOWN")
+    exact = formal_breadth.get("exact")
+    if (
+        formal_breadth_status == "OBSERVED"
+        and isinstance(exact, Mapping)
+        and type(exact.get("numerator")) is int
+        and type(exact.get("denominator")) is int
+        and exact["denominator"] > 0
+    ):
+        breadth_axis = classify_market_breadth(
+            Fraction(exact["numerator"], exact["denominator"])
         )
-        formal_breadth_status = str(formal_breadth.get("status") or "UNKNOWN")
-        exact = formal_breadth.get("exact")
-        if (
-            formal_breadth_status == "OBSERVED"
-            and isinstance(exact, Mapping)
-            and type(exact.get("numerator")) is int
-            and type(exact.get("denominator")) is int
-            and exact["denominator"] > 0
-        ):
-            breadth_axis = classify_market_breadth(
-                Fraction(exact["numerator"], exact["denominator"])
-            )
 
     # 保留旧 b_fixed_source 作为来源级诊断参考，不参与正式环境 breadth_axis 判定
     diagnostic_b_fixed_source: str | None = None
@@ -1257,7 +956,6 @@ def persist_market_indices_and_environment_for_session(
                     "pressure_axis": pressure_axis,
                     "breadth_source_kind": breadth_source_kind,
                     "prev_trade_date": prior_trade_date,
-                    "prev_formal_scope_key": prior_formal_scope_key,
                 },
             ),
             stock_capture_id=stock_capture_id,
@@ -1267,13 +965,8 @@ def persist_market_indices_and_environment_for_session(
             calendar_id=calendar_id,
             calendar_revision=calendar_revision,
             rule_version=rule_version,
-            formal_scope_key=env_formal_scope_key,
-            profile_revision=env_profile_revision,
-            universe_version_t=env_universe_t,
-            universe_version_t3=env_universe_t3,
             breadth_source_kind=breadth_source_kind,
             prev_trade_date=prior_trade_date,
-            prev_formal_scope_key=prior_formal_scope_key,
             initial_state=prior_env_state,
             cursor=write_cursor,
         )
@@ -1303,7 +996,6 @@ def persist_market_indices_and_environment_for_session(
             "pressure": pressure_axis,
         },
         "formal_breadth_status": formal_breadth_status,
-        "formal_breadth_scope": formal_breadth_scope,
         "participation_source_status": participation_source_status,
         "diagnostic_b_fixed_source": diagnostic_b_fixed_source,
     }

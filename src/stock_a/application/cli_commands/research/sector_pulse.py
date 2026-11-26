@@ -27,8 +27,6 @@ def _run_source_sector_pulse_transition_day(args: argparse.Namespace) -> int:
             target_session=_parse_session_date(args.target_session),
             research_cutoff=_parse_session_date(args.research_cutoff),
             source_capture_id=args.source_capture_id,
-            previous_profile_revision=args.previous_profile_revision,
-            target_profile_revision=args.target_profile_revision,
             industry_snapshot_id=args.industry_snapshot_id,
             concept_snapshot_id=args.concept_snapshot_id,
         )

@@ -1135,7 +1135,6 @@ def validate_source_market_context_binding(
         )
 
     market_identity = {
-        "source_capture_id": market.source_version["source_capture_id"],
         "target_session": market.target_session.isoformat(),
         "price_coordinate": "FORWARD_ADJUSTED",
         "price_row_count": int(market.source_version["price_row_count"]),
@@ -1179,7 +1178,6 @@ def validate_source_market_context_binding(
                 category="IDENTITY_MISMATCH",
             )
         strength_identity = {
-            "source_capture_id": strength_source.get("source_capture_id"),
             "target_session": strength.get("target_session"),
             "price_coordinate": strength_source.get("price_coordinate"),
         }
@@ -1284,8 +1282,6 @@ def compute_formal_market_breadth_from_universes(
     *,
     universe_t: Mapping[str, Fraction | None],
     universe_t3: Mapping[str, Fraction | None],
-    universe_version_t: str,
-    universe_version_t3: str,
 ) -> dict[str, Any]:
     """基于 t 与 t-3 各自日期有效 Universe 交集计算正式市场宽度 B_formal。"""
     ids_t = set(universe_t.keys())
@@ -1295,8 +1291,6 @@ def compute_formal_market_breadth_from_universes(
         return {
             "status": "UNKNOWN",
             "reason": "COMMON_UNIVERSE_EMPTY",
-            "universe_version_t": universe_version_t,
-            "universe_version_t3": universe_version_t3,
             "n_t": len(ids_t),
             "n_t3": len(ids_t3),
             "n_common": 0,
@@ -1320,8 +1314,6 @@ def compute_formal_market_breadth_from_universes(
         return {
             "status": "UNKNOWN",
             "reason": "NO_ELIGIBLE_COMMON_RETURNS",
-            "universe_version_t": universe_version_t,
-            "universe_version_t3": universe_version_t3,
             "n_t": len(ids_t),
             "n_t3": len(ids_t3),
             "n_common": len(common_ids),
@@ -1333,8 +1325,6 @@ def compute_formal_market_breadth_from_universes(
     return {
         "status": "OBSERVED",
         "reason": None,
-        "universe_version_t": universe_version_t,
-        "universe_version_t3": universe_version_t3,
         "n_t": len(ids_t),
         "n_t3": len(ids_t3),
         "n_common": len(common_ids),

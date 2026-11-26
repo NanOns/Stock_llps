@@ -97,7 +97,7 @@ def read_cohort_enrollment_datewise_comparison(
             context = {
                 "target_session": target,
                 "source_capture_id": int(item["source_capture_id"]),
-                "profile_revision": str(item["profile_revision"]),
+                "profile_revision": str(item.get("profile_revision") or ""),
                 "history_session_count": int(item["history_session_count"]),
                 "d1_history_session_count": int(item["d1_history_session_count"]),
                 "event_window_start": date.fromisoformat(item["event_window_start"]),
@@ -108,7 +108,6 @@ def read_cohort_enrollment_datewise_comparison(
             raise ResearchFactConflict("跨T0登记对照的精确来源上下文缺失") from error
         if (
             context["source_capture_id"] <= 0
-            or not context["profile_revision"]
             or context["history_session_count"] < 0
             or context["d1_history_session_count"] < 0
             or context["source_pool_count"] <= 0
@@ -161,7 +160,6 @@ def read_cohort_enrollment_datewise_comparison(
                      ON r.target_session=s.target_session
                     AND r.source_capture_id=%s AND r.source_capture_id=s.source_capture_id
                     AND r.rule_id=%s AND r.rule_version=%s
-                    AND r.profile_revision=s.profile_revision
                     AND r.history_session_count=s.history_session_count
                     AND r.d1_history_session_count=s.d1_history_session_count
                     AND r.event_window_start=s.event_window_start
@@ -616,14 +614,14 @@ def read_cohort_enrollment_lifecycle_groups(
     target: date,
     research_cutoff: date,
     source_capture_id: int,
-    profile_revision: str,
-    history_session_count: int,
-    d1_history_session_count: int,
-    event_window_start: date,
-    calendar_revision: str,
-    rule: str,
-    horizon_sessions: tuple[date, ...],
-    previous_session: date | None,
+    profile_revision: str | None = None,
+    history_session_count: int = 0,
+    d1_history_session_count: int = 0,
+    event_window_start: date | None = None,
+    calendar_revision: str = "",
+    rule: str = "",
+    horizon_sessions: tuple[date, ...] = (),
+    previous_session: date | None = None,
 ) -> dict[str, Any]:
     """在一个精确T0×规则内分组，GET只读PG且只读截止内会话。"""
     from stock_a.research.entry_context.sessions import _load_calendar
@@ -635,8 +633,7 @@ def read_cohort_enrollment_lifecycle_groups(
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or rule not in RULES
-        or not isinstance(profile_revision, str)
-        or not profile_revision
+        or (profile_revision is not None and not isinstance(profile_revision, str))
         or type(history_session_count) is not int
         or type(d1_history_session_count) is not int
         or type(event_window_start) is not date
@@ -674,7 +671,6 @@ def read_cohort_enrollment_lifecycle_groups(
         source_capture_id,
         rule,
         RULE_VERSION,
-        profile_revision,
         history_session_count,
         d1_history_session_count,
         event_window_start,
@@ -693,7 +689,7 @@ def read_cohort_enrollment_lifecycle_groups(
                       min(source_capture_id),max(source_capture_id)
                FROM source_rule_evaluations
                WHERE target_session=%s AND source_capture_id=%s AND rule_id=%s
-                 AND rule_version=%s AND profile_revision=%s
+                 AND rule_version=%s
                  AND history_session_count=%s AND d1_history_session_count=%s
                  AND event_window_start=%s AND calendar_revision=%s AND scope=%s""",
             key,
@@ -726,7 +722,7 @@ def read_cohort_enrollment_lifecycle_groups(
                FROM source_rule_evaluations r
                LEFT JOIN source_research_enrollments e ON e.rule_fact_id=r.id
                WHERE r.target_session=%s AND r.source_capture_id=%s AND r.rule_id=%s
-                 AND r.rule_version=%s AND r.profile_revision=%s
+                 AND r.rule_version=%s
                  AND r.history_session_count=%s AND r.d1_history_session_count=%s
                  AND r.event_window_start=%s AND r.calendar_revision=%s AND r.scope=%s
                GROUP BY r.state ORDER BY r.state""",
@@ -756,7 +752,7 @@ def read_cohort_enrollment_lifecycle_groups(
                LEFT JOIN source_rule_evaluations previous_r
                  ON previous_r.id=e.previous_rule_fact_id
                WHERE r.target_session=%s AND r.source_capture_id=%s AND r.rule_id=%s
-                 AND r.rule_version=%s AND r.profile_revision=%s
+                 AND r.rule_version=%s
                  AND r.history_session_count=%s AND r.d1_history_session_count=%s
                  AND r.event_window_start=%s AND r.calendar_revision=%s AND r.scope=%s
                ORDER BY e.enrollment_kind,r.source_symbol,e.id""",
@@ -853,7 +849,7 @@ def read_cohort_enrollment_lifecycle_groups(
                  ON active_e.rule_fact_id=latest.id
                WHERE r.target_session=%s AND r.source_capture_id=%s
                  AND r.rule_id=%s AND r.rule_version=%s
-                 AND r.profile_revision=%s AND r.history_session_count=%s
+                 AND r.history_session_count=%s
                  AND r.d1_history_session_count=%s
                  AND r.event_window_start=%s AND r.calendar_revision=%s
                  AND r.scope=%s AND r.state='UNKNOWN'
@@ -905,7 +901,7 @@ def read_cohort_enrollment_lifecycle_groups(
                 AND f.endpoint_session<=%s
                 AND f.price_coordinate='FORWARD_ADJUSTED' AND f.scope=%s
                WHERE r.target_session=%s AND r.source_capture_id=%s AND r.rule_id=%s
-                 AND r.rule_version=%s AND r.profile_revision=%s
+                 AND r.rule_version=%s
                  AND r.history_session_count=%s AND r.d1_history_session_count=%s
                  AND r.event_window_start=%s AND r.calendar_revision=%s AND r.scope=%s
                ORDER BY e.enrollment_kind,r.source_symbol,f.horizon""",
@@ -1151,7 +1147,7 @@ def read_cohort_enrollment_lifecycle_groups(
                      JOIN source_research_enrollments e ON e.rule_fact_id=r.id
                      WHERE r.target_session=%s AND r.source_capture_id=%s
                        AND r.rule_id=%s AND r.rule_version=%s
-                       AND r.profile_revision=%s AND r.history_session_count=%s
+                       AND r.history_session_count=%s
                        AND r.d1_history_session_count=%s
                        AND r.event_window_start=%s AND r.calendar_revision=%s
                        AND r.scope=%s AND r.state='TRUE'

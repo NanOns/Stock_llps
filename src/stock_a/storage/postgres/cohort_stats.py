@@ -20,16 +20,16 @@ def read_cohort_page(
     target,
     research_cutoff,
     source_capture_id,
-    profile_revision,
-    history_session_count,
-    d1_history_session_count,
-    event_window_start,
-    calendar_revision,
-    rule,
-    horizon,
-    offset,
-    limit,
-    symbol,
+    profile_revision=None,
+    history_session_count=0,
+    d1_history_session_count=0,
+    event_window_start=None,
+    calendar_revision="",
+    rule="",
+    horizon=1,
+    offset=0,
+    limit=50,
+    symbol=None,
     rps_board_kind="ALL",
     rps_scenario="ALL",
     rps_rule_state="ALL",
@@ -48,7 +48,7 @@ def read_cohort_page(
                       reason_codes,reason_counts
                FROM source_cohort_group_stats
                WHERE target_session=%s AND research_cutoff=%s AND source_capture_id=%s
-                 AND rule_id=%s AND rule_version=%s AND profile_revision=%s
+                 AND rule_id=%s AND rule_version=%s
                  AND history_session_count=%s AND d1_history_session_count=%s
                  AND event_window_start=%s AND calendar_revision=%s
                  AND path_rule_version=%s AND horizon=%s
@@ -59,7 +59,6 @@ def read_cohort_page(
                 source_capture_id,
                 rule,
                 RULE_VERSION,
-                profile_revision,
                 history_session_count,
                 d1_history_session_count,
                 event_window_start,
@@ -159,7 +158,7 @@ def read_cohort_page(
                    LEFT JOIN source_research_enrollments e ON e.rule_fact_id=r.id
                    WHERE r.target_session=%s AND r.source_capture_id=%s
                      AND r.source_symbol=%s
-                     AND r.rule_version=%s AND r.profile_revision=%s
+                     AND r.rule_version=%s
                      AND r.history_session_count=%s AND r.d1_history_session_count=%s
                      AND r.event_window_start=%s AND r.calendar_revision=%s
                    ORDER BY r.rule_id LIMIT 10""",
@@ -168,7 +167,6 @@ def read_cohort_page(
                     source_capture_id,
                     symbol,
                     RULE_VERSION,
-                    profile_revision,
                     history_session_count,
                     d1_history_session_count,
                     event_window_start,
@@ -484,13 +482,13 @@ def read_cohort_symbol_forward_paths(
     target,
     research_cutoff,
     source_capture_id,
-    profile_revision,
-    history_session_count,
-    d1_history_session_count,
-    event_window_start,
-    rule,
-    symbol,
-    horizon_due_sessions,
+    profile_revision=None,
+    history_session_count=0,
+    d1_history_session_count=0,
+    event_window_start=None,
+    rule="",
+    symbol="",
+    horizon_due_sessions=(),
 ):
     """从PG按精确规则T0键读取单股T+1/T+3/T+5路径，不重算价格。"""
     from stock_a.research.entry_context.sessions import _load_calendar
@@ -540,7 +538,7 @@ def read_cohort_symbol_forward_paths(
                FROM source_rule_evaluations
                WHERE target_session=%s AND source_capture_id=%s
                  AND source_symbol=%s AND rule_id=%s AND rule_version=%s
-                 AND profile_revision=%s AND history_session_count=%s
+                 AND history_session_count=%s
                  AND d1_history_session_count=%s AND event_window_start=%s
                ORDER BY source_capture_id,id LIMIT 2""",
             (
@@ -549,7 +547,6 @@ def read_cohort_symbol_forward_paths(
                 symbol,
                 rule,
                 RULE_VERSION,
-                profile_revision,
                 history_session_count,
                 d1_history_session_count,
                 event_window_start,

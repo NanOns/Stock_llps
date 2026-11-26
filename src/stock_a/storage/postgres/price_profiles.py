@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
-
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -81,13 +79,9 @@ _PROFILE_COLUMNS = (
     "market",
     "board",
     "target_session",
-    "profile_revision",
     "calculation_scope",
     "producer_contract",
     "producer_version",
-    "cross_section_universe_capture_id",
-    "cross_section_universe_version",
-    "cross_section_contract_version",
     "price_coordinate",
     "identity_status",
     "stable_security_id_status",
@@ -564,14 +558,6 @@ def _normalize_record(
         raise PriceProfilePgError(
             "PROFILE_COMPONENTS_INVALID", "Profile字段标识存在重复"
         )
-    revision = normalized.get("profile_revision")
-    if (
-        not isinstance(revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
-    ):
-        raise PriceProfilePgError(
-            "PROFILE_BUSINESS_KEY_INVALID", "画像修订必须使用显式完整画像修订"
-        )
     if (
         not isinstance(normalized.get("source_symbol"), str)
         or re.fullmatch(r"(SH|SZ|BJ)\.[0-9]{6}", normalized["source_symbol"]) is None
@@ -585,25 +571,6 @@ def _normalize_record(
         raise PriceProfilePgError(
             "PROFILE_BUSINESS_KEY_INVALID",
             "画像来源代码、BaoStock前复权坐标或NON_PIT时钟合同无效",
-        )
-    cross_capture_id = normalized.get("cross_section_universe_capture_id")
-    cross_version = normalized.get("cross_section_universe_version")
-    cross_contract = normalized.get("cross_section_contract_version")
-    if (
-        cross_capture_id is not None
-        and (type(cross_capture_id) is not int or cross_capture_id <= 0)
-        or (cross_version is None) != (cross_contract is None)
-        or cross_version is not None
-        and (
-            not isinstance(cross_version, str)
-            or not cross_version.strip()
-            or not isinstance(cross_contract, str)
-            or not cross_contract.strip()
-        )
-    ):
-        raise PriceProfilePgError(
-            "PROFILE_CROSS_SECTION_SCOPE_INVALID",
-            "画像绑定的横截面Universe版本、捕获和合同不完整",
         )
     for name in _CORE_COLUMN_NAMES:
         value = normalized.get(name)
@@ -711,6 +678,12 @@ def insert_profile_records_in_transaction(
         )
     inserted: list[str] = []
     columns = ", ".join(_PROFILE_COLUMNS)
+    update_columns = [
+        name
+        for name in _PROFILE_COLUMNS
+        if name not in ("target_session", "source_symbol")
+    ]
+    update_sql = ", ".join(f"{name}=EXCLUDED.{name}" for name in update_columns)
     row_template = f"({', '.join(['%s'] * len(_PROFILE_COLUMNS))})"
     for offset in range(0, len(prepared), INSERT_CHUNK_SIZE):
         chunk = prepared[offset : offset + INSERT_CHUNK_SIZE]
@@ -719,8 +692,8 @@ def insert_profile_records_in_transaction(
         cursor.execute(
             f"INSERT INTO source_symbol_price_profiles ({columns}) "
             f"VALUES {values_sql} "
-            "ON CONFLICT (source_raw_id, profile_revision) "
-            "DO NOTHING RETURNING source_symbol",
+            "ON CONFLICT (target_session, source_symbol) "
+            f"DO UPDATE SET {update_sql} RETURNING source_symbol",
             parameters,
         )
         returned = cursor.fetchall()
@@ -754,16 +727,15 @@ def _persist_profile_records_once(
         _normalize_record(item, allowed_enums=allowed_enums) for item in records
     ]
     first = prepared[0]
+    target_session = first["target_session"]
     batch_key = (
-        first["target_session"],
+        target_session,
         first["source_capture_id"],
-        first["profile_revision"],
     )
     for item in prepared:
         if (
             item["target_session"],
             item["source_capture_id"],
-            item["profile_revision"],
         ) != batch_key:
             raise PriceProfilePgError(
                 "PROFILE_BATCH_KEY_MIXED", "单次画像写入混入不同来源捕获"
@@ -782,7 +754,7 @@ FROM source_raw_daily
 WHERE session_date=%s AND source_capture_id=%s
 ORDER BY source_symbol""",
             (
-                first["target_session"],
+                target_session,
                 source_capture_id,
             ),
         )
@@ -813,44 +785,48 @@ ORDER BY source_symbol""",
         cursor.execute(
             f"""SELECT {", ".join(_PROFILE_COLUMNS)}
 FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
+WHERE target_session=%s
 ORDER BY source_symbol""",
-            batch_key,
+            (target_session,),
         )
         existing_rows = cursor.fetchall()
-        existing = {}
+        same_existing: dict[str, dict[str, Any]] = {}
+        obsolete_symbols: list[str] = []
+        changed_or_new_records: list[dict[str, Any]] = []
+        existing_map: dict[str, dict[str, Any]] = {}
         for row in existing_rows:
             stored = dict(zip(_PROFILE_COLUMNS, row, strict=True))
             symbol = stored["source_symbol"]
-            expected = requested.get(symbol)
-            if expected is None or stored != expected:
-                raise PriceProfilePgError(
-                    "PROFILE_CONTENT_CONFLICT",
-                    "同一画像业务键已保存不同内容；拒绝覆盖并回滚事务",
-                )
-            existing[symbol] = stored
-        missing_records = [
-            item for symbol, item in sorted(requested.items()) if symbol not in existing
-        ]
-        if missing_records:
+            existing_map[symbol] = stored
+            if symbol not in requested:
+                obsolete_symbols.append(symbol)
+            elif stored == requested[symbol]:
+                same_existing[symbol] = stored
+        for symbol, item in sorted(requested.items()):
+            if symbol not in same_existing:
+                changed_or_new_records.append(item)
+        if obsolete_symbols:
+            cursor.execute(
+                """DELETE FROM source_symbol_price_profiles
+WHERE target_session=%s AND source_symbol=ANY(%s::text[])""",
+                (target_session, obsolete_symbols),
+            )
+        if changed_or_new_records:
             inserted = insert_profile_records_in_transaction(
-                cursor, missing_records, allowed_enums=allowed_enums
+                cursor, changed_or_new_records, allowed_enums=allowed_enums
             )
         else:
             inserted = []
-        if inserted:
+        if inserted or obsolete_symbols:
             cursor.execute(
                 """DELETE FROM source_market_participation_days
-WHERE target_session=%s AND source_capture_id=%s""",
-                (
-                    first["target_session"],
-                    source_capture_id,
-                ),
+WHERE target_session=%s""",
+                (target_session,),
             )
         cursor.execute(
             """SELECT count(*)::bigint FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s""",
-            batch_key,
+WHERE target_session=%s""",
+            (target_session,),
         )
         row_count_after = int(cursor.fetchone()[0])
         if row_count_after != len(prepared):
@@ -860,9 +836,9 @@ WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s""",
         cursor.execute(
             f"""SELECT {", ".join(_PROFILE_COLUMNS)}
 FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
+WHERE target_session=%s
 ORDER BY source_symbol""",
-            batch_key,
+            (target_session,),
         )
         actual_rows = cursor.fetchall()
         if len(actual_rows) != len(prepared) or any(
@@ -877,13 +853,14 @@ ORDER BY source_symbol""",
                 "PROFILE_INSERT_READBACK_MISMATCH", "画像完整typed行事务读回不一致"
             )
     return {
-        "status": "PERSISTED" if inserted else "IDEMPOTENT_READBACK",
-        "target_session": first["target_session"].isoformat(),
+        "status": "PERSISTED"
+        if (inserted or obsolete_symbols)
+        else "IDEMPOTENT_READBACK",
+        "target_session": target_session.isoformat(),
         "source_capture_id": source_capture_id,
-        "profile_revision": first["profile_revision"],
         "requested_count": len(prepared),
         "inserted_count": len(inserted),
-        "existing_same_typed_row_count": len(existing),
+        "existing_same_typed_row_count": len(same_existing),
         "row_count_after": row_count_after,
         "transaction": "SERIALIZABLE_COMMITTED",
     }
@@ -892,14 +869,14 @@ ORDER BY source_symbol""",
 def list_profile_snapshots(
     config: Mapping[str, Any], *, max_target_session: date
 ) -> dict[str, Any]:
-    """列出截止日内按唯一source_capture_id闭合的画像快照。"""
+    """列出截止日内按唯一业务日闭合的画像快照。"""
     if type(max_target_session) is not date:
         raise PriceProfilePgError(
             "PROFILE_SNAPSHOT_CUTOFF_REQUIRED", "画像目录必须绑定显式研究截止日期"
         )
     with _transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT p.target_session,p.source_capture_id,p.profile_revision,
+            """SELECT p.target_session,p.source_capture_id,
                       p.history_window_start,p.history_window_end,
                       p.history_requested_session_count,count(*)::bigint AS profile_rows,
                       min(r.raw_row_count) AS expected_rows,
@@ -921,11 +898,11 @@ def list_profile_snapshots(
                ) r ON r.session_date=p.target_session
                  AND r.source_capture_id=p.source_capture_id
                WHERE p.target_session<=%s AND p.source_capture_id IS NOT NULL
-               GROUP BY p.target_session,p.source_capture_id,p.profile_revision,
+               GROUP BY p.target_session,p.source_capture_id,
                         p.history_window_start,p.history_window_end,
                         p.history_requested_session_count,p.history_calendar_id,
                         p.history_calendar_revision,p.price_coordinate
-               ORDER BY p.target_session DESC,p.source_capture_id,p.profile_revision
+               ORDER BY p.target_session DESC,p.source_capture_id
                LIMIT 2000""",
             (max_target_session,),
         )
@@ -933,16 +910,15 @@ def list_profile_snapshots(
             {
                 "target_session": row[0].isoformat(),
                 "source_capture_id": int(row[1]),
-                "profile_revision": str(row[2]),
-                "window_start": row[3].isoformat(),
-                "window_end": row[4].isoformat(),
-                "history_session_count": int(row[5]),
-                "source_symbol_count": int(row[6]),
-                "expected_source_symbol_count": int(row[7] or 0),
-                "complete": bool(row[8]),
-                "history_calendar_id": row[9],
-                "history_calendar_revision": row[10],
-                "price_coordinate": row[11],
+                "window_start": row[2].isoformat(),
+                "window_end": row[3].isoformat(),
+                "history_session_count": int(row[4]),
+                "source_symbol_count": int(row[5]),
+                "expected_source_symbol_count": int(row[6] or 0),
+                "complete": bool(row[7]),
+                "history_calendar_id": row[8],
+                "history_calendar_revision": row[9],
+                "price_coordinate": row[10],
             }
             for row in cursor.fetchall()
         ]
@@ -952,28 +928,23 @@ def list_profile_snapshots(
 def _select_profile_revision(
     revisions: Sequence[Mapping[str, Any]],
     *,
-    current_profile_revision: str,
+    current_profile_revision: str | None = None,
     current_producer_version: str,
     expected_symbol_count: int,
     history_session_count: int | None = None,
     requested_profile_revision: str | None = None,
 ) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
-    """返回符合请求且已闭合的现行画像修订候选。"""
+    """返回符合请求且已闭合的现行画像候选。"""
     candidates = [
         item
         for item in revisions
-        if item.get("profile_revision", "").startswith(current_profile_revision + "|")
-        and item.get("producer_version") == current_producer_version
+        if item.get("producer_version") == current_producer_version
         and (
             history_session_count is None
             or (
                 item.get("min_history_requested_sessions") == history_session_count
                 and item.get("max_history_requested_sessions") == history_session_count
             )
-        )
-        and (
-            requested_profile_revision is None
-            or item.get("profile_revision") == requested_profile_revision
         )
     ]
     complete = [
@@ -993,7 +964,7 @@ def read_source_profile_observability(
     target_session: date,
     source_capture_id: int,
     research_cutoff: date | None = None,
-    current_profile_revision: str,
+    current_profile_revision: str | None = None,
     current_producer_version: str,
     history_session_count: int | None = None,
     requested_profile_revision: str | None = None,
@@ -1006,8 +977,6 @@ def read_source_profile_observability(
         or cutoff < target_session
         or type(source_capture_id) is not int
         or source_capture_id <= 0
-        or not isinstance(current_profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, current_profile_revision) is None
         or not isinstance(current_producer_version, str)
         or not current_producer_version
         or history_session_count is not None
@@ -1015,16 +984,10 @@ def read_source_profile_observability(
             type(history_session_count) is not int
             or not 1 <= history_session_count <= 250
         )
-        or requested_profile_revision is not None
-        and (
-            not isinstance(requested_profile_revision, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, requested_profile_revision)
-            is None
-        )
     ):
         raise PriceProfilePgError(
             "PROFILE_OBSERVATION_KEY_INVALID",
-            "画像观察必须绑定日期、来源捕获ID及显式修订",
+            "画像观察必须绑定日期、来源捕获ID",
         )
     core_values = ", ".join(
         f"('core.{name}',p.{name}_quality,p.{name}_reason)"
@@ -1110,7 +1073,7 @@ def read_source_profile_observability(
                 "画像观察的Raw代码集合与唯一来源捕获分母不一致",
             )
         cursor.execute(
-            """SELECT profile_revision::text,producer_contract,producer_version,
+            """SELECT NULL::text AS profile_revision,producer_contract,producer_version,
                       count(*)::bigint AS stored_rows,
                       count(DISTINCT source_symbol)::bigint AS distinct_source_symbols,
                       count(*) FILTER (WHERE history_records_complete)::bigint AS history_records_complete_rows,
@@ -1126,10 +1089,10 @@ def read_source_profile_observability(
                       array_agg(DISTINCT target_price_quality ORDER BY target_price_quality) AS target_price_qualities,
                       array_agg(DISTINCT price_window_status ORDER BY price_window_status) AS price_window_statuses
                FROM stock.source_symbol_price_profiles
-               WHERE target_session=%s AND source_capture_id=%s
-               GROUP BY profile_revision,producer_contract,producer_version
-               ORDER BY profile_revision LIMIT %s""",
-            (target_session, source_capture_id, MAX_PROFILE_OBSERVATION_REVISIONS + 1),
+               WHERE target_session=%s
+               GROUP BY producer_contract,producer_version
+               ORDER BY producer_contract,producer_version LIMIT %s""",
+            (target_session, MAX_PROFILE_OBSERVATION_REVISIONS + 1),
         )
         revision_columns = [column.name for column in cursor.description]
         revisions = [
@@ -1141,7 +1104,7 @@ def read_source_profile_observability(
                 "精确捕获画像修订数超过固定上限",
             )
         for revision in revisions:
-            revision["profile_revision"] = str(revision["profile_revision"])
+            revision["profile_revision"] = None
             for name in (
                 "history_records_complete_rows",
                 "history_24_session_eligible_rows",
@@ -1191,14 +1154,13 @@ def read_source_profile_observability(
         core_quality_rows: list[dict[str, Any]] = []
         profile_quality_rows: list[dict[str, Any]] = []
         if selected is not None:
-            profile_revision = selected["profile_revision"]
             cursor.execute(
                 """WITH raw_symbols AS (
                        SELECT DISTINCT source_symbol FROM stock.source_raw_daily
                        WHERE source_capture_id=%s AND session_date=%s
                    ), profile_symbols AS (
                        SELECT DISTINCT source_symbol FROM stock.source_symbol_price_profiles
-                       WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
+                       WHERE target_session=%s
                    )
                    SELECT count(r.source_symbol)::bigint,count(p.source_symbol)::bigint,
                           count(*) FILTER (WHERE r.source_symbol IS NOT NULL AND p.source_symbol IS NOT NULL)::bigint,
@@ -1209,8 +1171,6 @@ def read_source_profile_observability(
                     source_capture_id,
                     target_session,
                     target_session,
-                    source_capture_id,
-                    profile_revision,
                 ),
             )
             comparison = cursor.fetchone()
@@ -1233,13 +1193,11 @@ def read_source_profile_observability(
                 f"""SELECT f.field_id,f.quality,f.reason_code,count(*)::bigint AS row_count
                    FROM stock.source_symbol_price_profiles p
                    CROSS JOIN LATERAL (VALUES {core_values}) AS f(field_id,quality,reason_code)
-                   WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
+                   WHERE p.target_session=%s
                    GROUP BY f.field_id,f.quality,f.reason_code
                    ORDER BY f.field_id,f.quality,f.reason_code LIMIT %s""",
                 (
                     target_session,
-                    source_capture_id,
-                    profile_revision,
                     MAX_PROFILE_OBSERVATION_QUALITY_ROWS + 1,
                 ),
             )
@@ -1260,13 +1218,11 @@ def read_source_profile_observability(
                        p.profile_field_ids,p.profile_statuses,
                        p.profile_qualities,p.profile_reasons
                    ) AS f(field_id,status,quality,reason_code)
-                   WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
+                   WHERE p.target_session=%s
                    GROUP BY f.field_id,f.status,f.quality,f.reason_code
                    ORDER BY f.field_id,f.status,f.quality,f.reason_code LIMIT %s""",
                 (
                     target_session,
-                    source_capture_id,
-                    profile_revision,
                     MAX_PROFILE_OBSERVATION_QUALITY_ROWS + 1,
                 ),
             )
@@ -1330,19 +1286,11 @@ def _snapshot_for_session(
             "PROFILE_PRICE_COORDINATE_UNSUPPORTED",
             "现役Core/Profile仅保存BaoStock FORWARD_ADJUSTED坐标",
         )
-    if (source_capture_id is None) != (profile_revision is None):
-        raise PriceProfilePgError(
-            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "精确画像快照须成对提供source_capture_id与profile_revision",
-        )
     if source_capture_id is not None and (
-        type(source_capture_id) is not int
-        or source_capture_id <= 0
-        or not isinstance(profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
+        type(source_capture_id) is not int or source_capture_id <= 0
     ):
         raise PriceProfilePgError(
-            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID", "精确捕获键或画像修订格式无效"
+            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID", "精确捕获键无效"
         )
     predicates = [
         "p.target_session=%s",
@@ -1351,10 +1299,10 @@ def _snapshot_for_session(
     ]
     parameters: list[Any] = [target_session, max_target_session, price_coordinate]
     if source_capture_id is not None:
-        predicates.extend(("p.source_capture_id=%s", "p.profile_revision=%s"))
-        parameters.extend((source_capture_id, profile_revision))
+        predicates.append("p.source_capture_id=%s")
+        parameters.append(source_capture_id)
     cursor.execute(
-        """SELECT p.target_session,p.source_capture_id,p.profile_revision,
+        """SELECT p.target_session,p.source_capture_id,
                   p.history_calendar_id,p.history_calendar_revision,
                   p.history_window_start,p.history_window_end,
                   p.history_requested_session_count,p.price_coordinate,
@@ -1379,11 +1327,11 @@ def _snapshot_for_session(
            WHERE """
         + " AND ".join(predicates)
         + """
-           GROUP BY p.target_session,p.source_capture_id,p.profile_revision,
+           GROUP BY p.target_session,p.source_capture_id,
                     p.history_calendar_id,p.history_calendar_revision,
                     p.history_window_start,p.history_window_end,p.price_coordinate,
                     p.history_requested_session_count
-           ORDER BY p.source_capture_id,p.profile_revision
+           ORDER BY p.source_capture_id
            LIMIT %s""",
         [*parameters, MAX_PROFILE_OBSERVATION_REVISIONS + 1],
     )
@@ -1396,22 +1344,22 @@ def _snapshot_for_session(
     if len(rows) != 1:
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_AMBIGUOUS",
-            f"{target_session.isoformat()}仍有多个捕获/画像版本；请精确提供source_capture_id与profile_revision",
+            f"{target_session.isoformat()}仍有多个捕获/画像版本；请检查唯一有效事实状态",
         )
     row = rows[0]
     snapshot = {
         "target_session": row[0],
         "source_capture_id": int(row[1]),
-        "profile_revision": str(row[2]),
-        "history_calendar_id": row[3],
-        "history_calendar_revision": row[4],
-        "window_start": row[5],
-        "window_end": row[6],
-        "price_coordinate": row[8],
-        "history_session_count": int(row[7]),
-        "source_symbol_count": int(row[9]),
-        "expected_source_symbol_count": int(row[10] or 0),
-        "complete": bool(row[11]),
+        "profile_revision": None,
+        "history_calendar_id": row[2],
+        "history_calendar_revision": row[3],
+        "window_start": row[4],
+        "window_end": row[5],
+        "price_coordinate": row[7],
+        "history_session_count": int(row[6]),
+        "source_symbol_count": int(row[8]),
+        "expected_source_symbol_count": int(row[9] or 0),
+        "complete": bool(row[10]),
     }
     if not snapshot["complete"]:
         raise PriceProfilePgError(
@@ -1672,7 +1620,6 @@ WITH old_rows AS (
      AND r.session_date=p.target_session AND r.source_capture_id=p.source_capture_id
     WHERE p.target_session=%s
       AND p.source_capture_id=%s
-      AND p.profile_revision=%s
       AND p.price_coordinate=%s
 ), new_rows AS (
     SELECT p.*,
@@ -1705,7 +1652,6 @@ WITH old_rows AS (
      AND r.session_date=p.target_session AND r.source_capture_id=p.source_capture_id
     WHERE p.target_session=%s
       AND p.source_capture_id=%s
-      AND p.profile_revision=%s
       AND p.price_coordinate=%s
 ), paired AS (
     SELECT COALESCE(o.source_symbol, n.source_symbol) AS source_symbol,
@@ -1849,8 +1795,8 @@ WITH old_rows AS (
            n.history_calendar_id AS after_history_calendar_id,
            o.history_calendar_revision AS before_history_calendar_revision,
            n.history_calendar_revision AS after_history_calendar_revision,
-           o.profile_revision::text AS before_profile_revision,
-           n.profile_revision::text AS after_profile_revision,
+           NULL::text AS before_profile_revision,
+           NULL::text AS after_profile_revision,
            o.profile_field_ids AS before_profile_field_ids,
            n.profile_field_ids AS after_profile_field_ids,
            o.profile_statuses AS before_profile_statuses,
@@ -2585,7 +2531,6 @@ def _profile_change_snapshot_parameters(snapshot: Mapping[str, Any]) -> tuple[An
     return (
         snapshot["target_session"],
         snapshot["source_capture_id"],
-        snapshot["profile_revision"],
         snapshot["price_coordinate"],
     )
 
@@ -2706,16 +2651,6 @@ def read_profile_change_page(
     ):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SYMBOL_INVALID", "来源代码搜索只接受字母、数字和点号"
-        )
-    if (before_source_capture_id is None) != (before_profile_revision is None):
-        raise PriceProfilePgError(
-            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "起始快照须成对提供source_capture_id与profile_revision；存量行键可省略",
-        )
-    if (after_source_capture_id is None) != (after_profile_revision is None):
-        raise PriceProfilePgError(
-            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "结束快照须成对提供source_capture_id与profile_revision；存量行键可省略",
         )
     symbol_search = source_symbol.upper() if source_symbol else None
     with _transaction(config, write=False) as (_connection, cursor, _unused):
@@ -3295,9 +3230,9 @@ def read_profile_relation_screen(
     after_amount_ratio20_min: Decimal | str | None = None,
     after_volume_ratio20_min: Decimal | str | None = None,
     before_source_capture_id: int,
-    before_profile_revision: str,
+    before_profile_revision: str | None = None,
     after_source_capture_id: int,
-    after_profile_revision: str,
+    after_profile_revision: str | None = None,
     price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
     """在完整两端来源并集上读取关系转移及结束日位置联合筛选。"""
@@ -3405,18 +3340,12 @@ def read_profile_relation_screen(
             "PROFILE_RELATION_END_FILTER_INVALID", "两个结束日位置条件不能重复字段"
         )
     if any(
-        type(capture_id) is not int
-        or capture_id <= 0
-        or not isinstance(revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
-        for capture_id, revision in (
-            (before_source_capture_id, before_profile_revision),
-            (after_source_capture_id, after_profile_revision),
-        )
+        type(capture_id) is not int or capture_id <= 0
+        for capture_id in (before_source_capture_id, after_source_capture_id)
     ):
         raise PriceProfilePgError(
             "PROFILE_RELATION_SNAPSHOT_IDENTITY_INVALID",
-            "前后快照必须精确提供来源包数字ID和profile revision",
+            "前后快照必须提供正数来源包数字ID",
         )
 
     with _transaction(config, write=False) as (_connection, cursor, _unused):
@@ -3853,9 +3782,9 @@ def read_profile_breadth(
     after_session: date,
     max_target_session: date,
     before_source_capture_id: int,
-    before_profile_revision: str,
+    before_profile_revision: str | None = None,
     after_source_capture_id: int,
-    after_profile_revision: str,
+    after_profile_revision: str | None = None,
     price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
     """按两份精确画像只读聚合来源池MA20关系。"""
@@ -3871,20 +3800,13 @@ def read_profile_breadth(
             "PROFILE_BREADTH_DATE_INVALID",
             "广度对照日期必须递增，且不晚于显式研究截止日",
         )
-    identities = (
-        (before_source_capture_id, before_profile_revision),
-        (after_source_capture_id, after_profile_revision),
-    )
     if any(
-        type(capture_id) is not int
-        or capture_id <= 0
-        or not isinstance(revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
-        for capture_id, revision in identities
+        type(capture_id) is not int or capture_id <= 0
+        for capture_id in (before_source_capture_id, after_source_capture_id)
     ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
-            "广度对照必须显式提供前后来源包数字ID和完整画像修订",
+            "广度对照必须显式提供前后来源包数字ID",
         )
 
     with _transaction(config, write=False) as (_connection, cursor, _unused):
@@ -4098,9 +4020,9 @@ def read_profile_breadth_members(
     after_session: date,
     max_target_session: date,
     before_source_capture_id: int,
-    before_profile_revision: str,
+    before_profile_revision: str | None = None,
     after_source_capture_id: int,
-    after_profile_revision: str,
+    after_profile_revision: str | None = None,
     price_coordinate: str = "FORWARD_ADJUSTED",
     mode: str,
     offset: int,
@@ -4193,20 +4115,13 @@ def read_profile_breadth_members(
             "PROFILE_BREADTH_MEMBER_MODE_INVALID", "广度明细模式无效"
         )
 
-    identities = (
-        (before_source_capture_id, before_profile_revision),
-        (after_source_capture_id, after_profile_revision),
-    )
     if any(
-        type(capture_id) is not int
-        or capture_id <= 0
-        or not isinstance(revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
-        for capture_id, revision in identities
+        type(capture_id) is not int or capture_id <= 0
+        for capture_id in (before_source_capture_id, after_source_capture_id)
     ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
-            "广度明细必须显式提供前后来源包数字ID和profile revision",
+            "广度明细必须显式提供前后来源包数字ID",
         )
 
     with _transaction(config, write=False) as (_connection, cursor, _unused):
@@ -4479,9 +4394,9 @@ def read_profile_pair(
     max_target_session: date,
     source_symbol: str,
     before_source_capture_id: int,
-    before_profile_revision: str,
+    before_profile_revision: str | None = None,
     after_source_capture_id: int,
-    after_profile_revision: str,
+    after_profile_revision: str | None = None,
     price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, Any]:
     """按两端精确封口快照，从现役配对SQL读取单个来源代码。"""
@@ -4727,7 +4642,7 @@ def read_profile_page(
     target_session: date,
     max_target_session: date,
     source_capture_id: int,
-    profile_revision: str,
+    profile_revision: str | None = None,
     price_coordinate: str = "FORWARD_ADJUSTED",
     offset: int,
     limit: int,
@@ -4770,13 +4685,6 @@ def read_profile_page(
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像查询日期或分页偏移无效")
     if type(limit) is not int or not 1 <= limit <= 100:
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像页大小必须为1至100")
-    if (
-        not isinstance(profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
-    ):
-        raise PriceProfilePgError(
-            "PROFILE_REVISION_INVALID", "画像修订必须是显式完整画像修订标签"
-        )
     if market not in {"ALL", "SH", "SZ", "BJ"} or board not in {
         "ALL",
         "MAIN_BOARD",
@@ -4925,13 +4833,11 @@ def read_profile_page(
     conditions = [
         "p.target_session=%s",
         "p.source_capture_id=%s",
-        "p.profile_revision=%s",
         "p.price_coordinate=%s",
     ]
     parameters: list[Any] = [
         target_session,
         source_capture_id,
-        profile_revision,
         price_coordinate,
     ]
     if market != "ALL":
@@ -5068,11 +4974,10 @@ WHERE r.session_date=%s
         cursor.execute(
             """SELECT count(*)::bigint FROM source_symbol_price_profiles
 WHERE target_session=%s
-  AND source_capture_id=%s AND profile_revision=%s""",
+  AND source_capture_id=%s""",
             (
                 target_session,
                 source_capture_id,
-                profile_revision,
             ),
         )
         snapshot_total = int(cursor.fetchone()[0])
@@ -5086,7 +4991,7 @@ WHERE target_session=%s
             cursor.execute(
                 """SELECT count(*)::bigint
 FROM source_symbol_price_profiles p
-WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.source_capture_id=%s
   AND (
     COALESCE(array_ndims(p.profile_field_ids), 0) <> 1
     OR COALESCE(array_length(p.profile_field_ids, 1), 0) <> 11
@@ -5114,7 +5019,6 @@ WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
                 (
                     target_session,
                     source_capture_id,
-                    profile_revision,
                     profile_ids,
                     profile_ids,
                 ),
@@ -5132,14 +5036,13 @@ WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
 FROM source_symbol_price_profiles p
 CROSS JOIN LATERAL generate_subscripts(p.profile_field_ids, 1)
   AS field_index(subscript)
-WHERE p.target_session=%s AND p.source_capture_id=%s AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.source_capture_id=%s
   AND p.profile_field_ids[field_index.subscript]=%s
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3""",
                 (
                     target_session,
                     source_capture_id,
-                    profile_revision,
                     profile_field_id,
                 ),
             )

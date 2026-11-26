@@ -64,7 +64,6 @@ def _build_endpoint_rows(
     target_session: date,
     price_capture_id: int,
     universe_capture_id: int | None,
-    universe_version: str,
     calendar_id: str,
     calendar_revision: str,
     contract_version: str,
@@ -85,7 +84,6 @@ def _build_endpoint_rows(
             else info.get("start_session")
         )
         u_id = info.get("universe_id")
-        u_rev = info.get("universe_revision")
         denom = int(info.get("denominator") or 0)
         known = int(info.get("known_count") or 0)
         unk = int(
@@ -98,15 +96,12 @@ def _build_endpoint_rows(
             and start_date is not None
             and isinstance(u_id, str)
             and bool(u_id)
-            and isinstance(u_rev, str)
-            and bool(u_rev)
         )
         rows.append(
             (
                 target_session,
                 price_capture_id,
                 universe_capture_id,
-                universe_version,
                 calendar_id,
                 calendar_revision,
                 contract_version,
@@ -118,7 +113,6 @@ def _build_endpoint_rows(
                 ep_date if avail else None,
                 start_date if avail else None,
                 u_id if avail else None,
-                u_rev if avail else None,
                 denom,
                 known,
                 unk,
@@ -133,12 +127,12 @@ def persist_cross_section_day_facts(
     batch_result: Mapping[str, Any],
     price_capture_id: int,
     universe_capture_id: int | None,
-    universe_version: str,
+    universe_version: str | None = None,
     calendar_id: str,
     calendar_revision: str,
     pit_status: str = "NON_PIT_RETROSPECTIVE",
 ) -> dict[str, Any]:
-    """在单事务内幂等持久化目标日全市场10项无损横截面因子与日级共享10端点依据；同键异内容拒绝回滚。"""
+    """在单事务内幂等持久化或替换更新目标日全市场10项横截面因子与日级共享10端点依据。"""
     target_session: date = batch_result["target_date"]
     contract_version = str(
         batch_result.get("contract_version") or CROSS_SECTION_CONTRACT_VERSION
@@ -155,7 +149,6 @@ def persist_cross_section_day_facts(
             sym,
             price_capture_id,
             universe_capture_id,
-            universe_version,
             "FORWARD_ADJUSTED",
             calendar_id,
             calendar_revision,
@@ -194,12 +187,97 @@ def persist_cross_section_day_facts(
         target_session=target_session,
         price_capture_id=price_capture_id,
         universe_capture_id=universe_capture_id,
-        universe_version=universe_version,
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
         contract_version=contract_version,
         rank_meta=rank_meta,
         rel_meta=rel_meta,
+    )
+
+    fact_columns = (
+        "target_session",
+        "source_symbol",
+        "price_capture_id",
+        "universe_capture_id",
+        "price_coordinate",
+        "calendar_id",
+        "calendar_revision",
+        "contract_version",
+        "pit_status",
+        "rps5",
+        "rps5_quality",
+        "rps5_reason",
+        "rps20",
+        "rps20_quality",
+        "rps20_reason",
+        "rps5_delta1_pp",
+        "rps5_delta1_pp_quality",
+        "rps5_delta1_pp_reason",
+        "rps5_delta3_pp",
+        "rps5_delta3_pp_quality",
+        "rps5_delta3_pp_reason",
+        "rps20_delta1_pp",
+        "rps20_delta1_pp_quality",
+        "rps20_delta1_pp_reason",
+        "rps20_delta3_pp",
+        "rps20_delta3_pp_quality",
+        "rps20_delta3_pp_reason",
+        "rel_market_1",
+        "rel_market_1_quality",
+        "rel_market_1_reason",
+        "rel_market_3",
+        "rel_market_3_quality",
+        "rel_market_3_reason",
+        "rel_market_5",
+        "rel_market_5_quality",
+        "rel_market_5_reason",
+        "rel_market_20",
+        "rel_market_20_quality",
+        "rel_market_20_reason",
+        "target_universe_count",
+        "rps5_known_count",
+        "rps20_known_count",
+        "rel_market_1_start_session",
+        "rel_market_1_denominator",
+        "rel_market_1_known_count",
+        "rel_market_3_start_session",
+        "rel_market_3_denominator",
+        "rel_market_3_known_count",
+        "rel_market_5_start_session",
+        "rel_market_5_denominator",
+        "rel_market_5_known_count",
+        "rel_market_20_start_session",
+        "rel_market_20_denominator",
+        "rel_market_20_known_count",
+        "rps5_exact",
+        "rps20_exact",
+        "rps5_delta1_pp_exact",
+        "rps5_delta3_pp_exact",
+        "rps20_delta1_pp_exact",
+        "rps20_delta3_pp_exact",
+        "rel_market_1_exact",
+        "rel_market_3_exact",
+        "rel_market_5_exact",
+        "rel_market_20_exact",
+    )
+    ep_columns = (
+        "target_session",
+        "price_capture_id",
+        "universe_capture_id",
+        "calendar_id",
+        "calendar_revision",
+        "contract_version",
+        "endpoint_key",
+        "endpoint_kind",
+        "return_period",
+        "offset_sessions",
+        "endpoint_status",
+        "endpoint_date",
+        "return_start_date",
+        "universe_id",
+        "denominator_count",
+        "known_count",
+        "unknown_count",
     )
 
     try:
@@ -209,145 +287,78 @@ def persist_cross_section_day_facts(
             _,
         ):
             cursor.execute(
-                """SELECT source_symbol,
-                          universe_capture_id, pit_status,
-                          rps5, rps5_quality, rps5_reason,
-                          rps20, rps20_quality, rps20_reason,
-                          rps5_delta1_pp, rps5_delta1_pp_quality, rps5_delta1_pp_reason,
-                          rps5_delta3_pp, rps5_delta3_pp_quality, rps5_delta3_pp_reason,
-                          rps20_delta1_pp, rps20_delta1_pp_quality, rps20_delta1_pp_reason,
-                          rps20_delta3_pp, rps20_delta3_pp_quality, rps20_delta3_pp_reason,
-                          rel_market_1, rel_market_1_quality, rel_market_1_reason,
-                          rel_market_3, rel_market_3_quality, rel_market_3_reason,
-                          rel_market_5, rel_market_5_quality, rel_market_5_reason,
-                          rel_market_20, rel_market_20_quality, rel_market_20_reason,
-                          target_universe_count, rps5_known_count, rps20_known_count,
-                          rel_market_1_start_session, rel_market_1_denominator, rel_market_1_known_count,
-                          rel_market_3_start_session, rel_market_3_denominator, rel_market_3_known_count,
-                          rel_market_5_start_session, rel_market_5_denominator, rel_market_5_known_count,
-                          rel_market_20_start_session, rel_market_20_denominator, rel_market_20_known_count,
-                          rps5_exact, rps20_exact, rps5_delta1_pp_exact, rps5_delta3_pp_exact,
-                          rps20_delta1_pp_exact, rps20_delta3_pp_exact,
-                          rel_market_1_exact, rel_market_3_exact, rel_market_5_exact, rel_market_20_exact
-                   FROM stock.source_cross_section_day_facts
-                   WHERE target_session = %s
-                     AND price_capture_id = %s
-                     AND universe_version = %s
-                     AND calendar_revision = %s
-                     AND contract_version = %s""",
-                (
-                    target_session,
-                    price_capture_id,
-                    universe_version,
-                    calendar_revision,
-                    contract_version,
-                ),
+                f"SELECT {', '.join(fact_columns)} FROM stock.source_cross_section_day_facts WHERE target_session = %s",
+                (target_session,),
             )
-            existing = {r[0]: r for r in cursor.fetchall()}
+            existing = {r[1]: r for r in cursor.fetchall()}
 
             cursor.execute(
-                """SELECT endpoint_key, universe_capture_id, calendar_id,
-                          endpoint_kind, return_period, offset_sessions,
-                          endpoint_status, endpoint_date, return_start_date,
-                          universe_id, universe_revision,
-                          denominator_count, known_count, unknown_count
-                   FROM stock.source_cross_section_endpoints
-                   WHERE target_session = %s
-                     AND price_capture_id = %s
-                     AND universe_version = %s
-                     AND calendar_revision = %s
-                     AND contract_version = %s""",
-                (
-                    target_session,
-                    price_capture_id,
-                    universe_version,
-                    calendar_revision,
-                    contract_version,
-                ),
+                f"SELECT {', '.join(ep_columns)} FROM stock.source_cross_section_endpoints WHERE target_session = %s",
+                (target_session,),
             )
-            existing_eps = {r[0]: r for r in cursor.fetchall()}
-            expected_eps = {
-                r[7]: (
-                    r[7],
-                    r[2],
-                    r[4],
-                    r[8],
-                    r[9],
-                    r[10],
-                    r[11],
-                    r[12],
-                    r[13],
-                    r[14],
-                    r[15],
-                    r[16],
-                    r[17],
-                    r[18],
-                )
-                for r in endpoint_rows
-            }
+            existing_eps = {r[6]: r for r in cursor.fetchall()}
+            expected = {r[1]: r for r in rows_to_insert}
+            expected_eps = {r[6]: r for r in endpoint_rows}
 
-            if existing or existing_eps:
-                expected = {
-                    r[1]: (
-                        r[1],
-                        r[3],
-                        r[9],
-                        *r[10:65],
-                    )
-                    for r in rows_to_insert
+            if existing == expected and existing_eps == expected_eps:
+                return {
+                    "status": "NO_CHANGE",
+                    "target_session": target_session.isoformat(),
+                    "row_count": len(rows_to_insert),
+                    "endpoint_count": len(endpoint_rows),
                 }
-                if existing == expected and existing_eps == expected_eps:
-                    return {
-                        "status": "NO_CHANGE",
-                        "target_session": target_session.isoformat(),
-                        "row_count": len(rows_to_insert),
-                        "endpoint_count": len(endpoint_rows),
-                    }
-                if existing_eps != expected_eps and existing == expected:
-                    raise ValueError(
-                        "CROSS_SECTION_ENDPOINTS_SAME_KEY_DIFFERENT_CONTENT"
-                    )
-                raise ValueError("CROSS_SECTION_SAME_KEY_DIFFERENT_CONTENT")
 
-            placeholders = ", ".join(["%s"] * 65)
+            target_symbols = sorted(expected)
+            if target_symbols:
+                cursor.execute(
+                    """DELETE FROM stock.source_cross_section_day_facts
+                       WHERE target_session = %s AND NOT (source_symbol = ANY(%s::text[]))""",
+                    (target_session, target_symbols),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM stock.source_cross_section_day_facts WHERE target_session = %s",
+                    (target_session,),
+                )
+
+            target_ep_keys = sorted(expected_eps)
+            if target_ep_keys:
+                cursor.execute(
+                    """DELETE FROM stock.source_cross_section_endpoints
+                       WHERE target_session = %s AND NOT (endpoint_key = ANY(%s::text[]))""",
+                    (target_session, target_ep_keys),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM stock.source_cross_section_endpoints WHERE target_session = %s",
+                    (target_session,),
+                )
+
+            placeholders = ", ".join(["%s"] * len(fact_columns))
+            fact_updates = ", ".join(
+                f"{col} = EXCLUDED.{col}"
+                for col in fact_columns
+                if col not in ("target_session", "source_symbol")
+            )
             cursor.executemany(
                 f"""INSERT INTO stock.source_cross_section_day_facts (
-                        target_session, source_symbol, price_capture_id, universe_capture_id,
-                        universe_version, price_coordinate, calendar_id, calendar_revision,
-                        contract_version, pit_status,
-                        rps5, rps5_quality, rps5_reason,
-                        rps20, rps20_quality, rps20_reason,
-                        rps5_delta1_pp, rps5_delta1_pp_quality, rps5_delta1_pp_reason,
-                        rps5_delta3_pp, rps5_delta3_pp_quality, rps5_delta3_pp_reason,
-                        rps20_delta1_pp, rps20_delta1_pp_quality, rps20_delta1_pp_reason,
-                        rps20_delta3_pp, rps20_delta3_pp_quality, rps20_delta3_pp_reason,
-                        rel_market_1, rel_market_1_quality, rel_market_1_reason,
-                        rel_market_3, rel_market_3_quality, rel_market_3_reason,
-                        rel_market_5, rel_market_5_quality, rel_market_5_reason,
-                        rel_market_20, rel_market_20_quality, rel_market_20_reason,
-                        target_universe_count, rps5_known_count, rps20_known_count,
-                        rel_market_1_start_session, rel_market_1_denominator, rel_market_1_known_count,
-                        rel_market_3_start_session, rel_market_3_denominator, rel_market_3_known_count,
-                        rel_market_5_start_session, rel_market_5_denominator, rel_market_5_known_count,
-                        rel_market_20_start_session, rel_market_20_denominator, rel_market_20_known_count,
-                        rps5_exact, rps20_exact, rps5_delta1_pp_exact, rps5_delta3_pp_exact,
-                        rps20_delta1_pp_exact, rps20_delta3_pp_exact,
-                        rel_market_1_exact, rel_market_3_exact, rel_market_5_exact, rel_market_20_exact
-                    ) VALUES ({placeholders})""",
+                        {", ".join(fact_columns)}
+                    ) VALUES ({placeholders})
+                    ON CONFLICT (target_session, source_symbol) DO UPDATE SET {fact_updates}""",
                 rows_to_insert,
             )
 
-            ep_placeholders = ", ".join(["%s"] * 19)
+            ep_placeholders = ", ".join(["%s"] * len(ep_columns))
+            ep_updates = ", ".join(
+                f"{col} = EXCLUDED.{col}"
+                for col in ep_columns
+                if col not in ("target_session", "endpoint_key")
+            )
             cursor.executemany(
                 f"""INSERT INTO stock.source_cross_section_endpoints (
-                        target_session, price_capture_id, universe_capture_id,
-                        universe_version, calendar_id, calendar_revision,
-                        contract_version, endpoint_key, endpoint_kind,
-                        return_period, offset_sessions, endpoint_status,
-                        endpoint_date, return_start_date,
-                        universe_id, universe_revision,
-                        denominator_count, known_count, unknown_count
-                    ) VALUES ({ep_placeholders})""",
+                        {", ".join(ep_columns)}
+                    ) VALUES ({ep_placeholders})
+                    ON CONFLICT (target_session, endpoint_key) DO UPDATE SET {ep_updates}""",
                 endpoint_rows,
             )
     except RawSourcePgError as exc:
@@ -367,17 +378,13 @@ def read_cross_section_day_bundle(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    price_capture_id: int,
+    price_capture_id: int | None = None,
     universe_version: str | None = None,
     universe_capture_id: int | None = None,
-    calendar_revision: str,
+    calendar_revision: str | None = None,
     contract_version: str = CROSS_SECTION_CONTRACT_VERSION,
 ) -> dict[str, Any]:
     """只读加载目标日全市场10项无损精确Fraction因子与日级共享10端点真实元数据。"""
-    if universe_version is not None and (
-        not isinstance(universe_version, str) or not universe_version.strip()
-    ):
-        raise ValueError("CROSS_SECTION_UNIVERSE_VERSION_INVALID")
     if universe_capture_id is not None and (
         type(universe_capture_id) is not int or universe_capture_id <= 0
     ):
@@ -388,76 +395,6 @@ def read_cross_section_day_bundle(
         cursor,
         _,
     ):
-        selected_universe_version = universe_version
-        selected_universe_capture_id = universe_capture_id
-        if selected_universe_version is None or selected_universe_capture_id is None:
-            # 只有唯一精确候选可自动复用；多捕获或多版本必须由调用方明确选定。
-            cursor.execute(
-                """SELECT DISTINCT universe_version, universe_capture_id
-                   FROM stock.source_cross_section_day_facts
-                   WHERE target_session = %s
-                     AND price_capture_id = %s
-                     AND calendar_revision = %s
-                     AND contract_version = %s
-                     AND (%s::text IS NULL OR universe_version = %s)
-                     AND (%s::bigint IS NULL OR universe_capture_id = %s)
-                   ORDER BY universe_version, universe_capture_id NULLS FIRST""",
-                (
-                    target_session,
-                    price_capture_id,
-                    calendar_revision,
-                    contract_version,
-                    selected_universe_version,
-                    selected_universe_version,
-                    selected_universe_capture_id,
-                    selected_universe_capture_id,
-                ),
-            )
-            scope_rows = cursor.fetchall()
-            if not scope_rows:
-                return {
-                    "status": "NOT_COMPUTED",
-                    "reason": "CROSS_SECTION_SCOPE_NOT_FOUND",
-                    "target_session": target_session,
-                    "price_capture_id": price_capture_id,
-                    "universe_capture_id": selected_universe_capture_id,
-                    "universe_version": selected_universe_version,
-                    "calendar_id": None,
-                    "calendar_revision": calendar_revision,
-                    "contract_version": contract_version,
-                    "rank_metadata": {},
-                    "relative_metadata": {},
-                    "by_entity": {},
-                }
-            if len(scope_rows) != 1:
-                return {
-                    "status": "INCOMPLETE",
-                    "reason": "CROSS_SECTION_SCOPE_AMBIGUOUS",
-                    "target_session": target_session,
-                    "price_capture_id": price_capture_id,
-                    "universe_capture_id": selected_universe_capture_id,
-                    "universe_version": selected_universe_version,
-                    "candidate_scopes": [
-                        {
-                            "universe_version": str(row[0]),
-                            "universe_capture_id": (
-                                int(row[1]) if row[1] is not None else None
-                            ),
-                        }
-                        for row in scope_rows
-                    ],
-                    "calendar_id": None,
-                    "calendar_revision": calendar_revision,
-                    "contract_version": contract_version,
-                    "rank_metadata": {},
-                    "relative_metadata": {},
-                    "by_entity": {},
-                }
-            selected_universe_version = str(scope_rows[0][0])
-            selected_universe_capture_id = (
-                int(scope_rows[0][1]) if scope_rows[0][1] is not None else None
-            )
-
         cursor.execute(
             """SELECT source_symbol,
                       rps5, rps5_exact, rps5_quality, rps5_reason,
@@ -469,54 +406,43 @@ def read_cross_section_day_bundle(
                       rel_market_1, rel_market_1_exact, rel_market_1_quality, rel_market_1_reason,
                       rel_market_3, rel_market_3_exact, rel_market_3_quality, rel_market_3_reason,
                       rel_market_5, rel_market_5_exact, rel_market_5_quality, rel_market_5_reason,
-                      rel_market_20, rel_market_20_exact, rel_market_20_quality, rel_market_20_reason
+                      rel_market_20, rel_market_20_exact, rel_market_20_quality, rel_market_20_reason,
+                      price_capture_id, universe_capture_id, calendar_revision, contract_version
                FROM stock.source_cross_section_day_facts
                WHERE target_session = %s
-                 AND price_capture_id = %s
-                 AND universe_version = %s
-                 AND universe_capture_id IS NOT DISTINCT FROM %s
-                 AND calendar_revision = %s
-                 AND contract_version = %s
                ORDER BY source_symbol""",
-            (
-                target_session,
-                price_capture_id,
-                selected_universe_version,
-                selected_universe_capture_id,
-                calendar_revision,
-                contract_version,
-            ),
+            (target_session,),
         )
         rows = cursor.fetchall()
 
         cursor.execute(
             """SELECT endpoint_key, endpoint_kind, return_period, offset_sessions,
                       endpoint_status, endpoint_date, return_start_date,
-                      universe_id, universe_revision,
+                      universe_id,
                       denominator_count, known_count, unknown_count,
                       calendar_id, universe_capture_id
                FROM stock.source_cross_section_endpoints
                WHERE target_session = %s
-                 AND price_capture_id = %s
-                 AND universe_version = %s
-                 AND universe_capture_id IS NOT DISTINCT FROM %s
-                 AND calendar_revision = %s
-                 AND contract_version = %s
                ORDER BY endpoint_key""",
-            (
-                target_session,
-                price_capture_id,
-                selected_universe_version,
-                selected_universe_capture_id,
-                calendar_revision,
-                contract_version,
-            ),
+            (target_session,),
         )
         ep_rows = cursor.fetchall()
 
     by_entity: dict[str, dict[str, FieldValue]] = {}
+    actual_price_capture_id: int | None = price_capture_id
+    actual_universe_capture_id: int | None = universe_capture_id
+    actual_calendar_revision: str | None = calendar_revision
+    actual_contract_version: str = contract_version
     for row in rows:
         sym = str(row[0])
+        if actual_price_capture_id is None and row[41] is not None:
+            actual_price_capture_id = int(row[41])
+        if actual_universe_capture_id is None and row[42] is not None:
+            actual_universe_capture_id = int(row[42])
+        if actual_calendar_revision is None and row[43] is not None:
+            actual_calendar_revision = str(row[43])
+        if row[44] is not None:
+            actual_contract_version = str(row[44])
         fields: dict[str, FieldValue] = {}
         for idx, (fid, _) in enumerate(_FIELD_DB_COLS):
             base = 1 + idx * 4
@@ -551,7 +477,6 @@ def read_cross_section_day_bundle(
             ep_date,
             start_d,
             u_id,
-            u_rev,
             denom,
             known,
             unk,
@@ -566,7 +491,6 @@ def read_cross_section_day_bundle(
             "return_start_date": start_d,
             "start_session": start_d,
             "universe_id": u_id,
-            "universe_revision": u_rev,
             "denominator": int(denom),
             "known_count": int(known),
             "unknown_count": int(unk),
@@ -594,14 +518,13 @@ def read_cross_section_day_bundle(
         "status": bundle_status,
         "reason": bundle_reason,
         "target_session": target_session,
-        "price_capture_id": price_capture_id,
-        "universe_capture_id": selected_universe_capture_id
-        if selected_universe_capture_id is not None
+        "price_capture_id": actual_price_capture_id,
+        "universe_capture_id": actual_universe_capture_id
+        if actual_universe_capture_id is not None
         else universe_capture_id_val,
-        "universe_version": selected_universe_version,
         "calendar_id": calendar_id_val,
-        "calendar_revision": calendar_revision,
-        "contract_version": contract_version,
+        "calendar_revision": actual_calendar_revision,
+        "contract_version": actual_contract_version,
         "rank_metadata": rank_meta,
         "relative_metadata": rel_meta,
         "by_entity": by_entity,
@@ -612,10 +535,10 @@ def read_cross_section_day_facts(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    price_capture_id: int,
-    universe_version: str,
+    price_capture_id: int | None = None,
+    universe_version: str | None = None,
     universe_capture_id: int | None = None,
-    calendar_revision: str,
+    calendar_revision: str | None = None,
     contract_version: str = CROSS_SECTION_CONTRACT_VERSION,
 ) -> dict[str, dict[str, FieldValue]]:
     """只读加载目标日全市场10项无损精确Fraction横截面因子。"""

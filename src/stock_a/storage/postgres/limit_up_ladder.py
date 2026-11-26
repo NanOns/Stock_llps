@@ -147,47 +147,50 @@ def persist_limit_up_streaks_for_session(
                       is_first_board, prior_session_status,
                       close_limit_up, touched_limit_up, one_word_limit_up, reason
                FROM stock.source_limit_up_streak_day_facts
-               WHERE target_session = %s
-                 AND source_capture_id = %s
-                 AND contract_version = %s
-                 AND calendar_revision = %s""",
-            (
-                target_session,
-                source_capture_id,
-                LIMIT_UP_LADDER_CONTRACT_VERSION,
-                calendar_revision,
-            ),
+               WHERE target_session = %s""",
+            (target_session,),
         )
         existing = {row[0]: row for row in cursor.fetchall()}
-        if existing:
-            expected = {
-                rec[1]: (
-                    rec[1],
-                    rec[2],
-                    rec[3],
-                    rec[4],
-                    rec[10],
-                    rec[11],
-                    rec[12],
-                    rec[13],
-                    rec[14],
-                    rec[15],
-                    rec[16],
-                    rec[17],
-                    rec[18],
-                )
-                for rec in records
+        expected = {
+            rec[1]: (
+                rec[1],
+                rec[2],
+                rec[3],
+                rec[4],
+                rec[10],
+                rec[11],
+                rec[12],
+                rec[13],
+                rec[14],
+                rec[15],
+                rec[16],
+                rec[17],
+                rec[18],
+            )
+            for rec in records
+        }
+        if existing == expected:
+            return {
+                "status": "NO_CHANGE",
+                "target_session": target_session.isoformat(),
+                "row_count": len(records),
+                "contiguous_session_count": len(window_sessions),
+                "calendar_revision": calendar_revision,
+                "contract_version": LIMIT_UP_LADDER_CONTRACT_VERSION,
             }
-            if existing == expected:
-                return {
-                    "status": "NO_CHANGE",
-                    "target_session": target_session.isoformat(),
-                    "row_count": len(records),
-                    "contiguous_session_count": len(window_sessions),
-                    "calendar_revision": calendar_revision,
-                    "contract_version": LIMIT_UP_LADDER_CONTRACT_VERSION,
-                }
-            raise ValueError("LIMIT_UP_STREAK_SAME_KEY_DIFFERENT_CONTENT")
+
+        target_symbols = sorted(expected)
+        if target_symbols:
+            cursor.execute(
+                """DELETE FROM stock.source_limit_up_streak_day_facts
+                   WHERE target_session = %s AND NOT (source_symbol = ANY(%s::text[]))""",
+                (target_session, target_symbols),
+            )
+        else:
+            cursor.execute(
+                "DELETE FROM stock.source_limit_up_streak_day_facts WHERE target_session = %s",
+                (target_session,),
+            )
 
         cursor.executemany(
             """INSERT INTO stock.source_limit_up_streak_day_facts (
@@ -204,7 +207,25 @@ def persist_limit_up_streaks_for_session(
                    %s, %s, %s,
                    %s, %s,
                    %s, %s, %s, %s
-               )""",
+               )
+               ON CONFLICT (target_session, source_symbol) DO UPDATE SET
+                   market = EXCLUDED.market,
+                   board = EXCLUDED.board,
+                   research_eligible = EXCLUDED.research_eligible,
+                   source_capture_id = EXCLUDED.source_capture_id,
+                   price_coordinate = EXCLUDED.price_coordinate,
+                   contract_version = EXCLUDED.contract_version,
+                   calendar_id = EXCLUDED.calendar_id,
+                   calendar_revision = EXCLUDED.calendar_revision,
+                   streak_status = EXCLUDED.streak_status,
+                   exact_streak = EXCLUDED.exact_streak,
+                   lower_bound_streak = EXCLUDED.lower_bound_streak,
+                   is_first_board = EXCLUDED.is_first_board,
+                   prior_session_status = EXCLUDED.prior_session_status,
+                   close_limit_up = EXCLUDED.close_limit_up,
+                   touched_limit_up = EXCLUDED.touched_limit_up,
+                   one_word_limit_up = EXCLUDED.one_word_limit_up,
+                   reason = EXCLUDED.reason""",
             records,
         )
 
@@ -222,19 +243,15 @@ def read_market_limit_up_ladder_summary(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     calendar_revision: str | None = None,
     research_eligible_only: bool = True,
 ) -> dict[str, Any]:
     """只读查询目标交易日全市场日线连板梯队汇总。
 
-    强制绑定精确 calendar_revision（防止多日历修订重复计数），并与同日同捕获的
-    source_price_limit_day_facts 目标证券集合逐一核对完整度；未落库返回 NOT_COMPUTED，
-    残缺返回 INCOMPLETE，完整闭合才返回 AVAILABLE。
+    按目标日单一有效连板事实读取，并与同日 source_price_limit_day_facts 目标证券集合
+    逐一核对完整度；未落库返回 NOT_COMPUTED，残缺返回 INCOMPLETE，完整闭合才返回 AVAILABLE。
     """
-    if calendar_revision is None:
-        _, _, calendar_revision, _ = _load_calendar(target_session)
-
     with _transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
@@ -247,32 +264,16 @@ def read_market_limit_up_ladder_summary(
             f"""SELECT source_symbol, streak_status, exact_streak, lower_bound_streak,
                        is_first_board, close_limit_up, touched_limit_up, one_word_limit_up
                 FROM stock.source_limit_up_streak_day_facts
-                WHERE target_session = %s
-                  AND source_capture_id = %s
-                  AND contract_version = %s
-                  AND calendar_revision = %s{eligible_clause}""",
-            (
-                target_session,
-                source_capture_id,
-                LIMIT_UP_LADDER_CONTRACT_VERSION,
-                calendar_revision,
-            ),
+                WHERE target_session = %s{eligible_clause}""",
+            (target_session,),
         )
         rows = cursor.fetchall()
 
         cursor.execute(
             f"""SELECT source_symbol
                 FROM stock.source_price_limit_day_facts
-                WHERE target_session = %s
-                  AND source_capture_id = %s
-                  AND contract_version = %s
-                  AND calendar_revision = %s{eligible_clause}""",
-            (
-                target_session,
-                source_capture_id,
-                PRICE_LIMIT_CONTRACT_VERSION,
-                calendar_revision,
-            ),
+                WHERE target_session = %s{eligible_clause}""",
+            (target_session,),
         )
         expected_symbols = {r[0] for r in cursor.fetchall()}
 

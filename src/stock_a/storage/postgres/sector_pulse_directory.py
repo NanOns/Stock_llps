@@ -37,7 +37,6 @@ def read_source_sector_pulse_directory_page(
     research_cutoff: date,
     source_capture_id: int,
     source_pool_count: int,
-    profile_revision: str,
     snapshot_ids: Mapping[str, int],
     calendar_id: str,
     calendar_revision: str,
@@ -56,8 +55,6 @@ def read_source_sector_pulse_directory_page(
             type(value) is not int or value <= 0
             for value in (source_capture_id, source_pool_count)
         )
-        or not isinstance(profile_revision, str)
-        or not profile_revision.startswith("PROFILE_R")
         or not isinstance(snapshot_ids, Mapping)
         or set(snapshot_ids) != {"INDUSTRY", "CONCEPT"}
         or any(type(value) is not int or value <= 0 for value in snapshot_ids.values())
@@ -96,14 +93,12 @@ def read_source_sector_pulse_directory_page(
     ):
         cursor.execute(
             """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint,
-       count(DISTINCT profile_revision)::bigint,min(producer_version),max(producer_version)
+       min(producer_version),max(producer_version)
 FROM source_pool_seed_day_facts
-WHERE target_session=%s AND source_capture_id=%s
-  AND profile_revision=%s AND producer_version=%s""",
+WHERE target_session=%s
+  AND producer_version=%s""",
             (
                 target_session,
-                source_capture_id,
-                profile_revision,
                 "SOURCE_POOL_SEED_CORE_PROFILE_R2",
             ),
         )
@@ -111,13 +106,12 @@ WHERE target_session=%s AND source_capture_id=%s
         if (
             int(seed[0]) <= 0
             or int(seed[0]) != int(seed[1])
-            or int(seed[2]) != 1
-            or seed[3] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
-            or seed[4] != seed[3]
+            or seed[2] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+            or seed[3] != seed[2]
         ):
             raise SectorPulsePgError(
                 "SECTOR_PULSE_DIRECTORY_SEED_SCOPE_INCOMPLETE",
-                "当前日期精确Seed/Profile全集未闭合",
+                "当前日期精确Seed全集未闭合",
             )
         seed_profile_count = int(seed[0])
 
@@ -142,14 +136,11 @@ WHERE snapshot_id=ANY(%s) GROUP BY snapshot_id,board_kind""",
          AND p.price_coordinate='FORWARD_ADJUSTED')::int
 FROM source_sector_cross_period_pulse_facts p
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
-WHERE p.target_session=%s AND p.source_capture_id=%s
-  AND p.profile_revision=%s
+WHERE p.target_session=%s
   AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)
 GROUP BY c.snapshot_id,c.board_kind""",
             (
                 target_session,
-                source_capture_id,
-                profile_revision,
                 _ALGORITHM,
                 snapshots,
             ),
@@ -188,14 +179,10 @@ GROUP BY c.snapshot_id,c.board_kind""",
         )
 
         base_where = (
-            "p.target_session=%s AND p.source_capture_id=%s "
-            "AND p.profile_revision=%s "
-            "AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)"
+            "p.target_session=%s AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)"
         )
         base_params: list[Any] = [
             target_session,
-            source_capture_id,
-            profile_revision,
             _ALGORITHM,
             snapshots,
         ]
@@ -237,14 +224,11 @@ LIMIT %s OFFSET %s""",
             """SELECT p.pulse_state,count(*)::int
 FROM source_sector_cross_period_pulse_facts p
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
-WHERE p.target_session=%s AND p.source_capture_id=%s
-  AND p.profile_revision=%s
+WHERE p.target_session=%s
   AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)
 GROUP BY p.pulse_state""",
             (
                 target_session,
-                source_capture_id,
-                profile_revision,
                 _ALGORITHM,
                 snapshots,
             ),
@@ -261,8 +245,7 @@ GROUP BY p.pulse_state""",
                 """WITH scoped AS (
   SELECT p.id FROM source_sector_cross_period_pulse_facts p
   JOIN tdx_sector_catalog c ON c.id=p.catalog_id
-  WHERE p.target_session=%s AND p.source_capture_id=%s
-    AND p.profile_revision=%s
+  WHERE p.target_session=%s
     AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s)
 ), outcomes AS (
   SELECT p.id,CASE WHEN count(f.id)=0 THEN 'NOT_COMPUTED'
@@ -277,8 +260,6 @@ GROUP BY p.pulse_state""",
 SELECT outcome_status,count(*)::int FROM outcomes GROUP BY outcome_status""",
                 (
                     target_session,
-                    source_capture_id,
-                    profile_revision,
                     _ALGORITHM,
                     snapshots,
                     t1_target,
@@ -478,9 +459,6 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_capture_id=source_capture_id,
-        profile_revision=profile_revision,
-        snapshot_ids=snapshot_ids,
         expected_board_counts={
             kind: partitions.get(kind, {}).get("actual_board_count", 0)
             for kind in ("INDUSTRY", "CONCEPT")
@@ -498,7 +476,6 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
         else ["PULSE_DIRECTORY_PARTITION_INCOMPLETE"],
         "target_session": target_session.isoformat(),
         "source_capture_id": source_capture_id,
-        "profile_revision": profile_revision,
         "source_pool_count": source_pool_count,
         "seed_profile_count": seed_profile_count,
         "snapshot_ids": dict(snapshot_ids),

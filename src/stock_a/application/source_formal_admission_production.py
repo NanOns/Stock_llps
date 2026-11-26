@@ -643,7 +643,7 @@ def run_source_formal_admission_from_saved(
                 research_cutoff=research_cutoff,
                 source_capture_id=source_capture_id,
                 price_coordinate="FORWARD_ADJUSTED",
-                profile_revision=seed_scope["profile_revision"],
+                profile_revision=seed_scope.get("profile_revision"),
                 producer_version=seed_scope["producer_version"],
             )
             seed_by_symbol = {row["source_symbol"]: row for row in seed_rows}
@@ -656,7 +656,7 @@ def run_source_formal_admission_from_saved(
         seed_by_symbol = {}
         seed_scope_reason = getattr(error, "code", "SEED_SCOPE_UNAVAILABLE")
 
-    profile_revision = seed_scope["profile_revision"] if seed_scope else None
+    profile_revision = seed_scope.get("profile_revision") if seed_scope else None
     seed_version = seed_scope["producer_version"] if seed_scope else None
     input_refs = read_saved_source_fact_ids(
         config,

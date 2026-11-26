@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 
 from stock_a.domain.sector_pulse_transitions import classify_pulse_transition
 from stock_a.storage.postgres import source_raw
-from stock_a.storage.postgres.research_day_facts import _insert_rows, _row_matches
+from stock_a.storage.postgres.research_day_facts import _row_matches
 
 _TABLE = "source_sector_pulse_adjacent_transitions"
 _PULSE_TABLE = "source_sector_cross_period_pulse_facts"
@@ -66,24 +66,20 @@ def _day_identity(day: Mapping[str, Any], label: str) -> dict[str, Any]:
         )
     capture_id = source.get("source_capture_id")
     row_count = source.get("raw_row_count")
-    profile_revision = day.get("profile_revision")
     if (
         type(capture_id) is not int
         or capture_id <= 0
         or type(row_count) is not int
         or row_count < 1
-        or not isinstance(profile_revision, str)
-        or not profile_revision.startswith("PROFILE_R")
     ):
         raise SectorPulseTransitionPgError(
             "PULSE_TRANSITION_SOURCE_IDENTITY_INVALID",
-            f"{label}来源包、捕获、Profile或分母无效",
+            f"{label}来源包、捕获或分母无效",
         )
     return {
         "target_session": session,
         "source_capture_id": capture_id,
         "raw_row_count": row_count,
-        "profile_revision": profile_revision,
         "source_version": source,
         "day_result": day,
     }
@@ -105,23 +101,20 @@ def _verify_source_partition(cursor: Any, day: Mapping[str, Any], label: str) ->
         )
     cursor.execute(
         "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
-        "count(DISTINCT profile_revision)::bigint, min(producer_version), max(producer_version) "
+        "min(producer_version), max(producer_version) "
         "FROM source_pool_seed_day_facts WHERE target_session=%s AND source_capture_id=%s "
-        "AND profile_revision=%s "
         "AND price_coordinate='FORWARD_ADJUSTED'",
         (
             identity["target_session"],
             identity["source_capture_id"],
-            identity["profile_revision"],
         ),
     )
     seed = cursor.fetchone()
     if (
         int(seed[0]) != identity["raw_row_count"]
         or int(seed[1]) != identity["raw_row_count"]
-        or int(seed[2]) != 1
-        or seed[3] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
-        or seed[4] != seed[3]
+        or seed[2] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+        or seed[3] != seed[2]
     ):
         raise SectorPulseTransitionPgError(
             "PULSE_TRANSITION_PROFILE_PARTITION_MISMATCH",
@@ -143,19 +136,16 @@ def _pulse_parent_id(
             "PULSE_TRANSITION_CATALOG_ID_INVALID", f"{kind}板块缺少数字目录ID"
         )
     cursor.execute(
-        f"SELECT p.id, p.pulse_state, p.pulse_reason_codes, p.profile_revision, "
+        f"SELECT p.id, p.pulse_state, p.pulse_reason_codes, "
         f"p.target_session, p.source_capture_id, "
         f"p.algorithm_contract, p.calculation_status, p.formal_rotation_state, "
         f"p.research_mode, p.membership_mode, p.price_coordinate, "
         f"c.snapshot_id, c.board_kind, c.board_native_id "
         f"FROM {_PULSE_TABLE} p JOIN tdx_sector_catalog c ON c.id=p.catalog_id "
-        "WHERE p.target_session=%s AND p.source_capture_id=%s "
-        "AND p.profile_revision=%s "
+        "WHERE p.target_session=%s "
         "AND p.catalog_id=%s AND p.algorithm_contract=%s",
         (
             identity["target_session"],
-            identity["source_capture_id"],
-            identity["profile_revision"],
             catalog_id,
             _PULSE_ALGORITHM,
         ),
@@ -167,18 +157,17 @@ def _pulse_parent_id(
             f"{kind}.{board_id}PULSE父事实缺失或与独立读回不一致",
         )
     if (
-        str(row[3]).strip() != identity["profile_revision"]
-        or row[4] != identity["target_session"]
-        or int(row[5]) != identity["source_capture_id"]
-        or row[6] != _PULSE_ALGORITHM
-        or row[7] != "COMPLETE"
-        or row[8] != "NOT_EVALUATED"
-        or row[9] != "NON_PIT_RETROSPECTIVE"
-        or row[10] != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-        or row[11] != "FORWARD_ADJUSTED"
-        or int(row[12]) != fact.get("snapshot_id")
-        or row[13] != kind
-        or row[14] != board_id
+        row[3] != identity["target_session"]
+        or int(row[4]) != identity["source_capture_id"]
+        or row[5] != _PULSE_ALGORITHM
+        or row[6] != "COMPLETE"
+        or row[7] != "NOT_EVALUATED"
+        or row[8] != "NON_PIT_RETROSPECTIVE"
+        or row[9] != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+        or row[10] != "FORWARD_ADJUSTED"
+        or int(row[11]) != fact.get("snapshot_id")
+        or row[12] != kind
+        or row[13] != board_id
     ):
         raise SectorPulseTransitionPgError(
             "PULSE_TRANSITION_PARENT_SCOPE_MISMATCH",
@@ -385,29 +374,25 @@ def persist_source_sector_pulse_transitions(
                 scopes = {}
                 for kind, rows in rows_by_kind.items():
                     actual = _scope_rows(cursor, rows)
-                    if actual and (
-                        len(actual) != len(rows)
-                        or any(
-                            not _row_matches(expected, stored)
-                            for expected, stored in zip(rows, actual, strict=True)
-                        )
-                    ):
-                        raise SectorPulseTransitionPgError(
-                            "PULSE_TRANSITION_CONTENT_CONFLICT",
-                            f"{kind}相同父事实和业务合同已存在异内容或不完整行",
-                        )
-                    scopes[kind] = len(actual) == len(rows)
-                if any(scopes.values()) and not all(scopes.values()):
-                    raise SectorPulseTransitionPgError(
-                        "PULSE_TRANSITION_PARTIAL_SCOPE",
-                        "行业与GN变化事实没有处于同一原子业务批次",
+                    scopes[kind] = len(actual) == len(rows) and all(
+                        _row_matches(expected, stored)
+                        for expected, stored in zip(rows, actual, strict=True)
                     )
                 inserted = {}
                 if not all(scopes.values()):
                     all_rows = rows_by_kind["INDUSTRY"] + rows_by_kind["CONCEPT"]
-                    inserted[_TABLE] = _insert_rows(
-                        cursor, _TABLE, _COLUMNS, _KEY, all_rows
+                    placeholders = ", ".join(["%s"] * len(_COLUMNS))
+                    update_columns = [col for col in _COLUMNS if col not in _KEY]
+                    update_clause = ", ".join(
+                        f"{col}=EXCLUDED.{col}" for col in update_columns
                     )
+                    sql = (
+                        f"INSERT INTO {_TABLE} ({', '.join(_COLUMNS)}) "
+                        f"VALUES ({placeholders}) "
+                        f"ON CONFLICT ({', '.join(_KEY)}) DO UPDATE SET {update_clause}"
+                    )
+                    cursor.executemany(sql, all_rows)
+                    inserted[_TABLE] = len(all_rows)
                 for kind, rows in rows_by_kind.items():
                     actual = _scope_rows(cursor, rows)
                     if len(actual) != len(rows) or any(

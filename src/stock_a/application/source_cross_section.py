@@ -106,7 +106,6 @@ def persist_source_cross_section_for_session(
         raise ValueError("CROSS_SECTION_TARGET_UNIVERSE_EMPTY")
 
     universe_capture_id = target_universe_info.get("universe_capture_id")
-    universe_version = str(target_universe_info["universe_version"])
     pit_status = str(target_universe_info["pit_status"])
 
     universe_info_by_date: dict[date, dict[str, Any]] = {
@@ -312,7 +311,7 @@ def persist_source_cross_section_for_session(
             return_start_date=start_date,
             universe_date=u_date,
             universe_id=f"BAOSTOCK_DATE_EFFECTIVE:{u_date.isoformat()}",
-            universe_revision=str(u_info["universe_version"]),
+            universe_revision=f"BAOSTOCK_DATE_EFFECTIVE:{u_date.isoformat()}",
             producer_version=CROSS_SECTION_CONTRACT_VERSION,
             universe_members=members,
             returns=returns_map,
@@ -343,7 +342,6 @@ def persist_source_cross_section_for_session(
         batch_result=batch_result,
         price_capture_id=source_capture_id,
         universe_capture_id=universe_capture_id,
-        universe_version=universe_version,
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
         pit_status=pit_status,
@@ -354,7 +352,6 @@ def persist_source_cross_section_for_session(
         "row_count": persist_report["row_count"],
         "endpoint_count": persist_report["endpoint_count"],
         "universe_capture_id": universe_capture_id,
-        "universe_version": universe_version,
         "calendar_revision": calendar_revision,
         "contract_version": CROSS_SECTION_CONTRACT_VERSION,
         "universe_quality_summary": {

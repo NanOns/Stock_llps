@@ -272,7 +272,7 @@ def read_source_board_relative_history_inputs(
 
             capture_id = source_capture_id
             cursor.execute(
-                """SELECT DISTINCT profile_revision,producer_contract,
+                """SELECT DISTINCT producer_contract,
                           producer_version,history_session_count,calendar_id,
                           calendar_revision,research_mode,price_coordinate,
                           history_window_start,history_window_end,
@@ -281,7 +281,7 @@ def read_source_board_relative_history_inputs(
                    WHERE target_session=%s AND source_capture_id=%s
                      AND source_symbol=%s
                      AND producer_version=%s
-                   ORDER BY profile_revision,producer_contract,producer_version""",
+                   ORDER BY producer_contract,producer_version""",
                 (session, capture_id, source_symbol, producer_version),
             )
             scope_rows = cursor.fetchall()
@@ -313,7 +313,6 @@ def read_source_board_relative_history_inputs(
                          ON s.source_symbol=m.source_symbol
                         AND s.target_session=%s
                         AND s.source_capture_id=%s
-                        AND s.profile_revision=%s
                         AND s.producer_contract=%s
                         AND s.producer_version=%s
                         AND s.history_session_count=%s
@@ -329,7 +328,6 @@ def read_source_board_relative_history_inputs(
                         capture_id,
                         session,
                         capture_id,
-                        scope["profile_revision"],
                         scope["producer_contract"],
                         scope["producer_version"],
                         scope["history_session_count"],
@@ -391,7 +389,7 @@ def read_source_board_relative_history_inputs(
             cursor.execute(
                 """SELECT p.pulse_state,p.calculation_status,p.research_mode,
                           p.membership_mode,p.price_coordinate,p.source_time_quality,
-                          p.source_clock_role,p.profile_revision,t.transition_state,
+                          p.source_clock_role,t.transition_state,
                           t.calculation_status
                    FROM source_sector_cross_period_pulse_facts p
                    LEFT JOIN source_sector_pulse_adjacent_transitions t
@@ -413,15 +411,15 @@ def read_source_board_relative_history_inputs(
                 pulse = pulse_rows[0]
                 day["pulse_status"] = pulse[1]
                 day["pulse_state"] = pulse[0]
-                day["transition_status"] = pulse[9] or "NOT_COMPUTED"
-                day["transition_state"] = pulse[8] or "NOT_COMPUTED"
+                day["transition_status"] = pulse[8] or "NOT_COMPUTED"
+                day["transition_state"] = pulse[7] or "NOT_COMPUTED"
                 day["pulse_context"] = {
                     "research_mode": pulse[2],
                     "membership_mode": pulse[3],
                     "price_coordinate": pulse[4],
                     "source_time_quality": pulse[5],
                     "source_clock_role": pulse[6],
-                    "profile_revision": pulse[7],
+                    "profile_revision": None,
                 }
             elif len(pulse_rows) > 1:
                 day["pulse_status"] = "AMBIGUOUS"

@@ -110,14 +110,15 @@ def _read_rule_day_contexts(
     )
     capture_rows = cursor.fetchall()
     cursor.execute(
-        """SELECT p.target_session,p.source_capture_id,p.profile_revision,
+        """SELECT p.target_session,p.source_capture_id,NULL::text AS profile_revision,
                   p.history_requested_session_count,
                   history_calendar_id,history_calendar_revision,history_window_start,
                   history_window_end,price_coordinate,
                   min(history_stored_session_count),max(history_stored_session_count),
                   count(*),count(DISTINCT p.source_symbol),
-                  p.cross_section_universe_capture_id,
-                  p.cross_section_universe_version,p.cross_section_contract_version
+                  NULL::bigint AS cross_section_universe_capture_id,
+                  NULL::text AS cross_section_universe_version,
+                  NULL::text AS cross_section_contract_version
            FROM source_symbol_price_profiles p
            WHERE p.target_session=ANY(%s) AND p.source_capture_id=%s
              AND p.price_coordinate='FORWARD_ADJUSTED'
@@ -125,7 +126,6 @@ def _read_rule_day_contexts(
                  SELECT 1 FROM source_pool_seed_day_facts s
                  WHERE s.target_session=p.target_session
                    AND s.source_capture_id=p.source_capture_id
-                   AND s.profile_revision=p.profile_revision
                    AND s.producer_version=%s
                    AND s.price_coordinate='FORWARD_ADJUSTED'
              )
@@ -134,12 +134,12 @@ def _read_rule_day_contexts(
     )
     profile_rows = cursor.fetchall()
     cursor.execute(
-        """SELECT target_session,source_capture_id,profile_revision,history_session_count,
+        """SELECT target_session,source_capture_id,NULL::text AS profile_revision,history_session_count,
                   history_window_start,history_window_end,calendar_revision,research_mode,
                   price_coordinate,producer_contract,producer_version,count(*),
-                  count(DISTINCT source_symbol),cross_section_universe_capture_id,
-                  cross_section_universe_version,cross_section_contract_version,
-                  universe_match_status,ranking_universe_count,evaluation_universe_count
+                  count(DISTINCT source_symbol),NULL::bigint AS cross_section_universe_capture_id,
+                  NULL::text AS cross_section_universe_version,NULL::text AS cross_section_contract_version,
+                  NULL::text AS universe_match_status,ranking_universe_count,evaluation_universe_count
            FROM source_pool_seed_day_facts
            WHERE target_session=ANY(%s) AND source_capture_id=%s
              AND producer_version=%s
@@ -155,8 +155,9 @@ def _read_rule_day_contexts(
                   research_mode,price_coordinate,count(*),
                   count(DISTINCT source_symbol),count(DISTINCT structure_type),
                   array_agg(DISTINCT structure_type ORDER BY structure_type),
-                  cross_section_universe_capture_id,cross_section_universe_version,
-                  cross_section_contract_version
+                  NULL::bigint AS cross_section_universe_capture_id,
+                  NULL::text AS cross_section_universe_version,
+                  NULL::text AS cross_section_contract_version
            FROM source_d1_structure_day_facts
            WHERE target_session=ANY(%s) AND source_capture_id=%s
              AND producer_version=ANY(%s)
@@ -312,7 +313,7 @@ def _read_rule_day_contexts(
         ) = d1
         expected_d1_types = _expected_d1_structure_types(d1_version)
         expected_d1_type_count = len(expected_d1_types)
-        revision_context = _profile_revision_context(profile_revision, history_count)
+        revision_context = (None, history_calendar_id, history_calendar_revision)
         inputs_complete = (
             profile_capture == seed_capture == d1_capture == capture
             and profile_count == profile_symbols == raw_count
@@ -334,21 +335,6 @@ def _read_rule_day_contexts(
             == d1_coordinate
             == "FORWARD_ADJUSTED"
             and research_mode == d1_research_mode == "NON_PIT_RETROSPECTIVE"
-            and (
-                profile_cross_capture_id,
-                profile_cross_version,
-                profile_cross_contract,
-            )
-            == (seed_cross_capture_id, seed_cross_version, seed_cross_contract)
-            and (
-                d1_version != _D1_PRODUCER_VERSION_7
-                or (d1_cross_capture_id, d1_cross_version, d1_cross_contract)
-                == (seed_cross_capture_id, seed_cross_version, seed_cross_contract)
-            )
-            and revision_context
-            == (revision_context[0], history_calendar_id, history_calendar_revision)
-            if revision_context is not None
-            else False
         )
         if not inputs_complete:
             context["reason"] = "PROFILE_SEED_D1_CONTEXT_MISMATCH"
@@ -423,7 +409,6 @@ def _read_rule_day_contexts(
         rules_complete = (
             rule_capture == capture
             and rule_version == RULE_VERSION
-            and rule_profile == profile_revision == seed_revision
             and rule_history_count == history_count
             and rule_d1_count == d1_history_count
             and event_window_start == d1_start
@@ -565,8 +550,6 @@ def _rule_context_comparable(
             before_rule["version"] == target_rule["version"],
             before_rule["capture"] == before_context["capture"],
             target_rule["capture"] == target_context["capture"],
-            before_rule["profile_revision"] == before_profile["revision"],
-            target_rule["profile_revision"] == target_profile["revision"],
             before_rule["d1_history_count"] == target_rule["d1_history_count"],
             before_rule["calendar_revision"] == target_rule["calendar_revision"],
             before_rule["scope"] == target_rule["scope"],
@@ -1223,10 +1206,6 @@ def persist_existing_enrollments(
         version, profile, history_count, d1_count, window_start, calendar_revision = (
             scopes[0][:6]
         )
-        profile_context = _profile_revision_context(profile, history_count)
-        if profile_context is None:
-            raise ValueError("Seed画像修订未标明日历身份，拒绝登记后继")
-        history_calendar_id = profile_context[1]
         cursor.execute(
             """SELECT count(*),count(DISTINCT source_symbol),
                       count(DISTINCT producer_contract),count(DISTINCT producer_version),
@@ -1236,10 +1215,11 @@ def persist_existing_enrollments(
                       min(research_mode),min(price_coordinate)
                FROM source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s
-                 AND profile_revision=%s AND history_session_count=%s""",
-            (target, source_capture_id, profile, history_count),
+                 AND history_session_count=%s""",
+            (target, source_capture_id, history_count),
         )
         seed_scope = cursor.fetchone()
+        history_calendar_id = seed_scope[9]
         if not (
             seed_scope[0] == raw_count
             and seed_scope[1] == raw_count
@@ -1248,25 +1228,12 @@ def persist_existing_enrollments(
             == (
                 _SEED_PRODUCER_VERSION,
                 history_calendar_id,
-                profile_context[2],
+                calendar_revision,
                 "NON_PIT_RETROSPECTIVE",
                 "FORWARD_ADJUSTED",
             )
         ):
             raise ValueError("Seed与规则的来源、画像或完整分母不一致")
-        cursor.execute(
-            """SELECT DISTINCT cross_section_universe_capture_id,
-                              cross_section_universe_version,
-                              cross_section_contract_version
-               FROM source_pool_seed_day_facts
-               WHERE target_session=%s AND source_capture_id=%s
-                 AND profile_revision=%s AND history_session_count=%s""",
-            (target, source_capture_id, profile, history_count),
-        )
-        seed_cross_scopes = cursor.fetchall()
-        if len(seed_cross_scopes) != 1:
-            raise ValueError("Seed横截面业务范围缺失或存在多个候选")
-        seed_cross_scope = seed_cross_scopes[0]
         from stock_a.storage.postgres.research_day_facts import (
             _expected_d1_structure_types,
             _select_preferred_d1_scopes,
@@ -1278,9 +1245,7 @@ def persist_existing_enrollments(
                       producer_contract,producer_version,material_change_contract,research_mode,
                       price_coordinate,count(*),count(DISTINCT source_symbol),
                       count(DISTINCT structure_type),
-                      array_agg(DISTINCT structure_type ORDER BY structure_type),
-                      cross_section_universe_capture_id,cross_section_universe_version,
-                      cross_section_contract_version
+                      array_agg(DISTINCT structure_type ORDER BY structure_type)
                FROM source_d1_structure_day_facts
                WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s
                  AND d1_history_session_count=%s AND history_window_start=%s
@@ -1292,8 +1257,7 @@ def persist_existing_enrollments(
                GROUP BY d1_history_session_count,history_window_start,
                         history_window_end,calendar_id,calendar_revision,producer_contract,
                         producer_version,material_change_contract,research_mode,
-                        price_coordinate,cross_section_universe_capture_id,
-                        cross_section_universe_version,cross_section_contract_version""",
+                        price_coordinate""",
             (
                 target,
                 source_capture_id,
@@ -1320,7 +1284,6 @@ def persist_existing_enrollments(
             and d1_scope[11] == raw_count
             and d1_scope[12] == len(expected_d1_types)
             and frozenset(d1_scope[13] or ()) == frozenset(expected_d1_types)
-            and tuple(d1_scope[14:17]) == tuple(seed_cross_scope)
         ):
             raise ValueError("D1结构与规则的日历或完整分母不一致")
         if d0_calendar != calendar_revision:

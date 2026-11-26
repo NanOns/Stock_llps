@@ -331,7 +331,7 @@ def persist_source_t0_early_observations_from_saved(
         previous_source_capture_id=previous_capture_id,
         target_source_capture_id=source_version["source_capture_id"],
         previous_profile_revision=previous_profile_revision,
-        target_profile_revision=inputs["seed_scope"]["profile_revision"],
+        target_profile_revision=inputs["seed_scope"].get("profile_revision"),
     )
 
     comparison_started = time.perf_counter()
@@ -611,7 +611,7 @@ def persist_source_t0_early_observations_from_saved(
         "price_coordinate": "FORWARD_ADJUSTED",
         "time_role": "NON_PIT_RETROSPECTIVE",
         "source_pool_count": source_version["capture_expected_row_count"],
-        "profile_revision": inputs["seed_scope"]["profile_revision"],
+        "profile_revision": inputs["seed_scope"].get("profile_revision"),
         "seed_scope": inputs["seed_scope"],
         "snapshot_ids": dict(snapshot_ids),
         "registration_count": inputs["registration_count"],

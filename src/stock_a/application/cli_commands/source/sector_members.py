@@ -62,7 +62,7 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
                 source_capture_id=args.source_capture_id,
-                profile_revision=args.profile_revision,
+                profile_revision=None,
                 offset=args.offset,
                 limit=args.limit,
             )
@@ -76,9 +76,9 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 after_session=_parse_session_date(args.after_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
                 before_source_capture_id=args.before_source_capture_id,
-                before_profile_revision=args.before_profile_revision,
+                before_profile_revision=None,
                 after_source_capture_id=args.after_source_capture_id,
-                after_profile_revision=args.after_profile_revision,
+                after_profile_revision=None,
                 offset=args.offset,
                 limit=args.limit,
                 member_offset=args.member_offset,
@@ -113,11 +113,7 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 )
                 from stock_a.contracts import load_price_profile_contract
 
-                profile_contract = (
-                    load_price_profile_contract(_CONFIG_ROOT).document
-                    if args.profile_revision
-                    else None
-                )
+                profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
 
                 result = read_retrospective_rotation(
                     config,
@@ -128,7 +124,6 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                     target_session=_parse_session_date(args.target_session),
                     research_cutoff=_parse_session_date(args.research_cutoff),
                     source_capture_id=args.source_capture_id,
-                    profile_revision=args.profile_revision,
                     profile_contract=profile_contract,
                 )
             else:
@@ -140,7 +135,7 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                     target_session=_parse_session_date(args.target_session),
                     research_cutoff=_parse_session_date(args.research_cutoff),
                     source_capture_id=args.source_capture_id,
-                    profile_revision=args.profile_revision,
+                    profile_revision=None,
                     changed_only=args.changed_only,
                     sort_by=args.sort_by,
                     direction=args.direction,
@@ -222,13 +217,11 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             _EXIT_ARGUMENT,
         )
     if args.include_source_seed_board and (
-        not args.profile_revision
-        or not args.detail_board_kind
-        or not args.detail_board_native_id
+        not args.detail_board_kind or not args.detail_board_native_id
     ):
         raise DiagnosticError(
             "SOURCE_SEED_BOARD_IDENTITY_REQUIRED",
-            "跨期强度输入须显式选择画像修订和一个板块",
+            "跨期强度输入须显式选择一个板块",
             _EXIT_ARGUMENT,
         )
     if args.include_d0_launch_new and not args.d0_before_session:
@@ -255,7 +248,6 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             concept_snapshot_id=args.concept_snapshot_id,
             source_capture_id=args.source_capture_id,
             price_coordinate="FORWARD_ADJUSTED",
-            profile_revision=args.profile_revision,
             event_window_start=_parse_session_date(args.event_window_start),
             pg_history_session_count=args.pg_history_session_count,
             include_d0_launch_new=args.include_d0_launch_new,

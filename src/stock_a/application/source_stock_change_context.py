@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
-
 from datetime import date
 import re
 from typing import Any, Mapping
@@ -19,7 +17,6 @@ from stock_a.application.source_d0_raw import (
 
 
 _SOURCE_SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
-_PROFILE_REVISION = re.compile(PROFILE_REVISION_PATTERN)
 
 
 class SourceStockChangeContextError(ValueError):
@@ -29,31 +26,6 @@ class SourceStockChangeContextError(ValueError):
         self.code = code
         self.category = category
         super().__init__(message)
-
-
-def _validate_profile_identity(
-    *,
-    before_profile_revision: str | None,
-    after_profile_revision: str | None,
-) -> bool:
-    if (before_profile_revision is None) != (after_profile_revision is None):
-        raise SourceStockChangeContextError(
-            "PROFILE_CHANGE_REVISION_PAIR_REQUIRED",
-            "Profile变化必须同时提供前后两个精确profile_revision，或同时省略。",
-            category="ARGUMENT",
-        )
-    if before_profile_revision is None:
-        return False
-    if any(
-        not isinstance(value, str) or _PROFILE_REVISION.fullmatch(value) is None
-        for value in (before_profile_revision, after_profile_revision)
-    ):
-        raise SourceStockChangeContextError(
-            "PROFILE_CHANGE_REVISION_INVALID",
-            "Profile修订必须是显式PROFILE_R两位版本标签。",
-            category="ARGUMENT",
-        )
-    return True
 
 
 def query_source_stock_change_context(
@@ -84,10 +56,7 @@ def query_source_stock_change_context(
             "前后来源必须使用正BIGINT source_capture_id。",
             category="ARGUMENT",
         )
-    profile_requested = _validate_profile_identity(
-        before_profile_revision=before_profile_revision,
-        after_profile_revision=after_profile_revision,
-    )
+    profile_requested = True
 
     d0 = query_source_d0_raw_launch(
         config,
@@ -135,9 +104,7 @@ def query_source_stock_change_context(
                 limit=1,
                 source_symbol=symbol,
                 before_source_capture_id=before_source_capture_id,
-                before_profile_revision=before_profile_revision,
                 after_source_capture_id=source_capture_id,
-                after_profile_revision=after_profile_revision,
             )
         except PgPriceProfileError as error:
             if getattr(error, "code", None) == "PROFILE_CHANGE_SNAPSHOT_MISSING":
@@ -157,33 +124,29 @@ def query_source_stock_change_context(
                     profile_result.get("before_snapshot"),
                     before_session,
                     before_source_capture_id,
-                    before_profile_revision,
                 ),
                 (
                     profile_result.get("after_snapshot"),
                     target_session,
                     source_capture_id,
-                    after_profile_revision,
                 ),
             )
             for (
                 snapshot,
                 session,
                 capture_id,
-                revision,
             ) in expected_snapshots:
                 if not isinstance(snapshot, Mapping) or any(
                     snapshot.get(key) != expected
                     for key, expected in (
                         ("target_session", session),
                         ("source_capture_id", capture_id),
-                        ("profile_revision", revision),
                     )
                     if expected is not None
                 ):
                     raise SourceStockChangeContextError(
                         "PROFILE_CHANGE_SNAPSHOT_IDENTITY_MISMATCH",
-                        "Profile变化返回的修订身份与显式请求不一致。",
+                        "Profile变化返回的业务键身份与显式请求不一致。",
                     )
             profile_rows = profile_result.get("rows")
             if not isinstance(profile_rows, list):

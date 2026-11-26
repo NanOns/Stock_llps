@@ -237,13 +237,15 @@ def persist_source_price_limits_for_session(
                    %s, %s, %s, %s, %s, %s, %s, %s
                )
                ON CONFLICT (
-                   target_session, source_symbol, source_capture_id,
-                   contract_version, calendar_revision
+                   target_session, source_symbol
                ) DO UPDATE SET
                    market = EXCLUDED.market,
                    board = EXCLUDED.board,
                    research_eligible = EXCLUDED.research_eligible,
+                   source_capture_id = EXCLUDED.source_capture_id,
                    calendar_id = EXCLUDED.calendar_id,
+                   calendar_revision = EXCLUDED.calendar_revision,
+                   contract_version = EXCLUDED.contract_version,
                    rule_id = EXCLUDED.rule_id,
                    limit_status = EXCLUDED.limit_status,
                    limit_pct = EXCLUDED.limit_pct,
@@ -261,6 +263,9 @@ def persist_source_price_limits_for_session(
                WHERE (
                    source_price_limit_day_facts.board,
                    source_price_limit_day_facts.research_eligible,
+                   source_price_limit_day_facts.source_capture_id,
+                   source_price_limit_day_facts.calendar_revision,
+                   source_price_limit_day_facts.contract_version,
                    source_price_limit_day_facts.rule_id,
                    source_price_limit_day_facts.limit_status,
                    source_price_limit_day_facts.limit_pct,
@@ -278,6 +283,9 @@ def persist_source_price_limits_for_session(
                ) IS DISTINCT FROM (
                    EXCLUDED.board,
                    EXCLUDED.research_eligible,
+                   EXCLUDED.source_capture_id,
+                   EXCLUDED.calendar_revision,
+                   EXCLUDED.contract_version,
                    EXCLUDED.rule_id,
                    EXCLUDED.limit_status,
                    EXCLUDED.limit_pct,
@@ -310,8 +318,8 @@ def read_market_pressure_summary(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_capture_id: int,
-    calendar_revision: str,
+    source_capture_id: int | None = None,
+    calendar_revision: str | None = None,
 ) -> dict[str, Any]:
     """读取正式研究范围（主板+创业板）的日线涨跌停市场压力轴汇总。"""
     with _transaction(config, write=False, statement_timeout_ms=15000) as (
@@ -333,16 +341,8 @@ def read_market_pressure_summary(
                    count(*) FILTER (WHERE limit_status = 'ASSESSABLE' AND one_word_limit_down = 'TRUE')::bigint AS one_word_down_count
                FROM stock.source_price_limit_day_facts
                WHERE target_session = %s
-                 AND source_capture_id = %s
-                 AND contract_version = %s
-                 AND calendar_revision = %s
                  AND research_eligible = TRUE""",
-            (
-                target_session,
-                source_capture_id,
-                PRICE_LIMIT_CONTRACT_VERSION,
-                calendar_revision,
-            ),
+            (target_session,),
         )
         row = cursor.fetchone()
         (
@@ -367,19 +367,11 @@ def read_market_pressure_summary(
             """SELECT reason, count(*)::bigint
                FROM stock.source_price_limit_day_facts
                WHERE target_session = %s
-                 AND source_capture_id = %s
-                 AND contract_version = %s
-                 AND calendar_revision = %s
                  AND research_eligible = TRUE
                  AND limit_status = 'UNKNOWN'
                GROUP BY reason
                ORDER BY count(*) DESC, reason ASC""",
-            (
-                target_session,
-                source_capture_id,
-                PRICE_LIMIT_CONTRACT_VERSION,
-                calendar_revision,
-            ),
+            (target_session,),
         )
         unknown_reason_counts = {str(r): int(c) for r, c in cursor.fetchall()}
 

@@ -5,10 +5,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from fractions import Fraction
-import re
 from typing import Any, Mapping, Sequence
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.research.source_market_breadth import SOURCE_MARKET_BREADTH_CONTRACT
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.sector_pulse_facts import (
@@ -38,7 +36,6 @@ def _read_market_context(
             "participation": {"status": "NOT_COMPUTED", "reason_codes": reason},
         }
     capture_id = source_identity.get("source_capture_id")
-    profile_revision = source_identity.get("profile_revision")
     if type(capture_id) is not int or capture_id <= 0:
         reason = ["MARKET_FACT_SOURCE_IDENTITY_INVALID"]
         return {
@@ -51,14 +48,13 @@ def _read_market_context(
        source_count,eligible_count,target_present_count,target_missing_count,
        read_failed_count
 FROM source_market_breadth_days
-WHERE target_session=%s AND target_session<=%s AND source_capture_id=%s
+WHERE target_session=%s AND target_session<=%s
   AND price_coordinate='FORWARD_ADJUSTED'
   AND calendar_id=%s AND calendar_revision=%s AND contract_version=%s
 ORDER BY id LIMIT 2""",
         (
             target_session,
             research_cutoff,
-            capture_id,
             calendar_id,
             calendar_revision,
             SOURCE_MARKET_BREADTH_CONTRACT,
@@ -131,25 +127,21 @@ GROUP BY primary_unknown_reason ORDER BY primary_unknown_reason""",
             )
             breadth["unknown_reason_counts"] = dict(cursor.fetchall())
 
-    participation_sql = """SELECT id,profile_revision,producer_version,price_coordinate,
+    participation_sql = """SELECT id,producer_version,price_coordinate,
        pit_status,source_pool_count,profile_count,assessable_count,
        profile_unknown_count,profile_missing_count,median_numerator,
        median_denominator,classification,status
 FROM source_market_participation_days
-WHERE target_session=%s AND target_session<=%s AND source_capture_id=%s
+WHERE target_session=%s AND target_session<=%s
   AND contract_version='MARKET_PARTICIPATION_R1'
   AND price_coordinate='FORWARD_ADJUSTED'
   AND calendar_id=%s AND calendar_revision=%s"""
     participation_params: tuple[Any, ...] = (
         target_session,
         research_cutoff,
-        capture_id,
         calendar_id,
         calendar_revision,
     )
-    if profile_revision is not None:
-        participation_sql += " AND profile_revision=%s"
-        participation_params += (profile_revision,)
     cursor.execute(participation_sql + " ORDER BY id LIMIT 2", participation_params)
     participation_rows = cursor.fetchall()
     if not participation_rows:
@@ -165,7 +157,6 @@ WHERE target_session=%s AND target_session<=%s AND source_capture_id=%s
     else:
         (
             _participation_id,
-            stored_profile_revision,
             producer_version,
             price_coordinate,
             pit_status,
@@ -189,10 +180,6 @@ WHERE target_session=%s AND target_session<=%s AND source_capture_id=%s
                 source_pool_count is None
                 or int(stored_source_count) == source_pool_count
             )
-            and (
-                profile_revision is None
-                or stored_profile_revision.strip() == profile_revision
-            )
         )
         median_value = None
         if median_numerator is not None and median_denominator is not None:
@@ -204,7 +191,6 @@ WHERE target_session=%s AND target_session<=%s AND source_capture_id=%s
                 valid_participation = False
         participation = {
             "status": participation_status if valid_participation else "INCOMPLETE",
-            "profile_revision": stored_profile_revision.strip(),
             "producer_version": producer_version,
             "classification": classification,
             "price_coordinate": price_coordinate,
@@ -228,7 +214,6 @@ def read_source_sector_pulse_history(
     target_session: date,
     research_cutoff: date,
     target_source_capture_id: int,
-    profile_revision: str,
     snapshot_id: int,
     board_kind: str,
     board_native_id: str,
@@ -244,8 +229,6 @@ def read_source_sector_pulse_history(
         or target_session > research_cutoff
         or type(target_source_capture_id) is not int
         or target_source_capture_id <= 0
-        or not isinstance(profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         or type(snapshot_id) is not int
         or snapshot_id <= 0
         or board_kind not in _KINDS
@@ -299,7 +282,7 @@ def read_source_sector_pulse_history(
     ):
         cursor.execute(
             f"""SELECT p.id,p.target_session,p.source_capture_id,
-       p.profile_revision,p.catalog_id,c.snapshot_id,p.board_kind,p.board_native_id,
+       p.catalog_id,c.snapshot_id,p.board_kind,p.board_native_id,
        p.board_name,p.algorithm_contract,p.pulse_state,p.pulse_reason_codes,
        p.calculation_status,p.formal_rotation_state,p.research_mode,p.membership_mode,
        p.price_coordinate,p.snapshot_source_quality,p.source_pool_count,
@@ -316,21 +299,16 @@ def read_source_sector_pulse_history(
 FROM {_TABLE} p
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
 WHERE p.target_session=ANY(%s) AND p.target_session<=%s
-  AND p.source_capture_id=%s
   AND p.board_kind=%s AND p.board_native_id=%s
   AND c.snapshot_id=%s AND p.algorithm_contract=%s
-  AND (p.target_session<>%s OR p.profile_revision=%s)
 ORDER BY p.target_session,p.id""",
             (
                 list(history_sessions),
                 research_cutoff,
-                target_source_capture_id,
                 board_kind,
                 board_native_id,
                 snapshot_id,
                 _ALGORITHM,
-                target_session,
-                profile_revision,
             ),
         )
         pulse_columns = [column.name for column in cursor.description]
@@ -464,7 +442,6 @@ ORDER BY requested.session_date""",
                         "identity": (
                             {
                                 "source_capture_id": capture["source_capture_id"],
-                                "profile_revision": None,
                             }
                             if capture
                             else None
@@ -486,7 +463,6 @@ ORDER BY requested.session_date""",
                         "identity": (
                             {
                                 "source_capture_id": capture["source_capture_id"],
-                                "profile_revision": None,
                             }
                             if capture
                             else None
@@ -505,11 +481,6 @@ ORDER BY requested.session_date""",
             if (
                 row["target_session"] != session
                 or int(row["snapshot_id"]) != snapshot_id
-                or not isinstance(row["profile_revision"], str)
-                or re.fullmatch(
-                    PROFILE_REVISION_PATTERN, row["profile_revision"].strip()
-                )
-                is None
                 or row["board_kind"] != board_kind
                 or row["board_native_id"] != board_native_id
                 or row["algorithm_contract"] != _ALGORITHM
@@ -525,16 +496,6 @@ ORDER BY requested.session_date""",
                 != int(row["mapped_count"]) + int(row["unmapped_count"])
             ):
                 reasons.append("PULSE_TYPED_FACT_CONTRACT_MISMATCH")
-            if (
-                session == target_session
-                and int(row["source_capture_id"]) != target_source_capture_id
-            ):
-                reasons.append("PULSE_TARGET_SOURCE_CAPTURE_MISMATCH")
-            if (
-                session == target_session
-                and row["profile_revision"].strip() != profile_revision
-            ):
-                reasons.append("PULSE_TARGET_PROFILE_REVISION_MISMATCH")
             if (
                 capture is None
                 or capture["source_capture_id"] != int(row["source_capture_id"])
@@ -555,7 +516,6 @@ ORDER BY requested.session_date""",
                         "catalog_id": int(row["catalog_id"]),
                         "snapshot_id": int(row["snapshot_id"]),
                         "source_capture_id": int(row["source_capture_id"]),
-                        "profile_revision": row["profile_revision"].strip(),
                     },
                     "pulse": _pulse_payload(row),
                     "transition": None,
@@ -868,7 +828,6 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
             "board_kind": board_kind,
             "board_native_id": board_native_id,
             "snapshot_id": snapshot_id,
-            "profile_revision": profile_revision,
             "algorithm_contract": _ALGORITHM,
             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
             "price_coordinate": "FORWARD_ADJUSTED",

@@ -8,7 +8,6 @@ import re
 import time
 from typing import Any, Mapping, Sequence
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.storage.postgres import source_raw
 
 
@@ -235,32 +234,35 @@ def read_source_launch_watch_evidence(
         )
         or (
             selected_profile_revision is not None
-            and selected_history_session_count is None
+            and not isinstance(selected_profile_revision, str)
         )
-        or selected_profile_revision is not None
-        and (
-            not isinstance(selected_profile_revision, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, selected_profile_revision) is None
+        or (
+            cross_section_universe_capture_id is not None
+            and (
+                type(cross_section_universe_capture_id) is not int
+                or cross_section_universe_capture_id <= 0
+            )
         )
-        or cross_section_universe_capture_id is not None
-        and (
-            type(cross_section_universe_capture_id) is not int
-            or cross_section_universe_capture_id <= 0
+        or (
+            cross_section_universe_version is not None
+            and (
+                not isinstance(cross_section_universe_version, str)
+                or not cross_section_universe_version.strip()
+            )
         )
-        or cross_section_universe_version is not None
-        and (
-            not isinstance(cross_section_universe_version, str)
-            or not cross_section_universe_version.strip()
+        or (
+            cross_section_contract_version is not None
+            and (
+                not isinstance(cross_section_contract_version, str)
+                or not cross_section_contract_version.strip()
+            )
         )
-        or cross_section_contract_version is not None
-        and (
-            not isinstance(cross_section_contract_version, str)
-            or not cross_section_contract_version.strip()
-        )
-        or universe_match_status is not None
-        and (
-            not isinstance(universe_match_status, str)
-            or not universe_match_status.strip()
+        or (
+            universe_match_status is not None
+            and (
+                not isinstance(universe_match_status, str)
+                or not universe_match_status.strip()
+            )
         )
     ):
         raise ValueError("D0首页研究证据读取键无效")
@@ -341,53 +343,33 @@ def read_source_launch_watch_evidence(
         if _scope_symbol:
             seed_scope_filter += " AND source_symbol=%s"
             seed_scope_params += (_scope_symbol,)
-        if selected_profile_revision is not None:
-            seed_scope_filter += " AND profile_revision=%s"
-            seed_scope_params += (selected_profile_revision,)
         if selected_history_session_count is not None:
             seed_scope_filter += " AND history_session_count=%s"
             seed_scope_params += (selected_history_session_count,)
-        for column, value in (
-            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
-            ("cross_section_universe_version", cross_section_universe_version),
-            ("cross_section_contract_version", cross_section_contract_version),
-            ("universe_match_status", universe_match_status),
-        ):
-            if value is not None:
-                seed_scope_filter += f" AND {column}=%s"
-                seed_scope_params += (value,)
         cursor.execute(
-            """SELECT profile_revision, producer_contract, producer_version,
+            """SELECT producer_contract, producer_version,
                       history_session_count, calendar_id, calendar_revision,
                       research_mode, price_coordinate,
                       count(*)::bigint, count(DISTINCT source_symbol)::bigint,
-                      cross_section_universe_capture_id,
-                      cross_section_universe_version,
-                      cross_section_contract_version,universe_match_status,
-                      ranking_universe_count,evaluation_universe_count
+                      ranking_universe_count, evaluation_universe_count
                FROM source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s"""
             + seed_scope_filter
             + """
-               GROUP BY profile_revision, producer_contract, producer_version,
+               GROUP BY producer_contract, producer_version,
                         history_session_count, calendar_id, calendar_revision,
                         research_mode, price_coordinate,
-                        cross_section_universe_capture_id,
-                        cross_section_universe_version,
-                        cross_section_contract_version,universe_match_status,
-                        ranking_universe_count,evaluation_universe_count
-               ORDER BY profile_revision, producer_version""",
+                        ranking_universe_count, evaluation_universe_count
+               ORDER BY producer_version""",
             seed_scope_params,
         )
         seed_scopes = cursor.fetchall()
         seed_scope_status = _scope_status(
-            seed_scopes, scoped_source_count, count_indices=(8, 9)
+            seed_scopes, scoped_source_count, count_indices=(7, 8)
         )
         seed_scope = seed_scopes[0] if len(seed_scopes) == 1 else None
 
         rule_scope_filter = " AND source_symbol=%s" if _scope_symbol else ""
-        if selected_profile_revision is not None:
-            rule_scope_filter += " AND profile_revision=%s"
         if selected_history_session_count is not None:
             rule_scope_filter += " AND history_session_count=%s"
         rule_scope_params: tuple[Any, ...] = (
@@ -396,14 +378,12 @@ def read_source_launch_watch_evidence(
         )
         if _scope_symbol:
             rule_scope_params += (_scope_symbol,)
-        if selected_profile_revision is not None:
-            rule_scope_params += (selected_profile_revision,)
         if selected_history_session_count is not None:
             rule_scope_params += (selected_history_session_count,)
         rule_scope_filter += " AND rule_id=ANY(%s)"
         rule_scope_params += (list(_POOL_RULE_IDS),)
         cursor.execute(
-            """SELECT rule_version, profile_revision, history_session_count,
+            """SELECT rule_version, min(profile_revision), history_session_count,
                       d1_history_session_count, event_window_start, calendar_revision,
                       scope, count(*)::bigint, count(DISTINCT source_symbol)::bigint,
                       count(DISTINCT rule_id)::bigint
@@ -411,10 +391,10 @@ def read_source_launch_watch_evidence(
                WHERE target_session=%s AND source_capture_id=%s"""
             + rule_scope_filter
             + """
-               GROUP BY rule_version, profile_revision, history_session_count,
+               GROUP BY rule_version, history_session_count,
                         d1_history_session_count, event_window_start,
                         calendar_revision, scope
-               ORDER BY profile_revision, rule_version, event_window_start""",
+               ORDER BY rule_version, event_window_start""",
             rule_scope_params,
         )
         rule_scopes = cursor.fetchall()
@@ -446,23 +426,12 @@ def read_source_launch_watch_evidence(
         if d1_history_session_count is not None:
             d1_count_clause = " AND d1_history_session_count=%s"
             d1_scope_params += (d1_history_session_count,)
-        for column, value in (
-            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
-            ("cross_section_universe_version", cross_section_universe_version),
-            ("cross_section_contract_version", cross_section_contract_version),
-        ):
-            if value is not None:
-                d1_scope_params += (value,)
-                d1_count_clause += f" AND {column}=%s"
         cursor.execute(
             """WITH d1_by_symbol AS MATERIALIZED (
                    SELECT d1_history_session_count, calendar_id,
                           history_window_start, history_window_end, calendar_revision,
                           producer_contract, producer_version, material_change_contract,
                           research_mode, price_coordinate, source_symbol,
-                          cross_section_universe_capture_id,
-                          cross_section_universe_version,
-                          cross_section_contract_version,
                           count(*)::bigint AS row_count,
                           array_agg(DISTINCT structure_type ORDER BY structure_type) AS types
                    FROM source_d1_structure_day_facts
@@ -472,9 +441,7 @@ def read_source_launch_watch_evidence(
             + d1_count_clause
             + " GROUP BY d1_history_session_count, calendar_id, history_window_start,"
             " history_window_end, calendar_revision, producer_contract, producer_version,"
-            " material_change_contract, research_mode, price_coordinate, source_symbol,"
-            " cross_section_universe_capture_id,cross_section_universe_version,"
-            " cross_section_contract_version"
+            " material_change_contract, research_mode, price_coordinate, source_symbol"
             " ) SELECT d1_history_session_count, calendar_id, history_window_start,"
             " history_window_end, calendar_revision, producer_contract, producer_version,"
             " material_change_contract, research_mode, price_coordinate,"
@@ -482,14 +449,10 @@ def read_source_launch_watch_evidence(
             " count(*) FILTER (WHERE row_count=cardinality(CASE"
             " WHEN producer_version=%s THEN %s::text[] ELSE %s::text[] END)"
             " AND types=CASE WHEN producer_version=%s THEN %s::text[] ELSE %s::text[] END)::bigint"
-            ", cross_section_universe_capture_id,cross_section_universe_version,"
-            " cross_section_contract_version"
             " FROM d1_by_symbol"
             " GROUP BY d1_history_session_count, calendar_id, history_window_start,"
             " history_window_end, calendar_revision, producer_contract, producer_version,"
-            " material_change_contract, research_mode, price_coordinate,"
-            " cross_section_universe_capture_id,cross_section_universe_version,"
-            " cross_section_contract_version"
+            " material_change_contract, research_mode, price_coordinate"
             " ORDER BY d1_history_session_count, producer_version, history_window_start,"
             " history_window_end",
             (
@@ -523,7 +486,7 @@ def read_source_launch_watch_evidence(
                           target_close_reason, core_ma20_quality, core_ma20_reason
                    FROM source_pool_seed_day_facts
                    WHERE target_session=%s AND source_capture_id=%s
-                     AND profile_revision=%s AND producer_contract=%s AND producer_version=%s
+                     AND producer_contract=%s AND producer_version=%s
                      AND history_session_count=%s AND calendar_id=%s AND calendar_revision=%s
                      AND research_mode=%s AND price_coordinate=%s
                      AND source_symbol=ANY(%s)
@@ -531,7 +494,7 @@ def read_source_launch_watch_evidence(
                 (
                     target_session,
                     source_capture_id,
-                    *seed_scope[:8],
+                    *seed_scope[:7],
                     list(symbols),
                 ),
             )
@@ -541,17 +504,13 @@ def read_source_launch_watch_evidence(
             seed_scope is not None
             and rule_scope is not None
             and d1_scope is not None
-            and rule_scope[1] == seed_scope[0]
-            and rule_scope[2] == seed_scope[3]
+            and rule_scope[2] == seed_scope[2]
             and rule_scope[6] == "NON_PIT_EXPLORATORY"
             and rule_scope[3] == d1_scope[0]
             and rule_scope[5] == d1_scope[4]
-            and seed_scope[4] == d1_scope[1]
-            and seed_scope[6] == d1_scope[8] == "NON_PIT_RETROSPECTIVE"
-            and seed_scope[7] == d1_scope[9] == "FORWARD_ADJUSTED"
-            and seed_scope[10] == d1_scope[13]
-            and seed_scope[11] == d1_scope[14]
-            and seed_scope[12] == d1_scope[15]
+            and seed_scope[3] == d1_scope[1]
+            and seed_scope[5] == d1_scope[8] == "NON_PIT_RETROSPECTIVE"
+            and seed_scope[6] == d1_scope[9] == "FORWARD_ADJUSTED"
             and rule_scope[2] > 0
             and rule_scope[3] > 0
         )
@@ -562,7 +521,7 @@ def read_source_launch_watch_evidence(
                           frozen_line_numerator, frozen_line_denominator, frozen_line_source
                    FROM source_rule_evaluations
                    WHERE target_session=%s AND source_capture_id=%s
-                     AND rule_version=%s AND profile_revision=%s
+                     AND rule_version=%s
                      AND history_session_count=%s AND d1_history_session_count=%s
                      AND event_window_start=%s AND calendar_revision=%s
                      AND scope=%s AND source_symbol=ANY(%s) AND rule_id=ANY(%s)
@@ -570,7 +529,12 @@ def read_source_launch_watch_evidence(
                 (
                     target_session,
                     source_capture_id,
-                    *rule_scope[:7],
+                    rule_scope[0],
+                    rule_scope[2],
+                    rule_scope[3],
+                    rule_scope[4],
+                    rule_scope[5],
+                    rule_scope[6],
                     list(symbols),
                     list(_RULE_IDS),
                 ),
@@ -589,7 +553,6 @@ def read_source_launch_watch_evidence(
                      AND o.d0_fact_id IS NOT NULL
                      AND s.target_session=o.target_session
                      AND s.source_capture_id=o.source_capture_id
-                     AND s.profile_revision=%s
                      AND s.history_session_count=%s
                      AND s.price_coordinate=%s
                      AND o.source_symbol=ANY(%s)""",
@@ -599,7 +562,6 @@ def read_source_launch_watch_evidence(
                     "EARLY_BOARD_RELATIVE_T0_R1",
                     "NON_PIT_EXPLORATORY",
                     "FORWARD_ADJUSTED",
-                    rule_scope[1],
                     rule_scope[2],
                     "FORWARD_ADJUSTED",
                     list(symbols),
@@ -621,9 +583,6 @@ def read_source_launch_watch_evidence(
                      AND material_change_contract=%s AND research_mode=%s
                     AND price_coordinate=%s AND history_window_start=%s
                     AND history_window_end=%s
-                    AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s
-                    AND cross_section_universe_version IS NOT DISTINCT FROM %s
-                    AND cross_section_contract_version IS NOT DISTINCT FROM %s
                     AND source_symbol=ANY(%s)
                    ORDER BY source_symbol, structure_type""",
                 (
@@ -640,9 +599,6 @@ def read_source_launch_watch_evidence(
                     d1_scope[9],
                     d1_scope[2],
                     d1_scope[3],
-                    d1_scope[13],
-                    d1_scope[14],
-                    d1_scope[15],
                     list(symbols),
                 ),
             )
@@ -767,20 +723,15 @@ def read_source_launch_watch_evidence(
             }
         if _scope_symbol is not None and seed_scope is not None:
             seed_fact["scope"] = {
-                "profile_revision": seed_scope[0],
-                "producer_contract": seed_scope[1],
-                "producer_version": seed_scope[2],
-                "history_session_count": int(seed_scope[3]),
-                "calendar_id": seed_scope[4],
-                "calendar_revision": seed_scope[5],
-                "research_mode": seed_scope[6],
-                "price_coordinate": seed_scope[7],
-                "cross_section_universe_capture_id": seed_scope[10],
-                "cross_section_universe_version": seed_scope[11],
-                "cross_section_contract_version": seed_scope[12],
-                "universe_match_status": seed_scope[13],
-                "ranking_universe_count": seed_scope[14],
-                "evaluation_universe_count": seed_scope[15],
+                "producer_contract": seed_scope[0],
+                "producer_version": seed_scope[1],
+                "history_session_count": int(seed_scope[2]),
+                "calendar_id": seed_scope[3],
+                "calendar_revision": seed_scope[4],
+                "research_mode": seed_scope[5],
+                "price_coordinate": seed_scope[6],
+                "ranking_universe_count": seed_scope[9],
+                "evaluation_universe_count": seed_scope[10],
                 "verification_scope": "SINGLE_SOURCE_SYMBOL_ROW_ONLY",
             }
 
@@ -1030,7 +981,7 @@ def read_source_launch_watch_evidence(
         and d1_scope is not None
         and rules_semantics_match
         and rule_scope[5] == d1_scope[4]
-        and seed_scope[3] == rule_scope[2]
+        and seed_scope[2] == rule_scope[2]
         and rule_scope[3] == d1_scope[0]
         and (
             d1_history_session_count is None or d1_scope[0] == d1_history_session_count
@@ -1053,24 +1004,19 @@ def read_source_launch_watch_evidence(
         "expected_source_count": expected_source_count,
         "candidate_count": len(symbols),
         "seed_status": seed_scope_status,
-        "seed_profile_revision": seed_scope[0] if seed_scope else None,
+        "seed_profile_revision": None,
         "seed_scope": {
-            "profile_revision": seed_scope[0],
-            "producer_contract": seed_scope[1],
-            "producer_version": seed_scope[2],
-            "history_session_count": seed_scope[3],
-            "calendar_id": seed_scope[4],
-            "calendar_revision": seed_scope[5],
-            "research_mode": seed_scope[6],
-            "price_coordinate": seed_scope[7],
-            "stored_rows": int(seed_scope[8]),
-            "stored_source_symbols": int(seed_scope[9]),
-            "cross_section_universe_capture_id": seed_scope[10],
-            "cross_section_universe_version": seed_scope[11],
-            "cross_section_contract_version": seed_scope[12],
-            "universe_match_status": seed_scope[13],
-            "ranking_universe_count": seed_scope[14],
-            "evaluation_universe_count": seed_scope[15],
+            "producer_contract": seed_scope[0],
+            "producer_version": seed_scope[1],
+            "history_session_count": seed_scope[2],
+            "calendar_id": seed_scope[3],
+            "calendar_revision": seed_scope[4],
+            "research_mode": seed_scope[5],
+            "price_coordinate": seed_scope[6],
+            "stored_rows": int(seed_scope[7]),
+            "stored_source_symbols": int(seed_scope[8]),
+            "ranking_universe_count": seed_scope[9],
+            "evaluation_universe_count": seed_scope[10],
         }
         if seed_scope
         else None,
@@ -1110,9 +1056,6 @@ def read_source_launch_watch_evidence(
             "stored_rows": int(d1_scope[10]),
             "stored_source_symbols": int(d1_scope[11]),
             "complete_source_symbols": int(d1_scope[12]),
-            "cross_section_universe_capture_id": d1_scope[13],
-            "cross_section_universe_version": d1_scope[14],
-            "cross_section_contract_version": d1_scope[15],
         }
         if d1_scope
         else None,
@@ -1210,17 +1153,17 @@ def read_source_seed_t1_outcomes(
         )
         t0_capture = cursor.fetchone()
         cursor.execute(
-            """SELECT profile_revision, producer_contract, producer_version,
+            """SELECT producer_contract, producer_version,
                       history_session_count, calendar_id, calendar_revision,
                       research_mode, price_coordinate, count(*)::bigint,
                       count(DISTINCT source_symbol)::bigint
                FROM source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s
                  AND producer_version=%s
-               GROUP BY profile_revision, producer_contract, producer_version,
+               GROUP BY producer_contract, producer_version,
                         history_session_count, calendar_id, calendar_revision,
                         research_mode, price_coordinate
-               ORDER BY profile_revision, producer_version""",
+               ORDER BY producer_version""",
             (target_session, source_capture_id, _SEED_PRODUCER_VERSION),
         )
         scopes = cursor.fetchall()
@@ -1230,10 +1173,10 @@ def read_source_seed_t1_outcomes(
         elif len(scopes) != 1:
             scope_status = "AMBIGUOUS"
             seed_scope = None
-        elif scopes[0][8] < scopes[0][9] == expected_source_count:
+        elif scopes[0][7] < scopes[0][8] == expected_source_count:
             scope_status = "INCOMPLETE"
             seed_scope = scopes[0]
-        elif scopes[0][8] == scopes[0][9] == expected_source_count:
+        elif scopes[0][7] == scopes[0][8] == expected_source_count:
             scope_status = "AVAILABLE"
             seed_scope = scopes[0]
         else:
@@ -1294,17 +1237,17 @@ def read_source_seed_t1_outcomes(
                 endpoint_seed_reasons = [f"T0_SEED_SCOPE_{scope_status}"]
             else:
                 cursor.execute(
-                    """SELECT profile_revision, producer_contract, producer_version,
+                    """SELECT producer_contract, producer_version,
                               history_session_count, calendar_id, calendar_revision,
                               research_mode, price_coordinate, count(*)::bigint,
                               count(DISTINCT source_symbol)::bigint
                        FROM source_pool_seed_day_facts
                        WHERE target_session=%s AND source_capture_id=%s
                          AND producer_version=%s
-                       GROUP BY profile_revision, producer_contract, producer_version,
+                       GROUP BY producer_contract, producer_version,
                                 history_session_count, calendar_id, calendar_revision,
                                 research_mode, price_coordinate
-                       ORDER BY profile_revision, producer_version""",
+                       ORDER BY producer_version""",
                     (next_session, endpoint_capture[0], _SEED_PRODUCER_VERSION),
                 )
                 endpoint_seed_scopes = cursor.fetchall()
@@ -1317,14 +1260,14 @@ def read_source_seed_t1_outcomes(
                 else:
                     endpoint_seed_scope = endpoint_seed_scopes[0]
                     if (
-                        endpoint_seed_scope[8] != expected_source_count
-                        or endpoint_seed_scope[9] != expected_source_count
+                        endpoint_seed_scope[7] != expected_source_count
+                        or endpoint_seed_scope[8] != expected_source_count
                     ):
                         endpoint_seed_status = "INCOMPLETE"
                         endpoint_seed_reasons = ["T1_SEED_SCOPE_INCOMPLETE"]
                     elif any(
                         endpoint_seed_scope[index] != seed_scope[index]
-                        for index in (1, 2, 4, 5, 6, 7)
+                        for index in (0, 1, 3, 4, 5, 6)
                     ):
                         endpoint_seed_status = "UNKNOWN"
                         endpoint_seed_reasons = [
@@ -1346,7 +1289,6 @@ def read_source_seed_t1_outcomes(
                     """SELECT source_symbol, s2_state, s2_reasons
                        FROM source_pool_seed_day_facts
                        WHERE target_session=%s AND source_capture_id=%s
-                         AND profile_revision=%s
                          AND producer_contract=%s AND producer_version=%s
                          AND calendar_id=%s AND calendar_revision=%s
                          AND research_mode=%s AND price_coordinate=%s
@@ -1357,11 +1299,10 @@ def read_source_seed_t1_outcomes(
                         endpoint_capture_id,
                         endpoint_seed_scope[0],
                         endpoint_seed_scope[1],
-                        endpoint_seed_scope[2],
+                        endpoint_seed_scope[3],
                         endpoint_seed_scope[4],
                         endpoint_seed_scope[5],
                         endpoint_seed_scope[6],
-                        endpoint_seed_scope[7],
                         list(symbols),
                     ),
                 )
@@ -1369,7 +1310,7 @@ def read_source_seed_t1_outcomes(
                     row[0]: (row[1], row[2]) for row in cursor.fetchall()
                 }
             cursor.execute(
-                """SELECT s.source_symbol, s.profile_revision,
+                """SELECT s.source_symbol,
                           s.source_seed_state, s.source_seed_reasons,
                           s.s1_state, s.s1_reasons, s.s2_state, s.s2_reasons,
                           s.safety_state, s.safety_reasons, s.research_mode,
@@ -1408,7 +1349,6 @@ def read_source_seed_t1_outcomes(
                     AND p.calendar_revision=s.calendar_revision
                     AND p.endpoint_session=%s
                    WHERE s.target_session=%s AND s.source_capture_id=%s
-                     AND s.profile_revision=%s
                      AND s.producer_contract=%s AND s.producer_version=%s
                      AND s.history_session_count=%s AND s.calendar_id=%s
                      AND s.calendar_revision=%s AND s.research_mode=%s
@@ -1421,7 +1361,7 @@ def read_source_seed_t1_outcomes(
                     next_session,
                     target_session,
                     source_capture_id,
-                    *seed_scope[:8],
+                    *seed_scope[:7],
                     list(symbols),
                 ),
             )
@@ -1429,7 +1369,6 @@ def read_source_seed_t1_outcomes(
             for row in rows:
                 (
                     symbol,
-                    profile_revision,
                     source_seed_state,
                     source_seed_reasons,
                     s1_state,
@@ -1488,7 +1427,7 @@ def read_source_seed_t1_outcomes(
                     "t0_reasons": _reasons(s2_reasons),
                     "t1_state": None,
                     "t1_reasons": [],
-                    "t0_profile_revision": profile_revision,
+                    "t0_profile_revision": None,
                     "t1_profile_revision": None,
                     "reason_codes": ["WAITING_FOR_FUTURE_SESSION"],
                     "interpretation": "SAME_SOURCE_S2_PREDICATE_ONLY",
@@ -1517,11 +1456,7 @@ def read_source_seed_t1_outcomes(
                             {
                                 "status": endpoint_seed_status,
                                 "transition": "UNKNOWN",
-                                "t1_profile_revision": (
-                                    endpoint_seed_scope[0]
-                                    if endpoint_seed_scope
-                                    else None
-                                ),
+                                "t1_profile_revision": None,
                                 "reason_codes": endpoint_seed_reasons,
                             }
                         )
@@ -1546,7 +1481,7 @@ def read_source_seed_t1_outcomes(
                                     "transition": f"{_state(s2_state)}_TO_{t1_s2_state}",
                                     "t1_state": t1_s2_state,
                                     "t1_reasons": _reasons(t1_s2_reasons),
-                                    "t1_profile_revision": endpoint_seed_scope[0],
+                                    "t1_profile_revision": None,
                                     "reason_codes": [],
                                 }
                             )
@@ -1617,7 +1552,7 @@ def read_source_seed_t1_outcomes(
                     "successor_capture_id": (
                         endpoint_capture_id if endpoint_capture_id else None
                     ),
-                    "profile_revision": profile_revision,
+                    "profile_revision": None,
                     "calendar_revision": calendar_revision,
                     "source_seed": source_seed,
                     "s1": {"state": _state(s1_state), "reasons": reasons["s1"]},
@@ -2016,7 +1951,7 @@ def _read_single_symbol_context(
             """SELECT catalog.snapshot_id, catalog.board_kind,
                       catalog.board_native_id, catalog.board_name,
                       member.membership_quality, snapshot.observed_at,
-                      snapshot.source_valid_on, pulse.id, pulse.profile_revision,
+                      snapshot.source_valid_on, pulse.id, NULL::text AS profile_revision,
                       pulse.pulse_state, pulse.pulse_reason_codes,
                       pulse.dq5_pp_numerator, pulse.dq5_pp_denominator,
                       pulse.breadth_delta1_numerator,
@@ -2038,8 +1973,7 @@ def _read_single_symbol_context(
                 AND pulse.source_capture_id=%s
                 AND pulse.algorithm_contract=%s
                WHERE catalog.snapshot_id=ANY(%s)
-               ORDER BY catalog.board_kind, catalog.board_native_id,
-                        pulse.profile_revision""",
+               ORDER BY catalog.board_kind, catalog.board_native_id""",
             (
                 source_symbol,
                 target_session,
@@ -2060,28 +1994,17 @@ def _read_single_symbol_context(
                 for item in memberships
             ):
                 continue
-            exact = [
-                item
-                for item in pulse_rows
-                if item[7] is not None
-                and selected_profile_revision is not None
-                and item[8] == selected_profile_revision
-            ]
             all_pulses = [item for item in pulse_rows if item[7] is not None]
-            if len(exact) > 1:
+            if len(all_pulses) > 1:
                 pulse_status = "AMBIGUOUS"
                 pulse_row = None
                 pulse_reasons = ["PULSE_SCOPE_AMBIGUOUS_FOR_MEMBERSHIP"]
-            elif not exact and all_pulses:
-                pulse_status = "NOT_COMPARABLE"
-                pulse_row = None
-                pulse_reasons = ["PULSE_PROFILE_REVISION_MISMATCH"]
-            elif not exact:
+            elif not all_pulses:
                 pulse_status = "NOT_COMPUTED"
                 pulse_row = None
                 pulse_reasons = ["PULSE_FACTS_NOT_SAVED_FOR_EXACT_INPUT"]
             else:
-                pulse_row = exact[0]
+                pulse_row = all_pulses[0]
                 pulse_ok = (
                     pulse_row[21] == "COMPLETE"
                     and pulse_row[22] == "NON_PIT_RETROSPECTIVE"
@@ -2250,11 +2173,8 @@ def read_source_launch_watch_page(
         or not 1 <= selected_history_session_count <= 250
     ):
         invalid_fields.append("画像历史会话数")
-    if (selected_profile_revision is None) != (selected_history_session_count is None):
-        invalid_fields.append("画像历史会话数与修订配对")
-    if selected_profile_revision is not None and (
-        not isinstance(selected_profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, selected_profile_revision) is None
+    if selected_profile_revision is not None and not isinstance(
+        selected_profile_revision, str
     ):
         invalid_fields.append("画像修订")
     if (board_kind is None) != (board_native_id is None):
@@ -2291,7 +2211,6 @@ def read_source_launch_watch_page(
            %s::text AS calendar_revision,
            %s::smallint AS d1_history_session_count,
            %s::smallint AS selected_history_session_count,
-           %s::text AS selected_profile_revision,
            %s::text[] AS rule_ids,
            %s::text AS watch_group, %s::text AS board_kind,
            %s::text AS board_native_id, %s::bigint AS board_snapshot_id,
@@ -2354,12 +2273,10 @@ def read_source_launch_watch_page(
       AND d.target_capture_id=p.target_capture_id
     GROUP BY d.source_symbol
 ), seed_scope_candidates AS MATERIALIZED (
-    SELECT s.profile_revision, s.producer_contract, s.producer_version,
+    SELECT s.producer_contract, s.producer_version,
            s.history_session_count, s.calendar_id, s.calendar_revision,
            s.research_mode, s.price_coordinate, count(*)::bigint AS fact_count,
-           s.cross_section_universe_capture_id,s.cross_section_universe_version,
-           s.cross_section_contract_version,s.universe_match_status,
-           s.ranking_universe_count,s.evaluation_universe_count,
+           s.ranking_universe_count, s.evaluation_universe_count,
            count(DISTINCT s.source_symbol)::bigint AS symbol_count
     FROM source_pool_seed_day_facts s CROSS JOIN params p
     WHERE s.target_session=p.target_session
@@ -2368,14 +2285,10 @@ def read_source_launch_watch_page(
       AND s.producer_version='SOURCE_POOL_SEED_CORE_PROFILE_R2'
       AND (p.selected_history_session_count IS NULL
            OR s.history_session_count=p.selected_history_session_count)
-      AND (p.selected_profile_revision IS NULL
-           OR s.profile_revision=p.selected_profile_revision)
-    GROUP BY s.profile_revision, s.producer_contract, s.producer_version,
+    GROUP BY s.producer_contract, s.producer_version,
              s.history_session_count, s.calendar_id, s.calendar_revision,
              s.research_mode, s.price_coordinate,
-             s.cross_section_universe_capture_id,s.cross_section_universe_version,
-             s.cross_section_contract_version,s.universe_match_status,
-             s.ranking_universe_count,s.evaluation_universe_count
+             s.ranking_universe_count, s.evaluation_universe_count
 ), seed_scope_status AS (
     SELECT CASE
         WHEN count(*)=0 THEN 'NOT_COMPUTED'
@@ -2395,18 +2308,13 @@ def read_source_launch_watch_page(
            min(s.s1_state) AS s1_state, min(s.s2_state) AS s2_state,
            min(s.safety_state) AS safety_state
     FROM source_pool_seed_day_facts s JOIN seed_scope k
-      ON k.profile_revision=s.profile_revision
-     AND k.producer_contract=s.producer_contract
+      ON k.producer_contract=s.producer_contract
      AND k.producer_version=s.producer_version
      AND k.history_session_count=s.history_session_count
      AND k.calendar_id=s.calendar_id
      AND k.calendar_revision=s.calendar_revision
      AND k.research_mode=s.research_mode
      AND k.price_coordinate=s.price_coordinate
-     AND k.cross_section_universe_capture_id IS NOT DISTINCT FROM s.cross_section_universe_capture_id
-     AND k.cross_section_universe_version IS NOT DISTINCT FROM s.cross_section_universe_version
-     AND k.cross_section_contract_version IS NOT DISTINCT FROM s.cross_section_contract_version
-     AND k.universe_match_status IS NOT DISTINCT FROM s.universe_match_status
      AND k.ranking_universe_count IS NOT DISTINCT FROM s.ranking_universe_count
      AND k.evaluation_universe_count IS NOT DISTINCT FROM s.evaluation_universe_count
     CROSS JOIN params p
@@ -2415,7 +2323,7 @@ def read_source_launch_watch_page(
       AND s.source_capture_id=p.target_capture_id
     GROUP BY s.source_symbol
 ), rule_scope_candidates AS MATERIALIZED (
-    SELECT r.rule_version, r.profile_revision, r.history_session_count,
+    SELECT r.rule_version, r.history_session_count,
            r.d1_history_session_count, r.event_window_start,
            r.calendar_revision, r.scope, count(*)::bigint AS fact_count,
            count(DISTINCT r.source_symbol)::bigint AS symbol_count,
@@ -2427,9 +2335,7 @@ def read_source_launch_watch_page(
       AND r.rule_id=ANY(p.rule_ids)
       AND (p.selected_history_session_count IS NULL
            OR r.history_session_count=p.selected_history_session_count)
-      AND (p.selected_profile_revision IS NULL
-           OR r.profile_revision=p.selected_profile_revision)
-    GROUP BY r.rule_version, r.profile_revision, r.history_session_count,
+    GROUP BY r.rule_version, r.history_session_count,
              r.d1_history_session_count, r.event_window_start,
              r.calendar_revision, r.scope
 ), rule_scope_status AS (
@@ -2452,7 +2358,6 @@ def read_source_launch_watch_page(
            bool_or(r.state='UNKNOWN') AS has_unknown
     FROM source_rule_evaluations r JOIN rule_scope k
       ON k.rule_version=r.rule_version
-     AND k.profile_revision=r.profile_revision
      AND k.history_session_count=r.history_session_count
      AND k.d1_history_session_count=r.d1_history_session_count
      AND k.event_window_start=r.event_window_start
@@ -2469,8 +2374,7 @@ def read_source_launch_watch_page(
            d.history_window_end, d.calendar_revision, d.producer_contract,
            d.producer_version, d.material_change_contract, d.research_mode,
            d.price_coordinate, d.source_symbol,
-           d.cross_section_universe_capture_id,d.cross_section_universe_version,
-           d.cross_section_contract_version,count(*)::bigint AS fact_count,
+           count(*)::bigint AS fact_count,
            array_agg(DISTINCT d.structure_type ORDER BY d.structure_type) AS structure_types
     FROM source_d1_structure_day_facts d CROSS JOIN params p
     WHERE d.target_session=p.target_session
@@ -2482,9 +2386,7 @@ def read_source_launch_watch_page(
     GROUP BY d.d1_history_session_count, d.calendar_id, d.history_window_start,
              d.history_window_end, d.calendar_revision, d.producer_contract,
              d.producer_version, d.material_change_contract, d.research_mode,
-             d.price_coordinate, d.source_symbol,
-             d.cross_section_universe_capture_id,d.cross_section_universe_version,
-             d.cross_section_contract_version
+             d.price_coordinate, d.source_symbol
 ), d1_scope_candidates AS MATERIALIZED (
     SELECT s.d1_history_session_count, s.calendar_id, s.history_window_start,
            s.history_window_end, s.calendar_revision, s.producer_contract,
@@ -2506,15 +2408,12 @@ def read_source_launch_watch_page(
                    ELSE ARRAY['GAP_ZONE','PIVOT_HIGH','PIVOT_LOW',
                               'RANGE_CEILING','RANGE_FLOOR']::text[]
                    END
-           )::bigint AS complete_symbol_count,
-           s.cross_section_universe_capture_id,s.cross_section_universe_version,
-           s.cross_section_contract_version
+           )::bigint AS complete_symbol_count
     FROM d1_symbol_scopes s
     GROUP BY s.d1_history_session_count, s.calendar_id, s.history_window_start,
              s.history_window_end, s.calendar_revision, s.producer_contract,
              s.producer_version, s.material_change_contract, s.research_mode,
-             s.price_coordinate,s.cross_section_universe_capture_id,
-             s.cross_section_universe_version,s.cross_section_contract_version
+             s.price_coordinate
 ), d1_scope_shapes AS MATERIALIZED (
     SELECT c.*,
            CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN
@@ -2575,9 +2474,6 @@ def read_source_launch_watch_page(
      AND k.calendar_id=d.calendar_id
      AND k.history_window_start=d.history_window_start
      AND k.history_window_end=d.history_window_end
-     AND k.cross_section_universe_capture_id IS NOT DISTINCT FROM d.cross_section_universe_capture_id
-     AND k.cross_section_universe_version IS NOT DISTINCT FROM d.cross_section_universe_version
-     AND k.cross_section_contract_version IS NOT DISTINCT FROM d.cross_section_contract_version
     CROSS JOIN params p
     WHERE d.target_session=p.target_session
       AND d.source_capture_id=p.source_capture_id
@@ -2597,8 +2493,7 @@ def read_source_launch_watch_page(
            CASE WHEN (SELECT status FROM seed_scope_status)='AVAILABLE'
                   AND (SELECT status FROM rule_scope_status)='AVAILABLE'
                   AND (SELECT status FROM d1_scope_status)='AVAILABLE'
-                THEN (SELECT r.profile_revision=s.profile_revision
-                             AND r.history_session_count=s.history_session_count
+                THEN (SELECT r.history_session_count=s.history_session_count
                              AND r.d1_history_session_count=d.d1_history_session_count
                              AND r.calendar_revision=d.calendar_revision
                              AND s.calendar_id=d.calendar_id
@@ -2607,9 +2502,6 @@ def read_source_launch_watch_page(
                              AND d.research_mode='NON_PIT_RETROSPECTIVE'
                              AND s.price_coordinate=d.price_coordinate
                              AND s.price_coordinate='FORWARD_ADJUSTED'
-                             AND s.cross_section_universe_capture_id IS NOT DISTINCT FROM d.cross_section_universe_capture_id
-                             AND s.cross_section_universe_version IS NOT DISTINCT FROM d.cross_section_universe_version
-                             AND s.cross_section_contract_version IS NOT DISTINCT FROM d.cross_section_contract_version
                       FROM rule_scope r CROSS JOIN seed_scope s CROSS JOIN d1_scope d)
                 ELSE FALSE END AS rules_match_seed
 ), base AS (
@@ -2867,7 +2759,7 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
        (SELECT rules FROM scope_status), (SELECT d1 FROM scope_status),
        (SELECT rules_match_seed FROM scope_status),
        (SELECT jsonb_build_object(
-           'profile_revision',profile_revision,'producer_contract',producer_contract,
+           'producer_contract',producer_contract,
            'producer_version',producer_version,'history_session_count',history_session_count,
            'calendar_id',calendar_id,'calendar_revision',calendar_revision,
            'research_mode',research_mode,'price_coordinate',price_coordinate
@@ -2886,7 +2778,6 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
                 target_calendar_revision,
                 d1_history_session_count,
                 selected_history_session_count,
-                selected_profile_revision,
                 list(_POOL_RULE_IDS),
                 watch_group,
                 board_kind,
@@ -3126,7 +3017,6 @@ def read_source_launch_watch_board_rps_comparisons(
     from stock_a.storage.postgres import source_raw
 
     scope_fields = (
-        "profile_revision",
         "producer_contract",
         "producer_version",
         "history_session_count",
@@ -3186,7 +3076,6 @@ def read_source_launch_watch_board_rps_comparisons(
         cursor.execute(
             """WITH params AS (
     SELECT %s::date AS target_session,%s::bigint AS source_capture_id,
-           %s::text AS profile_revision,
            %s::text AS producer_contract,%s::text AS producer_version,
            %s::smallint AS history_session_count,%s::text AS calendar_id,
            %s::text AS calendar_revision,%s::text AS research_mode,
@@ -3210,7 +3099,6 @@ def read_source_launch_watch_board_rps_comparisons(
     FROM source_pool_seed_day_facts s CROSS JOIN params p
     WHERE s.target_session=p.target_session
       AND s.source_capture_id=p.source_capture_id
-      AND s.profile_revision=p.profile_revision
       AND s.producer_contract=p.producer_contract
       AND s.producer_version=p.producer_version
       AND s.history_session_count=p.history_session_count
@@ -3325,7 +3213,6 @@ ORDER BY selected.snapshot_id,selected.board_kind,
             (
                 target_session,
                 source_capture_id,
-                seed_scope["profile_revision"],
                 seed_scope["producer_contract"],
                 seed_scope["producer_version"],
                 seed_scope["history_session_count"],

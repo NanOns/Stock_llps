@@ -436,8 +436,6 @@ def _compute_segment_rows(
             and anchor_observation.evidence_id == anchor_fact_id
             and anchor_observation.state == "TRUE"
             and _context_rule_values(anchor_context).get("capture") == anchor_capture_id
-            and _context_rule_values(anchor_context).get("profile_revision")
-            == profile_revision
             and _context_rule_values(anchor_context).get("history_session_count")
             == history_count
             and _context_rule_values(anchor_context).get("d1_history_session_count")
@@ -507,7 +505,6 @@ def _compute_segment_rows(
                 if row[3] == rule_id
                 and row[4] == rule_version
                 and row[4] == successor_rule.get("version")
-                and row[6] == successor_rule.get("profile_revision")
                 and row[7] == successor_rule.get("history_count")
                 and row[8] == successor_rule.get("d1_history_count")
                 and row[9] == successor_rule.get("event_window_start")

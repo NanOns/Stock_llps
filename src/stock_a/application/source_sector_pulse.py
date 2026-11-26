@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-import re
 from typing import Any, Mapping, Sequence
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.application.source_sector_change_research import (
     read_retrospective_rotation,
 )
@@ -368,20 +366,12 @@ def resolve_source_sector_snapshot_pairs_by_session(
     return out
 
 
-def _valid_profile_revision(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and re.fullmatch(PROFILE_REVISION_PATTERN, value) is not None
-    )
-
-
 def run_source_sector_pulse_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
     research_cutoff: date,
     source_capture_id: int,
-    profile_revision: str,
     industry_snapshot_id: int,
     concept_snapshot_id: int,
 ) -> dict[str, Any]:
@@ -390,7 +380,6 @@ def run_source_sector_pulse_day(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or not _valid_profile_revision(profile_revision)
         or type(industry_snapshot_id) is not int
         or industry_snapshot_id <= 0
         or type(concept_snapshot_id) is not int
@@ -398,7 +387,7 @@ def run_source_sector_pulse_day(
         or industry_snapshot_id == concept_snapshot_id
     ):
         raise SourceSectorPulseError(
-            "SECTOR_PULSE_SCOPE_INVALID", "目标会话、画像修订或双板块快照绑定无效"
+            "SECTOR_PULSE_SCOPE_INVALID", "目标会话或双板块快照绑定无效"
         )
     snapshot_pair = _require_source_sector_snapshot_pair(
         config,
@@ -465,7 +454,6 @@ def run_source_sector_pulse_day(
         target_session=target_session,
         source_capture_id=source_capture_id,
         source_version=source_version,
-        profile_revision=profile_revision,
         target_result=calculated,
     )
     pulse_counts = {state: 0 for state in ("TRUE", "FALSE", "UNKNOWN")}
@@ -481,7 +469,6 @@ def run_source_sector_pulse_day(
         "target_session": target_session.isoformat(),
         "source_capture_id": source_version["source_capture_id"],
         "source_pool_count": source_version["raw_row_count"],
-        "profile_revision": profile_revision,
         "snapshot_ids": {
             "INDUSTRY": industry_snapshot_id,
             "CONCEPT": concept_snapshot_id,
@@ -510,8 +497,6 @@ def run_source_sector_pulse_transition_day(
     target_session: date,
     research_cutoff: date,
     source_capture_id: int,
-    previous_profile_revision: str,
-    target_profile_revision: str,
     industry_snapshot_id: int,
     concept_snapshot_id: int,
 ) -> dict[str, Any]:
@@ -529,8 +514,6 @@ def run_source_sector_pulse_transition_day(
         or target_session > research_cutoff
         or type(source_capture_id) is not int
         or source_capture_id <= 0
-        or not _valid_profile_revision(previous_profile_revision)
-        or not _valid_profile_revision(target_profile_revision)
         or type(industry_snapshot_id) is not int
         or industry_snapshot_id <= 0
         or type(concept_snapshot_id) is not int
@@ -575,7 +558,7 @@ def run_source_sector_pulse_transition_day(
     generated_pulses: dict[str, Any] = {}
 
     def load_exact_day(
-        session: date, source_capture_id: int, expected_profile_revision: str
+        session: date, source_capture_id: int
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         source_version = read_source_version_context(
             config,
@@ -602,35 +585,26 @@ def run_source_sector_pulse_transition_day(
             source_capture_id=source_capture_id,
             source_pool_count=source_version["raw_row_count"],
             snapshot_ids=snapshots,
-            profile_revision=expected_profile_revision,
         )
         pulse["target_session"] = session.isoformat()
         pulse["source_version"] = source_version
-        if pulse.get("profile_revision") != expected_profile_revision:
-            raise SourceSectorPulseError(
-                "SECTOR_PULSE_TRANSITION_PROFILE_REVISION_MISMATCH",
-                f"{session}PULSE必须绑定显式指定的Seed/Profile修订",
-            )
         return source_version, pulse
 
     previous_source, previous_pulse = load_exact_day(
         previous_session,
         source_capture_id,
-        previous_profile_revision,
     )
     target_source, target_pulse = load_exact_day(
         target_session,
         source_capture_id,
-        target_profile_revision,
     )
-    for session, source_version, pulse, profile_revision in (
+    for session, source_version, pulse in (
         (
             previous_session,
             previous_source,
             previous_pulse,
-            previous_profile_revision,
         ),
-        (target_session, target_source, target_pulse, target_profile_revision),
+        (target_session, target_source, target_pulse),
     ):
         if pulse.get("status") == "AVAILABLE":
             continue
@@ -652,13 +626,10 @@ def run_source_sector_pulse_transition_day(
             target_session=session,
             research_cutoff=research_cutoff,
             source_capture_id=source_version["source_capture_id"],
-            profile_revision=profile_revision,
             industry_snapshot_id=industry_snapshot_id,
             concept_snapshot_id=concept_snapshot_id,
         )
-        _, refreshed = load_exact_day(
-            session, source_version["source_capture_id"], profile_revision
-        )
+        _, refreshed = load_exact_day(session, source_version["source_capture_id"])
         if refreshed.get("status") != "AVAILABLE":
             raise SourceSectorPulseError(
                 "SECTOR_PULSE_TRANSITION_RECALCULATION_NOT_CLOSED",
@@ -716,8 +687,6 @@ def run_source_sector_pulse_transition_day(
                     "raw_row_count",
                 )
             },
-            "previous_profile_revision": previous_profile_revision,
-            "target_profile_revision": target_profile_revision,
         },
         "pulse_rows": {
             "previous": {

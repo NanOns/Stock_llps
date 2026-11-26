@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
-
 from datetime import date
 from decimal import Decimal
 from fractions import Fraction
@@ -66,13 +64,8 @@ _SEED_COLUMNS = (
     "market",
     "board",
     "source_capture_id",
-    "profile_revision",
     "producer_contract",
     "producer_version",
-    "cross_section_universe_capture_id",
-    "cross_section_universe_version",
-    "cross_section_contract_version",
-    "universe_match_status",
     "ranking_universe_count",
     "evaluation_universe_count",
     "history_window_start",
@@ -159,32 +152,13 @@ _D0_COLUMNS = (
 _D0_KEY = (
     "target_session",
     "source_symbol",
-    "source_capture_id",
     "scenario",
-    "producer_version",
-    "calendar_revision",
 )
 _SEED_KEY = (
     "target_session",
-    "source_capture_id",
     "source_symbol",
-    "profile_revision",
-    "producer_version",
-    "cross_section_universe_capture_id",
-    "cross_section_universe_version",
-    "cross_section_contract_version",
-    "universe_match_status",
 )
-_SEED_SCOPE_KEY = (
-    "target_session",
-    "source_capture_id",
-    "profile_revision",
-    "producer_version",
-    "cross_section_universe_capture_id",
-    "cross_section_universe_version",
-    "cross_section_contract_version",
-    "universe_match_status",
-)
+_SEED_SCOPE_KEY = ("target_session",)
 _SEED_UNIVERSE_MATCH_STATUSES = frozenset(
     {
         "EXACT_MATCH",
@@ -395,18 +369,15 @@ def persist_static_d0_reference_scenario(
                     scoped_params,
                 )
                 existing = cursor.fetchall()
-                if existing and (
-                    len(existing) != len(rows)
-                    or any(
-                        not _row_matches(expected, actual)
-                        for expected, actual in zip(rows, existing, strict=True)
-                    )
-                ):
-                    raise StaticResearchPgError(
-                        "STATIC_D0_REFERENCE_CONTENT_CONFLICT",
-                        "相同D0参考事实业务键已有不同或不完整内容",
-                    )
-                if not existing:
+                matches = len(existing) == len(rows) and all(
+                    _row_matches(expected, actual)
+                    for expected, actual in zip(rows, existing, strict=True)
+                )
+                if not matches:
+                    if existing:
+                        cursor.execute(
+                            f"DELETE FROM {_D0_TABLE} WHERE {scoped}", scoped_params
+                        )
                     inserted[_D0_TABLE] = _insert_rows(
                         cursor, _D0_TABLE, _D0_COLUMNS, _D0_KEY, rows
                     )
@@ -426,18 +397,18 @@ def persist_static_d0_reference_scenario(
                     )
             return {
                 "status": "IDEMPOTENT_ALREADY_PRESENT"
-                if existing
+                if matches
                 else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
                 "scenario": scenario,
                 "rows_expected": len(rows),
                 "rows_inserted": inserted,
                 "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"
-                if existing
+                if matches
                 else None,
                 "transaction": "SERIALIZABLE_ATOMIC_SINGLE_D0_REFERENCE_SCENARIO",
-                "database_write_attempted": not bool(existing),
+                "database_write_attempted": not matches,
                 "ddl_executed": False,
-                "dml_executed": not bool(existing),
+                "dml_executed": not matches,
             }
         except source_raw.RawSourcePgError as error:
             if getattr(error.__cause__, "sqlstate", None) != "40001" or attempt == 4:
@@ -461,78 +432,26 @@ def _seed_rows(
     *,
     scenarios: Mapping[str, Mapping[str, Any]],
     history_window: Sequence[date],
-    profile_revision: str,
+    profile_revision: str | None = None,
 ) -> list[tuple[Any, ...]]:
     launch = scenarios["LAUNCH_CONFIRM"]
     source = launch["source_version"]
     calendar = launch["official_calendar"]
     market_by_symbol = {row["source_symbol"]: row for row in launch["results"]}
     seed_facts = seed.get("facts")
-    match_status = seed.get("universe_match_status")
     ranking_count = seed.get("ranking_universe_count")
     evaluation_count = seed.get("evaluation_universe_count")
-    cross_version = seed.get("cross_section_universe_version")
-    cross_contract = seed.get("cross_section_contract_version")
-    cross_capture_id = seed.get("cross_section_universe_capture_id")
-    formal_scope_metadata_valid = (
-        type(evaluation_count) is int
-        and evaluation_count > 0
-        and (
-            cross_capture_id is None
-            or type(cross_capture_id) is int
-            and cross_capture_id > 0
-        )
-        and (
-            match_status == "FALLBACK_CROSS_SECTION_INCOMPLETE"
-            and ranking_count is None
-            and isinstance(cross_version, str)
-            and bool(cross_version.strip())
-            and isinstance(cross_contract, str)
-            and bool(cross_contract.strip())
-            or match_status != "FALLBACK_CROSS_SECTION_INCOMPLETE"
-            and type(ranking_count) is int
-            and ranking_count >= 0
-        )
-        and (
-            match_status == "FALLBACK_CROSS_SECTION_UNAVAILABLE"
-            and cross_capture_id is None
-            and cross_version is None
-            and cross_contract is None
-            and ranking_count == evaluation_count
-            or match_status == "EXACT_MATCH"
-            and isinstance(cross_version, str)
-            and bool(cross_version.strip())
-            and isinstance(cross_contract, str)
-            and bool(cross_contract.strip())
-            and ranking_count == evaluation_count
-            or match_status == "EVALUATION_SUBSET_OF_RANKING"
-            and isinstance(cross_version, str)
-            and bool(cross_version.strip())
-            and isinstance(cross_contract, str)
-            and bool(cross_contract.strip())
-            and ranking_count > evaluation_count
-            or match_status == "FALLBACK_UNIVERSE_MISMATCH"
-            and isinstance(cross_version, str)
-            and bool(cross_version.strip())
-            and isinstance(cross_contract, str)
-            and bool(cross_contract.strip())
-            or match_status == "FALLBACK_CROSS_SECTION_INCOMPLETE"
-            and isinstance(cross_version, str)
-            and bool(cross_version.strip())
-            and isinstance(cross_contract, str)
-            and bool(cross_contract.strip())
-            and ranking_count is None
-        )
-    )
     if (
         not isinstance(seed_facts, Mapping)
         or set(seed_facts) != set(market_by_symbol)
         or seed.get("source_pool_total") != len(market_by_symbol)
         or seed.get("stored_profile_status") != "AVAILABLE"
-        or match_status not in _SEED_UNIVERSE_MATCH_STATUSES
-        or not formal_scope_metadata_valid
-        or not isinstance(profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
+        or type(evaluation_count) is not int
+        or evaluation_count <= 0
+        or (
+            ranking_count is not None
+            and (type(ranking_count) is not int or ranking_count < 0)
+        )
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_PARTITION_OPEN", "Seed或精确R6画像未覆盖完整来源池"
@@ -551,21 +470,10 @@ def _seed_rows(
             "market": raw["market"],
             "board": raw["board"],
             "source_capture_id": source["source_capture_id"],
-            "profile_revision": profile_revision,
             "producer_contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
             "producer_version": "SOURCE_POOL_SEED_CORE_PROFILE_R2",
-            "cross_section_universe_capture_id": seed.get(
-                "cross_section_universe_capture_id"
-            ),
-            "cross_section_universe_version": seed.get(
-                "cross_section_universe_version"
-            ),
-            "cross_section_contract_version": seed.get(
-                "cross_section_contract_version"
-            ),
-            "universe_match_status": seed["universe_match_status"],
-            "ranking_universe_count": seed["ranking_universe_count"],
-            "evaluation_universe_count": seed["evaluation_universe_count"],
+            "ranking_universe_count": seed.get("ranking_universe_count"),
+            "evaluation_universe_count": seed.get("evaluation_universe_count"),
             "history_window_start": history_window[0],
             "history_window_end": history_window[-1],
             "history_session_count": len(history_window),
@@ -717,21 +625,11 @@ def _scope_predicate(
     names = dict(zip(columns, row, strict=True))
     if table == _D0_TABLE:
         scenarios = sorted({str(item[columns.index("scenario")]) for item in rows})
-        producer_versions = sorted(
-            {str(item[columns.index("producer_version")]) for item in rows}
-        )
-        calendar_revisions = sorted(
-            {str(item[columns.index("calendar_revision")]) for item in rows}
-        )
         return (
-            "target_session=%s AND source_capture_id=%s AND scenario=ANY(%s) "
-            "AND producer_version=ANY(%s) AND calendar_revision=ANY(%s)",
+            "target_session=%s AND scenario=ANY(%s)",
             (
                 names["target_session"],
-                names["source_capture_id"],
                 scenarios,
-                producer_versions,
-                calendar_revisions,
             ),
         )
     scope = _SEED_SCOPE_KEY
@@ -776,9 +674,9 @@ def persist_static_research_day(
     scenarios: Mapping[str, Mapping[str, Any]],
     seed: Mapping[str, Any],
     history_window: Sequence[date],
-    profile_revision: str,
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
-    """以一个可重试串行化事务保存两类全池事实；相同键异内容回滚。"""
+    """以一个可重试串行化事务保存或替换两类全池事实。"""
     d0_rows = _d0_rows(scenarios)
     seed_rows = _seed_rows(
         seed,
@@ -800,7 +698,7 @@ def persist_static_research_day(
     raise AssertionError("不可达的静态研究事务重试状态")
 
 
-def _persist_once(config, scenarios, groups, profile_revision) -> dict[str, Any]:
+def _persist_once(config, scenarios, groups, profile_revision=None) -> dict[str, Any]:
     inserted: dict[str, int] = {}
     scopes = []
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
@@ -808,7 +706,6 @@ def _persist_once(config, scenarios, groups, profile_revision) -> dict[str, Any]
         cursor,
         _connection_identity,
     ):
-        first = scenarios["LAUNCH_CONFIRM"]
         cursor.execute(
             "SELECT to_regclass(%s) IS NOT NULL, to_regclass(%s) IS NOT NULL",
             (_D0_TABLE, _SEED_TABLE),
@@ -827,16 +724,10 @@ def _persist_once(config, scenarios, groups, profile_revision) -> dict[str, Any]
                 params,
             )
             existing = cursor.fetchall()
-            if not _existing_rows_match_expected_subset(
-                columns=columns,
-                key=key,
-                expected_rows=rows,
-                existing_rows=existing,
-            ):
-                raise StaticResearchPgError(
-                    "STATIC_RESEARCH_CONTENT_CONFLICT",
-                    "相同静态事实业务键已有不同内容，事务回滚",
-                )
+            matches = len(existing) == len(rows) and all(
+                _row_matches(expected, actual)
+                for expected, actual in zip(rows, existing, strict=True)
+            )
             scopes.append(
                 (
                     table,
@@ -845,15 +736,29 @@ def _persist_once(config, scenarios, groups, profile_revision) -> dict[str, Any]
                     rows,
                     predicate,
                     params,
-                    len(existing) == len(rows),
+                    matches,
+                    bool(existing),
                 )
             )
-        if not all(item[-1] for item in scopes):
-            for table, columns, key, rows, *_ in scopes:
+        if not all(item[6] for item in scopes):
+            for (
+                table,
+                columns,
+                key,
+                rows,
+                predicate,
+                params,
+                matches,
+                has_existing,
+            ) in scopes:
+                if matches:
+                    continue
+                if has_existing:
+                    cursor.execute(f"DELETE FROM {table} WHERE {predicate}", params)
                 inserted[table.rsplit(".", 1)[-1]] = _insert_rows(
                     cursor, table, columns, key, rows
                 )
-        for table, columns, key, rows, predicate, params, _ in scopes:
+        for table, columns, key, rows, predicate, params, _, _ in scopes:
             cursor.execute(
                 f"SELECT {', '.join(columns)} FROM {table} WHERE {predicate} ORDER BY {', '.join(key)}",
                 params,
@@ -869,7 +774,7 @@ def _persist_once(config, scenarios, groups, profile_revision) -> dict[str, Any]
                 )
     return {
         "status": "IDEMPOTENT_ALREADY_PRESENT"
-        if all(item[-1] for item in scopes)
+        if all(item[6] for item in scopes)
         else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
         "rows_expected": {
             table.rsplit(".", 1)[-1]: len(rows) for table, _, _, rows, *_ in scopes
@@ -886,15 +791,14 @@ def _persist_once(config, scenarios, groups, profile_revision) -> dict[str, Any]
             )
             for table, columns, _key, rows, *_ in scopes
         },
-        "profile_revision": profile_revision,
         "rows_inserted": inserted,
         "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"
-        if all(item[-1] for item in scopes)
+        if all(item[6] for item in scopes)
         else None,
         "transaction": "SERIALIZABLE_ATOMIC_D0_SCENARIOS_AND_SEED",
-        "database_write_attempted": not all(item[-1] for item in scopes),
+        "database_write_attempted": not all(item[6] for item in scopes),
         "ddl_executed": False,
-        "dml_executed": not all(item[-1] for item in scopes),
+        "dml_executed": not all(item[6] for item in scopes),
     }
 
 
@@ -1074,110 +978,37 @@ def read_source_pool_seed_facts(
     *,
     target_session: date,
     research_cutoff: date,
-    source_capture_id: int,
-    price_coordinate: str,
-    profile_revision: str,
+    source_capture_id: int | None = None,
+    price_coordinate: str = "FORWARD_ADJUSTED",
+    profile_revision: str | None = None,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R2",
     cross_section_universe_capture_id: int | None = None,
     cross_section_universe_version: str | None = None,
     cross_section_contract_version: str | None = None,
     universe_match_status: str | None = None,
 ) -> list[dict[str, Any]]:
-    """按BaoStock capture、QFQ坐标及显式截止读取Seed事实全池行。"""
+    """按目标日、QFQ坐标及显式截止读取Seed事实全池行。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
         or price_coordinate != "FORWARD_ADJUSTED"
-        or cross_section_universe_capture_id is not None
-        and (
-            type(cross_section_universe_capture_id) is not int
-            or cross_section_universe_capture_id <= 0
-        )
-        or cross_section_universe_version is not None
-        and (
-            not isinstance(cross_section_universe_version, str)
-            or not cross_section_universe_version.strip()
-        )
-        or cross_section_contract_version is not None
-        and (
-            not isinstance(cross_section_contract_version, str)
-            or not cross_section_contract_version.strip()
-        )
-        or universe_match_status is not None
-        and universe_match_status not in _SEED_UNIVERSE_MATCH_STATUSES
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_READ_SCOPE_INVALID",
-            "Seed读取必须绑定截止内BaoStock捕获和FORWARD_ADJUSTED坐标",
+            "Seed读取必须绑定截止内目标日和FORWARD_ADJUSTED坐标",
         )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
         _connection_identity,
     ):
-        scope_filters = []
-        scope_parameters: list[Any] = []
-        for column, value in (
-            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
-            ("cross_section_universe_version", cross_section_universe_version),
-            ("cross_section_contract_version", cross_section_contract_version),
-            ("universe_match_status", universe_match_status),
-        ):
-            if value is not None:
-                scope_filters.append(f"{column}=%s")
-                scope_parameters.append(value)
-        scope_where = " AND ".join(scope_filters)
-        if scope_where:
-            scope_where = " AND " + scope_where
-        cursor.execute(
-            f"""SELECT DISTINCT cross_section_universe_capture_id,
-                              cross_section_universe_version,
-                              cross_section_contract_version,universe_match_status,
-                              ranking_universe_count,evaluation_universe_count
-                FROM {_SEED_TABLE}
-                WHERE target_session=%s AND source_capture_id=%s
-                  AND profile_revision=%s AND producer_version=%s
-                  AND price_coordinate=%s{scope_where}
-                ORDER BY cross_section_universe_version NULLS FIRST,
-                         cross_section_universe_capture_id NULLS FIRST,
-                         cross_section_contract_version NULLS FIRST,
-                         universe_match_status NULLS FIRST""",
-            (
-                target_session,
-                source_capture_id,
-                profile_revision,
-                producer_version,
-                price_coordinate,
-                *scope_parameters,
-            ),
-        )
-        scope_rows = cursor.fetchall()
-        if not scope_rows:
-            raise StaticResearchPgError(
-                "STATIC_SEED_NOT_COMPUTED", "该日Seed没有精确语义的已保存事实"
-            )
-        if len(scope_rows) != 1:
-            raise StaticResearchPgError(
-                "STATIC_SEED_SCOPE_AMBIGUOUS",
-                "目标日同一画像修订存在多个横截面排名/评价总体；必须明确版本和捕获",
-            )
-        selected_scope = scope_rows[0]
         cursor.execute(
             f"""SELECT {", ".join("s." + name for name in _SEED_COLUMNS)}
                 FROM {_SEED_TABLE} s
                 JOIN stock.source_captures c ON c.capture_id=s.source_capture_id
                 WHERE s.target_session=%s AND s.target_session<=%s
-                  AND s.source_capture_id=%s AND s.profile_revision=%s
                   AND s.producer_version=%s AND s.price_coordinate=%s
-                  AND s.cross_section_universe_capture_id IS NOT DISTINCT FROM %s
-                  AND s.cross_section_universe_version IS NOT DISTINCT FROM %s
-                  AND s.cross_section_contract_version IS NOT DISTINCT FROM %s
-                  AND s.universe_match_status IS NOT DISTINCT FROM %s
-                  AND s.ranking_universe_count IS NOT DISTINCT FROM %s
-                  AND s.evaluation_universe_count IS NOT DISTINCT FROM %s
                   AND c.provider='BAOSTOCK' AND c.range_start_session<=s.target_session
                   AND s.target_session<=c.range_end_session
                   AND c.range_end_session<=%s
@@ -1188,11 +1019,8 @@ def read_source_pool_seed_facts(
             (
                 target_session,
                 research_cutoff,
-                source_capture_id,
-                profile_revision,
                 producer_version,
                 price_coordinate,
-                *selected_scope,
                 research_cutoff,
             ),
         )
@@ -1229,33 +1057,11 @@ def read_source_pool_seed_forward_scope(
         or source_capture_id <= 0
         or type(expected_source_count) is not int
         or expected_source_count <= 0
-        or profile_revision is not None
-        and (
-            not isinstance(profile_revision, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
-        )
         or history_session_count is not None
         and (
             type(history_session_count) is not int
             or not 1 <= history_session_count <= 250
         )
-        or cross_section_universe_capture_id is not None
-        and (
-            type(cross_section_universe_capture_id) is not int
-            or cross_section_universe_capture_id <= 0
-        )
-        or cross_section_universe_version is not None
-        and (
-            not isinstance(cross_section_universe_version, str)
-            or not cross_section_universe_version.strip()
-        )
-        or cross_section_contract_version is not None
-        and (
-            not isinstance(cross_section_contract_version, str)
-            or not cross_section_contract_version.strip()
-        )
-        or universe_match_status is not None
-        and universe_match_status not in _SEED_UNIVERSE_MATCH_STATUSES
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_FORWARD_KEY_INVALID", "后继生产Seed键或完整分母无效"
@@ -1265,39 +1071,17 @@ def read_source_pool_seed_forward_scope(
         cursor,
         _,
     ):
-        scope_predicate = (
-            "target_session=%s AND source_capture_id=%s AND producer_version=%s"
-        )
+        scope_predicate = "target_session=%s AND producer_version=%s"
         scope_parameters: tuple[Any, ...] = (
             target_session,
-            source_capture_id,
             "SOURCE_POOL_SEED_CORE_PROFILE_R2",
         )
-        if profile_revision is not None:
-            scope_predicate += " AND profile_revision=%s"
-            scope_parameters = (*scope_parameters, profile_revision)
         if history_session_count is not None:
             scope_predicate += " AND history_session_count=%s"
             scope_parameters = (*scope_parameters, history_session_count)
-        for column, value in (
-            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
-            ("cross_section_universe_version", cross_section_universe_version),
-            ("cross_section_contract_version", cross_section_contract_version),
-            ("universe_match_status", universe_match_status),
-        ):
-            if value is not None:
-                scope_predicate += f" AND {column}=%s"
-                scope_parameters = (*scope_parameters, value)
         cursor.execute(
-            f"""SELECT DISTINCT cross_section_universe_capture_id,
-                              cross_section_universe_version,
-                              cross_section_contract_version,universe_match_status,
-                              ranking_universe_count,evaluation_universe_count
-                FROM {_SEED_TABLE} WHERE {scope_predicate}
-                ORDER BY cross_section_universe_version NULLS FIRST,
-                         cross_section_universe_capture_id NULLS FIRST,
-                         cross_section_contract_version NULLS FIRST,
-                         universe_match_status NULLS FIRST""",
+            f"""SELECT DISTINCT ranking_universe_count, evaluation_universe_count
+                FROM {_SEED_TABLE} WHERE {scope_predicate}""",
             scope_parameters,
         )
         seed_scope_rows = cursor.fetchall()
@@ -1308,45 +1092,23 @@ def read_source_pool_seed_forward_scope(
         if len(seed_scope_rows) != 1:
             raise StaticResearchPgError(
                 "STATIC_SEED_SCOPE_AMBIGUOUS",
-                "T0存在多个横截面排名/评价范围，必须指定精确业务scope",
+                "T0存在多个排名/评价范围",
             )
         selected_cross_scope = seed_scope_rows[0]
-        for column, value in zip(
-            (
-                "cross_section_universe_capture_id",
-                "cross_section_universe_version",
-                "cross_section_contract_version",
-                "universe_match_status",
-            ),
-            selected_cross_scope[:4],
-            strict=True,
-        ):
-            scope_predicate += f" AND {column} IS NOT DISTINCT FROM %s"
-            scope_parameters = (*scope_parameters, value)
-        for column, value in zip(
-            ("ranking_universe_count", "evaluation_universe_count"),
-            selected_cross_scope[4:],
-            strict=True,
-        ):
-            scope_predicate += f" AND {column} IS NOT DISTINCT FROM %s"
-            scope_parameters = (*scope_parameters, value)
         cursor.execute(
-            f"""SELECT profile_revision, producer_contract, producer_version,
+            f"""SELECT producer_contract, producer_version,
                        history_session_count, calendar_id, calendar_revision,
                        research_mode, price_coordinate, count(*)::bigint,
                        count(DISTINCT source_symbol)::bigint,
                        count(*) FILTER (WHERE EXISTS (
                            SELECT 1 FROM source_raw_daily r
                            WHERE r.session_date=s.target_session
-                             AND r.source_capture_id=s.source_capture_id
                              AND r.source_symbol=s.source_symbol
                        ))::bigint,
                        count(*) FILTER (WHERE EXISTS (
                            SELECT 1 FROM source_symbol_price_profiles p
                            WHERE p.target_session=s.target_session
-                             AND p.source_capture_id=s.source_capture_id
                              AND p.source_symbol=s.source_symbol
-                             AND p.profile_revision=s.profile_revision
                              AND p.history_window_start=s.history_window_start
                              AND p.history_window_end=s.history_window_end
                              AND p.history_requested_session_count=s.history_session_count
@@ -1361,10 +1123,10 @@ def read_source_pool_seed_forward_scope(
                        count(*) FILTER (WHERE s2_state='UNKNOWN')::bigint
                 FROM {_SEED_TABLE} s
                 WHERE {scope_predicate}
-                GROUP BY s.profile_revision, s.producer_contract, s.producer_version,
+                GROUP BY s.producer_contract, s.producer_version,
                          s.history_session_count, s.calendar_id, s.calendar_revision,
                          s.research_mode, s.price_coordinate
-                ORDER BY s.profile_revision, s.producer_version""",
+                ORDER BY s.producer_version""",
             scope_parameters,
         )
         scopes = cursor.fetchall()
@@ -1375,10 +1137,10 @@ def read_source_pool_seed_forward_scope(
         complete_scopes = [
             item
             for item in scopes
-            if int(item[8]) == expected_source_count
+            if int(item[7]) == expected_source_count
+            and int(item[8]) == expected_source_count
             and int(item[9]) == expected_source_count
             and int(item[10]) == expected_source_count
-            and int(item[11]) == expected_source_count
         ]
         if len(complete_scopes) > 1:
             raise StaticResearchPgError(
@@ -1391,9 +1153,9 @@ def read_source_pool_seed_forward_scope(
             )
         scope = complete_scopes[0]
         if (
-            scope[2] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
-            or scope[6] != "NON_PIT_RETROSPECTIVE"
-            or scope[7] != "FORWARD_ADJUSTED"
+            scope[1] != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
+            or scope[5] != "NON_PIT_RETROSPECTIVE"
+            or scope[6] != "FORWARD_ADJUSTED"
         ):
             raise StaticResearchPgError(
                 "STATIC_SEED_SCOPE_UNSUPPORTED",
@@ -1401,13 +1163,9 @@ def read_source_pool_seed_forward_scope(
             )
         cursor.execute(
             f"""SELECT source_symbol FROM {_SEED_TABLE}
-                WHERE target_session=%s AND source_capture_id=%s
-                  AND profile_revision=%s AND producer_contract=%s
-                  AND producer_version=%s AND history_session_count=%s
-                  AND calendar_id=%s AND calendar_revision=%s
-                  AND research_mode=%s AND price_coordinate=%s
+                WHERE target_session=%s
                 ORDER BY source_symbol""",
-            (target_session, source_capture_id, *scope[:8]),
+            (target_session,),
         )
         symbols = tuple(row[0] for row in cursor.fetchall())
     if len(symbols) != expected_source_count or len(set(symbols)) != len(symbols):
@@ -1415,26 +1173,20 @@ def read_source_pool_seed_forward_scope(
             "STATIC_SEED_SOURCE_SET_INVALID", "T0 Seed来源代码集合未闭合或重复"
         )
     return {
-        "profile_revision": scope[0],
-        "producer_contract": scope[1],
-        "producer_version": scope[2],
-        "history_session_count": scope[3],
-        "calendar_id": scope[4],
-        "calendar_revision": scope[5],
-        "research_mode": scope[6],
-        "price_coordinate": scope[7],
-        "cross_section_universe_capture_id": selected_cross_scope[0],
-        "cross_section_universe_version": selected_cross_scope[1],
-        "cross_section_contract_version": selected_cross_scope[2],
-        "universe_match_status": selected_cross_scope[3]
-        or "UNIVERSE_SCOPE_NOT_RECORDED",
-        "ranking_universe_count": selected_cross_scope[4],
-        "evaluation_universe_count": selected_cross_scope[5],
-        "source_count": scope[8],
+        "producer_contract": scope[0],
+        "producer_version": scope[1],
+        "history_session_count": scope[2],
+        "calendar_id": scope[3],
+        "calendar_revision": scope[4],
+        "research_mode": scope[5],
+        "price_coordinate": scope[6],
+        "ranking_universe_count": selected_cross_scope[0],
+        "evaluation_universe_count": selected_cross_scope[1],
+        "source_count": scope[7],
         "s2_state_counts": {
-            "TRUE": scope[12],
-            "FALSE": scope[13],
-            "UNKNOWN": scope[14],
+            "TRUE": scope[11],
+            "FALSE": scope[12],
+            "UNKNOWN": scope[13],
         },
         "source_symbols": symbols,
     }
@@ -1445,7 +1197,7 @@ def read_source_stock_seed_fact(
     *,
     target_session: date,
     source_capture_id: int,
-    profile_revision: str,
+    profile_revision: str | None = None,
     source_symbol: str,
     expected_source_count: int,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R2",
@@ -1454,35 +1206,16 @@ def read_source_stock_seed_fact(
     cross_section_contract_version: str | None = None,
     universe_match_status: str | None = None,
 ) -> dict[str, Any]:
-    """按完整来源身份核验分区后，只读取单股行；分母须来自已闭合的Raw版本目录。"""
+    """按目标日和来源证券读取单股Seed行；分母须来自已闭合的Raw版本目录。"""
     if (
         type(target_session) is not date
         or type(source_capture_id) is not int
         or source_capture_id <= 0
-        or not isinstance(profile_revision, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         or not isinstance(source_symbol, str)
         or _SYMBOL.fullmatch(source_symbol) is None
         or type(expected_source_count) is not int
         or expected_source_count <= 0
         or producer_version != "SOURCE_POOL_SEED_CORE_PROFILE_R2"
-        or cross_section_universe_capture_id is not None
-        and (
-            type(cross_section_universe_capture_id) is not int
-            or cross_section_universe_capture_id <= 0
-        )
-        or cross_section_universe_version is not None
-        and (
-            not isinstance(cross_section_universe_version, str)
-            or not cross_section_universe_version.strip()
-        )
-        or cross_section_contract_version is not None
-        and (
-            not isinstance(cross_section_contract_version, str)
-            or not cross_section_contract_version.strip()
-        )
-        or universe_match_status is not None
-        and universe_match_status not in _SEED_UNIVERSE_MATCH_STATUSES
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_SINGLE_KEY_INVALID", "单股Seed读取必须绑定合法完整业务键"
@@ -1493,122 +1226,25 @@ def read_source_stock_seed_fact(
         cursor,
         _connection_identity,
     ):
-        scope_filter_parts = []
-        scope_filter_params = []
-        for column, value in (
-            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
-            ("cross_section_universe_version", cross_section_universe_version),
-            ("cross_section_contract_version", cross_section_contract_version),
-            ("universe_match_status", universe_match_status),
-        ):
-            if value is not None:
-                scope_filter_parts.append(f"{column}=%s")
-                scope_filter_params.append(value)
-        scope_filter = " AND ".join(scope_filter_parts)
-        if scope_filter:
-            scope_filter = " AND " + scope_filter
-        cursor.execute(
-            f"""SELECT DISTINCT cross_section_universe_capture_id,
-                              cross_section_universe_version,
-                              cross_section_contract_version,universe_match_status,
-                              ranking_universe_count,evaluation_universe_count
-                FROM {_SEED_TABLE}
-                WHERE target_session=%s AND source_capture_id=%s
-                  AND profile_revision=%s AND producer_version=%s{scope_filter}
-                ORDER BY cross_section_universe_version NULLS FIRST,
-                         cross_section_universe_capture_id NULLS FIRST,
-                         cross_section_contract_version NULLS FIRST,
-                         universe_match_status NULLS FIRST""",
-            (
-                target_session,
-                source_capture_id,
-                profile_revision,
-                producer_version,
-                *scope_filter_params,
-            ),
-        )
-        scope_rows = cursor.fetchall()
-        if not scope_rows:
-            return {
-                "status": "NOT_COMPUTED",
-                "reason_code": "SEED_NOT_COMPUTED",
-                "message": "该目标日和精确Raw捕获没有已保存Seed事实。",
-                "partition": {
-                    "stored_rows": 0,
-                    "expected_source_count": expected_source_count,
-                    "closed": False,
-                },
-            }
-        if len(scope_rows) != 1:
-            return {
-                "status": "INCOMPLETE",
-                "reason_code": "SEED_UNIVERSE_SCOPE_AMBIGUOUS",
-                "message": "该Seed业务键存在多个排名/评价范围，必须指定横截面scope。",
-                "partition": {
-                    "stored_rows": 0,
-                    "expected_source_count": expected_source_count,
-                    "closed": False,
-                },
-            }
-        selected_scope = scope_rows[0]
-        scope_identity_predicate = (
-            " AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s"
-            " AND cross_section_universe_version IS NOT DISTINCT FROM %s"
-            " AND cross_section_contract_version IS NOT DISTINCT FROM %s"
-            " AND universe_match_status IS NOT DISTINCT FROM %s"
-            " AND ranking_universe_count IS NOT DISTINCT FROM %s"
-            " AND evaluation_universe_count IS NOT DISTINCT FROM %s"
-        )
         cursor.execute(
             f"""SELECT count(*)::bigint AS stored_rows,
        count(DISTINCT source_capture_id)::bigint AS content_count,
        min(source_capture_id) AS source_capture_id
 FROM {_SEED_TABLE}
 WHERE target_session=%s::date
-  AND source_capture_id=%s
-  AND profile_revision=%s AND producer_version=%s{scope_identity_predicate}""",
+  AND producer_version=%s""",
             (
                 target_session,
-                source_capture_id,
-                profile_revision,
                 producer_version,
-                *selected_scope,
             ),
         )
         selected_rows, selected_contents, selected_content = cursor.fetchone()
         selected_rows = int(selected_rows)
         if selected_rows == 0:
-            cursor.execute(
-                f"""SELECT EXISTS (
-    SELECT 1 FROM {_SEED_TABLE}
-    WHERE target_session=%s::date
-      AND source_capture_id=%s
-      AND profile_revision<>%s AND producer_version=%s
-    LIMIT 1
-)""",
-                (
-                    target_session,
-                    source_capture_id,
-                    profile_revision,
-                    producer_version,
-                ),
-            )
-            another_revision_exists = cursor.fetchone()[0]
-            if another_revision_exists:
-                return {
-                    "status": "NOT_COMPARABLE",
-                    "reason_code": "SEED_PROFILE_REVISION_NOT_STORED",
-                    "message": "Seed事实只存在于其他画像修订，拒绝跨修订读取。",
-                    "partition": {
-                        "stored_rows": 0,
-                        "expected_source_count": expected_source_count,
-                        "closed": False,
-                    },
-                }
             return {
                 "status": "NOT_COMPUTED",
                 "reason_code": "SEED_NOT_COMPUTED",
-                "message": "该目标日和精确Raw捕获没有已保存Seed事实。",
+                "message": "该目标日没有已保存Seed事实。",
                 "partition": {
                     "stored_rows": 0,
                     "expected_source_count": expected_source_count,
@@ -1623,7 +1259,7 @@ WHERE target_session=%s::date
             return {
                 "status": "INCOMPLETE",
                 "reason_code": "SEED_PARTITION_NOT_CLOSED",
-                "message": "精确画像修订的Seed行数、来源分母或内容摘要未闭合。",
+                "message": "Seed行数、来源分母或内容摘要未闭合。",
                 "partition": {
                     "stored_rows": selected_rows,
                     "expected_source_count": expected_source_count,
@@ -1636,8 +1272,7 @@ WHERE target_session=%s::date
 FROM {_SEED_TABLE} s
 JOIN source_symbol_price_profiles p
   ON p.target_session=s.target_session
- AND p.source_symbol=s.source_symbol AND p.source_capture_id=s.source_capture_id
- AND p.profile_revision=s.profile_revision
+ AND p.source_symbol=s.source_symbol
  AND p.history_window_start=s.history_window_start
  AND p.history_window_end=s.history_window_end
  AND p.history_requested_session_count=s.history_session_count
@@ -1649,23 +1284,13 @@ JOIN source_symbol_price_profiles p
  )
  AND p.price_coordinate=s.price_coordinate
 WHERE s.target_session=%s::date
-  AND s.source_symbol=%s AND s.source_capture_id=%s
-  AND s.profile_revision=%s
+  AND s.source_symbol=%s
   AND s.producer_version=%s
-  AND s.cross_section_universe_capture_id IS NOT DISTINCT FROM %s
-  AND s.cross_section_universe_version IS NOT DISTINCT FROM %s
-  AND s.cross_section_contract_version IS NOT DISTINCT FROM %s
-  AND s.universe_match_status IS NOT DISTINCT FROM %s
-  AND s.ranking_universe_count IS NOT DISTINCT FROM %s
-  AND s.evaluation_universe_count IS NOT DISTINCT FROM %s
 LIMIT 2""",
             (
                 target_session,
                 source_symbol,
-                source_capture_id,
-                profile_revision,
                 producer_version,
-                *selected_scope,
             ),
         )
         rows = cursor.fetchall()
@@ -1757,11 +1382,11 @@ def read_seed_profile_returns(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_capture_id: int,
-    profile_revision: str,
+    source_capture_id: int | None = None,
+    profile_revision: str | None = None,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R2",
 ) -> dict[str, dict[str, Any]]:
-    """按完整身份连接旧Seed与同窗口画像，返回来源明确的收益字段。"""
+    """按唯一目标日与证券连接Seed与同窗口画像，返回来源明确的收益字段。"""
     columns = tuple(
         f"{name}_{part}"
         for name in ("ret1", "ret5", "ret20")
@@ -1777,18 +1402,15 @@ def read_seed_profile_returns(
 FROM {_SEED_TABLE} s
 JOIN source_symbol_price_profiles p
   ON p.target_session=s.target_session
- AND p.source_symbol=s.source_symbol AND p.source_capture_id=s.source_capture_id
- AND p.profile_revision=s.profile_revision
+ AND p.source_symbol=s.source_symbol
  AND p.history_window_start=s.history_window_start AND p.history_window_end=s.history_window_end
  AND p.history_requested_session_count=s.history_session_count
  AND p.history_calendar_id=s.calendar_id
  AND p.price_coordinate=s.price_coordinate
-WHERE s.target_session=%s AND s.source_capture_id=%s
-  AND s.profile_revision=%s AND s.producer_version=%s ORDER BY s.source_symbol""",
+WHERE s.target_session=%s
+  AND s.producer_version=%s ORDER BY s.source_symbol""",
             (
                 target_session,
-                source_capture_id,
-                profile_revision,
                 producer_version,
             ),
         )

@@ -100,15 +100,8 @@ PATH_COLUMNS = (
 )
 RULE_KEY = (
     "target_session",
-    "source_capture_id",
     "source_symbol",
     "rule_id",
-    "rule_version",
-    "profile_revision",
-    "history_session_count",
-    "d1_history_session_count",
-    "event_window_start",
-    "calendar_revision",
 )
 PATH_KEY = (
     "target_session",
@@ -443,13 +436,13 @@ def write_forward_path_rows(
                 raise ValueError(f"{label} paired QFQ/RAW请求未闭合到固定来源集合")
 
         cursor.execute(
-            """SELECT profile_revision,producer_contract,producer_version,
+            """SELECT NULL::text AS profile_revision,producer_contract,producer_version,
                       history_session_count,calendar_id,calendar_revision,
                       research_mode,price_coordinate,count(*),count(DISTINCT source_symbol)
                FROM source_pool_seed_day_facts
                WHERE target_session=%s AND source_capture_id=%s
                  AND producer_version=%s
-               GROUP BY profile_revision,producer_contract,producer_version,
+               GROUP BY producer_contract,producer_version,
                         history_session_count,calendar_id,calendar_revision,
                         research_mode,price_coordinate""",
             (target, source_capture_id, _SEED_PRODUCER_VERSION),
@@ -619,13 +612,30 @@ def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, ar
     if not rows:
         return 0
     indexes = tuple(columns.index(name) for name in key_columns)
-    statement = sql.SQL(
-        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING"
-    ).format(
-        sql.Identifier(table),
-        sql.SQL(", ").join(map(sql.Identifier, columns)),
-        sql.SQL(", ").join(sql.Placeholder() for _ in columns),
-    )
+    if table == "source_rule_evaluations":
+        update_cols = [col for col in columns if col not in key_columns]
+        statement = sql.SQL(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
+        ).format(
+            sql.Identifier(table),
+            sql.SQL(", ").join(map(sql.Identifier, columns)),
+            sql.SQL(", ").join(sql.Placeholder() for _ in columns),
+            sql.SQL(", ").join(map(sql.Identifier, key_columns)),
+            sql.SQL(", ").join(
+                sql.SQL("{} = EXCLUDED.{}").format(
+                    sql.Identifier(col), sql.Identifier(col)
+                )
+                for col in update_cols
+            ),
+        )
+    else:
+        statement = sql.SQL(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING"
+        ).format(
+            sql.Identifier(table),
+            sql.SQL(", ").join(map(sql.Identifier, columns)),
+            sql.SQL(", ").join(sql.Placeholder() for _ in columns),
+        )
     cursor.executemany(statement, rows)
     inserted = cursor.rowcount
     cursor.execute(

@@ -76,9 +76,12 @@ _RAW_COLUMNS = (
     "source_available_at",
 )
 _RAW_SELECT = ", ".join(_RAW_COLUMNS)
+_RAW_UPDATE_COLUMNS = [
+    column for column in _RAW_COLUMNS if column not in ("source_symbol", "session_date")
+]
 _RAW_INSERT = f"""INSERT INTO source_raw_daily ({_RAW_SELECT})
 VALUES ({", ".join(["%s"] * len(_RAW_COLUMNS))})
-ON CONFLICT (source_capture_id, source_symbol, session_date) DO NOTHING"""
+ON CONFLICT (source_symbol, session_date) DO UPDATE SET {", ".join(f"{column} = EXCLUDED.{column}" for column in _RAW_UPDATE_COLUMNS)}"""
 
 
 class RawSourcePgError(Exception):

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
-
 from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
-import re
 from typing import Any, Mapping
 
 from stock_a.application.research_window import resolve_pg_history_window
@@ -57,7 +54,6 @@ from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.storage.postgres.source_raw import RawSourcePgError
 from stock_a.storage.postgres.tdx_sector_members import read_rotation_snapshot_members
 
-_PROFILE_REVISION = re.compile(PROFILE_REVISION_PATTERN)
 _MAX_HISTORY_SESSION_CAPABILITY = 250
 
 
@@ -128,7 +124,6 @@ class SourceSectorChangeInputs:
     research_cutoff: date
     source_capture_id: int
     price_coordinate: str
-    profile_revision: str | None
     industry_snapshot_id: int
     concept_snapshot_id: int
     event_window_start: date
@@ -237,7 +232,6 @@ def prepare_source_sector_change_inputs(
     concept_snapshot_id: int,
     source_capture_id: int,
     price_coordinate: str,
-    profile_revision: str | None,
     event_window_start: date,
     pg_history_session_count: int | None,
     include_d0_launch_new: bool = False,
@@ -262,11 +256,6 @@ def prepare_source_sector_change_inputs(
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or price_coordinate != "FORWARD_ADJUSTED"
-        or profile_revision is not None
-        and (
-            not isinstance(profile_revision, str)
-            or _PROFILE_REVISION.fullmatch(profile_revision) is None
-        )
         or type(history_session_count) is not int
         or not 1 <= history_session_count <= configured_history_limit
         or type(include_d0_launch_new) is not bool
@@ -363,7 +352,7 @@ def prepare_source_sector_change_inputs(
                     target_session=target_session,
                     research_cutoff=research_cutoff,
                     source_capture_id=source_capture_id,
-                    profile_revision=profile_revision,
+                    profile_revision=None,
                     changed_only=False,
                     sort_by="delta20",
                     direction="STRONGER",
@@ -413,7 +402,6 @@ def prepare_source_sector_change_inputs(
         research_cutoff=research_cutoff,
         source_capture_id=source_capture_id,
         price_coordinate=price_coordinate,
-        profile_revision=profile_revision,
         industry_snapshot_id=industry_snapshot_id,
         concept_snapshot_id=concept_snapshot_id,
         event_window_start=event_window_start,
@@ -1115,7 +1103,6 @@ def read_retrospective_rotation(
                         else None,
                         "source_s1_s2": {
                             "scope": "NON_PIT_SOURCE_PATTERN_ONLY",
-                            "profile_revision": profile_revision,
                             "profile_matches_runtime": profile_matches_runtime,
                             "profile_note": "已存画像用于来源身份；S1/S2按当前Core/Profile合同即时计算，并非读取已存模式值。",
                             "input_error": seed_error,

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from datetime import date
-import re
 from typing import Any, Mapping
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.storage.postgres.source_rps_pulse_groups import (
     persist_source_rps_pulse_t0_change_facts,
@@ -34,12 +32,6 @@ def persist_source_rps_pulse_t0_groups_from_saved(
             type(history_session_count) is not int
             or not 1 <= history_session_count <= 250
         )
-        or profile_revision is not None
-        and (
-            history_session_count is None
-            or not isinstance(profile_revision, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
-        )
     ):
         raise ValueError("RPS×PULSE目标日、截止日或BaoStock来源捕获ID无效")
     _, _, _, official_sessions = _load_calendar(research_cutoff)
@@ -57,7 +49,6 @@ def persist_source_rps_pulse_t0_groups_from_saved(
         source_capture_id=source_capture_id,
         official_sessions=official_sessions,
         history_session_count=history_session_count,
-        profile_revision=profile_revision,
     )
     result["official_previous_session"] = previous_session.isoformat()
     result["source_read_policy"] = "PG_TYPED_FACTS_ONLY_NO_SOURCE_FILE_READ"

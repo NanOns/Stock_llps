@@ -12,7 +12,6 @@ import time
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.domain.research_day_facts import (
     D0LaunchFact,
     D1MaterialAnchorFact,
@@ -197,9 +196,6 @@ _D1_COLUMNS = (
     "calendar_revision",
     "producer_contract",
     "producer_version",
-    "cross_section_universe_capture_id",
-    "cross_section_universe_version",
-    "cross_section_contract_version",
     "material_change_contract",
     "source_time_quality",
     "source_clock_role",
@@ -281,30 +277,13 @@ _ANCHOR_COLUMNS = (
     "gap_after_reason",
 )
 _D0_KEY = (
-    "source_capture_id",
     "target_session",
     "source_symbol",
-    "before_capture_id",
-    "target_capture_id",
-    "producer_version",
-    "algorithm_contract",
-    "session_contract",
-    "calendar_revision",
 )
 _D1_KEY = (
-    "source_capture_id",
     "target_session",
     "source_symbol",
     "structure_type",
-    "target_capture_id",
-    "d1_history_session_count",
-    "calendar_revision",
-    "producer_contract",
-    "producer_version",
-    "material_change_contract",
-    "cross_section_universe_capture_id",
-    "cross_section_universe_version",
-    "cross_section_contract_version",
 )
 _ANCHOR_KEY = ("d1_structure_id", "created_session")
 _TABLES = (
@@ -335,8 +314,7 @@ def _select_complete_seed_scopes(
     candidates = [
         scope
         for scope in scopes
-        if (history_session_count is None or scope[3] == history_session_count)
-        and (profile_revision is None or scope[0] == profile_revision)
+        if history_session_count is None or scope[3] == history_session_count
     ]
     complete = [
         scope
@@ -431,9 +409,6 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 facts.calendar_revision,
                 facts.d1_producer_contract,
                 facts.d1_producer_version,
-                facts.cross_section_universe_capture_id,
-                facts.cross_section_universe_version,
-                facts.cross_section_contract_version,
                 facts.d1_material_change_contract,
                 facts.source_time_quality,
                 facts.source_clock_role,
@@ -549,35 +524,6 @@ def _validate_facts(
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_FACTS_INCOMPLETE", "单日来源身份或域选择无效"
-        )
-    cross_capture_id = facts.cross_section_universe_capture_id
-    cross_version = facts.cross_section_universe_version
-    cross_contract = facts.cross_section_contract_version
-    scope_absent = (
-        cross_capture_id is None and cross_version is None and cross_contract is None
-    )
-    scope_present = (
-        (
-            cross_capture_id is None
-            or type(cross_capture_id) is int
-            and cross_capture_id > 0
-        )
-        and isinstance(cross_version, str)
-        and bool(cross_version.strip())
-        and isinstance(cross_contract, str)
-        and bool(cross_contract.strip())
-    )
-    if (
-        not (scope_absent or scope_present)
-        or not include_d1
-        and not scope_absent
-        or include_d1
-        and facts.d1_producer_version == _D1_PRODUCER_VERSION_5
-        and not scope_absent
-    ):
-        raise ResearchDayPgError(
-            "RESEARCH_DAY_CROSS_SECTION_SCOPE_INVALID",
-            "D1横截面Universe捕获、版本与合同必须成组且只绑定R4 D1事实",
         )
     if include_d0 and (
         facts.d0_before_source_count < 0
@@ -767,38 +713,13 @@ def _scope_predicate(
 ) -> tuple[str, tuple[Any, ...]]:
     if table_name.endswith("source_d0_launch_day_facts"):
         return (
-            "target_session=%s AND source_capture_id=%s "
-            "AND before_capture_id=%s AND target_capture_id=%s AND producer_version=%s "
-            "AND algorithm_contract=%s AND session_contract=%s "
-            "AND calendar_revision=%s",
-            (
-                facts.target_session,
-                facts.source_capture_id,
-                facts.before_capture_id,
-                facts.target_capture_id,
-                facts.d0_producer_version,
-                facts.d0_algorithm_contract,
-                facts.d0_session_contract,
-                facts.calendar_revision,
-            ),
+            "target_session=%s",
+            (facts.target_session,),
         )
     if table_name.endswith("source_d1_structure_day_facts"):
         return (
-            "target_session=%s AND source_capture_id=%s "
-            "AND target_capture_id=%s AND d1_history_session_count=%s "
-            "AND calendar_revision=%s "
-            "AND producer_contract=%s AND producer_version=%s "
-            "AND material_change_contract=%s",
-            (
-                facts.target_session,
-                facts.source_capture_id,
-                facts.target_capture_id,
-                facts.d1_history_session_count,
-                facts.calendar_revision,
-                facts.d1_producer_contract,
-                facts.d1_producer_version,
-                facts.d1_material_change_contract,
-            ),
+            "target_session=%s",
+            (facts.target_session,),
         )
     return "d1_structure_id = ANY(%s)", (list(structure_ids),)
 
@@ -939,55 +860,35 @@ def _insert_rows(
     if not rows:
         return 0
     placeholders = ", ".join(["%s"] * len(columns))
-    # 0059将多日事实唯一键统一为paired capture加目标会话及来源业务维度。
+    # 0087将多日事实唯一键统一为单一有效业务键。
     current_keys = {
         "source_d0_launch_day_facts": (
-            "source_capture_id",
             "target_session",
             "source_symbol",
-            "before_capture_id",
-            "target_capture_id",
-            "producer_version",
-            "algorithm_contract",
-            "session_contract",
-            "calendar_revision",
         ),
         "source_d1_structure_day_facts": (
-            "source_capture_id",
             "target_session",
             "source_symbol",
             "structure_type",
-            "target_capture_id",
-            "d1_history_session_count",
-            "calendar_revision",
-            "producer_contract",
-            "producer_version",
-            "material_change_contract",
-            "cross_section_universe_capture_id",
-            "cross_section_universe_version",
-            "cross_section_contract_version",
         ),
         "source_d0_scenario_day_facts": (
             "target_session",
             "source_symbol",
-            "source_capture_id",
             "scenario",
-            "producer_version",
-            "calendar_revision",
         ),
         "source_pool_seed_day_facts": (
             "target_session",
-            "source_capture_id",
             "source_symbol",
-            "profile_revision",
-            "producer_version",
-            "cross_section_universe_capture_id",
-            "cross_section_universe_version",
-            "cross_section_contract_version",
-            "universe_match_status",
         ),
     }
-    conflict = ", ".join(current_keys.get(table.rsplit(".", 1)[-1], key))
+    conflict_cols = current_keys.get(table.rsplit(".", 1)[-1], key)
+    conflict = ", ".join(conflict_cols)
+    update_cols = [col for col in columns if col not in conflict_cols]
+    conflict_action = (
+        f"DO UPDATE SET {', '.join(f'{col}=EXCLUDED.{col}' for col in update_cols)}"
+        if update_cols
+        else "DO NOTHING"
+    )
     inserted = 0
     # 参数数量有界；每一批仍属于同一个单日事务，完整读回后才提交。
     batch_size = min(100, 60000 // len(columns))
@@ -996,7 +897,7 @@ def _insert_rows(
         values = ", ".join(f"({placeholders})" for _ in batch)
         cursor.execute(
             f"INSERT INTO {table} ({', '.join(columns)}) VALUES {values} "
-            f"ON CONFLICT ({conflict}) DO NOTHING",
+            f"ON CONFLICT ({conflict}) {conflict_action}",
             tuple(value for row in batch for value in row),
         )
         inserted += cursor.rowcount
@@ -1059,21 +960,14 @@ def _persist_source_research_day_once(
             existing_d0 = _select_rows(
                 cursor, "source_d0_launch_day_facts", _D0_COLUMNS, predicate, params
             )
-            if existing_d0 and (
-                len(existing_d0) != len(d0_rows)
-                or any(
-                    not _row_matches(expected, actual)
-                    for expected, actual in zip(d0_rows, existing_d0, strict=True)
-                )
-            ):
-                raise ResearchDayPgError(
-                    "RESEARCH_DAY_CONTENT_CONFLICT",
-                    "相同D0业务键已有不同或不完整事实",
-                )
+            d0_matches = len(existing_d0) == len(d0_rows) and all(
+                _row_matches(expected, actual)
+                for expected, actual in zip(d0_rows, existing_d0, strict=True)
+            )
             any_existing = any_existing or bool(existing_d0)
-            existing_scopes.append(len(existing_d0) == len(d0_rows))
+            existing_scopes.append(d0_matches)
             expected_rows["source_d0_launch_day_facts"] = len(d0_rows)
-            if not existing_d0:
+            if not d0_matches:
                 inserted["source_d0_launch_day_facts"] = _insert_rows(
                     cursor,
                     "source_d0_launch_day_facts",
@@ -1162,21 +1056,14 @@ def _persist_source_research_day_once(
                 d1_predicate,
                 d1_params,
             )
-            if existing_d1 and (
-                len(existing_d1) != len(d1_rows)
-                or any(
-                    not _row_matches(expected, actual)
-                    for expected, actual in zip(d1_rows, existing_d1, strict=True)
-                )
-            ):
-                raise ResearchDayPgError(
-                    "RESEARCH_DAY_CONTENT_CONFLICT",
-                    "相同D1结构业务键已有不同或不完整事实",
-                )
+            d1_matches = len(existing_d1) == len(d1_rows) and all(
+                _row_matches(expected, actual)
+                for expected, actual in zip(d1_rows, existing_d1, strict=True)
+            )
             any_existing = any_existing or bool(existing_d1)
-            existing_scopes.append(len(existing_d1) == len(d1_rows))
+            existing_scopes.append(d1_matches)
             expected_rows["source_d1_structure_day_facts"] = len(d1_rows)
-            if not existing_d1:
+            if not d1_matches:
                 inserted["source_d1_structure_day_facts"] = _insert_rows(
                     cursor,
                     "source_d1_structure_day_facts",
@@ -1443,11 +1330,8 @@ def _read_selected_board_observation(
     if history_session_count is not None:
         seed_scope_predicate += " AND s.history_session_count=%s"
         seed_scope_parameters.append(history_session_count)
-    if profile_revision is not None:
-        seed_scope_predicate += " AND s.profile_revision=%s"
-        seed_scope_parameters.append(profile_revision)
     cursor.execute(
-        "SELECT s.profile_revision, s.producer_contract, s.producer_version, "
+        "SELECT NULL::text AS profile_revision, s.producer_contract, s.producer_version, "
         "s.history_session_count, s.calendar_id, s.calendar_revision, "
         "s.research_mode, s.price_coordinate, count(*)::bigint, "
         "count(DISTINCT s.source_symbol)::bigint, "
@@ -1459,7 +1343,6 @@ def _read_selected_board_observation(
         "WHERE p.target_session=s.target_session "
         "AND p.source_capture_id=s.source_capture_id "
         "AND p.source_symbol=s.source_symbol "
-        "AND p.profile_revision=s.profile_revision "
         "AND p.history_window_start=s.history_window_start "
         "AND p.history_window_end=s.history_window_end "
         "AND p.history_requested_session_count=s.history_session_count "
@@ -1470,10 +1353,10 @@ def _read_selected_board_observation(
         "AND p.price_coordinate=s.price_coordinate))::bigint "
         "FROM source_pool_seed_day_facts s "
         f"WHERE {seed_scope_predicate} "
-        "GROUP BY s.profile_revision, s.producer_contract, s.producer_version, "
+        "GROUP BY s.producer_contract, s.producer_version, "
         "s.history_session_count, s.calendar_id, s.calendar_revision, "
         "s.research_mode, s.price_coordinate "
-        "ORDER BY s.profile_revision, s.producer_contract, s.producer_version, "
+        "ORDER BY s.producer_contract, s.producer_version, "
         "s.history_session_count",
         tuple(seed_scope_parameters),
     )
@@ -1482,7 +1365,6 @@ def _read_selected_board_observation(
         seed_scopes,
         expected_source_count=len(target_source_symbols),
         history_session_count=history_session_count,
-        profile_revision=profile_revision,
     )
     seed_scope = None
     seed_scope_status = "NOT_COMPUTED"
@@ -1510,14 +1392,14 @@ def _read_selected_board_observation(
             "rps20_numerator, rps20_denominator, rps20_quality "
             "FROM source_pool_seed_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s "
-            "AND profile_revision=%s AND producer_contract=%s AND producer_version=%s "
+            "AND producer_contract=%s AND producer_version=%s "
             "AND history_session_count=%s AND calendar_id=%s AND calendar_revision=%s "
             "AND research_mode=%s AND price_coordinate=%s AND source_symbol=ANY(%s) "
             "ORDER BY source_symbol",
             (
                 target_session,
                 source_capture_id,
-                *seed_scope[:8],
+                *seed_scope[1:8],
                 symbols,
             ),
         )
@@ -1846,11 +1728,6 @@ def read_source_research_day(
         and (
             type(history_session_count) is not int
             or not 1 <= history_session_count <= 250
-        )
-        or profile_revision is not None
-        and (
-            not isinstance(profile_revision, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         )
         or type(offset) is not int
         or offset < 0
@@ -2600,37 +2477,22 @@ def read_source_research_day_scope(
                 "ddl_executed": False,
                 "dml_executed": False,
             }
-        scope_filter = ""
-        scope_filter_params: tuple[Any, ...] = ()
-        for column, value in (
-            ("cross_section_universe_capture_id", cross_section_universe_capture_id),
-            ("cross_section_universe_version", cross_section_universe_version),
-            ("cross_section_contract_version", cross_section_contract_version),
-        ):
-            if value is not None:
-                scope_filter += f" AND {column}=%s"
-                scope_filter_params += (value,)
         cursor.execute(
             "SELECT DISTINCT d1_history_session_count, target_capture_id, "
             "history_window_start, history_window_end, calendar_id, "
             "calendar_revision, producer_contract, producer_version, "
-            "material_change_contract, research_mode, price_coordinate, "
-            "cross_section_universe_capture_id, cross_section_universe_version, "
-            "cross_section_contract_version "
+            "material_change_contract, research_mode, price_coordinate "
             "FROM source_d1_structure_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s "
-            "AND producer_version=ANY(%s) " + scope_filter + " "
+            "AND producer_version=ANY(%s) "
             "ORDER BY d1_history_session_count, target_capture_id, "
             "history_window_start, history_window_end, calendar_id, calendar_revision, "
             "producer_contract, producer_version, material_change_contract, "
-            "research_mode, price_coordinate, cross_section_universe_capture_id, "
-            "cross_section_universe_version, cross_section_contract_version, "
-            "history_window_start, history_window_end",
+            "research_mode, price_coordinate",
             (
                 target_session,
                 source_capture_id,
                 list(_D1_SUPPORTED_PRODUCER_VERSIONS),
-                *scope_filter_params,
             ),
         )
         scopes = _select_preferred_d1_scopes(
@@ -2669,12 +2531,6 @@ def read_source_research_day_scope(
         "material_change_contract": scopes[0][8],
         "research_mode": scopes[0][9],
         "price_coordinate": scopes[0][10],
-        "cross_section_universe_capture_id": scopes[0][11],
-        "cross_section_universe_version": scopes[0][12],
-        "cross_section_contract_version": scopes[0][13],
-        "cross_section_scope_status": "BOUND"
-        if scopes[0][12] is not None
-        else "NOT_RECORDED_OR_UNAVAILABLE",
         "scope_count": 1,
         "database_write_attempted": False,
         "ddl_executed": False,
@@ -2707,11 +2563,6 @@ def read_source_board_comparison(
         and (
             type(history_session_count) is not int
             or not 1 <= history_session_count <= 250
-        )
-        or profile_revision is not None
-        and (
-            not isinstance(profile_revision, str)
-            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         )
         or not isinstance(snapshot_ids, Mapping)
         or set(snapshot_ids) != {"INDUSTRY", "CONCEPT"}
@@ -2938,11 +2789,8 @@ def read_source_board_comparison(
         if history_session_count is not None:
             seed_scope_predicate += " AND s.history_session_count=%s"
             seed_scope_parameters.append(history_session_count)
-        if profile_revision is not None:
-            seed_scope_predicate += " AND s.profile_revision=%s"
-            seed_scope_parameters.append(profile_revision)
         cursor.execute(
-            "SELECT s.profile_revision,s.producer_contract,s.producer_version,"
+            "SELECT NULL::text AS profile_revision,s.producer_contract,s.producer_version,"
             "s.history_session_count,s.calendar_id,s.calendar_revision,"
             "s.research_mode,s.price_coordinate,count(*)::bigint,"
             "count(DISTINCT s.source_symbol)::bigint,"
@@ -2954,7 +2802,6 @@ def read_source_board_comparison(
             "WHERE p.target_session=s.target_session "
             "AND p.source_capture_id=s.source_capture_id "
             "AND p.source_symbol=s.source_symbol "
-            "AND p.profile_revision=s.profile_revision "
             "AND p.history_window_start=s.history_window_start "
             "AND p.history_window_end=s.history_window_end "
             "AND p.history_requested_session_count=s.history_session_count "
@@ -2963,17 +2810,18 @@ def read_source_board_comparison(
             "strpos('+' || p.history_calendar_revision || '+', '+' || "
             "to_char(s.target_session, 'YYYY') || ':' || s.calendar_revision || '+') > 0) "
             "AND p.price_coordinate=s.price_coordinate))::bigint, "
-            "s.cross_section_universe_capture_id,s.cross_section_universe_version,"
-            "s.cross_section_contract_version,s.universe_match_status,"
+            "NULL::bigint AS cross_section_universe_capture_id,"
+            "NULL::text AS cross_section_universe_version,"
+            "NULL::text AS cross_section_contract_version,"
+            "NULL::text AS universe_match_status,"
             "s.ranking_universe_count,s.evaluation_universe_count "
             "FROM source_pool_seed_day_facts s "
             f"WHERE {seed_scope_predicate} "
-            "GROUP BY s.profile_revision,s.producer_contract,s.producer_version,"
+            "GROUP BY s.producer_contract,s.producer_version,"
             "s.history_session_count,s.calendar_id,s.calendar_revision,"
-            "s.research_mode,s.price_coordinate,s.cross_section_universe_capture_id,"
-            "s.cross_section_universe_version,s.cross_section_contract_version,"
-            "s.universe_match_status,s.ranking_universe_count,s.evaluation_universe_count "
-            "ORDER BY s.profile_revision,s.producer_version,s.history_session_count",
+            "s.research_mode,s.price_coordinate,"
+            "s.ranking_universe_count,s.evaluation_universe_count "
+            "ORDER BY s.producer_version,s.history_session_count",
             tuple(seed_scope_parameters),
         )
         seed_scopes = cursor.fetchall()
@@ -2981,7 +2829,6 @@ def read_source_board_comparison(
             seed_scopes,
             expected_source_count=len(source_symbols),
             history_session_count=history_session_count,
-            profile_revision=profile_revision,
         )
         seed_scope = None
         seed_by_symbol: dict[str, str] = {}
@@ -2997,20 +2844,16 @@ def read_source_board_comparison(
                 cursor.execute(
                     "SELECT source_symbol,source_seed_state FROM source_pool_seed_day_facts "
                     "WHERE target_session=%s AND source_capture_id=%s "
-                    "AND profile_revision=%s AND producer_contract=%s AND producer_version=%s "
+                    "AND producer_contract=%s AND producer_version=%s "
                     "AND history_session_count=%s AND calendar_id=%s AND calendar_revision=%s "
                     "AND research_mode=%s AND price_coordinate=%s "
-                    "AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s "
-                    "AND cross_section_universe_version IS NOT DISTINCT FROM %s "
-                    "AND cross_section_contract_version IS NOT DISTINCT FROM %s "
-                    "AND universe_match_status IS NOT DISTINCT FROM %s "
                     "AND ranking_universe_count IS NOT DISTINCT FROM %s "
                     "AND evaluation_universe_count IS NOT DISTINCT FROM %s",
                     (
                         target_session,
                         source_capture_id,
-                        *seed_scope[:8],
-                        *seed_scope[12:18],
+                        *seed_scope[1:8],
+                        *seed_scope[16:18],
                     ),
                 )
                 rows = cursor.fetchall()
@@ -3022,6 +2865,7 @@ def read_source_board_comparison(
                     else "INCOMPLETE"
                 )
             else:
+                seed_scope = None
                 seed_status = "UNKNOWN"
         elif len(complete_seed_scopes) > 1 or len(candidate_seed_scopes) > 1:
             seed_status = "AMBIGUOUS"
@@ -3032,16 +2876,12 @@ def read_source_board_comparison(
             "SELECT DISTINCT d1_history_session_count,calendar_id,"
             "calendar_revision,producer_contract,producer_version,"
             "material_change_contract,research_mode,price_coordinate,"
-            "history_window_start,history_window_end,"
-            "cross_section_universe_capture_id,cross_section_universe_version,"
-            "cross_section_contract_version "
+            "history_window_start,history_window_end "
             "FROM source_d1_structure_day_facts "
             "WHERE target_session=%s AND source_capture_id=%s AND target_capture_id=%s "
             "AND producer_version=ANY(%s) AND d1_history_session_count=%s "
             "ORDER BY calendar_revision,producer_contract,producer_version,"
-            "history_window_start,history_window_end,"
-            "cross_section_universe_capture_id,cross_section_universe_version,"
-            "cross_section_contract_version",
+            "history_window_start,history_window_end",
             (
                 target_session,
                 source_capture_id,
@@ -3076,9 +2916,6 @@ def read_source_board_comparison(
                     "AND material_change_contract=%s AND research_mode=%s "
                     "AND price_coordinate=%s AND history_window_start=%s "
                     "AND history_window_end=%s "
-                    "AND cross_section_universe_capture_id IS NOT DISTINCT FROM %s "
-                    "AND cross_section_universe_version IS NOT DISTINCT FROM %s "
-                    "AND cross_section_contract_version IS NOT DISTINCT FROM %s "
                     "GROUP BY source_symbol",
                     (
                         target_session,
@@ -3090,9 +2927,6 @@ def read_source_board_comparison(
                         *d1_scope[3:8],
                         d1_scope[8],
                         d1_scope[9],
-                        d1_scope[10],
-                        d1_scope[11],
-                        d1_scope[12],
                     ),
                 )
                 rows = cursor.fetchall()

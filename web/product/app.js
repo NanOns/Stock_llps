@@ -2347,14 +2347,10 @@ async function loadD0PulseDirectoryPage() {
   try {
     if (context.profileResolution) await context.profileResolution;
     if (token !== state.d0PulseRequest || state.selected !== context) return;
-    if (
-      !context.profile_revision ||
-      !context.industry_snapshot_id ||
-      !context.concept_snapshot_id
-    ) {
+    if (!context.industry_snapshot_id || !context.concept_snapshot_id) {
       state.d0PulseDirectory = {
         status: "NOT_COMPUTED",
-        reason_codes: ["PULSE_DIRECTORY_PROFILE_OR_SNAPSHOT_NOT_BOUND"],
+        reason_codes: ["PULSE_DIRECTORY_SNAPSHOT_NOT_BOUND"],
       };
       renderD0Boards();
       return;
@@ -2362,10 +2358,6 @@ async function loadD0PulseDirectoryPage() {
     const query = new URLSearchParams({
       target_session: context.target_session,
       research_cutoff: context.research_cutoff,
-      source_capture_id: String(context.source_capture_id),
-      profile_revision: context.profile_revision,
-      industry_snapshot_id: String(context.industry_snapshot_id),
-      concept_snapshot_id: String(context.concept_snapshot_id),
       board_kind: $("d0BoardKind").value,
       search: $("d0BoardSearch").value.trim(),
       offset: String(state.d0BoardPage * 15),
@@ -5200,7 +5192,6 @@ async function openD0Board(board, offset = 0) {
       return;
     const researchQuery = {
       target_session: c.target_session,
-      source_capture_id: c.source_capture_id,
       d1_history_session_count: Number.isInteger(c.d1_history_session_count)
         ? c.d1_history_session_count
         : c.stock_history_session_count || c.source_history_session_count || 1,
@@ -5208,11 +5199,9 @@ async function openD0Board(board, offset = 0) {
       concept_snapshot_id: c.concept_snapshot_id,
       ...(Number.isInteger(c.stock_history_session_count) &&
       c.stock_history_session_count >= 1 &&
-      c.stock_history_session_count <= 250 &&
-      typeof c.profile_revision === "string"
+      c.stock_history_session_count <= 250
         ? {
             history_session_count: c.stock_history_session_count,
-            profile_revision: c.profile_revision,
           }
         : {}),
       board_kind: board.board_kind,
@@ -5241,10 +5230,6 @@ async function openD0Board(board, offset = 0) {
     let pulseFollowup = pulseBoard?.cross_period_pulse_followup;
     let pulseHistory = null;
     try {
-      if (!pulse?.profile_revision && c.profileResolution)
-        await c.profileResolution;
-      const historyProfileRevision =
-        pulse?.profile_revision || c.profile_revision;
       const historySnapshotId =
         pulse?.snapshot_id ||
         board.snapshot_id ||
@@ -5252,21 +5237,18 @@ async function openD0Board(board, offset = 0) {
           ? c.industry_snapshot_id
           : c.concept_snapshot_id);
       if (
-        !historyProfileRevision ||
         !Number.isInteger(Number(historySnapshotId)) ||
         Number(historySnapshotId) <= 0 ||
         !c.research_cutoff
       ) {
         pulseHistory = {
           status: "NOT_COMPUTED",
-          reason_codes: ["PULSE_HISTORY_PROFILE_OR_SNAPSHOT_NOT_BOUND"],
+          reason_codes: ["PULSE_HISTORY_SNAPSHOT_NOT_BOUND"],
         };
       } else {
         const historyQuery = new URLSearchParams({
           target_session: c.target_session,
           research_cutoff: c.research_cutoff,
-          source_capture_id: String(c.source_capture_id),
-          profile_revision: historyProfileRevision,
           snapshot_id: String(Number(historySnapshotId)),
           board_kind: board.board_kind,
           board_native_id: board.board_native_id,

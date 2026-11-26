@@ -190,7 +190,6 @@ def _select_adjacent_seed_scope_pair(
         if len(scope) >= 18
         and scope[4] == _SEED_PRODUCER_VERSION
         and (history_session_count is None or scope[5] == history_session_count)
-        and (profile_revision is None or scope[2] == profile_revision)
     ]
     current_candidates = [scope for scope in target_matches if complete(scope)]
     if not current_candidates:
@@ -483,7 +482,7 @@ def _read_source_context(
     if not reasons and source_symbols_by_day:
         cursor.execute(
             """SELECT s.target_session,s.source_capture_id,
-                      s.profile_revision,s.producer_contract,s.producer_version,
+                      ''::text,s.producer_contract,s.producer_version,
                       s.history_session_count,s.calendar_id,s.calendar_revision,
                       s.research_mode,s.price_coordinate,s.history_window_start,
                       s.history_window_end,s.source_time_quality,s.source_clock_role,
@@ -500,7 +499,6 @@ def _read_source_context(
                           WHERE p.target_session=s.target_session
                             AND p.source_capture_id=s.source_capture_id
                             AND p.source_symbol=s.source_symbol
-                            AND p.profile_revision=s.profile_revision
                             AND p.history_window_start=s.history_window_start
                             AND p.history_window_end=s.history_window_end
                             AND p.history_requested_session_count=s.history_session_count
@@ -514,11 +512,11 @@ def _read_source_context(
                WHERE s.source_capture_id=%s AND s.target_session=ANY(%s::date[])
                  AND s.producer_version=%s
                GROUP BY s.target_session,s.source_capture_id,
-                        s.profile_revision,s.producer_contract,s.producer_version,
+                        s.producer_contract,s.producer_version,
                         s.history_session_count,s.calendar_id,s.calendar_revision,
                         s.research_mode,s.price_coordinate,s.history_window_start,
                         s.history_window_end,s.source_time_quality,s.source_clock_role
-               ORDER BY s.target_session,s.source_capture_id,s.profile_revision""",
+               ORDER BY s.target_session,s.source_capture_id""",
             (
                 source_capture_id,
                 [previous, target],
@@ -672,7 +670,6 @@ def _read_ranked_relation_metrics(
                  ON s.target_session=ss.session_date
                 AND s.source_capture_id=ss.capture_id
                 AND s.source_symbol=m.source_symbol
-                AND s.profile_revision=ss.profile_revision
                 AND s.producer_contract=ss.producer_contract
                 AND s.producer_version=ss.producer_version
                 AND s.history_session_count=ss.history_session_count
@@ -906,9 +903,7 @@ def persist_source_rps_pulse_t0_change_facts(
             or not 1 <= history_session_count <= 250
         )
         or profile_revision is not None
-        and (not isinstance(profile_revision, str) or not profile_revision)
-        or profile_revision is not None
-        and history_session_count is None
+        and not isinstance(profile_revision, str)
     ):
         raise ValueError("RPS×PULSE离线生产的T0、前态、截止或捕获ID无效")
     official_positions = {
@@ -1241,7 +1236,7 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
 
     cursor.execute(
         """WITH cohort_scope_candidates AS MATERIALIZED (
-               SELECT s.target_session,s.source_capture_id,s.profile_revision,
+               SELECT s.target_session,s.source_capture_id,
                       s.history_session_count,s.d1_history_session_count,
                       s.event_window_start,s.calendar_revision
                FROM source_cohort_group_stats s
@@ -1249,14 +1244,14 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
                  AND s.rule_id=%s AND s.rule_version=%s
                  AND s.path_rule_version=%s AND s.horizon=%s
                  AND s.target_session<=%s
-               GROUP BY s.target_session,s.source_capture_id,s.profile_revision,
+               GROUP BY s.target_session,s.source_capture_id,
                         s.history_session_count,s.d1_history_session_count,
                         s.event_window_start,s.calendar_revision
                HAVING count(*)=6
                   AND count(DISTINCT (s.state,s.weighting))=6
                   AND count(DISTINCT s.source_pool_count)=1
            ), cohort_scopes AS MATERIALIZED (
-               SELECT target_session,source_capture_id,profile_revision,
+               SELECT target_session,source_capture_id,
                       history_session_count,d1_history_session_count,
                       event_window_start,calendar_revision
                FROM (
@@ -1293,7 +1288,6 @@ def _read_saved_rps_pulse_t0_date_counts_cursor(
             AND r.target_session=o.target_session
             AND r.source_capture_id=o.source_capture_id
             AND r.rule_version=%s AND r.rule_id=%s
-            AND r.profile_revision=s.profile_revision
             AND r.history_session_count=s.history_session_count
             AND r.d1_history_session_count=s.d1_history_session_count
             AND r.event_window_start=s.event_window_start
@@ -1472,7 +1466,7 @@ def read_rps_pulse_forward_groups_cursor(
     target: date,
     research_cutoff: date,
     source_capture_id: int,
-    profile_revision: str,
+    profile_revision: str | None = None,
     history_session_count: int,
     d1_history_session_count: int,
     event_window_start: date,
@@ -1534,7 +1528,7 @@ def read_rps_pulse_forward_groups_cursor(
              AND r.target_session=o.target_session
              AND r.source_capture_id=o.source_capture_id
              AND r.rule_version=%s AND r.rule_id=%s
-             AND r.profile_revision=%s AND r.history_session_count=%s
+             AND r.history_session_count=%s
              AND r.d1_history_session_count=%s AND r.event_window_start=%s
              AND r.calendar_revision=%s AND o.membership_status='MAPPED'
              AND o.board_kind IN ('INDUSTRY','CONCEPT')
@@ -1548,7 +1542,6 @@ def read_rps_pulse_forward_groups_cursor(
             source_capture_id,
             RULE_VERSION,
             rule_id,
-            profile_revision,
             history_session_count,
             d1_history_session_count,
             event_window_start,
@@ -1694,7 +1687,6 @@ def read_rps_pulse_forward_groups_cursor(
              AND r.target_session=o.target_session
              AND r.source_capture_id=o.source_capture_id
              AND r.rule_version=%s AND r.rule_id=%s
-             AND r.profile_revision=%s
              AND r.history_session_count=%s
              AND r.d1_history_session_count=%s
              AND r.event_window_start=%s AND r.calendar_revision=%s
@@ -1712,7 +1704,6 @@ def read_rps_pulse_forward_groups_cursor(
             source_capture_id,
             RULE_VERSION,
             rule_id,
-            profile_revision,
             history_session_count,
             d1_history_session_count,
             event_window_start,
@@ -1760,7 +1751,7 @@ def read_rps_pulse_forward_groups_cursor(
              AND o.source_capture_id=r.source_capture_id
            WHERE r.target_session=%s AND r.source_capture_id=%s
              AND r.rule_version=%s AND r.rule_id=%s
-             AND r.profile_revision=%s AND r.history_session_count=%s
+             AND r.history_session_count=%s
              AND r.d1_history_session_count=%s AND r.event_window_start=%s
              AND r.calendar_revision=%s {rule_state_clause}""",
         (
@@ -1772,7 +1763,6 @@ def read_rps_pulse_forward_groups_cursor(
             source_capture_id,
             RULE_VERSION,
             rule_id,
-            profile_revision,
             history_session_count,
             d1_history_session_count,
             event_window_start,

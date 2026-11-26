@@ -32,7 +32,6 @@ def register_commands(commands):
     sector_query.add_argument("--target-session", required=True)
     sector_query.add_argument("--research-cutoff", required=True)
     sector_query.add_argument("--source-capture-id", type=int, required=True)
-    sector_query.add_argument("--profile-revision")
     sector_query.add_argument("--offset", type=int, default=0)
     sector_query.add_argument("--limit", type=int, default=100)
     sector_breadth = sector_actions.add_parser(
@@ -49,9 +48,7 @@ def register_commands(commands):
     sector_breadth.add_argument("--after-session", required=True)
     sector_breadth.add_argument("--research-cutoff", required=True)
     sector_breadth.add_argument("--before-source-capture-id", type=int, required=True)
-    sector_breadth.add_argument("--before-profile-revision", required=True)
     sector_breadth.add_argument("--after-source-capture-id", type=int, required=True)
-    sector_breadth.add_argument("--after-profile-revision", required=True)
     sector_breadth.add_argument("--offset", type=int, default=0)
     sector_breadth.add_argument("--limit", type=int, default=30)
     sector_breadth.add_argument("--member-offset", type=int, default=0)
@@ -87,7 +84,6 @@ def register_commands(commands):
     sector_strength.add_argument("--target-session", required=True)
     sector_strength.add_argument("--research-cutoff", required=True)
     sector_strength.add_argument("--source-capture-id", type=int, required=True)
-    sector_strength.add_argument("--profile-revision")
     sector_strength.add_argument(
         "--rotation-start",
         help="按后验固定成员研究从该官方会话至目标日的Rotation候选；需指定板块编号",
@@ -131,7 +127,6 @@ def register_commands(commands):
         "--research-cutoff", required=True, help="显式研究截止会话YYYY-MM-DD"
     )
     sector_change_stocks.add_argument("--source-capture-id", type=int, required=True)
-    sector_change_stocks.add_argument("--profile-revision")
     sector_change_stocks.add_argument(
         "--include-source-seed-board",
         action="store_true",

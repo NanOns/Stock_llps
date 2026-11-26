@@ -296,54 +296,67 @@ def _persist_market_breadth_once(
                 "宽度事实与唯一BaoStock捕获、证券集合或完整分母不一致",
             )
         cursor.execute(
-            f"SELECT id,{', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}",
-            key,
+            f"SELECT id,{', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE target_session=%s",
+            (target_session,),
         )
         existing_day = cursor.fetchall()
-        day_existed = bool(existing_day)
-        if not existing_day:
-            _insert_rows(cursor, _DAY_TABLE, _DAY_COLUMNS, _KEY, [day])
+        day_matches = len(existing_day) == 1 and _row_matches(day, existing_day[0][1:])
+        rows_match = False
+        if day_matches:
+            parent_id = existing_day[0][0]
+            expected_with_parent = [(parent_id, *row) for row in rows]
             cursor.execute(
-                f"SELECT id,{', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}",
-                key,
+                f"SELECT {', '.join(_SYMBOL_COLUMNS)} FROM {_SYMBOL_TABLE} WHERE target_session=%s ORDER BY source_symbol",
+                (target_session,),
             )
-            existing_day = cursor.fetchall()
-        if len(existing_day) != 1 or not _row_matches(day, existing_day[0][1:]):
-            raise MarketBreadthPgError(
-                "MARKET_BREADTH_CONTENT_CONFLICT", "市场宽度父记录缺失或同键内容不一致"
-            )
-        parent_id = existing_day[0][0]
-        rows = [(parent_id, *row) for row in rows]
-        cursor.execute(
-            f"SELECT {', '.join(_SYMBOL_COLUMNS)} FROM {_SYMBOL_TABLE} WHERE {_SCOPE} ORDER BY source_symbol",
-            key,
-        )
-        existing_rows = cursor.fetchall()
-        if day_existed and not existing_rows:
-            raise MarketBreadthPgError(
-                "MARKET_BREADTH_CONTENT_CONFLICT", "既存宽度父记录缺少逐股事实"
-            )
-        if existing_rows:
-            if len(existing_rows) != len(rows) or any(
-                not _row_matches(expected, actual)
-                for expected, actual in zip(rows, existing_rows, strict=True)
-            ):
-                raise MarketBreadthPgError(
-                    "MARKET_BREADTH_CONTENT_CONFLICT",
-                    "既存宽度范围不完整或同一捕获业务键对应异内容",
+            existing_rows = cursor.fetchall()
+            if len(existing_rows) == len(expected_with_parent) and all(
+                _row_matches(expected, actual)
+                for expected, actual in zip(
+                    expected_with_parent, existing_rows, strict=True
                 )
+            ):
+                rows_match = True
+
+        if day_matches and rows_match:
+            rows = expected_with_parent
             inserted = 0
         else:
+            cursor.execute(
+                f"DELETE FROM {_SYMBOL_TABLE} WHERE target_session=%s",
+                (target_session,),
+            )
+            if existing_day:
+                day_update_cols = [c for c in _DAY_COLUMNS if c != "target_session"]
+                day_updates = ", ".join(f"{c}=EXCLUDED.{c}" for c in day_update_cols)
+                cursor.execute(
+                    f"""INSERT INTO {_DAY_TABLE} ({", ".join(_DAY_COLUMNS)})
+                        VALUES ({", ".join(["%s"] * len(_DAY_COLUMNS))})
+                        ON CONFLICT (target_session) DO UPDATE SET {day_updates}
+                        RETURNING id""",
+                    day,
+                )
+                parent_id = cursor.fetchone()[0]
+            else:
+                _insert_rows(
+                    cursor, _DAY_TABLE, _DAY_COLUMNS, ("target_session",), [day]
+                )
+                cursor.execute(
+                    f"SELECT id FROM {_DAY_TABLE} WHERE target_session=%s",
+                    (target_session,),
+                )
+                parent_id = cursor.fetchone()[0]
+            rows = [(parent_id, *row) for row in rows]
             inserted = _insert_rows(
                 cursor,
                 _SYMBOL_TABLE,
                 _SYMBOL_COLUMNS,
-                (*_KEY, "source_symbol"),
+                ("target_session", "source_symbol"),
                 rows,
             )
         cursor.execute(
-            f"SELECT {', '.join(_SYMBOL_COLUMNS)} FROM {_SYMBOL_TABLE} WHERE {_SCOPE} ORDER BY source_symbol",
-            key,
+            f"SELECT {', '.join(_SYMBOL_COLUMNS)} FROM {_SYMBOL_TABLE} WHERE target_session=%s ORDER BY source_symbol",
+            (target_session,),
         )
         persisted = cursor.fetchall()
         if len(persisted) != len(rows) or any(
@@ -502,23 +515,25 @@ def _persist_market_breadth_change(
                 "可比较变化缺少唯一精确前态宽度父事实",
             )
     row = _change_row(breadth_change)
-    key = tuple(row[_CHANGE_COLUMNS.index(name)] for name in _CHANGE_KEY)
-    predicate = " AND ".join(f"{name}=%s" for name in _CHANGE_KEY)
+    target_session = breadth_change["target_session"]
     cursor.execute(
-        f"SELECT {', '.join(_CHANGE_COLUMNS)} FROM {_CHANGE_TABLE} WHERE {predicate}",
-        key,
+        f"SELECT {', '.join(_CHANGE_COLUMNS)} FROM {_CHANGE_TABLE} WHERE target_session=%s",
+        (target_session,),
     )
     existing = cursor.fetchall()
-    if not existing:
-        _insert_rows(cursor, _CHANGE_TABLE, _CHANGE_COLUMNS, _CHANGE_KEY, [row])
-    elif len(existing) != 1 or not _row_matches(row, existing[0]):
-        raise MarketBreadthPgError(
-            "MARKET_BREADTH_CHANGE_CONTENT_CONFLICT",
-            "相同相邻日宽度比较业务键已有不同或重复内容",
+    unchanged = len(existing) == 1 and _row_matches(row, existing[0])
+    if not unchanged:
+        change_update_cols = [c for c in _CHANGE_COLUMNS if c != "target_session"]
+        change_updates = ", ".join(f"{c}=EXCLUDED.{c}" for c in change_update_cols)
+        cursor.execute(
+            f"""INSERT INTO {_CHANGE_TABLE} ({", ".join(_CHANGE_COLUMNS)})
+                VALUES ({", ".join(["%s"] * len(_CHANGE_COLUMNS))})
+                ON CONFLICT (target_session) DO UPDATE SET {change_updates}""",
+            row,
         )
     cursor.execute(
-        f"SELECT {', '.join(_CHANGE_COLUMNS)} FROM {_CHANGE_TABLE} WHERE {predicate}",
-        key,
+        f"SELECT {', '.join(_CHANGE_COLUMNS)} FROM {_CHANGE_TABLE} WHERE target_session=%s",
+        (target_session,),
     )
     readback = cursor.fetchall()
     if len(readback) != 1 or not _row_matches(row, readback[0]):
@@ -527,12 +542,12 @@ def _persist_market_breadth_change(
             "市场宽度变化事实事务内读回不一致",
         )
     return {
-        "status": "WRITTEN" if not existing else "IDEMPOTENT_ALREADY_PRESENT",
+        "status": "IDEMPOTENT_ALREADY_PRESENT" if unchanged else "WRITTEN",
         "comparison_status": breadth_change["comparison_status"],
         "before_session": breadth_change["before_session"].isoformat(),
         "target_session": breadth_change["target_session"].isoformat(),
         "rows": 1,
-        "inserted_rows": int(not existing),
+        "inserted_rows": int(not unchanged),
     }
 
 

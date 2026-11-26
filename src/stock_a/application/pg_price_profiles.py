@@ -9,9 +9,6 @@ from fractions import Fraction
 import re
 from typing import Any, Mapping, Sequence
 
-from stock_a.contracts.profile_revision import (
-    profile_revision as _window_profile_revision,
-)
 from stock_a.canonical.adjustment_periods import PERIOD_AGGREGATION_VERSION
 from stock_a.application.pg_research import (
     PgResearchBindingError,
@@ -142,28 +139,6 @@ def _validate_profile_semantics(profile_contract: Mapping[str, Any]) -> None:
         raise PgPriceProfileError("PROFILE_SEMANTICS_UNBOUND", "Profile规则登记不完整")
 
 
-def _profile_revision(
-    *,
-    scope: str,
-    calendar_id: str,
-    calendar_revision: str,
-    history_session_count: int,
-) -> str:
-    if (
-        scope != SOURCE_SYMBOL_PROFILE_SCOPE
-        or not isinstance(calendar_id, str)
-        or not calendar_id
-        or not isinstance(calendar_revision, str)
-        or not calendar_revision
-        or type(history_session_count) is not int
-        or not 1 <= history_session_count <= PG_PROFILE_MAX_HISTORY_SESSIONS
-    ):
-        raise PgPriceProfileError("PROFILE_REVISION_INPUT_INVALID", "画像修订入参无效")
-    return _window_profile_revision(
-        _PROFILE_REVISION, history_session_count, calendar_id, calendar_revision
-    )
-
-
 def _resolve_suspension_status(target_row: Mapping[str, Any]) -> str:
     """根据同捕获同日 BaoStock raw_tradestatus 字段推导目标日停牌状态。"""
     if target_row.get("raw_tradestatus_quality") == "OBSERVED":
@@ -181,9 +156,7 @@ def _records_for_page(
     preview: Mapping[str, Any],
     target_session: date,
     source_capture_id: int,
-    profile_revision: str,
     source_context: Mapping[str, Any],
-    cross_section_scope: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
     candidates = {item["source_symbol"]: item for item in page.get("candidates", ())}
     records: list[dict[str, Any]] = []
@@ -222,25 +195,9 @@ def _records_for_page(
             "market": candidate["market"],
             "board": candidate["board"],
             "target_session": target_session,
-            "profile_revision": profile_revision,
             "calculation_scope": SOURCE_SYMBOL_PROFILE_SCOPE,
             "producer_contract": _PRODUCER_CONTRACT,
             "producer_version": _PRODUCER_SEMANTICS_VERSION,
-            "cross_section_universe_capture_id": (
-                cross_section_scope.get("universe_capture_id")
-                if cross_section_scope is not None
-                else None
-            ),
-            "cross_section_universe_version": (
-                cross_section_scope.get("universe_version")
-                if cross_section_scope is not None
-                else None
-            ),
-            "cross_section_contract_version": (
-                cross_section_scope.get("contract_version")
-                if cross_section_scope is not None
-                else None
-            ),
             "price_coordinate": "FORWARD_ADJUSTED",
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
@@ -621,14 +578,10 @@ def run_source_symbol_price_profile(
             config,
             target_session=target_session,
             price_capture_id=source_capture_id,
-            universe_version=cross_section_universe_version,
             universe_capture_id=cross_section_universe_capture_id,
             calendar_revision=calendar_revision,
         )
-        explicit_cross_section_scope = (
-            cross_section_universe_version is not None
-            or cross_section_universe_capture_id is not None
-        )
+        explicit_cross_section_scope = cross_section_universe_capture_id is not None
         if cross_section_bundle.get("status") == "INCOMPLETE":
             raise PgPriceProfileError(
                 "PROFILE_CROSS_SECTION_SCOPE_AMBIGUOUS_OR_INCOMPLETE",
@@ -640,7 +593,7 @@ def run_source_symbol_price_profile(
         ):
             raise PgPriceProfileError(
                 "PROFILE_CROSS_SECTION_SCOPE_NOT_FOUND",
-                "指定横截面Universe版本/捕获没有唯一完整事实",
+                "指定横截面没有唯一完整事实",
             )
         if cross_section_bundle.get("status") != "AVAILABLE":
             cross_section_bundle = None
@@ -675,11 +628,7 @@ def run_source_symbol_price_profile(
                 preview=preview,
                 target_session=target_session,
                 source_capture_id=source_capture_id,
-                profile_revision=_PROFILE_REVISION,
                 source_context=source_context,
-                cross_section_scope=(
-                    cross_section_bundle if cross_section_bundle is not None else None
-                ),
             )
             consumer_failures += sum(
                 item.get("consumer_status") == "CONSUMER_FAILED"
@@ -693,22 +642,11 @@ def run_source_symbol_price_profile(
             raise PgPriceProfileError(
                 "PROFILE_BATCH_DENOMINATOR_MISMATCH", "全来源代码画像未一对一闭合"
             )
-        first_window = resolve_pg_history_window(
-            target_session.isoformat(), session_count
-        )[1]
         calendar_id = records[0]["history_calendar_id"] if records else ""
         if not calendar_id:
             raise PgPriceProfileError(
                 "PROFILE_CALENDAR_ID_MISSING", "现役Core窗口未返回正式日历身份"
             )
-        profile_revision = _profile_revision(
-            scope=scope,
-            calendar_id=calendar_id,
-            calendar_revision=calendar_revision,
-            history_session_count=len(first_window),
-        )
-        for record in records:
-            record["profile_revision"] = profile_revision
         result = persist_profile_records(config, records)
         result.update(
             {
@@ -727,27 +665,6 @@ def run_source_symbol_price_profile(
                 "source_zip_opened": False,
                 "baostock_called": False,
                 "formal_universe_status": "UNKNOWN_NOT_PROVED_BY_SOURCE_SYMBOLS",
-                "cross_section_scope": (
-                    {
-                        "universe_version": cross_section_bundle.get(
-                            "universe_version"
-                        ),
-                        "universe_capture_id": cross_section_bundle.get(
-                            "universe_capture_id"
-                        ),
-                        "contract_version": cross_section_bundle.get(
-                            "contract_version"
-                        ),
-                        "status": cross_section_bundle.get("status"),
-                    }
-                    if cross_section_bundle is not None
-                    else {
-                        "universe_version": None,
-                        "universe_capture_id": None,
-                        "contract_version": None,
-                        "status": "NOT_COMPUTED",
-                    }
-                ),
                 "pit_status": "NON_PIT_RETROSPECTIVE",
             }
         )
@@ -904,10 +821,7 @@ def read_source_symbol_price_profile_observation(
             selected.get("producer_version")
         )
         observation["profile_revision_selection"]["selected_version_match"] = (
-            str(selected.get("profile_revision", "")).startswith(
-                _PROFILE_REVISION + "|"
-            )
-            and selected.get("producer_version") == _PRODUCER_SEMANTICS_VERSION
+            selected.get("producer_version") == _PRODUCER_SEMANTICS_VERSION
         )
         observation["history_window"] = {
             "records_complete_rows": selected["history_records_complete_rows"],

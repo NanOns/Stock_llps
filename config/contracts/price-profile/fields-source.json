@@ -18,8 +18,7 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "source_symbol",
-          "source_capture_id"
+          "source_symbol"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -49,7 +48,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "calendar_version",
           "session_date"
         ],
         "context_dependencies": [
@@ -82,8 +80,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -116,8 +113,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -150,8 +146,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -184,8 +179,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -218,8 +212,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -252,8 +245,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -285,8 +277,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -320,7 +311,6 @@
         "business_key": [
           "source_symbol",
           "target_session",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -357,7 +347,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -394,7 +383,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -431,7 +419,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -468,7 +455,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -503,8 +489,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -537,8 +522,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "source_capture_id"
+          "session_date"
         ],
         "context_dependencies": [
           "context.target_session",
@@ -573,7 +557,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -610,7 +593,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -647,7 +629,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -684,7 +665,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [
@@ -721,7 +701,6 @@
         "business_key": [
           "source_symbol",
           "session_date",
-          "source_capture_id",
           "price_coordinate"
         ],
         "context_dependencies": [

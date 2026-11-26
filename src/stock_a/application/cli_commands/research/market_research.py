@@ -311,21 +311,13 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 price_damage_transition=args.price_damage_transition,
                 ma_slope20_transition=args.ma_slope20_transition,
                 before_source_package_id=args.before_source_package_id,
-                before_profile_revision=args.before_profile_revision,
                 after_source_package_id=args.after_source_package_id,
-                after_profile_revision=args.after_profile_revision,
             )
         elif args.action == "query":
-            if not all(
-                (
-                    args.target_session,
-                    args.source_package_id,
-                    args.profile_revision,
-                )
-            ):
+            if not args.target_session:
                 raise DiagnosticError(
                     "PROFILE_QUERY_KEY_REQUIRED",
-                    "画像查询必须显式指定目标日期、来源包数字ID和profile_revision",
+                    "画像查询必须显式指定目标日期",
                     _EXIT_ARGUMENT,
                 )
             if args.core_field is None and args.core_quality is not None:
@@ -339,7 +331,6 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 target_session=_parse_session_date(args.target_session),
                 max_target_session=max_target_session,
                 source_package_id=args.source_package_id,
-                profile_revision=args.profile_revision,
                 offset=args.offset,
                 limit=args.limit,
                 market=args.market,
@@ -478,8 +469,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
         else:
             for item in result.get("snapshots", ()):
                 sys.stdout.write(
-                    f"target={item['target_session']} package={item['source_package_id']} "
-                    f"revision={item['profile_revision']} "
+                    f"target={item['target_session']} package={item.get('source_package_id')} "
                     f"rows={item['source_symbol_count']}/{item['expected_source_symbol_count']} "
                     f"complete={item['complete']}\n"
                 )

@@ -25,7 +25,6 @@ _PROFILE_COLUMNS = (
     "producer_version",
     "price_coordinate",
     "pit_status",
-    "profile_revision",
     "history_calendar_id",
     "history_calendar_revision",
     "history_window_start",
@@ -45,7 +44,6 @@ _DAY_COLUMNS = (
     "target_session",
     "source_capture_id",
     "contract_version",
-    "profile_revision",
     "producer_contract",
     "producer_version",
     "source_time_quality",
@@ -73,13 +71,7 @@ _DAY_COLUMNS = (
     "classification",
     "status",
 )
-_KEY_COLUMNS = (
-    "target_session",
-    "source_capture_id",
-    "contract_version",
-    "profile_revision",
-    "producer_version",
-)
+_KEY_COLUMNS = ("target_session",)
 _REASON_COLUMNS = ("participation_day_id", "reason_code", "unknown_count")
 
 
@@ -101,24 +93,17 @@ def read_market_participation_profiles(
     source_capture_id: int,
     profile_revision: str | None = None,
 ) -> list[dict[str, Any]]:
-    """离线生产时一次性读取指定日期和BaoStock捕获的已存Profile。"""
+    """离线生产时一次性读取指定日期的已存Profile。"""
     if (
         type(target_session) is not date
         or type(source_capture_id) is not int
         or source_capture_id <= 0
-        or profile_revision is not None
-        and (not isinstance(profile_revision, str) or not profile_revision)
     ):
         raise MarketParticipationPgError(
             "MARKET_PARTICIPATION_INPUT_KEY_INVALID",
             "画像读取键必须是明确日期和来源捕获ID",
         )
     columns = ", ".join(_PROFILE_COLUMNS)
-    profile_scope = ""
-    parameters: tuple[Any, ...] = (target_session, source_capture_id)
-    if profile_revision is not None:
-        profile_scope = " AND profile_revision=%s"
-        parameters = (*parameters, profile_revision)
     try:
         with source_raw._transaction(
             config, write=False, statement_timeout_ms=30000
@@ -126,10 +111,10 @@ def read_market_participation_profiles(
             cursor.execute(
                 f"""SELECT {columns}
 FROM source_symbol_price_profiles
-WHERE target_session=%s AND source_capture_id=%s
-  AND price_coordinate='FORWARD_ADJUSTED'{profile_scope}
+WHERE target_session=%s
+  AND price_coordinate='FORWARD_ADJUSTED'
 ORDER BY source_symbol""",
-                parameters,
+                (target_session,),
             )
             return [
                 dict(zip(_PROFILE_COLUMNS, row, strict=True))
@@ -226,16 +211,41 @@ def persist_market_participation(
             expected_day = _expected_day_values(day)
             key = tuple(day[name] for name in _KEY_COLUMNS)
             cursor.execute(
-                f"""INSERT INTO {_DAY_TABLE} ({", ".join(_DAY_COLUMNS)})
-VALUES ({", ".join(["%s"] * len(_DAY_COLUMNS))})
-ON CONFLICT ({", ".join(_KEY_COLUMNS)}) DO NOTHING
-RETURNING id""",
-                expected_day,
+                f"""SELECT id, {", ".join(_DAY_COLUMNS)} FROM {_DAY_TABLE}
+WHERE {" AND ".join(f"{name}=%s" for name in _KEY_COLUMNS)}""",
+                key,
             )
-            inserted_id = cursor.fetchone()
-            inserted = inserted_id is not None
-            if inserted:
-                participation_day_id = int(inserted_id[0])
+            existing = cursor.fetchall()
+            unchanged = False
+            if len(existing) == 1 and tuple(existing[0][1:]) == expected_day:
+                participation_day_id = int(existing[0][0])
+                cursor.execute(
+                    f"""SELECT reason_code, unknown_count FROM {_REASON_TABLE}
+WHERE participation_day_id=%s ORDER BY reason_code""",
+                    (participation_day_id,),
+                )
+                if dict(cursor.fetchall()) == reason_counts:
+                    unchanged = True
+
+            if not unchanged:
+                update_columns = [
+                    name for name in _DAY_COLUMNS if name not in _KEY_COLUMNS
+                ]
+                update_sql = ", ".join(
+                    f"{name}=EXCLUDED.{name}" for name in update_columns
+                )
+                cursor.execute(
+                    f"""INSERT INTO {_DAY_TABLE} ({", ".join(_DAY_COLUMNS)})
+VALUES ({", ".join(["%s"] * len(_DAY_COLUMNS))})
+ON CONFLICT ({", ".join(_KEY_COLUMNS)}) DO UPDATE SET {update_sql}
+RETURNING id""",
+                    expected_day,
+                )
+                participation_day_id = int(cursor.fetchone()[0])
+                cursor.execute(
+                    f"DELETE FROM {_REASON_TABLE} WHERE participation_day_id=%s",
+                    (participation_day_id,),
+                )
                 if reason_counts:
                     cursor.executemany(
                         f"""INSERT INTO {_REASON_TABLE} ({", ".join(_REASON_COLUMNS)})
@@ -244,30 +254,6 @@ VALUES (%s, %s, %s)""",
                             (participation_day_id, reason, count)
                             for reason, count in reason_counts.items()
                         ],
-                    )
-            else:
-                cursor.execute(
-                    f"""SELECT id, {", ".join(_DAY_COLUMNS)} FROM {_DAY_TABLE}
-WHERE {" AND ".join(f"{name}=%s" for name in _KEY_COLUMNS)}""",
-                    key,
-                )
-                existing = cursor.fetchall()
-                if len(existing) != 1 or tuple(existing[0][1:]) != expected_day:
-                    raise MarketParticipationPgError(
-                        "MARKET_PARTICIPATION_CONTENT_CONFLICT",
-                        "同一成交参与业务键已有不同内容；事务已回滚",
-                    )
-                participation_day_id = int(existing[0][0])
-                cursor.execute(
-                    f"""SELECT reason_code, unknown_count FROM {_REASON_TABLE}
-WHERE participation_day_id=%s ORDER BY reason_code""",
-                    (participation_day_id,),
-                )
-                existing_reasons = dict(cursor.fetchall())
-                if existing_reasons != reason_counts:
-                    raise MarketParticipationPgError(
-                        "MARKET_PARTICIPATION_REASON_CONFLICT",
-                        "同一成交参与业务键的UNKNOWN原因分解不一致；事务已回滚",
                     )
 
             cursor.execute(
@@ -299,14 +285,13 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
         error.database_write_attempted = True
         raise
     return {
-        "status": "WRITTEN" if inserted else "IDEMPOTENT_ALREADY_PRESENT",
+        "status": "IDEMPOTENT_ALREADY_PRESENT" if unchanged else "WRITTEN",
         "target_session": day["target_session"].isoformat(),
         "source_capture_id": day["source_capture_id"],
-        "profile_revision": day["profile_revision"],
         "profile_count": day["profile_count"],
         "assessable_count": day["assessable_count"],
         "unknown_count": day["profile_unknown_count"] + day["profile_missing_count"],
-        "inserted_reason_rows": len(reason_counts) if inserted else 0,
+        "inserted_reason_rows": len(reason_counts) if not unchanged else 0,
         "transaction": "SERIALIZABLE_ATOMIC",
         "database_readback": "SAME_TRANSACTION_EXACT",
     }
@@ -356,21 +341,14 @@ def _read_market_participation_core(
     profile_revision: str | None = None,
     producer_version: str | None = None,
 ) -> dict[str, Any]:
-    if (
-        profile_revision is not None
-        and (not isinstance(profile_revision, str) or not profile_revision)
-    ) or (
-        producer_version is not None
-        and (not isinstance(producer_version, str) or not producer_version)
+    if producer_version is not None and (
+        not isinstance(producer_version, str) or not producer_version
     ):
         raise MarketParticipationPgError(
             "MARKET_PARTICIPATION_VERSION_INVALID", "成交参与读取版本键无效"
         )
     version_filter = ""
     version_parameters: tuple[Any, ...] = ()
-    if profile_revision is not None:
-        version_filter += " AND profile_revision=%s"
-        version_parameters += (profile_revision,)
     if producer_version is not None:
         version_filter += " AND producer_version=%s"
         version_parameters += (producer_version,)
@@ -380,12 +358,11 @@ def _read_market_participation_core(
         ) as (_, cursor, _):
             cursor.execute(
                 f"""SELECT id, {", ".join(_DAY_COLUMNS)} FROM {_DAY_TABLE}
-WHERE target_session=%s AND source_capture_id=%s
+WHERE target_session=%s
   AND contract_version=%s{version_filter}
-ORDER BY profile_revision, producer_version""",
+ORDER BY producer_version""",
                 (
                     target_session,
-                    capture_id,
                     MARKET_PARTICIPATION_CONTRACT,
                     *version_parameters,
                 ),
@@ -563,7 +540,6 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
             "unknown_reason_counts": reasons,
         },
         "profile": {
-            "profile_revision": day["profile_revision"],
             "producer_contract": day["producer_contract"],
             "producer_version": day["producer_version"],
             "history_calendar_id": day["profile_history_calendar_id"],

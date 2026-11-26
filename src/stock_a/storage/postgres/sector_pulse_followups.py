@@ -8,7 +8,7 @@ from fractions import Fraction
 from typing import Any, Mapping, Sequence
 
 from stock_a.storage.postgres import source_raw
-from stock_a.storage.postgres.research_day_facts import _insert_rows, _row_matches
+from stock_a.storage.postgres.research_day_facts import _row_matches
 from stock_a.storage.postgres.sector_pulse_cohorts import (
     persist_sector_pulse_cohort_rows,
     prepare_sector_pulse_cohort_rows,
@@ -27,7 +27,6 @@ _PULSE_COLUMNS = (
     "id",
     "target_session",
     "source_capture_id",
-    "profile_revision",
     "catalog_id",
     "snapshot_id",
     "board_kind",
@@ -72,11 +71,7 @@ _COLUMNS = (
 )
 _KEY = (
     "pulse_fact_id",
-    "target_source_capture_id",
     "horizon_sessions",
-    "followup_contract",
-    "calendar_id",
-    "calendar_revision",
 )
 _TRANSITION_COLUMNS = (
     "id",
@@ -152,7 +147,6 @@ def _pulse_rows(
             or row["research_mode"] != "NON_PIT_RETROSPECTIVE"
             or row["membership_mode"] != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
             or row["price_coordinate"] != "FORWARD_ADJUSTED"
-            or not str(row["profile_revision"]).startswith("PROFILE_R")
         ):
             raise SectorPulseFollowupPgError(
                 "PULSE_FOLLOWUP_T0_PARTITION_INVALID",
@@ -162,7 +156,6 @@ def _pulse_rows(
         (
             row["target_session"],
             row["source_capture_id"],
-            row["profile_revision"],
             row["source_pool_count"],
             row["source_time_quality"],
             row["source_clock_role"],
@@ -417,30 +410,26 @@ def read_source_sector_pulse_followup_inputs(
         research_expected_count = int(cursor.fetchone()[0])
         cursor.execute(
             """SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint,
-       count(DISTINCT profile_revision)::bigint, min(producer_version), max(producer_version)
+       min(producer_version), max(producer_version)
 FROM source_pool_seed_day_facts
-WHERE target_session=%s AND source_capture_id=%s AND profile_revision=%s
+WHERE target_session=%s AND source_capture_id=%s
   AND producer_version=%s AND price_coordinate='FORWARD_ADJUSTED'""",
             (
                 t0_session,
                 source_capture_id,
-                identity["profile_revision"],
                 _SEED_PRODUCER_VERSION,
             ),
         )
-        seed_count, seed_symbols, revision_count, producer_min, producer_max = (
-            cursor.fetchone()
-        )
+        seed_count, seed_symbols, producer_min, producer_max = cursor.fetchone()
         if (
             int(seed_count) != research_expected_count
             or int(seed_symbols) != research_expected_count
-            or int(revision_count) != 1
             or producer_min != _SEED_PRODUCER_VERSION
             or producer_max != producer_min
         ):
             raise SectorPulseFollowupPgError(
                 "PULSE_FOLLOWUP_PROFILE_PARTITION_INCOMPLETE",
-                "T0画像修订没有闭合到唯一完整的已存Seed来源池",
+                "T0画像没有闭合到唯一完整的已存Seed来源池",
             )
         members_by_board: dict[tuple[str, str], tuple[str, ...]] = {}
         pulse_by_board = {}
@@ -665,7 +654,6 @@ def _validate_write_scope(cursor: Any, context: Mapping[str, Any]) -> None:
     stable = (
         "id",
         "source_capture_id",
-        "profile_revision",
         "catalog_id",
         "snapshot_id",
         "board_name",
@@ -750,14 +738,10 @@ def _read_scope(
     calendar_revision: str,
 ) -> list[tuple[Any, ...]]:
     cursor.execute(
-        f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE pulse_fact_id=ANY(%s::bigint[]) AND target_source_capture_id=%s AND horizon_sessions=%s AND followup_contract=%s AND calendar_id=%s AND calendar_revision=%s ORDER BY pulse_fact_id",
+        f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE pulse_fact_id=ANY(%s::bigint[]) AND horizon_sessions=%s ORDER BY pulse_fact_id",
         (
             list(pulse_ids),
-            capture_id,
             horizon,
-            _FOLLOWUP,
-            calendar_id,
-            calendar_revision,
         ),
     )
     return cursor.fetchall()
@@ -809,21 +793,20 @@ def persist_source_sector_pulse_followups(
             equal = len(existing) == len(expected) and all(
                 _row_matches(a, b) for a, b in zip(expected, existing, strict=True)
             )
-            if existing and not equal:
-                raise SectorPulseFollowupPgError(
-                    "PULSE_FOLLOWUP_CONTENT_CONFLICT",
-                    "相同PULSE父行、目标捕获与期限已有异内容或不完整PG结果",
-                )
             already.append(equal)
             scopes.append((key, expected, ids))
-        if any(already) and not all(already):
-            raise SectorPulseFollowupPgError(
-                "PULSE_FOLLOWUP_PARTIAL_BATCH",
-                "PG中存在部分期限或板块已写结果；拒绝留下半批事实",
+        if all(already):
+            inserted = 0
+        else:
+            placeholders = ", ".join(["%s"] * len(_COLUMNS))
+            update_columns = [col for col in _COLUMNS if col not in _KEY]
+            update_clause = ", ".join(f"{col}=EXCLUDED.{col}" for col in update_columns)
+            sql = (
+                f"INSERT INTO {_TABLE} ({', '.join(_COLUMNS)}) VALUES ({placeholders}) "
+                f"ON CONFLICT ({', '.join(_KEY)}) DO UPDATE SET {update_clause}"
             )
-        inserted = (
-            0 if all(already) else _insert_rows(cursor, _TABLE, _COLUMNS, _KEY, rows)
-        )
+            cursor.executemany(sql, rows)
+            inserted = len(rows)
         for key, expected, ids in scopes:
             actual = _read_scope(
                 cursor, ids, key[0], key[1], calendar_id, calendar_revision
@@ -973,7 +956,6 @@ def read_source_sector_pulse_followups(
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_SOURCE_BINDING_INVALID", "T0来源包或捕获ID无效"
         )
-    profile_revision = _required_text(pulse_day.get("profile_revision"), "T0画像修订")
     calendar_id = _required_text(calendar_identity.get("calendar_id"), "官方日历")
     calendar_revision = _required_text(
         calendar_identity.get("calendar_revision"), "官方日历修订"
@@ -990,9 +972,6 @@ def read_source_sector_pulse_followups(
         config,
         target_session=t0_session,
         research_cutoff=research_cutoff,
-        source_capture_id=capture_id,
-        profile_revision=profile_revision,
-        snapshot_ids=snapshot_ids,
         expected_board_counts={
             kind: pulse_day.get("by_kind", {}).get(kind, {}).get("expected_board_count")
             for kind in _KINDS
@@ -1023,7 +1002,6 @@ def read_source_sector_pulse_followups(
             "PULSE_FOLLOWUP_PULSE_ID_INVALID", "T0 PULSE父事实ID重复"
         )
     saved_by_board: dict[str, dict[int, dict[str, Any]]] = {kind: {} for kind in _KINDS}
-    ambiguous_results: set[tuple[str, str, int]] = set()
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
         _connection,
         cursor,
@@ -1036,7 +1014,6 @@ def read_source_sector_pulse_followups(
 FROM {_TABLE} f JOIN {_PULSE_TABLE} p ON p.id=f.pulse_fact_id
 JOIN tdx_sector_catalog c ON c.id=p.catalog_id
 WHERE p.target_session=%s AND p.id=ANY(%s::bigint[])
-  AND p.source_capture_id=%s AND p.profile_revision=%s
   AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s::bigint[])
   AND f.followup_contract=%s AND f.calendar_id=%s AND f.calendar_revision=%s
   AND f.target_session<=%s
@@ -1044,8 +1021,6 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
             (
                 t0_session,
                 pulse_ids,
-                capture_id,
-                profile_revision,
                 _PULSE_ALGORITHM,
                 list(snapshot_ids.values()),
                 _FOLLOWUP,
@@ -1057,25 +1032,10 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
         names = [item.name for item in cursor.description]
         saved = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
         for row in saved:
-            selected_capture_id = (target_capture_ids or {}).get(
-                int(row["horizon_sessions"])
-            )
-            if (
-                selected_capture_id is not None
-                and row["target_source_capture_id"] != selected_capture_id
-            ):
-                continue
             bucket = saved_by_board[row["board_kind"]].setdefault(
                 row["board_native_id"], {}
             )
             horizon = int(row["horizon_sessions"])
-            result_key = (row["board_kind"], row["board_native_id"], horizon)
-            if result_key in ambiguous_results:
-                continue
-            if horizon in bucket:
-                del bucket[horizon]
-                ambiguous_results.add(result_key)
-                continue
             bucket[horizon] = row
         target_versions, target_statuses = {}, {}
         for horizon, target in horizon_targets.items():
@@ -1144,16 +1104,6 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
                             "observed_member_count": None,
                             "unknown_member_count": None,
                             "reason_codes": ["FOLLOWUP_HORIZON_BEYOND_RESEARCH_CUTOFF"],
-                        }
-                    elif (kind, board_id, horizon) in ambiguous_results:
-                        item = {
-                            "status": "INCOMPLETE",
-                            "horizon_sessions": horizon,
-                            "target_session": target.isoformat(),
-                            "fixed_member_denominator": int(pulse["member_count"]),
-                            "observed_member_count": None,
-                            "unknown_member_count": None,
-                            "reason_codes": ["FOLLOWUP_TARGET_REVISION_AMBIGUOUS"],
                         }
                     elif row is not None:
                         version = target_versions.get(horizon)
@@ -1248,6 +1198,5 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
         "ddl_executed": False,
         "dml_executed": False,
         "read_only_transaction": "REPEATABLE READ READ ONLY",
-        "profile_revision": profile_revision,
         "source_capture_id": capture_id,
     }
