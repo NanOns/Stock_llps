@@ -47,23 +47,13 @@ def read_cohort_page(
                       maturity_codes,maturity_counts,path_quality_codes,path_quality_counts,
                       reason_codes,reason_counts
                FROM source_cohort_group_stats
-               WHERE target_session=%s AND research_cutoff=%s AND source_capture_id=%s
-                 AND rule_id=%s AND rule_version=%s
-                 AND history_session_count=%s AND d1_history_session_count=%s
-                 AND event_window_start=%s AND calendar_revision=%s
-                 AND path_rule_version=%s AND horizon=%s
-               ORDER BY source_capture_id,state,weighting LIMIT 13""",
+               WHERE target_session=%s AND research_cutoff=%s
+                 AND rule_id=%s AND horizon=%s
+               ORDER BY state,weighting LIMIT 13""",
             (
                 target,
                 research_cutoff,
-                source_capture_id,
                 rule,
-                RULE_VERSION,
-                history_session_count,
-                d1_history_session_count,
-                event_window_start,
-                calendar_revision,
-                PATH_VERSION,
                 horizon,
             ),
         )
@@ -147,8 +137,6 @@ def read_cohort_page(
             offset=0 if symbol else offset,
             limit=limit,
         )
-        if any(row[21] != next(iter(captures)) for row in rows):
-            raise ResearchFactConflict("规则明细和Cohort统计的来源捕获不一致")
         rules = []
         if symbol:
             cursor.execute(
@@ -156,7 +144,7 @@ def read_cohort_page(
                           e.reason_code,e.parent_enrollment_id
                    FROM source_rule_evaluations r
                    LEFT JOIN source_research_enrollments e ON e.rule_fact_id=r.id
-                   WHERE r.target_session=%s AND r.source_capture_id=%s
+                   WHERE r.target_session=%s
                      AND r.source_symbol=%s
                      AND r.rule_version=%s
                      AND r.history_session_count=%s AND r.d1_history_session_count=%s
@@ -164,7 +152,6 @@ def read_cohort_page(
                    ORDER BY r.rule_id LIMIT 10""",
                 (
                     target,
-                    source_capture_id,
                     symbol,
                     RULE_VERSION,
                     history_session_count,
@@ -402,9 +389,8 @@ def read_cohort_date_comparison(
             """WITH selected_sessions AS (
                    SELECT DISTINCT target_session
                    FROM source_cohort_group_stats
-                   WHERE research_cutoff=%s AND source_capture_id=%s
-                     AND rule_id=%s AND rule_version=%s
-                     AND path_rule_version=%s AND horizon=%s
+                   WHERE research_cutoff=%s
+                     AND rule_id=%s AND horizon=%s
                    ORDER BY target_session DESC LIMIT %s
                )
                SELECT s.target_session,s.source_capture_id,s.profile_revision,
@@ -416,26 +402,16 @@ def read_cohort_date_comparison(
                       s.path_quality_counts,s.reason_codes,s.reason_counts
                FROM source_cohort_group_stats s
                JOIN selected_sessions x USING (target_session)
-               WHERE s.research_cutoff=%s AND s.source_capture_id=%s
-                 AND s.rule_id=%s AND s.rule_version=%s
-                 AND s.path_rule_version=%s AND s.horizon=%s
-               ORDER BY s.target_session DESC,s.source_capture_id,
-                        s.profile_revision,s.history_session_count,
-                        s.d1_history_session_count,s.event_window_start,
-                        s.calendar_revision,s.state,s.weighting""",
+               WHERE s.research_cutoff=%s
+                 AND s.rule_id=%s AND s.horizon=%s
+               ORDER BY s.target_session DESC,s.state,s.weighting""",
             (
                 research_cutoff,
-                source_capture_id,
                 rule,
-                RULE_VERSION,
-                PATH_VERSION,
                 horizon,
                 limit,
                 research_cutoff,
-                source_capture_id,
                 rule,
-                RULE_VERSION,
-                PATH_VERSION,
                 horizon,
             ),
         )

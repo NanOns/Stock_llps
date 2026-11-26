@@ -529,12 +529,15 @@ def research_stock_pg_d1_history_previews(
         )
     if any(
         row.get("source_symbol") != normalized
-        or row.get("source_capture_id") != source_capture_id
+        or (
+            row.get("session_date") == sessions[-1]
+            and row.get("source_capture_id") != source_capture_id
+        )
         for row in rows
     ):
         raise ResearchEntryError(
             "PG_HISTORY_REVISION_MISMATCH",
-            "PG历史行混入不同来源代码或paired捕获ID",
+            "PG历史行混入不同来源代码或目标日捕获ID不匹配",
         )
 
     rows_by_session = {row["session_date"]: row for row in rows}
@@ -547,7 +550,7 @@ def research_stock_pg_d1_history_previews(
         observations_by_session[day] = _core_observation_from_pg_price_row(
             row,
             session=day,
-            source_capture_id=source_capture_id,
+            source_capture_id=source_capture_id if day == sessions[-1] else None,
             price_coordinate=price_coordinate,
             coordinate_id=coordinate_id,
         )

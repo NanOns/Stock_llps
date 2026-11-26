@@ -723,12 +723,6 @@ def read_source_symbol_price_profile_observation(
             "reason_code": "RAW_SOURCE_VERSION_UNAVAILABLE",
             "target_session": target_session.isoformat(),
             "source_capture_id": source_capture_id,
-            "profile_revision_selection": {
-                "rule": "REQUIRES_EXACT_RAW_CAPTURE_AND_STORED_PROFILE_REVISION",
-                "selected_profile_revision": None,
-                "candidate_revision_count": 0,
-                "current_version_match_count": 0,
-            },
             "database_write": False,
             "ddl_executed": False,
         }
@@ -810,19 +804,7 @@ def read_source_symbol_price_profile_observation(
             )
         ),
     }
-    observation["profile_revision_selection"]["current_profile_revision"] = (
-        _PROFILE_REVISION
-    )
     if isinstance(selected, Mapping):
-        observation["profile_revision_selection"]["selected_producer_contract"] = (
-            selected.get("producer_contract")
-        )
-        observation["profile_revision_selection"]["selected_producer_version"] = (
-            selected.get("producer_version")
-        )
-        observation["profile_revision_selection"]["selected_version_match"] = (
-            selected.get("producer_version") == _PRODUCER_SEMANTICS_VERSION
-        )
         observation["history_window"] = {
             "records_complete_rows": selected["history_records_complete_rows"],
             "eligible_24_session_rows": selected["history_24_session_eligible_rows"],
@@ -834,7 +816,6 @@ def read_source_symbol_price_profile_observation(
             "price_window_usable_rows": selected["price_window_usable_rows"],
         }
     else:
-        observation["profile_revision_selection"]["selected_version_match"] = False
         observation["history_window"] = {
             "records_complete_rows": 0,
             "eligible_24_session_rows": 0,

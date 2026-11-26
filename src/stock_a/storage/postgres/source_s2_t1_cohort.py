@@ -233,21 +233,11 @@ def persist_source_s2_t1_cohort_in_transaction(
         outcomes=outcomes,
         expected_source_count=expected_count,
     )
-    selection = (
-        "target_session=%s AND endpoint_session=%s AND research_cutoff=%s "
-        "AND source_capture_id=%s "
-        "AND endpoint_source_capture_id=%s AND calendar_revision=%s "
-        "AND path_rule_version=%s AND cohort_version=%s"
-    )
+    selection = "target_session=%s AND endpoint_session=%s AND research_cutoff=%s"
     args = (
         target_session,
         endpoint_session,
         research_cutoff,
-        source_capture_id,
-        endpoint_source_capture_id,
-        calendar_revision,
-        path_rule_version,
-        COHORT_VERSION,
     )
     inserted = insert_and_compare(
         cursor,
@@ -263,10 +253,7 @@ def persist_source_s2_t1_cohort_in_transaction(
                   count(DISTINCT (t0_s2_state,t1_s2_state))::bigint
            FROM source_s2_t1_cohort_stats
            WHERE target_session=%s AND endpoint_session=%s
-             AND research_cutoff=%s AND source_capture_id=%s
-             AND endpoint_source_capture_id=%s
-             AND calendar_revision=%s AND path_rule_version=%s
-             AND cohort_version=%s""",
+             AND research_cutoff=%s""",
         args,
     )
     if cursor.fetchone() != (12, 12):
@@ -570,18 +557,12 @@ def _read_exact_scope(
         cursor.execute(
             f"""SELECT {columns} FROM source_s2_t1_cohort_stats
                 WHERE target_session=%s AND endpoint_session=%s
-                  AND research_cutoff=%s AND source_capture_id=%s
-                  AND endpoint_source_capture_id=%s
-                  AND cohort_version=%s AND path_rule_version=%s
+                  AND research_cutoff=%s
                 ORDER BY t0_s2_state, t1_s2_state""",
             (
                 target_session,
                 endpoint_session,
                 research_cutoff,
-                source_capture_id,
-                endpoint_source_capture_id,
-                COHORT_VERSION,
-                "SOURCE_RAW_FORWARD_PATH_R1",
             ),
         )
         rows = tuple(cursor.fetchall())
@@ -620,8 +601,6 @@ def _read_exact_scope(
             ("target_session", target_session.isoformat()),
             ("endpoint_session", endpoint_session.isoformat()),
             ("research_cutoff", research_cutoff.isoformat()),
-            ("source_capture_id", source_capture_id),
-            ("endpoint_source_capture_id", endpoint_source_capture_id),
         ):
             if payload.get(key) != value:
                 raise SourceS2T1CohortReadError("S2/T+1统计读回与请求业务键不一致")

@@ -752,7 +752,6 @@ def compute_source_pool_seed(
                 target_session=target_session,
                 max_target_session=research_cutoff,
                 source_capture_id=source_capture_id,
-                profile_revision=profile_revision,
                 offset=profile_offset,
                 limit=100,
             )
@@ -911,7 +910,9 @@ def compute_source_pool_seed(
                     _core_observation_from_pg_price_row(
                         by_date.get(day),
                         session=day,
-                        source_capture_id=source_capture_id,
+                        source_capture_id=source_capture_id
+                        if day == target_session
+                        else None,
                         price_coordinate="FORWARD_ADJUSTED",
                         coordinate_id=coordinate_id,
                     )

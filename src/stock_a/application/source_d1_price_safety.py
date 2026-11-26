@@ -424,7 +424,7 @@ def _core_observations(
         _core_observation_from_pg_price_row(
             rows_by_session.get(session),
             session=session,
-            source_capture_id=source_capture_id,
+            source_capture_id=source_capture_id if session == sessions[-1] else None,
             price_coordinate="FORWARD_ADJUSTED",
             coordinate_id=coordinate_id,
         )

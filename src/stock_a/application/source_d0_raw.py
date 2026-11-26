@@ -2205,12 +2205,11 @@ def _query_source_d0_raw_launch_changes(
         or type(source_capture_id) is not int
         or before_source_capture_id <= 0
         or source_capture_id <= 0
-        or before_source_capture_id != source_capture_id
         or price_coordinate != "FORWARD_ADJUSTED"
     ):
         raise SourceD0RawError(
             "D0_CHANGE_PACKAGE_IDENTITY_MISMATCH",
-            "相邻比较两端必须显式绑定同一个数字来源包ID。",
+            "相邻比较两端必须绑定有效的数字来源捕获ID与前复权坐标。",
             category="ARGUMENT",
         )
     if transition is None:
@@ -2278,7 +2277,8 @@ def _query_source_d0_raw_launch_changes(
     before_source = before_result["source_version"]
     after_source = after_result["source_version"]
     compatible_identity = (
-        before_source["source_capture_id"] == after_source["source_capture_id"]
+        type(before_source.get("source_capture_id")) is int
+        and type(after_source.get("source_capture_id")) is int
         and _calendar_identities_compatible(
             before_result["official_calendar"], after_result["official_calendar"]
         )

@@ -857,17 +857,19 @@ def read_raw_symbols_by_session(
     config: Mapping[str, Any],
     *,
     target_sessions: Sequence[date],
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     cutoff: date,
 ) -> dict[str, Any]:
-    """按真实BaoStock捕获读取截止日内各官方会话的证券代码。"""
+    """按BaoStock双坐标有效事实读取截止日内各官方会话的证券代码（支持跨捕获）。"""
     if type(cutoff) is not date:
         raise DataJobPgError(
             "DATA_JOB_CUTOFF_REQUIRED", "Raw证券范围读取必须绑定研究截止日"
         )
-    if type(source_capture_id) is not int or source_capture_id <= 0:
+    if source_capture_id is not None and (
+        type(source_capture_id) is not int or source_capture_id <= 0
+    ):
         raise DataJobPgError(
-            "DATA_JOB_SOURCE_CAPTURE_INVALID", "Raw证券范围读取必须绑定正整数来源捕获ID"
+            "DATA_JOB_SOURCE_CAPTURE_INVALID", "Raw证券范围读取来源捕获ID必须为正整数"
         )
     if isinstance(target_sessions, (str, bytes)) or not isinstance(
         target_sessions, Sequence
@@ -891,21 +893,26 @@ def read_raw_symbols_by_session(
             "Raw证券范围中存在超过研究截止日的会话；未读取来源数据",
         )
     ordered_sessions = tuple(sorted(sessions))
+    capture_sql = "AND d.source_capture_id=%s" if source_capture_id is not None else ""
+    params: list[Any] = [list(ordered_sessions)]
+    if source_capture_id is not None:
+        params.append(source_capture_id)
+    params.append(cutoff)
     with source_raw._transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT d.session_date,
+            f"""SELECT d.session_date,
                       array_agg(DISTINCT d.source_symbol ORDER BY d.source_symbol),
                       count(DISTINCT d.source_symbol)
                FROM stock.source_raw_daily d
                JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
-               WHERE d.session_date=ANY(%s) AND d.source_capture_id=%s
+               WHERE d.session_date=ANY(%s) {capture_sql}
                  AND d.session_date<=%s AND c.provider='BAOSTOCK'
                  AND c.price_coordinates @> ARRAY[
                      'RAW_UNADJUSTED','FORWARD_ADJUSTED'
                  ]::text[]
                GROUP BY d.session_date
                ORDER BY d.session_date""",
-            (list(ordered_sessions), source_capture_id, cutoff),
+            tuple(params),
         )
         rows = cursor.fetchall()
     symbols_by_session = {session.isoformat(): [] for session in ordered_sessions}
@@ -934,53 +941,173 @@ def read_raw_symbols_by_session(
     }
 
 
+_FACT_DATE_COUNT_QUERIES: dict[str, tuple[str, bool]] = {
+    "stock.source_raw_daily": (
+        "SELECT session_date, count(*)::bigint FROM stock.source_raw_daily WHERE session_date<=%s GROUP BY session_date",
+        True,
+    ),
+    "stock.source_baostock_session_directory": (
+        "SELECT session_date, count(*)::bigint FROM stock.source_baostock_session_directory WHERE session_date<=%s GROUP BY session_date",
+        True,
+    ),
+    "stock.source_market_index_daily": (
+        "SELECT session_date, count(*)::bigint FROM stock.source_market_index_daily WHERE session_date<=%s GROUP BY session_date",
+        True,
+    ),
+    "stock.source_symbol_price_profiles": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_symbol_price_profiles WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_market_breadth_days": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_market_breadth_days WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.r03_formal_market_breadth_facts": (
+        "SELECT trade_date, count(*)::bigint FROM stock.r03_formal_market_breadth_facts WHERE trade_date<=%s GROUP BY trade_date",
+        True,
+    ),
+    "stock.source_market_participation_days": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_market_participation_days WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_pool_seed_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_pool_seed_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_d0_scenario_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_d0_scenario_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_d0_launch_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_d0_launch_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_d1_structure_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_d1_structure_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_d0_formal_admission_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_d0_formal_admission_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_rule_evaluations": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_rule_evaluations WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_sector_cross_period_pulse_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_sector_cross_period_pulse_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_sector_pulse_adjacent_transitions": (
+        "SELECT p.target_session, count(*)::bigint FROM stock.source_sector_pulse_adjacent_transitions t JOIN stock.source_sector_cross_period_pulse_facts p ON p.id=t.target_pulse_id WHERE p.target_session<=%s GROUP BY p.target_session",
+        True,
+    ),
+    "stock.source_sector_pulse_followup_facts": (
+        "SELECT p.target_session, count(*)::bigint FROM stock.source_sector_pulse_followup_facts f JOIN stock.source_sector_cross_period_pulse_facts p ON p.id=f.pulse_fact_id WHERE p.target_session<=%s GROUP BY p.target_session",
+        True,
+    ),
+    "stock.source_sector_pulse_cohort_group_facts": (
+        "SELECT t0_session, count(*)::bigint FROM stock.source_sector_pulse_cohort_group_facts WHERE t0_session<=%s GROUP BY t0_session",
+        True,
+    ),
+    "stock.r03_sector_native_day_facts": (
+        "SELECT trade_date, count(*)::bigint FROM stock.r03_sector_native_day_facts WHERE trade_date<=%s GROUP BY trade_date",
+        True,
+    ),
+    "stock.r03_sector_rotation_board_day_facts": (
+        "SELECT trade_date, count(*)::bigint FROM stock.r03_sector_rotation_board_day_facts WHERE trade_date<=%s GROUP BY trade_date",
+        True,
+    ),
+    "stock.r03_sector_overlap_clusters": (
+        "SELECT trade_date, count(*)::bigint FROM stock.r03_sector_overlap_clusters WHERE trade_date<=%s GROUP BY trade_date",
+        True,
+    ),
+    "stock.r03_sector_loo_support_facts": (
+        "SELECT trade_date, count(*)::bigint FROM stock.r03_sector_loo_support_facts WHERE trade_date<=%s GROUP BY trade_date",
+        True,
+    ),
+    "stock.source_price_limit_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_price_limit_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_limit_up_streak_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_limit_up_streak_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_cross_section_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_cross_section_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_market_environment_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_market_environment_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_forward_path_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_forward_path_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_cohort_group_stats": (
+        "SELECT target_session, count(*)::bigint FROM stock.source_cohort_group_stats WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.source_fep_baseline_facts": (
+        "SELECT COALESCE(target_session, period_end_session), count(*)::bigint FROM stock.source_fep_baseline_facts WHERE COALESCE(target_session, period_end_session)<=%s GROUP BY 1",
+        True,
+    ),
+    "stock.source_research_observation_segment_days": (
+        "SELECT t0_session, count(*)::bigint FROM stock.source_research_observation_segment_days WHERE t0_session<=%s GROUP BY t0_session",
+        True,
+    ),
+}
+
+
 def read_module_completion_watermarks(
     config: Mapping[str, Any], *, cutoff: date
 ) -> dict[str, Any]:
-    """按唯一来源捕获、完整业务表集合和PG读回行数计算模块水位。"""
+    """按当前有效业务事实、最新任务进度与PG读回行数计算模块完成状态与水位。"""
     if type(cutoff) is not date:
         raise DataJobPgError(
             "DATA_JOB_CUTOFF_REQUIRED", "模块完成水位核验必须绑定研究截止日"
         )
     with source_raw._transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT p.job_id,p.target_session,p.business_table,p.status,
+            """SELECT DISTINCT ON (p.business_table, p.target_session)
+                      p.job_id,p.target_session,p.business_table,p.status,
                       p.expected_rows,p.verified_rows,p.source_capture_id,
                       p.profile_revision,p.producer_version,p.profile_history_session_count,
                       p.d1_history_session_count,p.calendar_revision,
-                      p.industry_snapshot_id,p.concept_snapshot_id,j.request_key
+                      p.industry_snapshot_id,p.concept_snapshot_id,j.request_key,
+                      p.completed_at
                FROM stock.data_job_progress p
                JOIN stock.data_jobs j ON j.job_id=p.job_id
-               LEFT JOIN stock.source_captures c ON c.capture_id=p.source_capture_id
                WHERE p.target_session<=%s
-                 AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
-                 AND p.completed_at IS NOT NULL
-                 AND p.expected_rows IS NOT NULL
-                 AND p.verified_rows=p.expected_rows
-                 AND (
-                     (p.business_table=ANY(ARRAY[
-                         'stock.tdx_sector_source_snapshots',
-                         'stock.tdx_sector_catalog',
-                         'stock.tdx_sector_members'
-                     ]::text[]) AND c.provider='TDX')
-                     OR
-                     (p.business_table<>ALL(ARRAY[
-                         'stock.tdx_sector_source_snapshots',
-                         'stock.tdx_sector_catalog',
-                         'stock.tdx_sector_members'
-                     ]::text[]) AND (p.source_capture_id IS NULL OR c.provider='BAOSTOCK'))
-                 )
-               ORDER BY p.job_id,p.target_session,p.business_table""",
+               ORDER BY p.business_table, p.target_session,
+                        COALESCE(p.updated_at, j.updated_at) DESC,
+                        p.job_id DESC""",
             (cutoff,),
         )
         rows = cursor.fetchall()
+        cursor.execute(
+            """SELECT 'stock.' || table_name
+               FROM information_schema.tables
+               WHERE table_schema='stock'"""
+        )
+        existing_tables = {str(r[0]) for r in cursor.fetchall()}
+        fact_counts_by_table_session: dict[str, dict[date, int]] = {}
+        for tbl, (sql, _has_param) in _FACT_DATE_COUNT_QUERIES.items():
+            if tbl not in existing_tables:
+                continue
+            cursor.execute(sql, (cutoff,))
+            fact_counts_by_table_session[tbl] = {
+                r[0]: int(r[1]) for r in cursor.fetchall() if r[0] is not None
+            }
 
-    by_job_module_session: dict[tuple[Any, ...], dict[str, Any]] = {}
+    latest_by_table_session: dict[tuple[str, date], dict[str, Any]] = {}
     for (
         job_id,
         target_session,
         business_table,
-        _status,
+        status,
         expected_rows,
         verified_rows,
         capture_id,
@@ -992,66 +1119,27 @@ def read_module_completion_watermarks(
         industry_snapshot_id,
         concept_snapshot_id,
         request_key,
+        completed_at,
     ) in rows:
-        for module, required_tables in _MODULE_PROGRESS_TABLES.items():
-            if business_table not in required_tables:
-                continue
-            if module == "TDX_SECTOR_MEMBERS":
-                if industry_snapshot_id is None or concept_snapshot_id is None:
-                    continue
-            module_capture_id = int(capture_id) if capture_id is not None else None
-            coordinate_capture_ids = (
-                {
-                    "RAW_UNADJUSTED": module_capture_id,
-                    "FORWARD_ADJUSTED": module_capture_id,
-                }
-                if module != "TDX_SECTOR_MEMBERS" and module_capture_id is not None
-                else {}
-            )
-            key = (
-                job_id,
-                module,
-                target_session,
-                module_capture_id,
-                industry_snapshot_id,
-                concept_snapshot_id,
-            )
-            state = by_job_module_session.setdefault(
-                key,
-                {
-                    "tables": set(),
-                    "table_results": {},
-                    "source_capture_id": module_capture_id,
-                    "source_capture_ids_by_coordinate": coordinate_capture_ids,
-                    "industry_snapshot_id": industry_snapshot_id,
-                    "concept_snapshot_id": concept_snapshot_id,
-                    "profile_revision": profile_revision,
-                    "producer_version": producer_version,
-                    "request_key": str(request_key) if request_key else None,
-                },
-            )
-            for _k, _v in (
-                ("profile_revision", profile_revision),
-                ("producer_version", producer_version),
-            ):
-                if _v is not None and state.get(_k) is None:
-                    state[_k] = _v
-            state["tables"].add(business_table)
-            state["table_results"][business_table] = {
-                "business_table": business_table,
-                "expected_rows": int(expected_rows),
-                "verified_rows": int(verified_rows),
-                "source_capture_id": module_capture_id,
-                "source_capture_ids_by_coordinate": coordinate_capture_ids,
-                "profile_revision": profile_revision,
-                "producer_version": producer_version,
-                "profile_history_session_count": profile_history_session_count,
-                "d1_history_session_count": d1_history_session_count,
-                "calendar_revision": calendar_revision,
-                "industry_snapshot_id": industry_snapshot_id,
-                "concept_snapshot_id": concept_snapshot_id,
-                "request_key": str(request_key) if request_key else None,
-            }
+        module_capture_id = int(capture_id) if capture_id is not None else None
+        latest_by_table_session[(business_table, target_session)] = {
+            "job_id": job_id,
+            "target_session": target_session,
+            "business_table": business_table,
+            "status": str(status),
+            "expected_rows": int(expected_rows) if expected_rows is not None else None,
+            "verified_rows": int(verified_rows) if verified_rows is not None else None,
+            "source_capture_id": module_capture_id,
+            "profile_revision": profile_revision,
+            "producer_version": producer_version,
+            "profile_history_session_count": profile_history_session_count,
+            "d1_history_session_count": d1_history_session_count,
+            "calendar_revision": calendar_revision,
+            "industry_snapshot_id": industry_snapshot_id,
+            "concept_snapshot_id": concept_snapshot_id,
+            "request_key": str(request_key) if request_key else None,
+            "completed_at": completed_at,
+        }
 
     sessions_by_module: dict[str, set[date]] = {
         module: set() for module in _MODULE_PROGRESS_TABLES
@@ -1060,34 +1148,163 @@ def read_module_completion_watermarks(
     completed_units_by_module: dict[str, list[dict[str, Any]]] = {
         module: [] for module in _MODULE_PROGRESS_TABLES
     }
-    for key, state in by_job_module_session.items():
-        _job_id, module, target_session, capture_id = key[:4]
-        if not _MODULE_PROGRESS_TABLES[module].issubset(state["tables"]):
-            continue
-        sessions_by_module[module].add(target_session)
-        if capture_id is not None:
-            captures_by_module_session.setdefault((module, target_session), set()).add(
-                int(capture_id)
+    module_session_states: dict[str, dict[str, str]] = {
+        module: {} for module in _MODULE_PROGRESS_TABLES
+    }
+
+    for module, required_tables in _MODULE_PROGRESS_TABLES.items():
+        candidate_sessions = {
+            sess for (tbl, sess) in latest_by_table_session if tbl in required_tables
+        }
+        for target_session in sorted(candidate_sessions):
+            table_records = [
+                latest_by_table_session.get((tbl, target_session))
+                for tbl in required_tables
+            ]
+            if any(rec is None for rec in table_records):
+                module_session_states[module][target_session.isoformat()] = (
+                    "NOT_COMPUTED"
+                )
+                continue
+            assert all(rec is not None for rec in table_records)
+            if any(rec["status"] == "RUNNING" for rec in table_records if rec):
+                module_session_states[module][target_session.isoformat()] = "RUNNING"
+                continue
+            if any(
+                rec["status"]
+                in {
+                    "FAILED",
+                    "INTERRUPTED",
+                    "BLOCKED",
+                    "INCOMPLETE",
+                    "NOT_COMPUTED",
+                    "CLEARED",
+                }
+                for rec in table_records
+                if rec
+            ):
+                module_session_states[module][target_session.isoformat()] = (
+                    "FAILED_OR_INVALIDATED"
+                )
+                continue
+            all_verified = all(
+                rec is not None
+                and rec["status"] in _COMPLETE_PROGRESS_STATUSES
+                and rec["completed_at"] is not None
+                and rec["expected_rows"] is not None
+                and rec["verified_rows"] == rec["expected_rows"]
+                for rec in table_records
             )
-        completed_units_by_module[module].append(
-            {
-                "job_id": str(_job_id),
-                "target_session": target_session.isoformat(),
-                "source_capture_id": capture_id,
-                "source_capture_ids_by_coordinate": state[
-                    "source_capture_ids_by_coordinate"
-                ],
-                "industry_snapshot_id": state["industry_snapshot_id"],
-                "concept_snapshot_id": state["concept_snapshot_id"],
-                "profile_revision": state["profile_revision"],
-                "producer_version": state["producer_version"],
-                "request_key": state["request_key"],
-                "business_tables": [
-                    state["table_results"][table]
-                    for table in sorted(state["table_results"])
-                ],
+            if not all_verified:
+                module_session_states[module][target_session.isoformat()] = (
+                    "FAILED_OR_INVALIDATED"
+                )
+                continue
+            if module == "TDX_SECTOR_MEMBERS" and any(
+                rec["industry_snapshot_id"] is None
+                or rec["concept_snapshot_id"] is None
+                for rec in table_records
+                if rec
+            ):
+                module_session_states[module][target_session.isoformat()] = (
+                    "FAILED_OR_INVALIDATED"
+                )
+                continue
+            # 核对当前PG有效业务表事实是否依然存在（防止旧成功进度掩盖已被清理/失效的事实）
+            fact_invalidated = False
+            for rec in table_records:
+                assert rec is not None
+                tbl = rec["business_table"]
+                if (
+                    rec["expected_rows"] > 0
+                    and tbl in fact_counts_by_table_session
+                    and fact_counts_by_table_session[tbl].get(target_session, 0) <= 0
+                ):
+                    fact_invalidated = True
+                    break
+            if fact_invalidated:
+                module_session_states[module][target_session.isoformat()] = (
+                    "FAILED_OR_INVALIDATED"
+                )
+                continue
+
+            is_empty_result = all(
+                rec is not None and rec["expected_rows"] == 0 for rec in table_records
+            )
+            module_session_states[module][target_session.isoformat()] = (
+                "COMPLETED_EMPTY" if is_empty_result else "COMPLETED_WITH_ROWS"
+            )
+            sessions_by_module[module].add(target_session)
+            capture_ids_for_day = {
+                rec["source_capture_id"]
+                for rec in table_records
+                if rec and rec["source_capture_id"] is not None
             }
-        )
+            rep = table_records[0]
+            assert rep is not None
+            rep_capture_id = (
+                next(iter(capture_ids_for_day))
+                if len(capture_ids_for_day) == 1
+                else rep["source_capture_id"]
+            )
+            if rep_capture_id is not None:
+                captures_by_module_session.setdefault(
+                    (module, target_session), set()
+                ).add(int(rep_capture_id))
+            completed_units_by_module[module].append(
+                {
+                    "job_id": str(rep["job_id"]),
+                    "target_session": target_session.isoformat(),
+                    "completion_state": module_session_states[module][
+                        target_session.isoformat()
+                    ],
+                    "source_capture_id": rep_capture_id,
+                    "source_capture_ids_by_coordinate": (
+                        {
+                            "RAW_UNADJUSTED": rep_capture_id,
+                            "FORWARD_ADJUSTED": rep_capture_id,
+                        }
+                        if module != "TDX_SECTOR_MEMBERS" and rep_capture_id is not None
+                        else {}
+                    ),
+                    "industry_snapshot_id": rep["industry_snapshot_id"],
+                    "concept_snapshot_id": rep["concept_snapshot_id"],
+                    "profile_revision": rep["profile_revision"],
+                    "producer_version": rep["producer_version"],
+                    "request_key": rep["request_key"],
+                    "business_tables": [
+                        {
+                            "business_table": rec["business_table"],
+                            "expected_rows": int(rec["expected_rows"]),
+                            "verified_rows": int(rec["verified_rows"]),
+                            "source_capture_id": rec["source_capture_id"],
+                            "source_capture_ids_by_coordinate": (
+                                {
+                                    "RAW_UNADJUSTED": rec["source_capture_id"],
+                                    "FORWARD_ADJUSTED": rec["source_capture_id"],
+                                }
+                                if module != "TDX_SECTOR_MEMBERS"
+                                and rec["source_capture_id"] is not None
+                                else {}
+                            ),
+                            "profile_revision": rec["profile_revision"],
+                            "producer_version": rec["producer_version"],
+                            "profile_history_session_count": rec[
+                                "profile_history_session_count"
+                            ],
+                            "d1_history_session_count": rec["d1_history_session_count"],
+                            "calendar_revision": rec["calendar_revision"],
+                            "industry_snapshot_id": rec["industry_snapshot_id"],
+                            "concept_snapshot_id": rec["concept_snapshot_id"],
+                            "request_key": rec["request_key"],
+                        }
+                        for rec in sorted(
+                            (r for r in table_records if r is not None),
+                            key=lambda item: item["business_table"],
+                        )
+                    ],
+                }
+            )
 
     completed_sessions = {
         module: sorted(day.isoformat() for day in sessions)
@@ -1124,6 +1341,7 @@ def read_module_completion_watermarks(
         "module_completed_sessions": completed_sessions,
         "module_completion_watermarks": watermarks,
         "module_completion_source_captures": latest_captures,
+        "module_session_states": module_session_states,
     }
 
 
@@ -1161,10 +1379,10 @@ def _cross_section_cleanup_details(
     cursor: Any,
     *,
     target_sessions: Sequence[date],
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     cutoff: date,
 ) -> dict[str, Any]:
-    """一次解析横截面直接后继和其R4实际历史窗口覆盖的D1链。"""
+    """一次解析横截面直接后继和其R4实际历史窗口覆盖的D1链（按日期与父子数字ID，不限同捕获）。"""
     from stock_a.storage.postgres.research_day_facts import _D1_PRODUCER_VERSION_7
 
     selected = tuple(sorted(set(target_sessions)))
@@ -1175,13 +1393,12 @@ def _cross_section_cleanup_details(
                SELECT DISTINCT p.target_session
                FROM stock.source_symbol_price_profiles p
                JOIN scope s ON s.target_session=p.target_session
-               WHERE p.source_capture_id=%s
             ), root_d1 AS (
-               SELECT DISTINCT d.id,d.target_session,d.source_capture_id,
+               SELECT DISTINCT d.id,d.target_session,
                       d.d1_history_session_count,d.calendar_revision,
                       d.history_window_start
                FROM stock.source_d1_structure_day_facts d
-               WHERE d.source_capture_id=%s AND d.producer_version=%s
+               WHERE d.producer_version=%s
                  AND d.target_session<=%s
                  AND EXISTS (
                      SELECT 1 FROM scope s
@@ -1189,29 +1406,26 @@ def _cross_section_cleanup_details(
                        AND s.target_session<=d.target_session
                  )
             ), root_rules AS (
-               SELECT DISTINCT r.id,r.target_session,r.source_capture_id,
+               SELECT DISTINCT r.id,r.target_session,
                       r.rule_id,r.rule_version,r.profile_revision,
                       r.history_session_count,r.d1_history_session_count,
                       r.event_window_start,r.calendar_revision
                FROM stock.source_rule_evaluations r
-               WHERE r.source_capture_id=%s
-                 AND (
-                     r.target_session IN (SELECT target_session FROM profile_rows)
-                      OR EXISTS (
-                          SELECT 1 FROM root_d1 d
-                          WHERE d.target_session=r.target_session
-                            AND d.source_capture_id=r.source_capture_id
-                            AND d.d1_history_session_count=r.d1_history_session_count
-                            AND d.calendar_revision=r.calendar_revision
-                            AND d.history_window_start=r.event_window_start
-                      )
-                  )
+               WHERE (
+                   r.target_session IN (SELECT target_session FROM profile_rows)
+                    OR EXISTS (
+                        SELECT 1 FROM root_d1 d
+                        WHERE d.target_session=r.target_session
+                          AND d.d1_history_session_count=r.d1_history_session_count
+                          AND d.calendar_revision=r.calendar_revision
+                          AND d.history_window_start=r.event_window_start
+                    )
+               )
             ), affected_cohort_stats AS (
                SELECT DISTINCT c.ctid,c.target_session
                FROM stock.source_cohort_group_stats c
                JOIN root_rules r
                  ON c.target_session=r.target_session
-                AND c.source_capture_id=r.source_capture_id
                 AND c.rule_id=r.rule_id AND c.rule_version=r.rule_version
                 AND c.profile_revision=r.profile_revision
                 AND c.history_session_count=r.history_session_count
@@ -1228,7 +1442,6 @@ def _cross_section_cleanup_details(
                FROM stock.source_fep_baseline_facts f
                JOIN root_rules r
                  ON f.target_session=r.target_session
-                AND f.source_capture_id=r.source_capture_id
                 AND f.rule_id=r.rule_id AND f.rule_version=r.rule_version
                 AND f.profile_revision=r.profile_revision
                 AND f.history_session_count=r.history_session_count
@@ -1262,8 +1475,6 @@ def _cross_section_cleanup_details(
                FROM stock.data_job_progress p
                JOIN stock.data_jobs j ON j.job_id=p.job_id
                WHERE p.business_table='stock.source_fep_baseline_facts'
-                 AND p.source_capture_id=(SELECT source_capture_id FROM root_rules LIMIT 1)
-                 AND j.source_capture_id=p.source_capture_id
                  AND j.research_cutoff IN (
                      SELECT DISTINCT research_cutoff FROM affected_fep_baselines
                  )
@@ -1272,21 +1483,17 @@ def _cross_section_cleanup_details(
                FROM stock.source_research_events e
                JOIN root_d1 d
                  ON e.target_session=d.target_session
-                AND e.source_capture_id=d.source_capture_id
-                AND e.target_capture_id=d.source_capture_id
                 AND e.d1_history_session_count=d.d1_history_session_count
                 AND e.calendar_revision=d.calendar_revision
                WHERE e.event_version='SOURCE_D1_ANCHOR_R1'
             ), root_d0 AS (
                SELECT DISTINCT d.id,d.target_session
                FROM stock.source_d0_launch_day_facts d
-               WHERE d.source_capture_id=%s
-                 AND d.target_session IN (SELECT target_session FROM profile_rows)
+               WHERE d.target_session IN (SELECT target_session FROM profile_rows)
            ), root_seed AS (
                SELECT DISTINCT f.id,f.target_session
                FROM stock.source_pool_seed_day_facts f
                JOIN profile_rows p ON p.target_session=f.target_session
-               WHERE f.source_capture_id=%s
            ), affected_enrollments(id) AS (
                SELECT e.id
                FROM stock.source_research_enrollments e
@@ -1307,15 +1514,14 @@ def _cross_section_cleanup_details(
            ), affected_t0 AS (
                SELECT t.id
                FROM stock.source_t0_early_observation_facts t
-               WHERE t.source_capture_id=%s
-                 AND (
-                     t.target_session IN (SELECT target_session FROM profile_rows)
-                     OR t.target_session IN (SELECT target_session FROM root_d1)
-                     OR t.enrollment_id IN (SELECT id FROM affected_enrollments)
-                     OR t.rule_fact_id IN (SELECT id FROM root_rules)
-                     OR t.d0_fact_id IN (SELECT id FROM root_d0)
-                     OR t.seed_fact_id IN (SELECT id FROM root_seed)
-                 )
+               WHERE (
+                   t.target_session IN (SELECT target_session FROM profile_rows)
+                   OR t.target_session IN (SELECT target_session FROM root_d1)
+                   OR t.enrollment_id IN (SELECT id FROM affected_enrollments)
+                   OR t.rule_fact_id IN (SELECT id FROM root_rules)
+                   OR t.d0_fact_id IN (SELECT id FROM root_d0)
+                   OR t.seed_fact_id IN (SELECT id FROM root_seed)
+               )
            ), affected_observation_segments AS (
                SELECT o.id,o.t0_session
                FROM stock.source_research_observation_segment_days o
@@ -1348,16 +1554,13 @@ def _cross_section_cleanup_details(
            )
            SELECT
              (SELECT count(*) FROM stock.source_symbol_price_profiles p
-              WHERE p.target_session IN (SELECT target_session FROM profile_rows)
-                AND p.source_capture_id=%s),
+              WHERE p.target_session IN (SELECT target_session FROM profile_rows)),
              (SELECT count(*) FROM root_seed),
              (SELECT count(*) FROM stock.source_d0_scenario_day_facts f
-              WHERE f.target_session IN (SELECT target_session FROM profile_rows)
-                AND f.source_capture_id=%s),
+              WHERE f.target_session IN (SELECT target_session FROM profile_rows)),
              (SELECT count(*) FROM root_d0),
              (SELECT count(*) FROM stock.source_d0_formal_admission_day_facts f
-              WHERE f.target_session IN (SELECT target_session FROM profile_rows)
-                AND f.source_capture_id=%s),
+              WHERE f.target_session IN (SELECT target_session FROM profile_rows)),
              (SELECT count(*) FROM root_d1),
              (SELECT count(*) FROM stock.source_d1_material_anchor_day_facts a
               WHERE a.d1_structure_id IN (SELECT id FROM root_d1)),
@@ -1390,24 +1593,15 @@ def _cross_section_cleanup_details(
                        FROM affected_fep_baselines),ARRAY[]::bigint[])""",
         (
             list(selected),
-            source_capture_id,
-            source_capture_id,
             _D1_PRODUCER_VERSION_7,
             cutoff,
-            source_capture_id,
             cutoff,
             cutoff,
-            source_capture_id,
-            source_capture_id,
-            source_capture_id,
             list(selected),
             list(selected),
             list(selected),
             list(selected),
             list(selected),
-            source_capture_id,
-            source_capture_id,
-            source_capture_id,
         ),
     )
     row = cursor.fetchone()
@@ -1455,31 +1649,28 @@ def _cross_section_cleanup_details(
 
 
 def _cross_section_cleanup_dependencies(
-    cursor: Any, *, target_session: date, source_capture_id: int
+    cursor: Any, *, target_session: date, source_capture_id: int | None = None
 ) -> dict[str, Any]:
-    """核对横截面所派生Profile/Seed/D0/D1及真实相邻登记引用。"""
+    """核对横截面所派生Profile/Seed/D0/D1及真实相邻登记引用（按日期与父子数字ID）。"""
     from stock_a.storage.postgres.research_day_facts import _D1_PRODUCER_VERSION_7
 
     cursor.execute(
         """WITH RECURSIVE scope AS (
-               SELECT %s::date AS target_session, %s::bigint AS source_capture_id
+               SELECT %s::date AS target_session
            ), root_profiles AS (
                SELECT 1
                FROM stock.source_symbol_price_profiles p,scope s
                WHERE p.target_session=s.target_session
-                 AND p.source_capture_id=s.source_capture_id
                LIMIT 1
            ), root_d1 AS (
                SELECT d.id,d.target_session
                FROM stock.source_d1_structure_day_facts d,scope s
                WHERE d.target_session=s.target_session
-                 AND d.source_capture_id=s.source_capture_id
                  AND d.producer_version=%s
            ), root_rules AS (
                SELECT r.id,r.target_session
                FROM stock.source_rule_evaluations r,scope s
                WHERE r.target_session=s.target_session
-                 AND r.source_capture_id=s.source_capture_id
                  AND (
                      EXISTS (SELECT 1 FROM root_profiles)
                      OR EXISTS (SELECT 1 FROM root_d1)
@@ -1488,12 +1679,10 @@ def _cross_section_cleanup_dependencies(
                SELECT d.id,d.target_session
                FROM stock.source_d0_launch_day_facts d,scope s
                WHERE d.target_session=s.target_session
-                 AND d.source_capture_id=s.source_capture_id
                  AND EXISTS (SELECT 1 FROM root_profiles)
            ), root_seed AS (
                SELECT f.id FROM stock.source_pool_seed_day_facts f,scope s
                WHERE f.target_session=s.target_session
-                 AND f.source_capture_id=s.source_capture_id
                  AND EXISTS (SELECT 1 FROM root_profiles)
            ), affected_enrollments(id) AS (
                SELECT e.id
@@ -1515,10 +1704,9 @@ def _cross_section_cleanup_dependencies(
            ), affected_t0 AS (
                SELECT t.id,t.enrollment_id
                FROM stock.source_t0_early_observation_facts t,scope s
-               WHERE ((t.target_session=s.target_session
-                      AND t.source_capture_id=s.source_capture_id)
-                     AND (EXISTS (SELECT 1 FROM root_profiles)
-                          OR EXISTS (SELECT 1 FROM root_d1)))
+               WHERE (t.target_session=s.target_session
+                      AND (EXISTS (SELECT 1 FROM root_profiles)
+                           OR EXISTS (SELECT 1 FROM root_d1)))
                   OR t.enrollment_id IN (SELECT id FROM affected_enrollments)
                   OR t.rule_fact_id IN (SELECT id FROM root_rules)
                   OR t.d0_fact_id IN (SELECT id FROM root_d0)
@@ -1526,20 +1714,16 @@ def _cross_section_cleanup_dependencies(
            )
            SELECT
                (SELECT count(*) FROM stock.source_symbol_price_profiles p,scope s
-                WHERE p.target_session=s.target_session
-                  AND p.source_capture_id=s.source_capture_id),
+                WHERE p.target_session=s.target_session),
                (SELECT count(*) FROM root_seed),
                (SELECT count(*) FROM stock.source_d0_scenario_day_facts f,scope s
                 WHERE f.target_session=s.target_session
-                  AND f.source_capture_id=s.source_capture_id
                   AND EXISTS (SELECT 1 FROM root_profiles)),
                (SELECT count(*) FROM stock.source_d0_launch_day_facts f,scope s
                 WHERE f.target_session=s.target_session
-                  AND f.source_capture_id=s.source_capture_id
                   AND EXISTS (SELECT 1 FROM root_profiles)),
                (SELECT count(*) FROM stock.source_d0_formal_admission_day_facts f,scope s
                 WHERE f.target_session=s.target_session
-                  AND f.source_capture_id=s.source_capture_id
                   AND EXISTS (SELECT 1 FROM root_profiles)),
                (SELECT count(*) FROM root_d1),
                (SELECT count(*) FROM stock.source_d1_material_anchor_day_facts a
@@ -1564,7 +1748,6 @@ def _cross_section_cleanup_dependencies(
                ),ARRAY[]::date[])""",
         (
             target_session,
-            source_capture_id,
             _D1_PRODUCER_VERSION_7,
         ),
     )
@@ -1592,29 +1775,26 @@ def _cross_section_cleanup_dependencies(
 
 
 def _cross_section_cleanup_target_ids(
-    cursor: Any, *, target_session: date, source_capture_id: int
+    cursor: Any, *, target_session: date, source_capture_id: int | None = None
 ) -> dict[str, tuple[Any, ...]]:
-    """在同一事务中冻结需要清理的准确业务ID集合。"""
+    """在同一事务中冻结需要清理的准确业务ID集合（按日期与父子数字ID）。"""
     from stock_a.storage.postgres.research_day_facts import _D1_PRODUCER_VERSION_7
 
     cursor.execute(
         """WITH RECURSIVE scope AS (
-               SELECT %s::date AS target_session,%s::bigint AS source_capture_id
+               SELECT %s::date AS target_session
            ), root_profiles AS (
                SELECT 1
                FROM stock.source_symbol_price_profiles p,scope s
                WHERE p.target_session=s.target_session
-                 AND p.source_capture_id=s.source_capture_id
                LIMIT 1
            ), root_d1 AS (
                SELECT d.id FROM stock.source_d1_structure_day_facts d,scope s
                WHERE d.target_session=s.target_session
-                 AND d.source_capture_id=s.source_capture_id
                  AND d.producer_version=%s
            ), root_rules AS (
                SELECT r.id FROM stock.source_rule_evaluations r,scope s
                WHERE r.target_session=s.target_session
-                 AND r.source_capture_id=s.source_capture_id
                  AND (
                      EXISTS (SELECT 1 FROM root_profiles)
                      OR EXISTS (SELECT 1 FROM root_d1)
@@ -1622,12 +1802,10 @@ def _cross_section_cleanup_target_ids(
            ), root_d0 AS (
                SELECT d.id FROM stock.source_d0_launch_day_facts d,scope s
                WHERE d.target_session=s.target_session
-                 AND d.source_capture_id=s.source_capture_id
                  AND EXISTS (SELECT 1 FROM root_profiles)
            ), root_seed AS (
                SELECT f.id FROM stock.source_pool_seed_day_facts f,scope s
                WHERE f.target_session=s.target_session
-                 AND f.source_capture_id=s.source_capture_id
                  AND EXISTS (SELECT 1 FROM root_profiles)
            ), affected_enrollments(id) AS (
                SELECT e.id
@@ -1643,8 +1821,7 @@ def _cross_section_cleanup_target_ids(
            ), affected_t0(id) AS (
                SELECT t.id
                FROM stock.source_t0_early_observation_facts t,scope s
-               WHERE ((t.target_session=s.target_session
-                       AND t.source_capture_id=s.source_capture_id)
+               WHERE (t.target_session=s.target_session
                       AND (EXISTS (SELECT 1 FROM root_profiles)
                            OR EXISTS (SELECT 1 FROM root_d1)))
                   OR t.enrollment_id IN (SELECT id FROM affected_enrollments)
@@ -1660,7 +1837,7 @@ def _cross_section_cleanup_target_ids(
              COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_enrollments),ARRAY[]::bigint[]),
              COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_t0),ARRAY[]::bigint[]),
              COALESCE((SELECT array_agg(id ORDER BY id) FROM root_d1),ARRAY[]::bigint[])""",
-        (target_session, source_capture_id, _D1_PRODUCER_VERSION_7),
+        (target_session, _D1_PRODUCER_VERSION_7),
     )
     row = cursor.fetchone()
     names = (
@@ -1679,10 +1856,10 @@ def _cross_section_d1_descendant_dependencies(
     cursor: Any,
     *,
     target_sessions: Sequence[date],
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     cutoff: date,
 ) -> dict[str, Any]:
-    """找出D1 R4实际历史窗口覆盖被改会话的后继事实及其相邻登记。"""
+    """找出D1 R4实际历史窗口覆盖被改会话的后继事实及其相邻登记（不限同捕获）。"""
     from stock_a.storage.postgres.research_day_facts import _D1_PRODUCER_VERSION_7
 
     selected = tuple(sorted(set(target_sessions)))
@@ -1692,7 +1869,7 @@ def _cross_section_d1_descendant_dependencies(
            ), affected_d1 AS (
                SELECT DISTINCT d.id,d.target_session
                FROM stock.source_d1_structure_day_facts d
-               WHERE d.source_capture_id=%s AND d.producer_version=%s
+               WHERE d.producer_version=%s
                  AND d.target_session<=%s
                  AND d.target_session>=(SELECT min(target_session) FROM selected_sessions)
                  AND d.target_session<>ALL(%s::date[])
@@ -1707,8 +1884,7 @@ def _cross_section_d1_descendant_dependencies(
                                r.d1_history_session_count,r.event_window_start,
                                r.calendar_revision
                FROM stock.source_rule_evaluations r
-               WHERE r.source_capture_id=%s
-                 AND r.target_session IN (SELECT target_session FROM affected_d1)
+               WHERE r.target_session IN (SELECT target_session FROM affected_d1)
            ), affected_enrollments(id) AS (
                SELECT e.id
                FROM stock.source_research_enrollments e
@@ -1727,8 +1903,7 @@ def _cross_section_d1_descendant_dependencies(
            ), affected_t0 AS (
                SELECT t.id
                FROM stock.source_t0_early_observation_facts t
-               WHERE t.source_capture_id=%s
-                 AND (t.target_session IN (SELECT target_session FROM affected_d1)
+               WHERE (t.target_session IN (SELECT target_session FROM affected_d1)
                       OR t.rule_fact_id IN (SELECT id FROM affected_rules)
                       OR t.enrollment_id IN (SELECT id FROM affected_enrollments))
            ), affected_observation_segments AS (
@@ -1766,12 +1941,9 @@ def _cross_section_d1_descendant_dependencies(
              COALESCE((SELECT array_agg(id ORDER BY id) FROM affected_observation_segments),ARRAY[]::bigint[])""",
         (
             list(selected),
-            source_capture_id,
             _D1_PRODUCER_VERSION_7,
             cutoff,
             list(selected),
-            source_capture_id,
-            source_capture_id,
         ),
     )
     row = cursor.fetchone()
@@ -2010,79 +2182,64 @@ def _cleanup_version_rows(
 
     if module_code == "D1":
         cursor.execute(
-            """SELECT d.target_session,d.source_capture_id,
-                      d.d1_history_session_count,d.producer_version,
-                      d.calendar_revision,count(DISTINCT d.id),count(DISTINCT a.id)
+            """SELECT d.target_session,max(d.source_capture_id),
+                      max(d.d1_history_session_count),max(d.producer_version),
+                      max(d.calendar_revision),count(DISTINCT d.id),count(DISTINCT a.id)
                FROM stock.source_d1_structure_day_facts d
                LEFT JOIN stock.source_d1_material_anchor_day_facts a
                  ON a.d1_structure_id=d.id
                WHERE d.target_session=ANY(%s) AND d.target_session<=%s
-                 AND d.source_capture_id IS NOT NULL
-               GROUP BY d.target_session,d.source_capture_id,
-                        d.d1_history_session_count,d.producer_version,d.calendar_revision
-               ORDER BY d.target_session,d.source_capture_id,
-                        d.d1_history_session_count,d.producer_version,d.calendar_revision""",
+               GROUP BY d.target_session
+               ORDER BY d.target_session""",
             (list(target_sessions), cutoff),
         )
         rows = cursor.fetchall()
         versions = []
-        dependent_by_scope: dict[
-            tuple[Any, ...], tuple[int, int, list[dict[str, Any]]]
-        ] = {}
         for row in rows:
             target_session = row[0]
-            capture_id = int(row[1])
+            capture_id = int(row[1]) if row[1] is not None else None
             history_count = int(row[2])
             producer_version = str(row[3])
             calendar_revision = str(row[4])
-            scope = (target_session, capture_id, history_count, calendar_revision)
-            if scope not in dependent_by_scope:
-                cursor.execute(
-                    """SELECT count(*) FROM stock.source_rule_evaluations
-                       WHERE target_session=%s AND source_capture_id=%s
-                         AND d1_history_session_count=%s AND calendar_revision=%s""",
-                    scope,
-                )
-                rule_rows = int(cursor.fetchone()[0])
-                cursor.execute(
-                    """SELECT count(DISTINCT e.id)
-                       FROM stock.source_research_enrollments e
-                       JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
-                       WHERE r.target_session=%s AND r.source_capture_id=%s
-                         AND r.d1_history_session_count=%s AND r.calendar_revision=%s""",
-                    scope,
-                )
-                enrollment_rows = int(cursor.fetchone()[0])
-                cursor.execute(
-                    """SELECT current_rule.target_session,count(DISTINCT e.id)
-                       FROM stock.source_research_enrollments e
-                       JOIN stock.source_rule_evaluations current_rule
-                         ON current_rule.id=e.rule_fact_id
-                       JOIN stock.source_rule_evaluations previous_rule
-                         ON previous_rule.id=e.previous_rule_fact_id
-                       WHERE previous_rule.target_session=%s
-                         AND previous_rule.source_capture_id=%s
-                         AND previous_rule.d1_history_session_count=%s
-                         AND previous_rule.calendar_revision=%s
-                         AND current_rule.target_session>%s
-                       GROUP BY current_rule.target_session
-                       ORDER BY current_rule.target_session""",
-                    (*scope, target_session),
-                )
-                later_sessions = [
-                    {"target_session": target_row[0], "rows": int(target_row[1])}
-                    for target_row in cursor.fetchall()
-                ]
-                dependent_by_scope[scope] = (
-                    rule_rows,
-                    enrollment_rows,
-                    later_sessions,
-                )
-            rule_rows, enrollment_rows, later_sessions = dependent_by_scope[scope]
+            cursor.execute(
+                """SELECT count(*) FROM stock.source_rule_evaluations
+                   WHERE target_session=%s""",
+                (target_session,),
+            )
+            rule_rows = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(DISTINCT e.id)
+                   FROM stock.source_research_enrollments e
+                   JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
+                   WHERE r.target_session=%s""",
+                (target_session,),
+            )
+            enrollment_rows = int(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT current_rule.target_session,count(DISTINCT e.id)
+                   FROM stock.source_research_enrollments e
+                   JOIN stock.source_rule_evaluations current_rule
+                     ON current_rule.id=e.rule_fact_id
+                   JOIN stock.source_rule_evaluations previous_rule
+                     ON previous_rule.id=e.previous_rule_fact_id
+                   WHERE previous_rule.target_session=%s
+                     AND current_rule.target_session>%s
+                   GROUP BY current_rule.target_session
+                   ORDER BY current_rule.target_session""",
+                (target_session, target_session),
+            )
+            later_sessions = [
+                {"target_session": target_row[0], "rows": int(target_row[1])}
+                for target_row in cursor.fetchall()
+            ]
             versions.append(
                 {
                     "target_session": target_session,
-                    "source_version": {"source_capture_id": capture_id},
+                    "source_version": (
+                        {"source_capture_id": capture_id}
+                        if capture_id is not None
+                        else {}
+                    ),
                     "algorithm_version": producer_version,
                     "calendar_revision": calendar_revision,
                     "d1_history_session_count": history_count,
@@ -2094,12 +2251,7 @@ def _cleanup_version_rows(
                     },
                     "dependent_target_sessions": [],
                     "blocking_dependent_target_sessions": later_sessions,
-                    "version_key": {
-                        "source_capture_id": capture_id,
-                        "d1_history_session_count": history_count,
-                        "producer_version": producer_version,
-                        "calendar_revision": calendar_revision,
-                    },
+                    "version_key": {"target_session": target_session.isoformat()},
                 }
             )
         return versions
@@ -2107,55 +2259,44 @@ def _cleanup_version_rows(
     if module_code == "D0":
         cursor.execute(
             """WITH scopes AS (
-                   SELECT target_session,source_capture_id
-                   FROM stock.source_d0_scenario_day_facts
+                   SELECT target_session FROM stock.source_d0_scenario_day_facts
                    WHERE target_session=ANY(%s) AND target_session<=%s
-                     AND source_capture_id IS NOT NULL
                    UNION
-                   SELECT target_session,source_capture_id
-                   FROM stock.source_pool_seed_day_facts
+                   SELECT target_session FROM stock.source_pool_seed_day_facts
                    WHERE target_session=ANY(%s) AND target_session<=%s
-                     AND source_capture_id IS NOT NULL
                    UNION
-                   SELECT target_session,source_capture_id
-                   FROM stock.source_d0_launch_day_facts
+                   SELECT target_session FROM stock.source_d0_launch_day_facts
                    WHERE target_session=ANY(%s) AND target_session<=%s
-                     AND source_capture_id IS NOT NULL
                )
-               SELECT s.target_session,s.source_capture_id,
+               SELECT s.target_session,
+                 (SELECT max(d.source_capture_id) FROM stock.source_d0_scenario_day_facts d
+                  WHERE d.target_session=s.target_session),
                  (SELECT count(*) FROM stock.source_d0_scenario_day_facts d
-                  WHERE d.target_session=s.target_session
-                    AND d.source_capture_id=s.source_capture_id),
+                  WHERE d.target_session=s.target_session),
                  (SELECT count(*) FROM stock.source_pool_seed_day_facts p
-                  WHERE p.target_session=s.target_session
-                    AND p.source_capture_id=s.source_capture_id),
+                  WHERE p.target_session=s.target_session),
                  (SELECT count(*) FROM stock.source_d0_launch_day_facts d
-                  WHERE d.target_session=s.target_session
-                    AND d.source_capture_id=s.source_capture_id),
+                  WHERE d.target_session=s.target_session),
                  (SELECT count(DISTINCT e.id)
                   FROM stock.source_research_enrollments e
                   JOIN stock.source_d0_launch_day_facts d ON d.id=e.d0_fact_id
-                  WHERE d.target_session=s.target_session
-                    AND d.source_capture_id=s.source_capture_id),
+                  WHERE d.target_session=s.target_session),
                  jsonb_build_object(
                    'D0',coalesce((SELECT jsonb_agg(DISTINCT producer_version
                                                     ORDER BY producer_version)
                      FROM stock.source_d0_scenario_day_facts d
-                     WHERE d.target_session=s.target_session
-                       AND d.source_capture_id=s.source_capture_id),'[]'::jsonb),
+                     WHERE d.target_session=s.target_session),'[]'::jsonb),
                    'SEED',coalesce((SELECT jsonb_agg(DISTINCT producer_version
                                                       ORDER BY producer_version)
                      FROM stock.source_pool_seed_day_facts p
-                     WHERE p.target_session=s.target_session
-                       AND p.source_capture_id=s.source_capture_id),'[]'::jsonb),
+                     WHERE p.target_session=s.target_session),'[]'::jsonb),
                    'D0_LAUNCH',coalesce((SELECT jsonb_agg(DISTINCT producer_version
                                                           ORDER BY producer_version)
                      FROM stock.source_d0_launch_day_facts d
-                     WHERE d.target_session=s.target_session
-                       AND d.source_capture_id=s.source_capture_id),'[]'::jsonb)
+                     WHERE d.target_session=s.target_session),'[]'::jsonb)
                  )
                FROM scopes s
-               ORDER BY s.target_session,s.source_capture_id""",
+               ORDER BY s.target_session""",
             (
                 list(target_sessions),
                 cutoff,
@@ -2168,7 +2309,9 @@ def _cleanup_version_rows(
         return [
             {
                 "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
+                "source_version": (
+                    {"source_capture_id": int(row[1])} if row[1] is not None else {}
+                ),
                 "algorithm_version": json.dumps(
                     row[6], ensure_ascii=False, sort_keys=True
                 ),
@@ -2179,10 +2322,7 @@ def _cleanup_version_rows(
                     "stock.source_d0_launch_day_facts": int(row[4]),
                     "stock.source_research_enrollments": int(row[5]),
                 },
-                "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "algorithm_versions": row[6],
-                },
+                "version_key": {"target_session": row[0].isoformat()},
             }
             for row in cursor.fetchall()
         ]
@@ -2553,8 +2693,11 @@ def _cleanup_version_rows(
 
     if module_code == "SECTOR_TRANSITION":
         cursor.execute(
-            """SELECT p.target_session,p.source_capture_id,t.target_pulse_id,
-                      t.transition_contract,t.calendar_id,t.calendar_revision,
+            """SELECT p.target_session,max(p.source_capture_id),
+                      max(t.transition_contract),
+                      coalesce(array_agg(DISTINCT t.target_pulse_id
+                                         ORDER BY t.target_pulse_id),
+                               ARRAY[]::bigint[]),
                       count(*),coalesce(array_agg(DISTINCT t.previous_pulse_id
                                                   ORDER BY t.previous_pulse_id),
                                         ARRAY[]::bigint[])
@@ -2562,27 +2705,23 @@ def _cleanup_version_rows(
                JOIN stock.source_sector_cross_period_pulse_facts p
                  ON p.id=t.target_pulse_id
                WHERE p.target_session=ANY(%s) AND p.target_session<=%s
-                 AND p.source_capture_id IS NOT NULL
-               GROUP BY p.target_session,p.source_capture_id,t.target_pulse_id,
-                        t.transition_contract,t.calendar_id,t.calendar_revision
-               ORDER BY p.target_session,p.source_capture_id,t.target_pulse_id,
-                        t.transition_contract,t.calendar_id,t.calendar_revision""",
+               GROUP BY p.target_session
+               ORDER BY p.target_session""",
             (list(target_sessions), cutoff),
         )
         return [
             {
                 "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
-                "algorithm_version": str(row[3]),
-                "parent_rows": int(row[6]),
+                "source_version": (
+                    {"source_capture_id": int(row[1])} if row[1] is not None else {}
+                ),
+                "algorithm_version": str(row[2] or ""),
+                "parent_rows": int(row[4]),
                 "child_rows": 0,
                 "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "target_pulse_id": int(row[2]),
-                    "transition_contract": str(row[3]),
-                    "calendar_id": str(row[4]),
-                    "calendar_revision": str(row[5]),
-                    "previous_pulse_ids": [int(value) for value in row[7]],
+                    "target_session": row[0].isoformat(),
+                    "target_pulse_ids": [int(value) for value in row[3]],
+                    "previous_pulse_ids": [int(value) for value in row[5]],
                 },
             }
             for row in cursor.fetchall()
@@ -2590,11 +2729,12 @@ def _cleanup_version_rows(
 
     if module_code == "PRICE_LIMITS":
         cursor.execute(
-            """SELECT target_session,source_capture_id,contract_version,calendar_revision,count(*)
+            """SELECT target_session,max(source_capture_id),
+                      max(contract_version),max(calendar_revision),count(*)
                FROM stock.source_price_limit_day_facts
                WHERE target_session=ANY(%s) AND target_session<=%s
-               GROUP BY target_session,source_capture_id,contract_version,calendar_revision
-               ORDER BY target_session,source_capture_id,contract_version,calendar_revision""",
+               GROUP BY target_session
+               ORDER BY target_session""",
             (list(target_sessions), cutoff),
         )
         limit_versions: list[dict[str, Any]] = []
@@ -2602,51 +2742,47 @@ def _cleanup_version_rows(
             cursor.execute(
                 """SELECT count(*)
                    FROM stock.source_limit_up_streak_day_facts
-                   WHERE target_session=%s AND source_capture_id=%s
-                     AND calendar_revision=%s""",
-                (row[0], int(row[1]), str(row[3])),
+                   WHERE target_session=%s""",
+                (row[0],),
             )
             streak_rows = int(cursor.fetchone()[0])
             limit_versions.append(
                 {
                     "target_session": row[0],
-                    "source_version": {"source_capture_id": int(row[1])},
-                    "algorithm_version": str(row[2]),
+                    "source_version": (
+                        {"source_capture_id": int(row[1])} if row[1] is not None else {}
+                    ),
+                    "algorithm_version": str(row[2] or ""),
                     "parent_rows": int(row[4]),
                     "child_rows": 0,
                     "dependent_rows": {
                         "stock.source_limit_up_streak_day_facts": streak_rows,
                     },
-                    "version_key": {
-                        "source_capture_id": int(row[1]),
-                        "contract_version": str(row[2]),
-                        "calendar_revision": str(row[3]),
-                    },
+                    "version_key": {"target_session": row[0].isoformat()},
                 }
             )
         return limit_versions
 
     if module_code == "LIMIT_UP_LADDER":
         cursor.execute(
-            """SELECT target_session,source_capture_id,contract_version,calendar_revision,count(*)
+            """SELECT target_session,max(source_capture_id),
+                      max(contract_version),max(calendar_revision),count(*)
                FROM stock.source_limit_up_streak_day_facts
                WHERE target_session=ANY(%s) AND target_session<=%s
-               GROUP BY target_session,source_capture_id,contract_version,calendar_revision
-               ORDER BY target_session,source_capture_id,contract_version,calendar_revision""",
+               GROUP BY target_session
+               ORDER BY target_session""",
             (list(target_sessions), cutoff),
         )
         return [
             {
                 "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
-                "algorithm_version": str(row[2]),
+                "source_version": (
+                    {"source_capture_id": int(row[1])} if row[1] is not None else {}
+                ),
+                "algorithm_version": str(row[2] or ""),
                 "parent_rows": int(row[4]),
                 "child_rows": 0,
-                "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "contract_version": str(row[2]),
-                    "calendar_revision": str(row[3]),
-                },
+                "version_key": {"target_session": row[0].isoformat()},
             }
             for row in cursor.fetchall()
         ]
@@ -2694,17 +2830,12 @@ def _cleanup_version_rows(
 
     if module_code == "MARKET_INDICES_ENV":
         cursor.execute(
-            """SELECT target_session, stock_capture_id, index_capture_id,
-                      primary_index_symbol, index_config_version,
-                      rule_version, calendar_id, calendar_revision, count(*)
+            """SELECT target_session, max(stock_capture_id), max(index_capture_id),
+                      max(rule_version), count(*)
                FROM stock.source_market_environment_day_facts
                WHERE target_session=ANY(%s) AND target_session<=%s
-               GROUP BY target_session, stock_capture_id, index_capture_id,
-                        primary_index_symbol, index_config_version,
-                        rule_version, calendar_id, calendar_revision
-               ORDER BY target_session, stock_capture_id, index_capture_id,
-                        primary_index_symbol, index_config_version,
-                        rule_version, calendar_id, calendar_revision""",
+               GROUP BY target_session
+               ORDER BY target_session""",
             (list(target_sessions), cutoff),
         )
         env_versions = []
@@ -2714,75 +2845,63 @@ def _cleanup_version_rows(
                 {
                     "target_session": row[0],
                     "source_version": {
-                        "stock_capture_id": int(row[1]),
+                        "stock_capture_id": int(row[1]) if row[1] is not None else None,
                         "index_capture_id": idx_cap,
                     },
-                    "algorithm_version": str(row[5]),
-                    "parent_rows": int(row[8]),
+                    "algorithm_version": str(row[3] or ""),
+                    "parent_rows": int(row[4]),
                     "child_rows": 0,
                     "table_counts": {
-                        "stock.source_market_environment_day_facts": int(row[8]),
+                        "stock.source_market_environment_day_facts": int(row[4]),
                     },
-                    "version_key": {
-                        "stock_capture_id": int(row[1]),
-                        "index_capture_id": idx_cap,
-                        "primary_index_symbol": str(row[3]),
-                        "index_config_version": str(row[4]),
-                        "rule_version": str(row[5]),
-                        "calendar_id": str(row[6]),
-                        "calendar_revision": str(row[7]),
-                    },
+                    "version_key": {"target_session": row[0].isoformat()},
                 }
             )
         return env_versions
 
     if module_code == "FORWARD_PATH":
         cursor.execute(
-            """SELECT target_session,source_capture_id,path_rule_version,calendar_revision,count(*)
+            """SELECT target_session,max(source_capture_id),max(path_rule_version),count(*)
                FROM stock.source_forward_path_facts
                WHERE target_session=ANY(%s) AND target_session<=%s
-               GROUP BY target_session,source_capture_id,path_rule_version,calendar_revision
-               ORDER BY target_session,source_capture_id,path_rule_version,calendar_revision""",
+               GROUP BY target_session
+               ORDER BY target_session""",
             (list(target_sessions), cutoff),
         )
         return [
             {
                 "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
-                "algorithm_version": str(row[2]),
-                "parent_rows": int(row[4]),
+                "source_version": (
+                    {"source_capture_id": int(row[1])} if row[1] is not None else {}
+                ),
+                "algorithm_version": str(row[2] or ""),
+                "parent_rows": int(row[3]),
                 "child_rows": 0,
-                "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "path_rule_version": str(row[2]),
-                    "calendar_revision": str(row[3]),
-                },
+                "version_key": {"target_session": row[0].isoformat()},
             }
             for row in cursor.fetchall()
         ]
 
     if module_code == "COHORT_STATS":
         cursor.execute(
-            """SELECT target_session,source_capture_id,rule_version,calendar_revision,count(*)
+            """SELECT target_session,max(source_capture_id),max(rule_version),count(*)
                FROM stock.source_cohort_group_stats
                WHERE target_session=ANY(%s) AND target_session<=%s
                  AND research_cutoff<=%s
-               GROUP BY target_session,source_capture_id,rule_version,calendar_revision
-               ORDER BY target_session,source_capture_id,rule_version,calendar_revision""",
+               GROUP BY target_session
+               ORDER BY target_session""",
             (list(target_sessions), cutoff, cutoff),
         )
         return [
             {
                 "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
-                "algorithm_version": str(row[2]),
-                "parent_rows": int(row[4]),
+                "source_version": (
+                    {"source_capture_id": int(row[1])} if row[1] is not None else {}
+                ),
+                "algorithm_version": str(row[2] or ""),
+                "parent_rows": int(row[3]),
                 "child_rows": 0,
-                "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "rule_version": str(row[2]),
-                    "calendar_revision": str(row[3]),
-                },
+                "version_key": {"target_session": row[0].isoformat()},
             }
             for row in cursor.fetchall()
         ]
@@ -2790,50 +2909,46 @@ def _cleanup_version_rows(
     if module_code == "FEP_BASELINE":
         cursor.execute(
             """SELECT COALESCE(target_session, period_end_session) AS sess,
-                      source_capture_id,rule_version,calendar_revision,count(*)
+                      max(source_capture_id),max(rule_version),count(*)
                FROM stock.source_fep_baseline_facts
                WHERE COALESCE(target_session, period_end_session)=ANY(%s)
-                 AND research_cutoff<=%s AND source_capture_id IS NOT NULL
-               GROUP BY 1,2,3,4 ORDER BY 1,2,3,4""",
+                 AND research_cutoff<=%s
+               GROUP BY 1 ORDER BY 1""",
             (list(target_sessions), cutoff),
         )
         return [
             {
                 "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
-                "algorithm_version": str(row[2]),
-                "parent_rows": int(row[4]),
+                "source_version": (
+                    {"source_capture_id": int(row[1])} if row[1] is not None else {}
+                ),
+                "algorithm_version": str(row[2] or ""),
+                "parent_rows": int(row[3]),
                 "child_rows": 0,
-                "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "rule_version": str(row[2]),
-                    "calendar_revision": str(row[3]),
-                },
+                "version_key": {"target_session": row[0].isoformat()},
             }
             for row in cursor.fetchall()
         ]
 
     if module_code == "OBSERVATION_SEGMENTS":
         cursor.execute(
-            """SELECT t0_session,source_capture_id,rule_version,calendar_revision,count(*)
+            """SELECT t0_session,max(source_capture_id),max(rule_version),count(*)
                FROM stock.source_research_observation_segment_days
                WHERE t0_session=ANY(%s) AND t0_session<=%s
-               GROUP BY t0_session,source_capture_id,rule_version,calendar_revision
-               ORDER BY t0_session,source_capture_id,rule_version,calendar_revision""",
+               GROUP BY t0_session
+               ORDER BY t0_session""",
             (list(target_sessions), cutoff),
         )
         return [
             {
                 "target_session": row[0],
-                "source_version": {"source_capture_id": int(row[1])},
-                "algorithm_version": str(row[2]),
-                "parent_rows": int(row[4]),
+                "source_version": (
+                    {"source_capture_id": int(row[1])} if row[1] is not None else {}
+                ),
+                "algorithm_version": str(row[2] or ""),
+                "parent_rows": int(row[3]),
                 "child_rows": 0,
-                "version_key": {
-                    "source_capture_id": int(row[1]),
-                    "rule_version": str(row[2]),
-                    "calendar_revision": str(row[3]),
-                },
+                "version_key": {"target_session": row[0].isoformat()},
             }
             for row in cursor.fetchall()
         ]
@@ -3438,151 +3553,68 @@ def _cleanup_preview_in_cursor(
         sessions,
         cutoff,
     )
-    if module_code == "CROSS_SECTION":
-        by_capture: dict[int, list[dict[str, Any]]] = {}
-        for version in versions:
-            by_capture.setdefault(
-                version["version_key"]["price_capture_id"], []
-            ).append(version)
-        for source_capture_id, scoped_versions in by_capture.items():
-            selected_scope_sessions = tuple(
-                sorted({version["target_session"] for version in scoped_versions})
+    if module_code == "CROSS_SECTION" and versions:
+        selected_scope_sessions = tuple(
+            sorted({version["target_session"] for version in versions})
+        )
+        details = _cross_section_cleanup_details(
+            cursor,
+            target_sessions=selected_scope_sessions,
+            cutoff=cutoff,
+        )
+        dependent_ids = {
+            name: details[name]
+            for name in (
+                "profile_sessions",
+                "profile_revisions",
+                "rule_fact_ids",
+                "d0_fact_ids",
+                "seed_fact_ids",
+                "enrollment_ids",
+                "t0_fact_ids",
+                "d1_structure_ids",
+                "observation_segment_ids",
+                "fep_baseline_ids",
+                "research_event_ids",
             )
-            details = _cross_section_cleanup_details(
-                cursor,
-                target_sessions=selected_scope_sessions,
-                source_capture_id=source_capture_id,
-                cutoff=cutoff,
-            )
-            dependent_ids = {
-                name: details[name]
-                for name in (
-                    "profile_sessions",
-                    "profile_revisions",
-                    "rule_fact_ids",
-                    "d0_fact_ids",
-                    "seed_fact_ids",
-                    "enrollment_ids",
-                    "t0_fact_ids",
-                    "d1_structure_ids",
-                    "observation_segment_ids",
-                    "fep_baseline_ids",
-                    "research_event_ids",
-                )
-            }
-            scoped_versions[0]["dependent_rows"] = details["dependent_rows"]
-            scoped_versions[0]["dependent_target_sessions"] = details[
-                "dependent_target_sessions"
-            ]
-            scoped_versions[0]["dependent_ids"] = dependent_ids
-            for version in scoped_versions[1:]:
-                version["dependent_rows"] = {}
-                version["dependent_target_sessions"] = ()
-                version["dependent_ids"] = {}
-    elif module_code == "MARKET_INDICES_ENV":
-        grouped_scopes: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-        for version in versions:
-            key = version["version_key"]
-            scope_key = (
-                key["stock_capture_id"],
-                key["index_capture_id"],
-                key["primary_index_symbol"],
-                key["index_config_version"],
-                key["calendar_id"],
-                key["calendar_revision"],
-                key["rule_version"],
-            )
-            grouped_scopes.setdefault(scope_key, []).append(version)
+        }
+        versions[0]["dependent_rows"] = details["dependent_rows"]
+        versions[0]["dependent_target_sessions"] = details["dependent_target_sessions"]
+        versions[0]["dependent_ids"] = dependent_ids
+        for version in versions[1:]:
+            version["dependent_rows"] = {}
+            version["dependent_target_sessions"] = ()
+            version["dependent_ids"] = {}
+    elif module_code == "MARKET_INDICES_ENV" and versions:
         selected_sessions = set(sessions)
-        for scope_key, scoped_versions in grouped_scopes.items():
-            root_sessions = sorted(
-                version["target_session"] for version in scoped_versions
-            )
-            first_session = root_sessions[0]
-            (
-                stock_capture_id,
-                index_capture_id,
-                primary,
-                index_config,
-                cal_id,
-                cal_rev,
-                rule_ver,
-            ) = scope_key
-            cursor.execute(
-                """SELECT target_session
-                   FROM stock.source_market_environment_day_facts
-                   WHERE target_session>%s AND target_session<=%s
-                     AND target_session<>ALL(%s::date[])
-                     AND stock_capture_id=%s
-                     AND index_capture_id IS NOT DISTINCT FROM %s
-                     AND primary_index_symbol=%s
-                     AND index_config_version IS NOT DISTINCT FROM %s
-                     AND calendar_id=%s AND calendar_revision=%s
-                     AND rule_version=%s
-                   ORDER BY target_session""",
-                (
-                    first_session,
-                    cutoff,
-                    list(selected_sessions),
-                    stock_capture_id,
-                    index_capture_id,
-                    primary,
-                    index_config,
-                    cal_id,
-                    cal_rev,
-                    rule_ver,
-                ),
-            )
-            dependent_sessions = tuple(row[0] for row in cursor.fetchall())
-            if dependent_sessions:
-                scoped_versions[0].setdefault("dependent_rows", {})[
-                    "stock.source_market_environment_day_facts"
-                ] = len(dependent_sessions)
-                scoped_versions[0]["dependent_target_sessions"] = dependent_sessions
-    source_scopes_by_session: dict[date, set[str]] = {}
-    for version in versions:
-        scope_version = version["source_version"]
-        if module_code == "CROSS_SECTION":
-            # CROSS_SECTION清理API不接Universe选择键，业务操作即同日、同价格捕获的全scope清理；
-            # 多Universe版本不应伪装成多个价格捕获。不同price_capture_id仍保持歧义阻断。
-            scope_version = {
-                "source_capture_id": version["version_key"]["price_capture_id"]
-            }
-        source_scope = json.dumps(
-            scope_version,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        first_session = min(version["target_session"] for version in versions)
+        cursor.execute(
+            """SELECT DISTINCT target_session
+               FROM stock.source_market_environment_day_facts
+               WHERE target_session>%s AND target_session<=%s
+                 AND target_session<>ALL(%s::date[])
+               ORDER BY target_session""",
+            (first_session, cutoff, list(selected_sessions)),
         )
-        source_scopes_by_session.setdefault(version["target_session"], set()).add(
-            source_scope
-        )
-    if any(len(scopes) > 1 for scopes in source_scopes_by_session.values()):
-        blockers.append(
-            {
-                "referenced_table": spec["parent_table"],
-                "dependent_table": module_code,
-                "constraint": "",
-                "reason": "同一目标会话包含多个来源包或捕获；请先按来源版本收敛清理范围",
-            }
-        )
+        dependent_sessions = tuple(row[0] for row in cursor.fetchall())
+        if dependent_sessions:
+            versions[0].setdefault("dependent_rows", {})[
+                "stock.source_market_environment_day_facts"
+            ] = len(dependent_sessions)
+            versions[0]["dependent_target_sessions"] = dependent_sessions
     if module_code == "MARKET_BREADTH":
         for version in versions:
-            source_version = version.get("source_version", {})
             cursor.execute(
                 """SELECT count(*) FROM stock.source_market_participation_days
-                   WHERE target_session=%s AND source_capture_id=%s""",
-                (
-                    version["target_session"],
-                    source_version.get("source_capture_id"),
-                ),
+                   WHERE target_session=%s""",
+                (version["target_session"],),
             )
             if int(cursor.fetchone()[0]) > 0:
                 blockers.append(
                     {
                         "referenced_table": spec["parent_table"],
                         "dependent_table": "stock.source_market_participation_days",
-                        "constraint": "业务依赖：成交参与消费同日市场宽度与同源捕获",
+                        "constraint": "业务依赖：成交参与消费同日市场宽度",
                         "reason": "先清理该日成交参与结果，再重新预览市场宽度；未纳入下游清理",
                     }
                 )
@@ -3705,14 +3737,10 @@ def _cleanup_preview_in_cursor(
     # R03_SECTOR_NATIVE 采用同事务精确版本级联清理（含 LOO/Overlap/Rotation 及未选中后继），不再旧式阻断
     if module_code == "SECTOR_PULSE":
         for version in versions:
-            source_version = version["source_version"]
             cursor.execute(
                 """SELECT count(*) FROM stock.source_sector_pulse_cohort_group_facts
-                   WHERE t0_session=%s AND t0_source_capture_id=%s""",
-                (
-                    version["target_session"],
-                    source_version["source_capture_id"],
-                ),
+                   WHERE t0_session=%s""",
+                (version["target_session"],),
             )
             dependent_rows = int(cursor.fetchone()[0])
             if dependent_rows:
@@ -3722,9 +3750,9 @@ def _cleanup_preview_in_cursor(
                         "dependent_table": (
                             "stock.source_sector_pulse_cohort_group_facts"
                         ),
-                        "constraint": "业务依赖：板块分组后继引用T0 PULSE来源身份",
+                        "constraint": "业务依赖：板块分组后继引用T0 PULSE日期",
                         "reason": (
-                            "先清理同一T0来源版本的SECTOR_FOLLOWUP，再重新预览PULSE；"
+                            "先清理该T0日期的SECTOR_FOLLOWUP，再重新预览PULSE；"
                             f"PG读回到{dependent_rows}条下游分组"
                         ),
                     }
@@ -3736,14 +3764,12 @@ def _cleanup_preview_in_cursor(
                 """SELECT count(*)
                    FROM stock.source_sector_pulse_cohort_group_facts g
                    JOIN stock.source_sector_pulse_adjacent_transitions t
-                     ON t.target_pulse_id=%s
+                     ON t.target_pulse_id=ANY(%s::bigint[])
                    JOIN stock.source_sector_cross_period_pulse_facts p
                      ON p.id=t.previous_pulse_id
                    WHERE g.t0_session=p.target_session
-                     AND g.t0_source_capture_id=p.source_capture_id
-                     AND g.t0_source_capture_id=p.source_capture_id
                      AND g.cohort_axis='ADJACENT_TRANSITION'""",
-                (key["target_pulse_id"],),
+                (key["target_pulse_ids"],),
             )
             dependent_rows = int(cursor.fetchone()[0])
             if dependent_rows:
@@ -3762,26 +3788,19 @@ def _cleanup_preview_in_cursor(
                 )
     if module_code == "D0":
         for version in versions:
-            source_version = version["source_version"]
             for dependent_table, query in (
                 (
                     "stock.source_sector_cross_period_pulse_facts",
                     """SELECT count(*) FROM stock.source_sector_cross_period_pulse_facts
-                       WHERE target_session=%s AND source_capture_id=%s""",
+                       WHERE target_session=%s""",
                 ),
                 (
                     "stock.source_sector_pulse_cohort_group_facts",
                     """SELECT count(*) FROM stock.source_sector_pulse_cohort_group_facts
-                       WHERE t0_session=%s AND t0_source_capture_id=%s""",
+                       WHERE t0_session=%s""",
                 ),
             ):
-                cursor.execute(
-                    query,
-                    (
-                        version["target_session"],
-                        source_version["source_capture_id"],
-                    ),
-                )
+                cursor.execute(query, (version["target_session"],))
                 dependent_rows = int(cursor.fetchone()[0])
                 if dependent_rows:
                     blockers.append(
@@ -3798,20 +3817,13 @@ def _cleanup_preview_in_cursor(
     if module_code == "PRICE_LIMITS":
         selected_session_set = set(sessions)
         for version in versions:
-            key = version["version_key"]
             cursor.execute(
                 """SELECT target_session, count(*)
                    FROM stock.source_limit_up_streak_day_facts
                    WHERE target_session>%s AND target_session<=%s
-                     AND source_capture_id=%s AND calendar_revision=%s
                    GROUP BY target_session
                    ORDER BY target_session""",
-                (
-                    version["target_session"],
-                    cutoff,
-                    key["source_capture_id"],
-                    key["calendar_revision"],
-                ),
+                (version["target_session"], cutoff),
             )
             downstream_dates = [
                 (row[0].isoformat(), int(row[1]))
@@ -4125,16 +4137,9 @@ def clear_derived_module(
                     """DELETE FROM stock.source_research_enrollments e
                        WHERE e.rule_fact_id IN (
                            SELECT r.id FROM stock.source_rule_evaluations r
-                           WHERE r.target_session=%s AND r.source_capture_id=%s
-                             AND r.d1_history_session_count=%s
-                             AND r.calendar_revision=%s
+                           WHERE r.target_session=%s
                        )""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["d1_history_session_count"],
-                        key["calendar_revision"],
-                    ),
+                    (target_session,),
                 )
                 deleted_rows["stock.source_research_enrollments"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4142,14 +4147,8 @@ def clear_derived_module(
                 ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_rule_evaluations
-                       WHERE target_session=%s AND source_capture_id=%s AND d1_history_session_count=%s
-                         AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["d1_history_session_count"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_rule_evaluations"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4158,17 +4157,8 @@ def clear_derived_module(
                 cursor.execute(
                     """DELETE FROM stock.source_d1_material_anchor_day_facts a
                        USING stock.source_d1_structure_day_facts d
-                       WHERE a.d1_structure_id=d.id AND d.target_session=%s
-                         AND d.source_capture_id=%s
-                         AND d.d1_history_session_count=%s
-                         AND d.producer_version=%s AND d.calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["d1_history_session_count"],
-                        key["producer_version"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE a.d1_structure_id=d.id AND d.target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_d1_material_anchor_day_facts"] += (
                     cursor.rowcount
@@ -4178,16 +4168,8 @@ def clear_derived_module(
                 ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_d1_structure_day_facts
-                       WHERE target_session=%s AND source_capture_id=%s
-                         AND d1_history_session_count=%s
-                         AND producer_version=%s AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["d1_history_session_count"],
-                        key["producer_version"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_d1_structure_day_facts"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4221,12 +4203,8 @@ def clear_derived_module(
                 cursor.execute(
                     """DELETE FROM stock.source_research_enrollments e
                        USING stock.source_d0_launch_day_facts d
-                       WHERE e.d0_fact_id=d.id AND d.target_session=%s
-                         AND d.source_capture_id=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                    ),
+                       WHERE e.d0_fact_id=d.id AND d.target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_research_enrollments"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4234,12 +4212,8 @@ def clear_derived_module(
                 ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_d0_launch_day_facts
-                       WHERE target_session=%s AND source_capture_id=%s
-                    """,
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_d0_launch_day_facts"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4247,11 +4221,8 @@ def clear_derived_module(
                 ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_pool_seed_day_facts
-                       WHERE target_session=%s AND source_capture_id=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_pool_seed_day_facts"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4259,11 +4230,8 @@ def clear_derived_module(
                 ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_d0_scenario_day_facts
-                       WHERE target_session=%s AND source_capture_id=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_d0_scenario_day_facts"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4443,14 +4411,10 @@ def clear_derived_module(
             elif module_code == "SECTOR_TRANSITION":
                 cursor.execute(
                     """DELETE FROM stock.source_sector_pulse_adjacent_transitions
-                       WHERE target_pulse_id=%s AND transition_contract=%s
-                         AND calendar_id=%s AND calendar_revision=%s
+                       WHERE target_pulse_id=ANY(%s::bigint[])
                          AND previous_pulse_id=ANY(%s::bigint[])""",
                     (
-                        key["target_pulse_id"],
-                        key["transition_contract"],
-                        key["calendar_id"],
-                        key["calendar_revision"],
+                        key["target_pulse_ids"],
                         key["previous_pulse_ids"],
                     ),
                 )
@@ -4461,16 +4425,11 @@ def clear_derived_module(
                     "stock.source_sector_pulse_adjacent_transitions"
                 ] += cursor.rowcount
             elif module_code == "PRICE_LIMITS":
-                # 仅清理预览范围内同捕获、同日历、同会话的连板事实（后续未纳入日期已在预览阶段安全阻断）
+                # 仅清理预览范围内同会话的限价与连板事实（后续未纳入日期已在预览阶段安全阻断）
                 cursor.execute(
                     """DELETE FROM stock.source_limit_up_streak_day_facts
-                       WHERE target_session=%s AND source_capture_id=%s
-                         AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_limit_up_streak_day_facts"] += (
                     cursor.rowcount
@@ -4480,14 +4439,8 @@ def clear_derived_module(
                 ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_price_limit_day_facts
-                       WHERE target_session=%s AND source_capture_id=%s
-                         AND contract_version=%s AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["contract_version"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_price_limit_day_facts"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4496,14 +4449,8 @@ def clear_derived_module(
             elif module_code == "LIMIT_UP_LADDER":
                 cursor.execute(
                     """DELETE FROM stock.source_limit_up_streak_day_facts
-                       WHERE target_session=%s AND source_capture_id=%s
-                         AND contract_version=%s AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["contract_version"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_limit_up_streak_day_facts"] += (
                     cursor.rowcount
@@ -4533,22 +4480,9 @@ def clear_derived_module(
             elif module_code == "MARKET_INDICES_ENV":
                 cursor.execute(
                     """DELETE FROM stock.source_market_environment_day_facts
-                       WHERE target_session=%s AND stock_capture_id=%s
-                         AND index_capture_id IS NOT DISTINCT FROM %s
-                         AND primary_index_symbol=%s
-                         AND index_config_version IS NOT DISTINCT FROM %s
-                         AND calendar_id=%s AND calendar_revision=%s
-                         AND rule_version=%s""",
-                    (
-                        target_session,
-                        key["stock_capture_id"],
-                        key["index_capture_id"],
-                        key["primary_index_symbol"],
-                        key["index_config_version"],
-                        key["calendar_id"],
-                        key["calendar_revision"],
-                        key["rule_version"],
-                    ),
+                       WHERE target_session=%s
+                       RETURNING target_session""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_market_environment_day_facts"] += (
                     cursor.rowcount
@@ -4559,14 +4493,8 @@ def clear_derived_module(
             elif module_code == "FORWARD_PATH":
                 cursor.execute(
                     """DELETE FROM stock.source_forward_path_facts
-                       WHERE target_session=%s AND source_capture_id=%s
-                         AND path_rule_version=%s AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["path_rule_version"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_forward_path_facts"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4575,14 +4503,8 @@ def clear_derived_module(
             elif module_code == "COHORT_STATS":
                 cursor.execute(
                     """DELETE FROM stock.source_cohort_group_stats
-                       WHERE target_session=%s AND source_capture_id=%s
-                         AND rule_version=%s AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["rule_version"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_cohort_group_stats"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4591,15 +4513,8 @@ def clear_derived_module(
             elif module_code == "FEP_BASELINE":
                 cursor.execute(
                     """DELETE FROM stock.source_fep_baseline_facts
-                       WHERE COALESCE(target_session, period_end_session)=%s
-                         AND source_capture_id=%s AND rule_version=%s
-                         AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["rule_version"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE COALESCE(target_session, period_end_session)=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_fep_baseline_facts"] += cursor.rowcount
                 deleted_by_session[target_session.isoformat()][
@@ -4608,14 +4523,8 @@ def clear_derived_module(
             elif module_code == "OBSERVATION_SEGMENTS":
                 cursor.execute(
                     """DELETE FROM stock.source_research_observation_segment_days
-                       WHERE t0_session=%s AND source_capture_id=%s
-                         AND rule_version=%s AND calendar_revision=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                        key["rule_version"],
-                        key["calendar_revision"],
-                    ),
+                       WHERE t0_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_research_observation_segment_days"] += (
                     cursor.rowcount
@@ -4627,12 +4536,8 @@ def clear_derived_module(
                 cursor.execute(
                     """DELETE FROM stock.source_sector_pulse_followup_facts f
                        USING stock.source_sector_cross_period_pulse_facts p
-                       WHERE p.id=f.pulse_fact_id AND p.target_session=%s
-                         AND p.source_capture_id=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                    ),
+                       WHERE p.id=f.pulse_fact_id AND p.target_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_sector_pulse_followup_facts"] += (
                     cursor.rowcount
@@ -4643,12 +4548,8 @@ def clear_derived_module(
                 cursor.execute(
                     """DELETE FROM stock.source_sector_pulse_cohort_reason_facts r
                        USING stock.source_sector_pulse_cohort_group_facts g
-                       WHERE g.id=r.cohort_group_fact_id AND g.t0_session=%s
-                         AND g.t0_source_capture_id=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                    ),
+                       WHERE g.id=r.cohort_group_fact_id AND g.t0_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_sector_pulse_cohort_reason_facts"] += (
                     cursor.rowcount
@@ -4658,11 +4559,8 @@ def clear_derived_module(
                 ] += cursor.rowcount
                 cursor.execute(
                     """DELETE FROM stock.source_sector_pulse_cohort_group_facts
-                       WHERE t0_session=%s AND t0_source_capture_id=%s""",
-                    (
-                        target_session,
-                        key["source_capture_id"],
-                    ),
+                       WHERE t0_session=%s""",
+                    (target_session,),
                 )
                 deleted_rows["stock.source_sector_pulse_cohort_group_facts"] += (
                     cursor.rowcount
@@ -4766,75 +4664,29 @@ def clear_derived_module(
             for row in cursor.fetchall():
                 _record_native_del("stock.r03_sector_native_day_facts", row[0])
 
-        if module_code == "MARKET_INDICES_ENV":
-            grouped_scopes: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-            for version in preview["versions"]:
-                key = version["version_key"]
-                scope_key = (
-                    key["stock_capture_id"],
-                    key["index_capture_id"],
-                    key["primary_index_symbol"],
-                    key["index_config_version"],
-                    key["calendar_id"],
-                    key["calendar_revision"],
-                    key["rule_version"],
-                )
-                grouped_scopes.setdefault(scope_key, []).append(version)
+        if module_code == "MARKET_INDICES_ENV" and preview["versions"]:
             selected_sessions = set(sessions)
-            for scope_key, scoped_versions in grouped_scopes.items():
-                root_sessions = sorted(
-                    date.fromisoformat(version["target_session"])
-                    for version in scoped_versions
+            first_session = min(
+                date.fromisoformat(version["target_session"])
+                for version in preview["versions"]
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_market_environment_day_facts
+                   WHERE target_session>%s AND target_session<=%s
+                     AND target_session<>ALL(%s::date[])
+                   RETURNING target_session""",
+                (first_session, cutoff, list(selected_sessions)),
+            )
+            for row in cursor.fetchall():
+                table = "stock.source_market_environment_day_facts"
+                deleted_rows[table] += 1
+                session_counts = deleted_by_session.setdefault(
+                    row[0].isoformat(),
+                    {name: 0 for name in cleanup_count_tables},
                 )
-                (
-                    stock_capture_id,
-                    index_capture_id,
-                    primary,
-                    index_config,
-                    cal_id,
-                    cal_rev,
-                    rule_ver,
-                ) = scope_key
-                cursor.execute(
-                    """DELETE FROM stock.source_market_environment_day_facts
-                       WHERE target_session>%s AND target_session<=%s
-                         AND target_session<>ALL(%s::date[])
-                         AND stock_capture_id=%s
-                         AND index_capture_id IS NOT DISTINCT FROM %s
-                         AND primary_index_symbol=%s
-                         AND index_config_version IS NOT DISTINCT FROM %s
-                         AND calendar_id=%s AND calendar_revision=%s
-                         AND rule_version=%s
-                       RETURNING target_session""",
-                    (
-                        root_sessions[0],
-                        cutoff,
-                        list(selected_sessions),
-                        stock_capture_id,
-                        index_capture_id,
-                        primary,
-                        index_config,
-                        cal_id,
-                        cal_rev,
-                        rule_ver,
-                    ),
-                )
-                for row in cursor.fetchall():
-                    table = "stock.source_market_environment_day_facts"
-                    deleted_rows[table] += 1
-                    session_counts = deleted_by_session.setdefault(
-                        row[0].isoformat(),
-                        {name: 0 for name in cleanup_count_tables},
-                    )
-                    session_counts[table] += 1
+                session_counts[table] += 1
 
-        if module_code == "CROSS_SECTION":
-            scopes_by_capture: dict[int, list[dict[str, Any]]] = {}
-            for version in preview["versions"]:
-                key = version["version_key"]
-                scopes_by_capture.setdefault(key["price_capture_id"], []).append(
-                    version
-                )
+        if module_code == "CROSS_SECTION" and preview["versions"]:
 
             def record_deletion(table: str, count: int, session: date) -> None:
                 if not count:
@@ -4846,205 +4698,198 @@ def clear_derived_module(
                 )
                 session_counts[table] += count
 
-            for source_capture_id, scoped_versions in scopes_by_capture.items():
-                selected_scope_sessions = tuple(
-                    sorted(
-                        {
-                            date.fromisoformat(version["target_session"])
-                            for version in scoped_versions
-                        }
-                    )
-                )
-                target_session = selected_scope_sessions[0]
-                target_ids = scoped_versions[0].get("dependent_ids", {})
-                enrollment_sessions: dict[int, date] = {}
-                if target_ids["enrollment_ids"]:
-                    cursor.execute(
-                        """SELECT e.id,COALESCE(r.target_session,d.target_session)
-                           FROM stock.source_research_enrollments e
-                           LEFT JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
-                           LEFT JOIN stock.source_d0_launch_day_facts d ON d.id=e.d0_fact_id
-                           WHERE e.id=ANY(%s::bigint[])""",
-                        (list(target_ids["enrollment_ids"]),),
-                    )
-                    enrollment_sessions = {
-                        int(row[0]): row[1] or target_session
-                        for row in cursor.fetchall()
+            selected_scope_sessions = tuple(
+                sorted(
+                    {
+                        date.fromisoformat(version["target_session"])
+                        for version in preview["versions"]
                     }
-
-                cursor.execute(
-                    """DELETE FROM stock.source_rps_pulse_t0_change_facts
-                       WHERE source_t0_fact_id=ANY(%s::bigint[])
-                          OR enrollment_id=ANY(%s::bigint[])
-                       RETURNING target_session""",
-                    (
-                        list(target_ids["t0_fact_ids"]),
-                        list(target_ids["enrollment_ids"]),
-                    ),
                 )
-                for row in cursor.fetchall():
-                    record_deletion("stock.source_rps_pulse_t0_change_facts", 1, row[0])
-
+            )
+            target_session = selected_scope_sessions[0]
+            target_ids = preview["versions"][0].get("dependent_ids", {})
+            enrollment_sessions: dict[int, date] = {}
+            if target_ids["enrollment_ids"]:
                 cursor.execute(
-                    """DELETE FROM stock.source_research_observation_segment_days
-                       WHERE anchor_rule_fact_id=ANY(%s::bigint[])
-                          OR evidence_rule_fact_id=ANY(%s::bigint[])
-                          OR source_enrollment_id=ANY(%s::bigint[])
-                          OR parent_enrollment_id=ANY(%s::bigint[])
-                          OR linked_enrollment_id=ANY(%s::bigint[])
-                       RETURNING t0_session""",
-                    (
-                        list(target_ids["rule_fact_ids"]),
-                        list(target_ids["rule_fact_ids"]),
-                        list(target_ids["enrollment_ids"]),
-                        list(target_ids["enrollment_ids"]),
-                        list(target_ids["enrollment_ids"]),
-                    ),
-                )
-                for row in cursor.fetchall():
-                    record_deletion(
-                        "stock.source_research_observation_segment_days", 1, row[0]
-                    )
-
-                cursor.execute(
-                    """DELETE FROM stock.source_cohort_group_stats
-                       USING stock.source_rule_evaluations r
-                       WHERE r.id=ANY(%s::bigint[])
-                         AND source_cohort_group_stats.target_session=r.target_session
-                         AND source_cohort_group_stats.source_capture_id=r.source_capture_id
-                         AND source_cohort_group_stats.rule_id=r.rule_id
-                         AND source_cohort_group_stats.rule_version=r.rule_version
-                         AND source_cohort_group_stats.profile_revision=r.profile_revision
-                         AND source_cohort_group_stats.history_session_count=r.history_session_count
-                         AND source_cohort_group_stats.d1_history_session_count=r.d1_history_session_count
-                         AND source_cohort_group_stats.event_window_start=r.event_window_start
-                         AND source_cohort_group_stats.calendar_revision=r.calendar_revision
-                         AND source_cohort_group_stats.research_cutoff<=%s
-                       RETURNING source_cohort_group_stats.target_session""",
-                    (list(target_ids["rule_fact_ids"]), cutoff),
-                )
-                for row in cursor.fetchall():
-                    record_deletion("stock.source_cohort_group_stats", 1, row[0])
-
-                cursor.execute(
-                    """DELETE FROM stock.source_fep_baseline_facts
-                       WHERE id=ANY(%s::bigint[])
-                       RETURNING research_cutoff""",
-                    (list(target_ids["fep_baseline_ids"]),),
-                )
-                for row in cursor.fetchall():
-                    record_deletion("stock.source_fep_baseline_facts", 1, row[0])
-
-                cursor.execute(
-                    """DELETE FROM stock.source_research_events
-                       WHERE id=ANY(%s::bigint[])
-                       RETURNING target_session""",
-                    (list(target_ids["research_event_ids"]),),
-                )
-                for row in cursor.fetchall():
-                    record_deletion("stock.source_research_events", 1, row[0])
-
-                cursor.execute(
-                    """DELETE FROM stock.source_t0_early_observation_facts
-                       WHERE id=ANY(%s::bigint[])
-                       RETURNING target_session""",
-                    (list(target_ids["t0_fact_ids"]),),
-                )
-                for row in cursor.fetchall():
-                    record_deletion(
-                        "stock.source_t0_early_observation_facts", 1, row[0]
-                    )
-
-                cursor.execute(
-                    """DELETE FROM stock.source_research_enrollments
-                       WHERE id=ANY(%s::bigint[])
-                       RETURNING id""",
+                    """SELECT e.id,COALESCE(r.target_session,d.target_session)
+                       FROM stock.source_research_enrollments e
+                       LEFT JOIN stock.source_rule_evaluations r ON r.id=e.rule_fact_id
+                       LEFT JOIN stock.source_d0_launch_day_facts d ON d.id=e.d0_fact_id
+                       WHERE e.id=ANY(%s::bigint[])""",
                     (list(target_ids["enrollment_ids"]),),
                 )
+                enrollment_sessions = {
+                    int(row[0]): row[1] or target_session for row in cursor.fetchall()
+                }
+
+            cursor.execute(
+                """DELETE FROM stock.source_rps_pulse_t0_change_facts
+                   WHERE source_t0_fact_id=ANY(%s::bigint[])
+                      OR enrollment_id=ANY(%s::bigint[])
+                   RETURNING target_session""",
+                (
+                    list(target_ids["t0_fact_ids"]),
+                    list(target_ids["enrollment_ids"]),
+                ),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_rps_pulse_t0_change_facts", 1, row[0])
+
+            cursor.execute(
+                """DELETE FROM stock.source_research_observation_segment_days
+                   WHERE anchor_rule_fact_id=ANY(%s::bigint[])
+                      OR evidence_rule_fact_id=ANY(%s::bigint[])
+                      OR source_enrollment_id=ANY(%s::bigint[])
+                      OR parent_enrollment_id=ANY(%s::bigint[])
+                      OR linked_enrollment_id=ANY(%s::bigint[])
+                   RETURNING t0_session""",
+                (
+                    list(target_ids["rule_fact_ids"]),
+                    list(target_ids["rule_fact_ids"]),
+                    list(target_ids["enrollment_ids"]),
+                    list(target_ids["enrollment_ids"]),
+                    list(target_ids["enrollment_ids"]),
+                ),
+            )
+            for row in cursor.fetchall():
+                record_deletion(
+                    "stock.source_research_observation_segment_days", 1, row[0]
+                )
+
+            cursor.execute(
+                """DELETE FROM stock.source_cohort_group_stats
+                   USING stock.source_rule_evaluations r
+                   WHERE r.id=ANY(%s::bigint[])
+                     AND source_cohort_group_stats.target_session=r.target_session
+                     AND source_cohort_group_stats.rule_id=r.rule_id
+                     AND source_cohort_group_stats.rule_version=r.rule_version
+                     AND source_cohort_group_stats.profile_revision=r.profile_revision
+                     AND source_cohort_group_stats.history_session_count=r.history_session_count
+                     AND source_cohort_group_stats.d1_history_session_count=r.d1_history_session_count
+                     AND source_cohort_group_stats.event_window_start=r.event_window_start
+                     AND source_cohort_group_stats.calendar_revision=r.calendar_revision
+                     AND source_cohort_group_stats.research_cutoff<=%s
+                   RETURNING source_cohort_group_stats.target_session""",
+                (list(target_ids["rule_fact_ids"]), cutoff),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_cohort_group_stats", 1, row[0])
+
+            cursor.execute(
+                """DELETE FROM stock.source_fep_baseline_facts
+                   WHERE id=ANY(%s::bigint[])
+                   RETURNING research_cutoff""",
+                (list(target_ids["fep_baseline_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_fep_baseline_facts", 1, row[0])
+
+            cursor.execute(
+                """DELETE FROM stock.source_research_events
+                   WHERE id=ANY(%s::bigint[])
+                   RETURNING target_session""",
+                (list(target_ids["research_event_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_research_events", 1, row[0])
+
+            cursor.execute(
+                """DELETE FROM stock.source_t0_early_observation_facts
+                   WHERE id=ANY(%s::bigint[])
+                   RETURNING target_session""",
+                (list(target_ids["t0_fact_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_t0_early_observation_facts", 1, row[0])
+
+            cursor.execute(
+                """DELETE FROM stock.source_research_enrollments
+                   WHERE id=ANY(%s::bigint[])
+                   RETURNING id""",
+                (list(target_ids["enrollment_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion(
+                    "stock.source_research_enrollments",
+                    1,
+                    enrollment_sessions.get(int(row[0]), target_session),
+                )
+
+            cursor.execute(
+                """DELETE FROM stock.source_rule_evaluations
+                   WHERE id=ANY(%s::bigint[])
+                   RETURNING target_session""",
+                (list(target_ids["rule_fact_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_rule_evaluations", 1, row[0])
+
+            if target_ids["profile_sessions"]:
+                cursor.execute(
+                    """DELETE FROM stock.source_d0_formal_admission_day_facts
+                       WHERE target_session=ANY(%s)
+                       RETURNING target_session""",
+                    (list(target_ids["profile_sessions"]),),
+                )
                 for row in cursor.fetchall():
                     record_deletion(
-                        "stock.source_research_enrollments",
-                        1,
-                        enrollment_sessions.get(int(row[0]), target_session),
+                        "stock.source_d0_formal_admission_day_facts", 1, row[0]
                     )
 
+            cursor.execute(
+                """DELETE FROM stock.source_d0_launch_day_facts
+                   WHERE id=ANY(%s::bigint[])
+                   RETURNING target_session""",
+                (list(target_ids["d0_fact_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_d0_launch_day_facts", 1, row[0])
+
+            cursor.execute(
+                """DELETE FROM stock.source_d1_material_anchor_day_facts
+                   WHERE d1_structure_id=ANY(%s::bigint[])
+                   RETURNING created_session""",
+                (list(target_ids["d1_structure_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_d1_material_anchor_day_facts", 1, row[0])
+
+            cursor.execute(
+                """DELETE FROM stock.source_d1_structure_day_facts
+                   WHERE id=ANY(%s::bigint[])
+                   RETURNING target_session""",
+                (list(target_ids["d1_structure_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_d1_structure_day_facts", 1, row[0])
+
+            cursor.execute(
+                """DELETE FROM stock.source_pool_seed_day_facts
+                   WHERE id=ANY(%s::bigint[])
+                   RETURNING target_session""",
+                (list(target_ids["seed_fact_ids"]),),
+            )
+            for row in cursor.fetchall():
+                record_deletion("stock.source_pool_seed_day_facts", 1, row[0])
+
+            if target_ids["profile_sessions"]:
                 cursor.execute(
-                    """DELETE FROM stock.source_rule_evaluations
-                       WHERE id=ANY(%s::bigint[])
+                    """DELETE FROM stock.source_d0_scenario_day_facts
+                       WHERE target_session=ANY(%s)
                        RETURNING target_session""",
-                    (list(target_ids["rule_fact_ids"]),),
+                    (list(target_ids["profile_sessions"]),),
                 )
                 for row in cursor.fetchall():
-                    record_deletion("stock.source_rule_evaluations", 1, row[0])
-
-                if target_ids["profile_sessions"]:
-                    cursor.execute(
-                        """DELETE FROM stock.source_d0_formal_admission_day_facts
-                           WHERE target_session=ANY(%s) AND source_capture_id=%s
-                           RETURNING target_session""",
-                        (list(target_ids["profile_sessions"]), source_capture_id),
-                    )
-                    for row in cursor.fetchall():
-                        record_deletion(
-                            "stock.source_d0_formal_admission_day_facts", 1, row[0]
-                        )
+                    record_deletion("stock.source_d0_scenario_day_facts", 1, row[0])
 
                 cursor.execute(
-                    """DELETE FROM stock.source_d0_launch_day_facts
-                       WHERE id=ANY(%s::bigint[])
+                    """DELETE FROM stock.source_symbol_price_profiles
+                       WHERE target_session=ANY(%s)
                        RETURNING target_session""",
-                    (list(target_ids["d0_fact_ids"]),),
+                    (list(target_ids["profile_sessions"]),),
                 )
                 for row in cursor.fetchall():
-                    record_deletion("stock.source_d0_launch_day_facts", 1, row[0])
-
-                cursor.execute(
-                    """DELETE FROM stock.source_d1_material_anchor_day_facts
-                       WHERE d1_structure_id=ANY(%s::bigint[])
-                       RETURNING created_session""",
-                    (list(target_ids["d1_structure_ids"]),),
-                )
-                for row in cursor.fetchall():
-                    record_deletion(
-                        "stock.source_d1_material_anchor_day_facts", 1, row[0]
-                    )
-
-                cursor.execute(
-                    """DELETE FROM stock.source_d1_structure_day_facts
-                       WHERE id=ANY(%s::bigint[])
-                       RETURNING target_session""",
-                    (list(target_ids["d1_structure_ids"]),),
-                )
-                for row in cursor.fetchall():
-                    record_deletion("stock.source_d1_structure_day_facts", 1, row[0])
-
-                cursor.execute(
-                    """DELETE FROM stock.source_pool_seed_day_facts
-                       WHERE id=ANY(%s::bigint[])
-                       RETURNING target_session""",
-                    (list(target_ids["seed_fact_ids"]),),
-                )
-                for row in cursor.fetchall():
-                    record_deletion("stock.source_pool_seed_day_facts", 1, row[0])
-
-                if target_ids["profile_sessions"]:
-                    cursor.execute(
-                        """DELETE FROM stock.source_d0_scenario_day_facts
-                           WHERE target_session=ANY(%s) AND source_capture_id=%s
-                           RETURNING target_session""",
-                        (list(target_ids["profile_sessions"]), source_capture_id),
-                    )
-                    for row in cursor.fetchall():
-                        record_deletion("stock.source_d0_scenario_day_facts", 1, row[0])
-
-                    cursor.execute(
-                        """DELETE FROM stock.source_symbol_price_profiles
-                           WHERE target_session=ANY(%s) AND source_capture_id=%s
-                           RETURNING target_session""",
-                        (list(target_ids["profile_sessions"]), source_capture_id),
-                    )
-                    for row in cursor.fetchall():
-                        record_deletion("stock.source_symbol_price_profiles", 1, row[0])
+                    record_deletion("stock.source_symbol_price_profiles", 1, row[0])
 
         expected_counts = {
             table: int(preview.get("affected_rows_by_table", {}).get(table, 0))
@@ -5878,7 +5723,6 @@ def create_or_resume_job(
         "operation",
         "selected_modules",
         "module_output_session_counts",
-        "source_version_fingerprint",
         "calendar_id",
         "calendar_revision",
         "planned_units",
@@ -5893,6 +5737,13 @@ def create_or_resume_job(
         "profile_history_session_count", job["history_session_count"]
     )
     reset_preview_fingerprint = job.get("reset_preview_fingerprint")
+    compat_source_fingerprint = job.get("source_version_fingerprint")
+    if (
+        not isinstance(compat_source_fingerprint, str)
+        or len(compat_source_fingerprint) != 64
+        or any(c not in "0123456789abcdef" for c in compat_source_fingerprint)
+    ):
+        compat_source_fingerprint = "0" * 64
     if (
         not isinstance(selected_modules, (list, tuple))
         or any(not isinstance(item, str) or not item for item in selected_modules)
@@ -5909,8 +5760,6 @@ def create_or_resume_job(
             "CLEAR_DERIVED",
             "CLEAR_AND_REGENERATE",
         }
-        or not isinstance(job["source_version_fingerprint"], str)
-        or len(job["source_version_fingerprint"]) != 64
         or not isinstance(initialization_mode, str)
         or not initialization_mode.strip()
         or not isinstance(daily_mode, str)
@@ -6089,7 +5938,7 @@ def create_or_resume_job(
                 job["operation"],
                 list(selected_modules),
                 list(output_counts),
-                job["source_version_fingerprint"],
+                compat_source_fingerprint,
                 job["calendar_id"],
                 job["calendar_revision"],
                 job["planned_units"],

@@ -502,6 +502,35 @@ def _ratio(numerator: Any, denominator: Any) -> str | None:
     return str(Fraction(int(numerator), int(denominator)))
 
 
+_T0_KEY_COLUMNS = (
+    "research_cutoff",
+    "target_session",
+    "rule_id",
+    "lane",
+    "horizon",
+    "group_code",
+    "metric_code",
+    "condition_code",
+)
+_EQUAL_DATE_KEY_COLUMNS = (
+    "research_cutoff",
+    "period_start_session",
+    "period_end_session",
+    "rule_id",
+    "lane",
+    "horizon",
+    "group_code",
+    "metric_code",
+    "condition_code",
+)
+
+
+def _fep_business_key(row: tuple[Any, ...]) -> tuple[Any, ...]:
+    summary_scope = row[_COLUMNS.index("summary_scope")]
+    key_columns = _T0_KEY_COLUMNS if summary_scope == "T0" else _EQUAL_DATE_KEY_COLUMNS
+    return (summary_scope, *(row[_COLUMNS.index(name)] for name in key_columns))
+
+
 def _row_values(row: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(row.get(column) for column in _COLUMNS)
 
@@ -547,24 +576,27 @@ def persist_fep_baseline_rows(
     ):
         raise ValueError("单次FEP写入必须绑定唯一截止与BaoStock来源捕获")
 
-    def business_key(row: tuple[Any, ...]) -> tuple[Any, ...]:
-        return tuple(row[_COLUMNS.index(name)] for name in _COLUMNS[:23])
-
     expected_by_key = {}
     for value in values:
-        key = business_key(value)
+        key = _fep_business_key(value)
         if key in expected_by_key and expected_by_key[key] != value:
             raise ResearchFactConflict("FEP输入批次同业务键包含异内容")
         expected_by_key[key] = value
 
     restatable_indexes = {_COLUMNS.index(name) for name in _RESTATABLE_COLUMNS}
-    key_filter = " AND ".join(
-        f"{column} IS NOT DISTINCT FROM %s" for column in _COLUMNS[:23]
+    t0_key_filter = " AND ".join(f"{column}=%s" for column in _T0_KEY_COLUMNS)
+    equal_key_filter = " AND ".join(
+        f"{column} IS NOT DISTINCT FROM %s" for column in _EQUAL_DATE_KEY_COLUMNS
     )
-    update_sql = (
+    update_t0_sql = (
         f"UPDATE {_TABLE} SET "
         + ",".join(f"{column}=%s" for column in _RESTATABLE_COLUMNS)
-        + f" WHERE {key_filter}"
+        + f" WHERE summary_scope='T0' AND {t0_key_filter}"
+    )
+    update_equal_sql = (
+        f"UPDATE {_TABLE} SET "
+        + ",".join(f"{column}=%s" for column in _RESTATABLE_COLUMNS)
+        + f" WHERE summary_scope='EQUAL_DATE' AND {equal_key_filter}"
     )
 
     with _transaction(config, write=True, statement_timeout_ms=30000) as (
@@ -577,15 +609,13 @@ def persist_fep_baseline_rows(
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
                 WHERE research_cutoff=%s
-                  AND (source_capture_id=%s
-                       OR (source_capture_id IS NULL AND summary_scope='EQUAL_DATE'))
                   AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
                 ORDER BY summary_scope,target_session,period_start_session,
                          rule_id,lane,horizon,condition_code,group_code,metric_code""",
-            (cutoffs[0], capture_ids[0], rules, horizons, lanes),
+            (cutoffs[0], rules, horizons, lanes),
         )
         stored = cursor.fetchall()
-        stored_by_key = {business_key(tuple(row)): tuple(row) for row in stored}
+        stored_by_key = {_fep_business_key(tuple(row)): tuple(row) for row in stored}
         if len(stored_by_key) != len(stored):
             raise ResearchFactConflict("FEP已存范围存在重复业务键；事务已回滚")
         restated = 0
@@ -603,12 +633,18 @@ def persist_fep_baseline_rows(
                     raise ResearchFactConflict(
                         "FEP纠错影响业务身份或冻结分母；拒绝覆盖并回滚"
                     )
+                if expected[summary_scope_index] == "T0":
+                    update_sql = update_t0_sql
+                    key_cols = _T0_KEY_COLUMNS
+                else:
+                    update_sql = update_equal_sql
+                    key_cols = _EQUAL_DATE_KEY_COLUMNS
                 cursor.execute(
                     update_sql,
                     tuple(
                         expected[_COLUMNS.index(name)] for name in _RESTATABLE_COLUMNS
                     )
-                    + tuple(expected[_COLUMNS.index(name)] for name in _COLUMNS[:23]),
+                    + tuple(expected[_COLUMNS.index(name)] for name in key_cols),
                 )
                 if cursor.rowcount != 1:
                     raise ResearchFactConflict("FEP同键定点修订未更新唯一业务行")
@@ -621,15 +657,13 @@ def persist_fep_baseline_rows(
             cursor.execute(
                 f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
                     WHERE research_cutoff=%s
-                      AND (source_capture_id=%s
-                           OR (source_capture_id IS NULL AND summary_scope='EQUAL_DATE'))
                       AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
                     ORDER BY summary_scope,target_session,period_start_session,
                              rule_id,lane,horizon,condition_code,group_code,metric_code""",
-                (cutoffs[0], capture_ids[0], rules, horizons, lanes),
+                (cutoffs[0], rules, horizons, lanes),
             )
             stored_after = {
-                business_key(tuple(row)): tuple(row) for row in cursor.fetchall()
+                _fep_business_key(tuple(row)): tuple(row) for row in cursor.fetchall()
             }
             if any(
                 stored_after.get(key) != value for key, value in expected_by_key.items()
@@ -648,7 +682,7 @@ def persist_fep_baseline_rows(
 def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
     """证明每个T0三组、比较行及四个条件日期分区都完整且唯一。"""
     reasons = []
-    keys = [tuple(row[:23]) for row in rows]
+    keys = [_fep_business_key(tuple(row)) for row in rows]
     if len(keys) != len(set(keys)):
         reasons.append("FEP_READER_DUPLICATE_BUSINESS_SCOPE")
     index = {name: _COLUMNS.index(name) for name in _COLUMNS}
@@ -1022,11 +1056,9 @@ def read_fep_baseline(
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
                 WHERE research_cutoff=%s
-                  AND (source_capture_id=%s
-                       OR (source_capture_id IS NULL AND summary_scope='EQUAL_DATE'))
                   AND rule_id=%s AND horizon=%s AND lane=ANY(%s)
                 ORDER BY lane,summary_scope,target_session,condition_code,group_code,metric_code""",
-            (research_cutoff, source_capture_id, rule_id, horizon, list(query_lanes)),
+            (research_cutoff, rule_id, horizon, list(query_lanes)),
         )
         stored_rows = cursor.fetchall()
     index = {name: _COLUMNS.index(name) for name in _COLUMNS}

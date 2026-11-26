@@ -52,7 +52,7 @@ def _read_rule_day_contexts(
     cursor: Any,
     *,
     sessions: Sequence[date],
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     required_rule_ids: Sequence[str] | None = None,
 ) -> dict[date, dict[str, Any]]:
     """读取每个目标日各自闭合的Raw、Profile、Seed、D1和规则范围。"""
@@ -64,9 +64,17 @@ def _read_rule_day_contexts(
     selected = tuple(sorted(set(sessions)))
     if not selected:
         return {}
+    capture_filter = "AND c.capture_id=%s" if source_capture_id is not None else ""
+    req_filter = "WHERE capture_id=%s" if source_capture_id is not None else ""
+    req_params: tuple[Any, ...] = (
+        (source_capture_id,) if source_capture_id is not None else ()
+    )
+    cap_params: tuple[Any, ...] = (
+        (source_capture_id,) if source_capture_id is not None else ()
+    )
     cursor.execute(
-        """WITH request_codes AS (
-               SELECT source_code,
+        f"""WITH request_codes AS (
+               SELECT capture_id,source_code,
                       count(*)=2 AND count(DISTINCT adjustment_flag)=2
                         AND count(DISTINCT eligible_start_session)=1
                         AND count(DISTINCT eligible_end_session)=1
@@ -78,10 +86,14 @@ def _read_rule_day_contexts(
                       min(eligible_start_session) AS eligible_start,
                       max(eligible_end_session) AS eligible_end
                FROM source_capture_requests
-               WHERE capture_id=%s
-               GROUP BY source_code
+               {req_filter}
+               GROUP BY capture_id,source_code
            ), selected_sessions AS (
                SELECT unnest(%s::date[]) AS target_session
+           ), day_captures AS (
+               SELECT DISTINCT r.session_date AS target_session,r.source_capture_id AS capture_id
+               FROM source_raw_daily r
+               JOIN selected_sessions s ON s.target_session=r.session_date
            )
            SELECT s.target_session,c.capture_id,c.parser_contract,
                   c.source_time_quality,c.source_clock_role,
@@ -93,12 +105,15 @@ def _read_rule_day_contexts(
                   count(q.source_code) FILTER (WHERE q.complete)::bigint
                       AS complete_requests
            FROM selected_sessions s
+           JOIN day_captures dc ON dc.target_session=s.target_session
            JOIN source_captures c
-             ON c.capture_id=%s AND c.provider='BAOSTOCK'
+             ON c.capture_id=dc.capture_id AND c.provider='BAOSTOCK'
             AND c.range_start_session<=s.target_session
             AND s.target_session<=c.range_end_session
+            {capture_filter}
            LEFT JOIN request_codes q
-             ON s.target_session BETWEEN q.eligible_start AND q.eligible_end
+             ON q.capture_id=c.capture_id
+            AND s.target_session BETWEEN q.eligible_start AND q.eligible_end
            LEFT JOIN source_raw_daily r
              ON r.session_date=s.target_session
             AND r.source_capture_id=c.capture_id
@@ -106,11 +121,12 @@ def _read_rule_day_contexts(
            GROUP BY s.target_session,c.capture_id,c.parser_contract,
                     c.source_time_quality,c.source_clock_role
            ORDER BY s.target_session,c.capture_id""",
-        (source_capture_id, list(selected), source_capture_id),
+        (*req_params, list(selected), *cap_params),
     )
     capture_rows = cursor.fetchall()
+    p_cap_filter = "AND p.source_capture_id=%s" if source_capture_id is not None else ""
     cursor.execute(
-        """SELECT p.target_session,p.source_capture_id,NULL::text AS profile_revision,
+        f"""SELECT p.target_session,p.source_capture_id,NULL::text AS profile_revision,
                   p.history_requested_session_count,
                   history_calendar_id,history_calendar_revision,history_window_start,
                   history_window_end,price_coordinate,
@@ -120,7 +136,7 @@ def _read_rule_day_contexts(
                   NULL::text AS cross_section_universe_version,
                   NULL::text AS cross_section_contract_version
            FROM source_symbol_price_profiles p
-           WHERE p.target_session=ANY(%s) AND p.source_capture_id=%s
+           WHERE p.target_session=ANY(%s) {p_cap_filter}
              AND p.price_coordinate='FORWARD_ADJUSTED'
              AND EXISTS (
                  SELECT 1 FROM source_pool_seed_day_facts s
@@ -130,26 +146,27 @@ def _read_rule_day_contexts(
                    AND s.price_coordinate='FORWARD_ADJUSTED'
              )
            GROUP BY 1,2,3,4,5,6,7,8,9,14,15,16 ORDER BY 1,2,3""",
-        (list(selected), source_capture_id, _SEED_PRODUCER_VERSION),
+        (list(selected), *cap_params, _SEED_PRODUCER_VERSION),
     )
     profile_rows = cursor.fetchall()
+    s_cap_filter = "AND source_capture_id=%s" if source_capture_id is not None else ""
     cursor.execute(
-        """SELECT target_session,source_capture_id,NULL::text AS profile_revision,history_session_count,
+        f"""SELECT target_session,source_capture_id,NULL::text AS profile_revision,history_session_count,
                   history_window_start,history_window_end,calendar_revision,research_mode,
                   price_coordinate,producer_contract,producer_version,count(*),
                   count(DISTINCT source_symbol),NULL::bigint AS cross_section_universe_capture_id,
                   NULL::text AS cross_section_universe_version,NULL::text AS cross_section_contract_version,
                   NULL::text AS universe_match_status,ranking_universe_count,evaluation_universe_count
            FROM source_pool_seed_day_facts
-           WHERE target_session=ANY(%s) AND source_capture_id=%s
+           WHERE target_session=ANY(%s) {s_cap_filter}
              AND producer_version=%s
            GROUP BY 1,2,3,4,5,6,7,8,9,10,11,14,15,16,17,18,19
            ORDER BY 1,2,3""",
-        (list(selected), source_capture_id, _SEED_PRODUCER_VERSION),
+        (list(selected), *cap_params, _SEED_PRODUCER_VERSION),
     )
     seed_rows = cursor.fetchall()
     cursor.execute(
-        """SELECT target_session,target_capture_id,d1_history_session_count,
+        f"""SELECT target_session,target_capture_id,d1_history_session_count,
                   history_window_start,history_window_end,calendar_id,calendar_revision,
                   producer_contract,producer_version,material_change_contract,
                   research_mode,price_coordinate,count(*),
@@ -159,22 +176,22 @@ def _read_rule_day_contexts(
                   NULL::text AS cross_section_universe_version,
                   NULL::text AS cross_section_contract_version
            FROM source_d1_structure_day_facts
-           WHERE target_session=ANY(%s) AND source_capture_id=%s
+           WHERE target_session=ANY(%s) {s_cap_filter}
              AND producer_version=ANY(%s)
            GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,17,18,19 ORDER BY 1,2,3""",
-        (list(selected), source_capture_id, list(_D1_SUPPORTED_PRODUCER_VERSIONS)),
+        (list(selected), *cap_params, list(_D1_SUPPORTED_PRODUCER_VERSIONS)),
     )
     d1_rows = cursor.fetchall()
     cursor.execute(
-        """SELECT target_session,source_capture_id,rule_version,profile_revision,
+        f"""SELECT target_session,source_capture_id,rule_version,profile_revision,
                   history_session_count,d1_history_session_count,event_window_start,
                   calendar_revision,scope,count(*),count(DISTINCT source_symbol),
                   count(DISTINCT rule_id),array_agg(DISTINCT rule_id ORDER BY rule_id)
            FROM source_rule_evaluations
-           WHERE target_session=ANY(%s) AND source_capture_id=%s
+           WHERE target_session=ANY(%s) {s_cap_filter}
              AND rule_id=ANY(%s)
            GROUP BY 1,2,3,4,5,6,7,8,9 ORDER BY 1,2,3,4""",
-        (list(selected), source_capture_id, list(sorted(required_rules))),
+        (list(selected), *cap_params, list(sorted(required_rules))),
     )
     rule_rows = cursor.fetchall()
 
@@ -225,6 +242,7 @@ def _read_rule_day_contexts(
             complete_requests,
         ) = captures[0]
         context.update(
+            source_capture_id=capture,
             capture=capture,
             parser_contract=parser_contract,
             source_time_quality=source_time_quality,
@@ -232,9 +250,11 @@ def _read_rule_day_contexts(
             normalized_count=raw_count,
             source_count=research_raw_count,
         )
-        profile_scopes = by_table["profiles"][session]
-        seed_scopes = by_table["seeds"][session]
-        d1_scopes = by_table["d1"][session]
+        profile_scopes = [
+            row for row in by_table["profiles"][session] if row[0] == capture
+        ]
+        seed_scopes = [row for row in by_table["seeds"][session] if row[0] == capture]
+        d1_scopes = [row for row in by_table["d1"][session] if row[0] == capture]
         d1_scopes = _select_preferred_d1_scopes(
             d1_scopes,
             version_index=7,
@@ -385,7 +405,7 @@ def _read_rule_day_contexts(
                 "cross_section_contract_version": d1_cross_contract,
             },
         )
-        rule_scopes = by_table["rules"][session]
+        rule_scopes = [row for row in by_table["rules"][session] if row[0] == capture]
         if len(rule_scopes) != 1:
             context["rules_present"] = bool(rule_scopes)
             context["rules_reason"] = "RULE_SCOPE_MISSING_OR_AMBIGUOUS"
@@ -498,7 +518,6 @@ def _rule_context_comparable(
     target_rule = target_context["rule"]
     return all(
         (
-            before_context["source_capture_id"] == target_context["source_capture_id"],
             before_context["source_time_quality"]
             == target_context["source_time_quality"],
             before_context["source_clock_role"] == target_context["source_clock_role"],
@@ -617,8 +636,8 @@ def _reentry_parent_ids(
     )
     cursor.execute(
         """SELECT min(target_session) FROM source_rule_evaluations
-           WHERE source_capture_id=%s AND target_session<=%s""",
-        (source_capture_id, target),
+           WHERE target_session<=%s""",
+        (target,),
     )
     first_rule_session = cursor.fetchone()[0]
     if first_rule_session is None:
@@ -628,18 +647,16 @@ def _reentry_parent_ids(
     )[-60:]
     if not sessions or before not in sessions or target not in sessions:
         return {}
-    contexts = _read_rule_day_contexts(
-        cursor, sessions=sessions, source_capture_id=source_capture_id
-    )
+    contexts = _read_rule_day_contexts(cursor, sessions=sessions)
     cursor.execute(
         """SELECT target_session,id,source_symbol,rule_id,rule_version,state,
                   profile_revision,history_session_count,d1_history_session_count,
                   event_window_start,calendar_revision,scope,source_capture_id
            FROM source_rule_evaluations
-           WHERE source_capture_id=%s AND target_session=ANY(%s)
+           WHERE target_session=ANY(%s)
              AND source_symbol=ANY(%s) AND rule_id=ANY(%s) AND rule_version=%s
            ORDER BY source_symbol,rule_id,target_session,id""",
-        (source_capture_id, list(sessions), symbols, rule_ids, rule_version),
+        (list(sessions), symbols, rule_ids, rule_version),
     )
     facts_by_pair: dict[tuple[str, str], dict[date, list[tuple[Any, ...]]]] = {}
     for row in cursor.fetchall():
@@ -650,13 +667,13 @@ def _reentry_parent_ids(
         """SELECT e.id,r.id,r.target_session,r.source_symbol,r.rule_id
            FROM source_research_enrollments e
            JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
-           WHERE r.source_capture_id=%s AND r.target_session=ANY(%s)
+           WHERE r.target_session=ANY(%s)
              AND r.target_session<%s AND r.source_symbol=ANY(%s)
              AND r.rule_id=ANY(%s) AND r.rule_version=%s AND r.state='TRUE'
              AND e.enrollment_kind IN
                  ('ENTRY','FIRST_OBSERVED_LEFT_CENSORED','REENTRY')
            ORDER BY r.source_symbol,r.rule_id,r.target_session DESC,e.id DESC""",
-        (source_capture_id, list(sessions), before, symbols, rule_ids, rule_version),
+        (list(sessions), before, symbols, rule_ids, rule_version),
     )
     roots_by_pair: dict[tuple[str, str], list[tuple[int, int, date]]] = {}
     for enrollment_id, fact_id, session, symbol, rule_id in cursor.fetchall():
@@ -891,7 +908,6 @@ def insert_rule_enrollments(
     contexts = _read_rule_day_contexts(
         cursor,
         sessions=(before, target),
-        source_capture_id=source_capture_id,
         required_rule_ids=selected_rules,
     )
     current_context = contexts.get(target)
@@ -934,7 +950,7 @@ def insert_rule_enrollments(
                   count(DISTINCT d.id), min(d.id), min(d.before_state)
            FROM source_rule_evaluations r
            LEFT JOIN source_rule_evaluations p
-             ON p.target_session=%s AND p.source_capture_id=r.source_capture_id
+             ON p.target_session=%s
             AND p.source_symbol=r.source_symbol AND p.rule_id=r.rule_id
             AND p.source_capture_id=%s AND %s::boolean
             AND p.rule_version=r.rule_version
@@ -1582,18 +1598,12 @@ def read_enrollment_followups(
                 "parent_enrollment_id": row[17],
                 "enrollment_kind": row[18],
             }
-        rule_contexts: dict[int, dict[date, dict[str, Any]]] = {}
+        shared_rule_contexts: dict[date, dict[str, Any]] = {}
         if not invalid_anchor_scope and selected:
-            rule_source_capture_ids = {
-                anchor["source_capture_id"]
-                for anchor in anchors_by_id.values()
-                if anchor["is_rule"]
-            }
-            for source_capture_id in rule_source_capture_ids:
-                rule_contexts[source_capture_id] = _read_rule_day_contexts(
+            if any(anchor["is_rule"] for anchor in anchors_by_id.values()):
+                shared_rule_contexts = _read_rule_day_contexts(
                     cursor,
                     sessions=(target, *selected),
-                    source_capture_id=source_capture_id,
                 )
         if not invalid_anchor_scope and successor_sessions:
             cursor.execute(
@@ -1602,7 +1612,6 @@ def read_enrollment_followups(
                FROM source_research_enrollments e
                JOIN source_d0_launch_day_facts b ON b.id=e.d0_fact_id
                JOIN source_d0_launch_day_facts n ON n.source_symbol=b.source_symbol
-                 AND n.source_capture_id=b.source_capture_id
                  AND n.producer_version=b.producer_version
                  AND n.algorithm_contract=b.algorithm_contract
                  AND n.session_contract=b.session_contract
@@ -1621,7 +1630,7 @@ def read_enrollment_followups(
                FROM source_research_enrollments e
                JOIN source_rule_evaluations b ON b.id=e.rule_fact_id
                JOIN source_rule_evaluations n ON n.source_symbol=b.source_symbol
-                 AND n.source_capture_id=b.source_capture_id AND n.rule_id=b.rule_id
+                 AND n.rule_id=b.rule_id
                LEFT JOIN source_research_enrollments next_e ON next_e.rule_fact_id=n.id
                WHERE e.id=ANY(%s) AND n.target_session=ANY(%s)""",
                 (enrollment_ids, list(selected)),
@@ -1735,17 +1744,17 @@ def read_enrollment_followups(
             }
             for item in enrollment_ids
         }
-    rule_pair_comparable: dict[tuple[int, date, date], bool] = {}
-    for source_capture_id, contexts in rule_contexts.items():
+    rule_pair_comparable: dict[tuple[date, date], bool] = {}
+    if shared_rule_contexts:
         sequence = (target, *selected)
         for previous_session, next_session in zip(sequence, sequence[1:]):
-            rule_pair_comparable[
-                (source_capture_id, previous_session, next_session)
-            ] = _rule_context_comparable(
-                contexts.get(previous_session),
-                contexts.get(next_session),
-                before=previous_session,
-                target=next_session,
+            rule_pair_comparable[(previous_session, next_session)] = (
+                _rule_context_comparable(
+                    shared_rule_contexts.get(previous_session),
+                    shared_rule_contexts.get(next_session),
+                    before=previous_session,
+                    target=next_session,
+                )
             )
     by_key: dict[tuple[int, date], list[tuple[Any, ...]]] = {}
     for (
@@ -1808,7 +1817,7 @@ def read_enrollment_followups(
     output = {}
     for enrollment_id in enrollment_ids:
         anchor = anchors_by_id[enrollment_id]
-        anchor_context = rule_contexts.get(anchor["source_capture_id"], {}).get(target)
+        anchor_context = shared_rule_contexts.get(target)
         anchor_rule = (anchor_context or {}).get("rule") or {}
         rule_context_available = bool(
             anchor["is_rule"]
@@ -1816,6 +1825,7 @@ def read_enrollment_followups(
             and anchor_context
             and anchor_context.get("inputs_complete")
             and anchor_context.get("rules_complete")
+            and anchor_context.get("capture") == anchor["source_capture_id"]
             and anchor["rule_id"] is not None
             and anchor["rule_version"] == anchor_rule.get("version")
             and anchor["profile_revision"] == anchor_rule.get("profile_revision")
@@ -1839,12 +1849,10 @@ def read_enrollment_followups(
             candidate_detail: dict[str, Any] | None = None
             if anchor["is_rule"]:
                 candidates = rule_candidates.get((enrollment_id, session), [])
-                successor_context = rule_contexts.get(
-                    anchor["source_capture_id"], {}
-                ).get(session)
+                successor_context = shared_rule_contexts.get(session)
                 successor_rule = (successor_context or {}).get("rule") or {}
                 pair_comparable = rule_context_available and rule_pair_comparable.get(
-                    (anchor["source_capture_id"], previous, session), False
+                    (previous, session), False
                 )
                 valid = [
                     item

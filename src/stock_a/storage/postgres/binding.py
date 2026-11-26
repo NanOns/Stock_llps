@@ -99,6 +99,7 @@ _MIGRATION_FILES = (
     "0085_r03_phase_closure_round1.sql",
     "0086_r03_phase_closure_round2_final.sql",
     "0087_single_effective_fact_remove_multiversion.sql",
+    "0088_single_effective_fact_final_closure.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -175,6 +176,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R03_PHASE_CLOSURE_ROUND1_20261126": frozenset({85}),
     "R03_PHASE_CLOSURE_ROUND2_FINAL_20261126": frozenset({86}),
     "SINGLE_EFFECTIVE_FACT_REMOVE_MULTIVERSION_20261126": frozenset({87}),
+    "SINGLE_EFFECTIVE_FACT_FINAL_CLOSURE_20261126": frozenset({88}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -425,6 +427,7 @@ _RELATIONS_BY_MIGRATION_COUNT[84] = _RELATIONS_BY_MIGRATION_COUNT[83]
 _RELATIONS_BY_MIGRATION_COUNT[85] = _RELATIONS_BY_MIGRATION_COUNT[84]
 _RELATIONS_BY_MIGRATION_COUNT[86] = _RELATIONS_BY_MIGRATION_COUNT[85]
 _RELATIONS_BY_MIGRATION_COUNT[87] = _RELATIONS_BY_MIGRATION_COUNT[86]
+_RELATIONS_BY_MIGRATION_COUNT[88] = _RELATIONS_BY_MIGRATION_COUNT[87]
 
 
 class BindingRefused(Exception):

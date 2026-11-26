@@ -637,19 +637,15 @@ def read_retrospective_rotation(
             "Rotation候选窗须为1至15个会话，且至少有8个前态会话",
         )
     sessions = tuple(all_sessions[start_index - lookback : end_index + 1])
-    capture_start, capture_end = _capture_session_bounds(
+    _capture_start, capture_end = _capture_session_bounds(
         config,
         source_capture_id=source_capture_id,
         research_cutoff=research_cutoff,
     )
-    if (
-        len(sessions) > configured_history_limit
-        or sessions[0] < capture_start
-        or target_session > capture_end
-    ):
+    if len(sessions) > configured_history_limit or target_session > capture_end:
         raise TdxSectorMembersApplicationError(
             "ROTATION_WINDOW_EXCEEDS_CAPTURE_RANGE",
-            "Rotation历史窗口不得超出配置预算或当前paired capture的会话范围。",
+            "Rotation历史窗口不得超出配置预算或目标捕获截止范围。",
         )
     if peer_snapshot_ids is not None and (
         not peer_target_only
@@ -742,7 +738,9 @@ def read_retrospective_rotation(
                 _core_observation_from_pg_price_row(
                     qfq_rows.get(day),
                     session=day,
-                    source_capture_id=source_capture_id,
+                    source_capture_id=source_capture_id
+                    if day == target_session
+                    else None,
                     price_coordinate=price_coordinate,
                     coordinate_id=(
                         f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"

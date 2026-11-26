@@ -1327,7 +1327,19 @@ def prepare_source_research_day(
     d1_wall_seconds = 0.0
     prepared: Mapping[str, Any] = {}
 
+    before_source_capture_id = source_capture_id
     if include_d0:
+        before_catalog = read_baostock_price_catalog(config, cutoff=research_cutoff)
+        before_caps = {
+            int(item["source_capture_id"])
+            for item in before_catalog.get("price_coordinate_versions", ())
+            if item.get("session_date") == before_session.isoformat()
+            and item.get("price_coordinate") == "FORWARD_ADJUSTED"
+            and item.get("coverage_status") == "COMPLETE"
+            and type(item.get("source_capture_id")) is int
+        }
+        if len(before_caps) == 1:
+            before_source_capture_id = next(iter(before_caps))
         d0_started = time.perf_counter()
         d0 = query_source_d0_raw_launch(
             config,
@@ -1337,7 +1349,7 @@ def prepare_source_research_day(
             target_session=target_session,
             research_cutoff=research_cutoff,
             source_capture_id=source_capture_id,
-            before_source_capture_id=source_capture_id,
+            before_source_capture_id=before_source_capture_id,
             transition="ALL",
             offset=0,
             limit=2 * MAX_SOURCE_SYMBOLS,
@@ -1364,8 +1376,6 @@ def prepare_source_research_day(
             concept_snapshot_id=None,
             include_source_symbol_structure_results=True,
             include_impulse=include_impulse,
-            cross_section_universe_version=cross_section_universe_version,
-            cross_section_universe_capture_id=cross_section_universe_capture_id,
         )
         d1_wall_seconds = time.perf_counter() - d1_started
         d1 = prepared["d1"]
@@ -1381,7 +1391,7 @@ def prepare_source_research_day(
         or after.get("target_session") != target_session.isoformat()
         or before.get("target_session") != before_session.isoformat()
         or after_source.get("source_capture_id") != source_capture_id
-        or before_source.get("source_capture_id") != source_capture_id
+        or before_source.get("source_capture_id") != before_source_capture_id
         or d0.get("source_key_set", {}).get("union_partition_closed") is not True
         or len(d0_rows) != d0.get("source_key_set", {}).get("source_union_count")
     ):

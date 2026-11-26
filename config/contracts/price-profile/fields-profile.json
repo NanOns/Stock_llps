@@ -1805,8 +1805,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -1845,8 +1844,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "BOTH_ENDPOINT_RETURNS_REEXPRESSED_TO_TARGET_AND_RANKED_ON_EACH_ENDPOINT_UNIVERSE",
         "context_dependencies": [
@@ -1885,8 +1883,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "BOTH_ENDPOINT_RETURNS_REEXPRESSED_TO_TARGET_AND_RANKED_ON_EACH_ENDPOINT_UNIVERSE",
         "context_dependencies": [
@@ -1922,8 +1919,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -1962,8 +1958,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "BOTH_ENDPOINT_RETURNS_REEXPRESSED_TO_TARGET_AND_RANKED_ON_EACH_ENDPOINT_UNIVERSE",
         "context_dependencies": [
@@ -2002,8 +1997,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "BOTH_ENDPOINT_RETURNS_REEXPRESSED_TO_TARGET_AND_RANKED_ON_EACH_ENDPOINT_UNIVERSE",
         "context_dependencies": [
@@ -2039,8 +2033,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2076,8 +2069,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2113,8 +2105,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2150,8 +2141,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "cross_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2202,8 +2192,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2245,8 +2234,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2289,8 +2277,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2337,8 +2324,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2382,8 +2368,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2426,8 +2411,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2471,8 +2455,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2512,8 +2495,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2552,8 +2534,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2591,8 +2572,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
@@ -2632,8 +2612,7 @@
         },
         "business_key": [
           "source_symbol",
-          "session_date",
-          "profile_input_version"
+          "session_date"
         ],
         "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [

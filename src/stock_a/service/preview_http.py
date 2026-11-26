@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
-
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from collections import Counter, defaultdict
@@ -638,34 +636,18 @@ def _capture_id(value: Any) -> int:
     return _positive_id(value, "PREVIEW_CAPTURE_ID_INVALID", "来源捕获ID")
 
 
-def _profile_revision(value: Any) -> str:
-    if (
-        not isinstance(value, str)
-        or re.fullmatch(PROFILE_REVISION_PATTERN, value) is None
-    ):
-        raise PreviewHttpError(
-            400, "PREVIEW_PROFILE_REVISION_INVALID", "画像修订须为完整画像修订标签"
-        )
-    return value
-
-
 def _selected_profile_history_session_count(
     profile_observation: Mapping[str, Any] | None,
     *,
     requested_history_session_count: int | None,
-    requested_profile_revision: str | None,
 ) -> int | None:
     """只以完整唯一Profile的请求窗口选会话数，不要求每行都有全历史。"""
     if not isinstance(profile_observation, Mapping):
         return None
-    selection = profile_observation.get("profile_revision_selection")
-    selected = profile_observation.get("selected_revision")
-    if not isinstance(selection, Mapping) or not isinstance(selected, Mapping):
+    if profile_observation.get("status") != "PG_SOURCE_PROFILE_STORED":
         return None
-    if (
-        selection.get("current_version_match_count") != 1
-        or selection.get("selected_version_match") is not True
-    ):
+    selected = profile_observation.get("selected_revision")
+    if not isinstance(selected, Mapping):
         return None
     requested_min = selected.get("min_history_requested_sessions")
     requested_max = selected.get("max_history_requested_sessions")
@@ -1800,7 +1782,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         watch_group: str,
         d1_history_session_count: int | None,
         history_session_count: int | None,
-        profile_revision: str | None,
         board_kind: str | None,
         board_native_id: str | None,
     ) -> dict[str, Any]:
@@ -1869,7 +1850,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 limit=limit,
                 d1_history_session_count=d1_history_session_count,
                 selected_history_session_count=history_session_count,
-                selected_profile_revision=profile_revision,
                 board_kind=board_kind,
                 board_native_id=board_native_id,
                 board_snapshot_id=board_snapshot_id,
@@ -1918,7 +1898,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 seed_producer_version=seed_scope.get("producer_version"),
                 source_symbols=sorted(page_symbols),
                 profile_history_session_count=history_session_count,
-                profile_revision=profile_revision,
             )
         t0_summary_query_started = time.perf_counter()
         from stock_a.storage.postgres.t0_early_observations import (
@@ -1953,7 +1932,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 source_symbols=page_symbols,
                 d1_history_session_count=d1_history_session_count,
                 selected_history_session_count=history_session_count,
-                selected_profile_revision=profile_revision,
             )
             from stock_a.application.source_d0_tdx_membership import (
                 read_tdx_sector_memberships_for_symbols,
@@ -2768,9 +2746,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "followup_reason": followup_reason,
                         "target_session": target_session.isoformat(),
                         "source_capture_id": after_source["source_capture_id"],
-                        "profile_revision": (page_result.get("seed_scope") or {}).get(
-                            "profile_revision"
-                        ),
                         "rule_version": (evidence.get("rule_scope") or {}).get(
                             "rule_version"
                         ),
@@ -3163,7 +3138,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         }
         board_fields = {"board_kind", "board_native_id"}
         evidence_fields = {"d1_history_session_count"}
-        profile_fields = {"history_session_count", "profile_revision"}
+        profile_fields = {"history_session_count"}
         watch_fields = {"watch_group"}
         before_capture_field = {"before_source_capture_id"}
         if not isinstance(body, dict) or not required.issubset(body):
@@ -3275,17 +3250,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if "history_session_count" in body
             else None
         )
-        profile_revision = (
-            _profile_revision(body["profile_revision"])
-            if "profile_revision" in body
-            else None
-        )
-        if (history_session_count is None) != (profile_revision is None):
-            raise PreviewHttpError(
-                400,
-                "SOURCE_LAUNCH_WATCH_PROFILE_SCOPE_INVALID",
-                "Profile历史会话数与画像修订须成对提供",
-            )
 
         board_kind: str | None = None
         board_native_id: str | None = None
@@ -3342,7 +3306,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             watch_group=watch_group,
             d1_history_session_count=d1_history_session_count,
             history_session_count=history_session_count,
-            profile_revision=profile_revision,
             board_kind=board_kind,
             board_native_id=board_native_id,
         )
@@ -3358,17 +3321,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "board_a",
             "board_b",
         }
-        optional = {"history_session_count", "profile_revision"}
+        optional = {"history_session_count"}
         if (
             not isinstance(body, dict)
             or set(body) - required - optional
             or not required <= set(body)
-            or ("history_session_count" in body) != ("profile_revision" in body)
         ):
             raise PreviewHttpError(
                 400,
                 "BOARD_COMPARISON_FIELDS_INVALID",
-                "双板块比较须提供完整字段；Profile会话数与修订须成对提供",
+                "双板块比较须提供完整字段",
             )
         target = _iso_date(body["target_session"])
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
@@ -3381,11 +3343,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         profile_history_count = (
             _positive_int(body["history_session_count"], "history_session_count", 250)
             if "history_session_count" in body
-            else None
-        )
-        profile_revision = (
-            _profile_revision(body["profile_revision"])
-            if "profile_revision" in body
             else None
         )
         snapshots = {
@@ -3436,7 +3393,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 source_capture_id=source_capture_id,
                 d1_history_session_count=history_count,
                 history_session_count=profile_history_count,
-                profile_revision=profile_revision,
                 snapshot_ids=snapshots,
                 board_a_kind=board_a[0],
                 board_a_native_id=board_a[1],
@@ -3684,7 +3640,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "target_session": result["target_session"],
             "research_cutoff": result["research_cutoff"],
             "source_capture_id": result["source_capture_id"],
-            "profile_revision": result["profile_revision"],
             "d1_history_session_count": result["d1_history_session_count"],
             "d1_history_start": result["d1_history_start"],
             "d1_history_end": result["d1_history_end"],
@@ -3742,7 +3697,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "research_cutoff",
             "source_capture_id",
             "price_coordinate",
-            "profile_revision",
             "industry_snapshot_id",
             "concept_snapshot_id",
             "event_window_start",
@@ -3812,9 +3766,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "SECTOR_CHANGE_PRICE_COORDINATE_INVALID",
                 "D0/D1及跨会话结构观察固定使用BaoStock FORWARD_ADJUSTED坐标",
             )
-        profile_revision = (
-            None if d1_only else _profile_revision(body["profile_revision"])
-        )
         event_window_start = _iso_date(body["event_window_start"], "event_window_start")
         source_policy = self.preview_server.state.config.get("source_policy", {})
         baostock_policy = (
@@ -3994,8 +3945,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 if len(exact_profiles) != 1:
                     raise PreviewHttpError(
                         409,
-                        "SECTOR_CHANGE_PROFILE_REVISION_UNAVAILABLE",
-                        "所选日期、来源捕获和画像修订没有唯一完整的PG版本",
+                        "SECTOR_CHANGE_PROFILE_UNAVAILABLE",
+                        "所选日期没有唯一完整的PG画像事实",
                     )
                 catalog = read_tdx_sector_source_snapshot_catalog(config)
                 snapshots = {item["snapshot_id"]: item for item in catalog["snapshots"]}
@@ -4022,7 +3973,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 cutoff.isoformat(),
                 source_capture_id,
                 price_coordinate,
-                profile_revision,
                 industry_snapshot_id,
                 concept_snapshot_id,
                 event_window_start.isoformat(),
@@ -4223,7 +4173,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             industry_snapshot_id=industry_snapshot_id,
                             concept_snapshot_id=concept_snapshot_id,
                             source_capture_id=source_capture_id,
-                            profile_revision=profile_revision,
                             event_window_start=event_window_start,
                             pg_history_session_count=history_session_count,
                             include_d0_launch_new=read_d0,
@@ -4293,7 +4242,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "reused_exact_inputs": cache_hit,
             "reused_source_d1_discovery": source_d1_cache_hit,
         }
-        if profile_revision is not None:
+        if not d1_only:
             from stock_a.application.r03_formal_sector import R03_CONTRACT_VERSION
             from stock_a.storage.postgres.r03_formal_sector import (
                 read_r03_loo_support_fact,
@@ -4447,7 +4396,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "industry_snapshot_id",
                         "concept_snapshot_id",
                         "history_session_count",
-                        "profile_revision",
                         "board_kind",
                         "board_native_id",
                         "structure_type",
@@ -4524,11 +4472,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             if "history_session_count" in values
                             else None
                         ),
-                        profile_revision=(
-                            _profile_revision(values["profile_revision"])
-                            if "profile_revision" in values
-                            else None
-                        ),
                         offset=_nonnegative_int(values.get("offset", "0"), "offset"),
                         limit=_positive_int(
                             _nonnegative_int(values.get("limit", "30"), "limit", 50),
@@ -4585,7 +4528,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 target_session=target,
                                 research_cutoff=self.preview_server.state.research_cutoff,
                                 source_capture_id=source_capture_id,
-                                profile_revision=values.get("profile_revision"),
+                                profile_revision=None,
                                 offset=_nonnegative_int(
                                     values.get("offset", "0"), "offset"
                                 ),
@@ -5855,7 +5798,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 allowed = {
                     "target_session",
                     "source_capture_id",
-                    "profile_revision",
                     "rule",
                     "history",
                     "d1_history",
@@ -5934,7 +5876,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         target=target,
                         research_cutoff=cutoff,
                         source_capture_id=_capture_id(values["source_capture_id"]),
-                        profile_revision=_profile_revision(values["profile_revision"]),
+                        profile_revision=None,
                         history_session_count=_positive_int(
                             _nonnegative_int(values["history"], "history", 500),
                             "history",
@@ -5992,7 +5934,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 allowed = {
                     "target_session",
                     "source_capture_id",
-                    "profile_revision",
                     "history",
                     "d1_history",
                     "window",
@@ -6014,7 +5955,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         target=target,
                         research_cutoff=cutoff,
                         source_capture_id=_capture_id(values["source_capture_id"]),
-                        profile_revision=_profile_revision(values["profile_revision"]),
                         history_session_count=_positive_int(
                             _nonnegative_int(values["history"], "history", 500),
                             "history",
@@ -6236,7 +6176,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 allowed = {
                     "target_session",
                     "source_capture_id",
-                    "profile_revision",
                     "history",
                     "d1_history",
                     "window",
@@ -6273,7 +6212,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         target=target,
                         research_cutoff=cutoff,
                         source_capture_id=_capture_id(values["source_capture_id"]),
-                        profile_revision=_profile_revision(values["profile_revision"]),
                         history_session_count=_positive_int(
                             _nonnegative_int(values["history"], "history", 500),
                             "history",
@@ -6305,7 +6243,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "source_capture_id",
                         "price_coordinate",
                         "history_session_count",
-                        "profile_revision",
                     },
                 )
                 if not {
@@ -6343,19 +6280,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     if "history_session_count" in values
                     else None
                 )
-                requested_profile_revision = (
-                    _profile_revision(values["profile_revision"])
-                    if "profile_revision" in values
-                    else None
-                )
-                if requested_profile_revision is not None and (
-                    requested_history_session_count is None
-                ):
-                    raise PreviewHttpError(
-                        400,
-                        "SECTOR_CHANGE_PROFILE_SCOPE_INVALID",
-                        "精确画像修订必须同时提供history_session_count",
-                    )
                 catalog = read_tdx_sector_source_snapshot_catalog(
                     self.preview_server.state.config
                 )
@@ -6379,7 +6303,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             source_capture_id=source_context["source_capture_id"],
                             research_cutoff=self.preview_server.state.research_cutoff,
                             history_session_count=requested_history_session_count,
-                            profile_revision=requested_profile_revision,
                         )
                     except PgPriceProfileError as error:
                         profile_observation = {
@@ -6390,7 +6313,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     history_session_count = _selected_profile_history_session_count(
                         profile_observation,
                         requested_history_session_count=requested_history_session_count,
-                        requested_profile_revision=requested_profile_revision,
                     )
                     try:
                         d1_scope = read_source_research_day_scope(
@@ -6584,7 +6506,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_QUERY_INVALID",
-                        "画像版本目录不接受隐式筛选或latest参数",
+                        "画像目录不接受隐式筛选或latest参数",
                     )
                 snapshots = source_symbol_price_profile_snapshots(
                     self.preview_server.state.config,
@@ -6611,9 +6533,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_session",
                         "after_session",
                         "before_source_capture_id",
-                        "before_profile_revision",
                         "after_source_capture_id",
-                        "after_profile_revision",
                         "offset",
                         "limit",
                         "symbol",
@@ -6680,10 +6600,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_bias20_atr_state", "ALL"
                     ),
                     after_bias20_atr_state=values.get("after_bias20_atr_state", "ALL"),
-                    before_source_capture_id=values.get("before_source_capture_id"),
-                    before_profile_revision=values.get("before_profile_revision"),
-                    after_source_capture_id=values.get("after_source_capture_id"),
-                    after_profile_revision=values.get("after_profile_revision"),
+                    before_source_capture_id=(
+                        _capture_id(values["before_source_capture_id"])
+                        if values.get("before_source_capture_id")
+                        else None
+                    ),
+                    after_source_capture_id=(
+                        _capture_id(values["after_source_capture_id"])
+                        if values.get("after_source_capture_id")
+                        else None
+                    ),
                     price_coordinate=price_coordinate,
                 )
                 result.update(
@@ -6704,9 +6630,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_session",
                         "after_session",
                         "before_source_capture_id",
-                        "before_profile_revision",
                         "after_source_capture_id",
-                        "after_profile_revision",
                         "relation_field",
                         "transition_type",
                         "ma20_direction",
@@ -6780,19 +6704,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         if values.get("before_source_capture_id")
                         else None
                     ),
-                    before_profile_revision=(
-                        _profile_revision(values["before_profile_revision"])
-                        if values.get("before_profile_revision")
-                        else None
-                    ),
                     after_source_capture_id=(
                         _capture_id(values["after_source_capture_id"])
                         if values.get("after_source_capture_id")
-                        else None
-                    ),
-                    after_profile_revision=(
-                        _profile_revision(values["after_profile_revision"])
-                        if values.get("after_profile_revision")
                         else None
                     ),
                     price_coordinate=price_coordinate,
@@ -6815,9 +6729,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_session",
                         "after_session",
                         "before_source_capture_id",
-                        "before_profile_revision",
                         "after_source_capture_id",
-                        "after_profile_revision",
                         "price_coordinate",
                     },
                 )
@@ -6859,19 +6771,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         if values.get("before_source_capture_id")
                         else None
                     ),
-                    before_profile_revision=(
-                        _profile_revision(values["before_profile_revision"])
-                        if values.get("before_profile_revision")
-                        else None
-                    ),
                     after_source_capture_id=(
                         _capture_id(values["after_source_capture_id"])
                         if values.get("after_source_capture_id")
-                        else None
-                    ),
-                    after_profile_revision=(
-                        _profile_revision(values["after_profile_revision"])
-                        if values.get("after_profile_revision")
                         else None
                     ),
                     price_coordinate=price_coordinate,
@@ -6895,9 +6797,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_session",
                         "after_session",
                         "before_source_capture_id",
-                        "before_profile_revision",
                         "after_source_capture_id",
-                        "after_profile_revision",
                         "price_coordinate",
                         "mode",
                         "side",
@@ -6924,9 +6824,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "offset",
                     "limit",
                     "before_source_capture_id",
-                    "before_profile_revision",
                     "after_source_capture_id",
-                    "after_profile_revision",
                 }
                 if (
                     mode_parameters is None
@@ -6965,19 +6863,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         if values.get("before_source_capture_id")
                         else None
                     ),
-                    before_profile_revision=(
-                        _profile_revision(values["before_profile_revision"])
-                        if values.get("before_profile_revision")
-                        else None
-                    ),
                     after_source_capture_id=(
                         _capture_id(values["after_source_capture_id"])
                         if values.get("after_source_capture_id")
-                        else None
-                    ),
-                    after_profile_revision=(
-                        _profile_revision(values["after_profile_revision"])
-                        if values.get("after_profile_revision")
                         else None
                     ),
                     price_coordinate=price_coordinate,
@@ -7013,9 +6901,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "after_session",
                         "symbol",
                         "before_source_capture_id",
-                        "before_profile_revision",
                         "after_source_capture_id",
-                        "after_profile_revision",
                         "price_coordinate",
                     },
                 )
@@ -7051,19 +6937,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         if values.get("before_source_capture_id")
                         else None
                     ),
-                    before_profile_revision=(
-                        _profile_revision(values["before_profile_revision"])
-                        if values.get("before_profile_revision")
-                        else None
-                    ),
                     after_source_capture_id=(
                         _capture_id(values["after_source_capture_id"])
                         if values.get("after_source_capture_id")
-                        else None
-                    ),
-                    after_profile_revision=(
-                        _profile_revision(values["after_profile_revision"])
-                        if values.get("after_profile_revision")
                         else None
                     ),
                     price_coordinate=price_coordinate,
@@ -7087,7 +6963,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "target_session",
                         "source_capture_id",
-                        "profile_revision",
                         "offset",
                         "limit",
                         "market",
@@ -7154,7 +7029,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     target_session=target,
                     max_target_session=self.preview_server.state.research_cutoff,
                     source_capture_id=source_capture_id,
-                    profile_revision=values.get("profile_revision"),
                     offset=offset,
                     limit=limit,
                     market=values.get("market", "ALL"),
@@ -8144,29 +8018,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             source_change_optional = {
                 "research_cutoff",
                 "before_source_capture_id",
-                "before_profile_revision",
-                "after_profile_revision",
             }
-            has_before_profile_revision = (
-                isinstance(body, dict) and "before_profile_revision" in body
-            )
-            has_after_profile_revision = (
-                isinstance(body, dict) and "after_profile_revision" in body
-            )
-            if (
-                post_path == "/api/preview/stock-timeline"
-                and has_before_profile_revision != has_after_profile_revision
-            ):
-                raise PreviewHttpError(
-                    400,
-                    "PREVIEW_PROFILE_REVISIONS_MUST_BE_PAIRED",
-                    "before_profile_revision与after_profile_revision必须同时提供",
-                )
             source_change_body = timeline_fields | source_change_required
             source_change_allowed = (
                 source_change_body | source_change_optional | capture_field
             )
-            stock_seed_fields = {"profile_revision"}
             stock_evidence_fields = {"industry_snapshot_id", "concept_snapshot_id"}
             stock_d1_evidence_field = {"d1_history_session_count"}
             valid_body = isinstance(body, dict)
@@ -8174,35 +8030,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 allowed_stock_bodies = {
                     frozenset(expected),
                     frozenset(expected | capture_field),
-                    frozenset(expected | stock_seed_fields),
-                    frozenset(expected | stock_seed_fields | capture_field),
                     frozenset(expected | stock_evidence_fields),
                     frozenset(expected | stock_evidence_fields | capture_field),
-                    frozenset(expected | stock_seed_fields | stock_evidence_fields),
-                    frozenset(
-                        expected
-                        | stock_seed_fields
-                        | stock_evidence_fields
-                        | capture_field
-                    ),
                     frozenset(
                         expected | stock_evidence_fields | stock_d1_evidence_field
                     ),
                     frozenset(
                         expected
-                        | stock_evidence_fields
-                        | stock_d1_evidence_field
-                        | capture_field
-                    ),
-                    frozenset(
-                        expected
-                        | stock_seed_fields
-                        | stock_evidence_fields
-                        | stock_d1_evidence_field
-                    ),
-                    frozenset(
-                        expected
-                        | stock_seed_fields
                         | stock_evidence_fields
                         | stock_d1_evidence_field
                         | capture_field
@@ -8259,8 +8093,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             before_source_capture_id: int | None = None
             industry_snapshot_id: int | None = None
             concept_snapshot_id: int | None = None
-            before_profile_revision: str | None = None
-            after_profile_revision: str | None = None
             if source_change_opt_in:
                 if body["include_source_change_context"] is not True:
                     raise PreviewHttpError(
@@ -8283,21 +8115,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 industry_snapshot_id = _snapshot_id(body["industry_snapshot_id"])
                 concept_snapshot_id = _snapshot_id(body["concept_snapshot_id"])
-                if source_change_optional <= set(body):
-                    before_profile_revision = _profile_revision(
-                        body["before_profile_revision"]
-                    )
-                    after_profile_revision = _profile_revision(
-                        body["after_profile_revision"]
-                    )
-            profile_revision = None
             d1_history_session_count = None
             membership_snapshot_ids = None
-            if (
-                post_path == "/api/preview/stock"
-                and body.get("profile_revision") is not None
-            ):
-                profile_revision = _profile_revision(body["profile_revision"])
             if post_path == "/api/preview/stock" and stock_evidence_fields <= set(body):
                 if body.get("d1_history_session_count") is not None:
                     d1_history_session_count = _positive_int(
@@ -8459,8 +8278,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             before_source_capture_id=before_source_capture_id,
                             source_capture_id=source_capture_id,
                             symbol=symbol,
-                            before_profile_revision=before_profile_revision,
-                            after_profile_revision=after_profile_revision,
                         )
                     except Exception as error:
                         preview_error = _source_context_preview_error(error)
@@ -8596,7 +8413,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     target_session=target,
                     source_capture_id=source_context["source_capture_id"],
                     source_symbol=symbol,
-                    profile_revision=profile_revision,
                     expected_source_count=source_context["research_expected_row_count"],
                     source_time_quality=source_context["source_time_quality"],
                     source_clock_role=source_context["source_clock_role"],
@@ -8620,7 +8436,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         expected_before_session=sessions[-2]
                         if len(sessions) > 1
                         else None,
-                        selected_profile_revision=profile_revision,
                         selected_history_session_count=session_count,
                         membership_snapshot_ids=membership_snapshot_ids,
                     )
@@ -8827,9 +8642,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "followup_reason": followup_reason,
                     "target_session": target.isoformat(),
                     "source_capture_id": source_context["source_capture_id"],
-                    "profile_revision": (saved_evidence.get("rule_scope") or {}).get(
-                        "profile_revision"
-                    ),
                     "price_coordinate": "FORWARD_ADJUSTED",
                     "scope": "NON_PIT_EXPLORATORY",
                 }
@@ -8854,24 +8666,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     }
                 else:
                     saved_rule_scope = saved_evidence.get("rule_scope")
-                    admission_profile_revision = (
-                        profile_revision
-                        if profile_revision is not None
-                        else saved_rule_scope.get("profile_revision")
+                    admission_history_session_count = (
+                        saved_rule_scope.get("history_session_count")
                         if isinstance(saved_rule_scope, Mapping)
-                        else None
+                        else session_count
                     )
-                    admission_history_session_count = None
-                    if admission_profile_revision is not None:
-                        from stock_a.contracts.profile_revision import (
-                            profile_revision_history_session_count,
-                        )
-
-                        admission_history_session_count = (
-                            profile_revision_history_session_count(
-                                admission_profile_revision
-                            )
-                        )
                     formal_admission_day = read_source_formal_admission_day(
                         config,
                         target_session=target,
@@ -8887,7 +8686,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         ).get("producer_version"),
                         source_symbols=[symbol],
                         profile_history_session_count=admission_history_session_count,
-                        profile_revision=admission_profile_revision,
                     )
                 formal_d0_admission = present_source_formal_admission(
                     stored_day=formal_admission_day,

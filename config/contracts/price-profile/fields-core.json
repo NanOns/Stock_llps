@@ -1022,8 +1022,7 @@
   "defaults": {
     "business_key": [
       "source_symbol",
-      "session_date",
-      "core_input_version"
+      "session_date"
     ],
     "context_dependencies": [
       "context.target_session",

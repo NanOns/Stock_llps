@@ -63,7 +63,7 @@ def read_source_pool_rps(
                 config,
                 target_session=endpoint,
                 cutoff=research_cutoff,
-                source_capture_id=source_capture_id,
+                source_capture_id=source_capture_id if offset == 0 else None,
                 price_coordinate="FORWARD_ADJUSTED",
                 offset=page_offset,
                 limit=page_size,
@@ -71,7 +71,7 @@ def read_source_pool_rps(
                 board="ALL",
                 allow_full_pool_page=True,
             )
-            if page.get("source_capture_id") != source_capture_id:
+            if offset == 0 and page.get("source_capture_id") != source_capture_id:
                 raise ValueError("RPS端点没有绑定请求的paired capture")
             if (
                 page.get("version_status") != "CLOSED"
@@ -114,18 +114,16 @@ def read_source_pool_rps(
             config,
             source_symbols=all_symbols,
             sessions=sessions,
-            source_capture_id=source_capture_id,
+            source_capture_id=None,
             price_coordinate="FORWARD_ADJUSTED",
             cutoff=research_cutoff,
             offset=page_offset,
             limit=page_size,
         )
         page = batch.get("page", {})
-        if (
-            batch.get("source_capture_id") != source_capture_id
-            or batch.get("price_coordinate") != "FORWARD_ADJUSTED"
-            or batch.get("target_sessions") != [item.isoformat() for item in sessions]
-        ):
+        if batch.get("price_coordinate") != "FORWARD_ADJUSTED" or batch.get(
+            "target_sessions"
+        ) != [item.isoformat() for item in sessions]:
             raise ValueError("RPS历史批次响应与QFQ capture窗口不一致")
         if total_rows is None:
             total_rows = int(page.get("total", -1))
@@ -141,7 +139,10 @@ def read_source_pool_rps(
             if not isinstance(row, Mapping):
                 raise ValueError("RPS历史行不是字段映射")
             key = (str(row["source_symbol"]), row["session_date"])
-            if key in history_rows or row.get("source_capture_id") != source_capture_id:
+            if key in history_rows or (
+                row.get("session_date") == target_session
+                and row.get("source_capture_id") != source_capture_id
+            ):
                 raise ValueError("RPS历史行重复或source_capture_id不匹配")
             history_rows[key] = row
         next_offset = page.get("next_offset")
@@ -173,7 +174,9 @@ def read_source_pool_rps(
                 _core_observation_from_pg_price_row(
                     history_rows.get((symbol, day)),
                     session=day,
-                    source_capture_id=source_capture_id,
+                    source_capture_id=source_capture_id
+                    if day == target_session
+                    else None,
                     price_coordinate="FORWARD_ADJUSTED",
                     coordinate_id=coordinate_id,
                 )

@@ -20,27 +20,24 @@ async function loadProfileSnapshots() {
     state.profileSnapshots = data.snapshots || [];
     populateChangeSnapshots(state.profileSnapshots);
     $("profileSnapshotSelect").replaceChildren(
-      new Option("— 请选择精确画像日期 / 来源捕获ID / 画像修订 —", ""),
+      new Option("— 请选择精确画像日期 —", ""),
     );
     for (const item of state.profileSnapshots) {
       const key = profileSnapshotKey(item);
       const option = new Option(
-        `${item.target_session} · 捕获ID ${item.source_capture_id} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision}`,
+        `${item.target_session} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话`,
         key,
       );
-      option.title =
-        `${item.target_session} · ` +
-        `目标日 ${item.target_session} · 来源捕获ID ${item.source_capture_id} · ` +
-        `profile_revision ${item.profile_revision}`;
+      option.title = `目标日 ${item.target_session} · ${item.history_session_count}会话`;
       option.disabled = !item.complete;
       $("profileSnapshotSelect").append(option);
     }
     $("profileSnapshotSelect").disabled = state.profileSnapshots.length === 0;
     $("profileCount").textContent = state.profileSnapshots.length
-      ? `${state.profileSnapshots.length}个真实PG画像版本`
+      ? `${state.profileSnapshots.length}个真实PG画像日期`
       : "没有已保存画像";
     $("profileMessage").textContent = state.profileSnapshots.length
-      ? "请选择精确日期、来源捕获ID和画像修订。搜索仅读取PG持久画像，不回退latest。"
+      ? "请选择精确日期。搜索仅读取PG唯一有效画像，不回退latest。"
       : "PG画像表中没有已保存记录。";
   } catch (error) {
     $("dataBoundary").textContent =
@@ -300,8 +297,6 @@ async function loadProfilePage() {
   }
   const params = new URLSearchParams({
     target_session: snapshot.target_session,
-    source_capture_id: snapshot.source_capture_id,
-    profile_revision: snapshot.profile_revision,
     price_coordinate: "FORWARD_ADJUSTED",
     offset: String(state.profileOffset),
     limit: String(state.profileLimit),
@@ -325,8 +320,7 @@ async function loadProfilePage() {
   });
   const symbol = $("profileSymbolInput").value.trim();
   if (symbol) params.set("symbol", symbol);
-  $("profileMessage").textContent =
-    "正在按精确日期、来源捕获和画像修订读取PG分页…";
+  $("profileMessage").textContent = "正在按精确日期读取PG分页…";
   try {
     const data = await api(`/api/source-symbol-price-profiles?${params}`);
     if (requestId !== state.profileRequest) return;
@@ -359,8 +353,6 @@ async function loadProfilePage() {
       );
     if (
       data.target_session !== snapshot.target_session ||
-      data.source_capture_id !== snapshot.source_capture_id ||
-      data.profile_revision !== snapshot.profile_revision ||
       data.price_coordinate !== "FORWARD_ADJUSTED" ||
       data.rows.some((item) => item.price_coordinate !== "FORWARD_ADJUSTED") ||
       data.bias20_atr_band !== bias20AtrBand ||
@@ -392,9 +384,7 @@ async function loadProfilePage() {
           : item.selected_profile_field !== null,
       )
     )
-      throw new Error(
-        "画像响应与选定的精确来源版本或分页上下文不一致，已停止展示。",
-      );
+      throw new Error("画像响应与选定的日期或分页上下文不一致，已停止展示。");
     populateProfileFieldOptions(
       data.profile_field_options,
       profileFieldId || "",
@@ -407,9 +397,7 @@ async function loadProfilePage() {
       profileFieldId,
       profileCondition,
     );
-    const binding =
-      `${snapshot.target_session} · 来源捕获ID ${data.source_capture_id} · ` +
-      `profile_revision ${data.profile_revision}`;
+    const binding = `${snapshot.target_session} · FORWARD_ADJUSTED`;
     state.profileTotal = page.total;
     $("profileCount").textContent =
       `${page.count}条 / 筛选命中${page.total} / 完整来源池${data.source_pool_total}`;
@@ -525,8 +513,6 @@ async function loadProfilePage() {
         makeComparisonAddButton({
           source_symbol: item.source_symbol,
           target_session: item.target_session,
-          source_capture_id: item.source_capture_id,
-          profile_revision: item.profile_revision,
           origin_label: "完整PG价格画像",
         }),
       );

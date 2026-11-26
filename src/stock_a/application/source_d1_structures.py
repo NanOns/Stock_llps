@@ -154,7 +154,7 @@ def _history_observations(
             or day not in days
             or day in row_map
             or row.get("source_symbol") != normalized
-            or row.get("source_capture_id") != source_capture_id
+            or (day == days[-1] and row.get("source_capture_id") != source_capture_id)
         ):
             raise PgResearchBindingError(
                 "D1_STRUCTURE_RAW_BINDING_INVALID",
@@ -172,7 +172,7 @@ def _history_observations(
         observation = _core_observation_from_pg_price_row(
             row,
             session=day,
-            source_capture_id=source_capture_id,
+            source_capture_id=source_capture_id if day == days[-1] else None,
             price_coordinate="FORWARD_ADJUSTED",
             coordinate_id=coordinate_id,
         )
@@ -1268,7 +1268,7 @@ def _read_baostock_d1_candidate_page(
             config,
             source_symbols=(symbol,),
             sessions=sessions,
-            source_capture_id=source_capture_id,
+            source_capture_id=None,
             price_coordinate="FORWARD_ADJUSTED",
             cutoff=research_cutoff,
             limit=1000,
@@ -1378,19 +1378,18 @@ def _read_baostock_d1_candidate_page(
             config,
             source_symbols=symbols,
             sessions=sessions,
-            source_capture_id=source_capture_id,
+            source_capture_id=None,
             price_coordinate="FORWARD_ADJUSTED",
             cutoff=research_cutoff,
             offset=offset_history,
             limit=1000,
         )
         page_info = history_page.get("page", {})
-        if (
-            history_page.get("source_capture_id") != source_capture_id
-            or history_page.get("price_coordinate") != "FORWARD_ADJUSTED"
-            or history_page.get("target_sessions")
-            != [session.isoformat() for session in sessions]
-        ):
+        if history_page.get(
+            "price_coordinate"
+        ) != "FORWARD_ADJUSTED" or history_page.get("target_sessions") != [
+            session.isoformat() for session in sessions
+        ]:
             raise PgResearchBindingError(
                 "D1_STRUCTURE_HISTORY_IDENTITY_MISMATCH",
                 "批量历史响应与QFQ capture窗口不一致。",
@@ -1679,7 +1678,6 @@ def discover_source_d1_structures(
                 or len(target_matches) != 1
                 or any(
                     row.get("source_symbol") != symbol
-                    or row.get("source_capture_id") != source_capture_id
                     or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
                     for row in rows
                 )

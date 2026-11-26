@@ -84,7 +84,7 @@ export function selectProfileScopeFromRecentJobs(
   );
   return {
     history_session_count: job.profile_history_session_count,
-    profile_revision: matches.length === 1 ? matches[0].profile_revision : null,
+    available: matches.length === 1,
   };
 }
 

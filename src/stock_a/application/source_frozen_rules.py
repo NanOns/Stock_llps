@@ -178,7 +178,7 @@ def _rule_row(
         source_capture_id,
         rule_id,
         RULE_VERSION,
-        profile_revision or "",
+        profile_revision or "PROFILE_R02",
         history_session_count,
         d1_history_session_count,
         event_window_start,

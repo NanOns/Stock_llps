@@ -518,8 +518,8 @@ def write_forward_path_rows(
             cohort_result = {"inserted": 0, "expected_rows": 0}
         if inserted:
             cursor.execute(
-                "DELETE FROM source_cohort_group_stats WHERE target_session=%s AND source_capture_id=%s",
-                (target, source_capture_id),
+                "DELETE FROM source_cohort_group_stats WHERE target_session=%s AND horizon=%s",
+                (target, horizon),
             )
     return {
         "target_session": target.isoformat(),
@@ -705,8 +705,7 @@ def write_computed_rule_rows(
         or metadata[4] <= 0
         or metadata[5] <= 0
         or type(metadata[6]) is not date
-        or not isinstance(metadata[3], str)
-        or not metadata[3]
+        or (metadata[3] is not None and not isinstance(metadata[3], str))
         or not isinstance(metadata[7], str)
         or not metadata[7]
         or metadata[8] != SCOPE
@@ -798,6 +797,11 @@ def write_computed_rule_rows(
             "target_session=%s AND source_capture_id=%s",
             (target, source_capture_id),
         )
+        if inserted:
+            cursor.execute(
+                "DELETE FROM source_cohort_group_stats WHERE target_session=%s AND rule_id=ANY(%s)",
+                (target, list(selected_rules)),
+            )
         from stock_a.storage.postgres.research_enrollment import (
             insert_rule_enrollments,
         )
@@ -1069,14 +1073,14 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
             # 新捕获也会改变同一规则键的歧义，旧捕获的摘要不能继续使用。
             cursor.execute(
                 """DELETE FROM source_cohort_group_stats
-                   WHERE target_session=%s AND source_capture_id=%s""",
-                (target, source_capture_id),
+                   WHERE target_session=%s""",
+                (target,),
             )
         elif count_paths:
             cursor.execute(
                 """DELETE FROM source_cohort_group_stats
-                   WHERE target_session=%s AND source_capture_id=%s""",
-                (target, source_capture_id),
+                   WHERE target_session=%s""",
+                (target,),
             )
         event_result = None
         if events is not None:

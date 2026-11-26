@@ -8,7 +8,6 @@ import {
   displayStockCode,
   displayStockName,
   displayStockTitle,
-  selectProfileScopeFromRecentJobs,
 } from "./state.js";
 import { renderD1MaterialMarket, setD1MaterialStatus } from "./market.js";
 import { renderD1Boards, renderD1Members } from "./sectors.js";
@@ -20,10 +19,6 @@ import {
 const $ = (id) => document.getElementById(id);
 const state = {
   versions: [],
-  profiles: [],
-  profilesReady: null,
-  profileDirectoryStatus: "NOT_LOADED",
-  profileDirectoryError: null,
   context: null,
   displayNameContext: null,
   selected: null,
@@ -1735,8 +1730,7 @@ function gotoPage(page) {
     ["focus", "market", "diagnostics"].includes(page) || operationPage;
   $("refreshResearch").hidden = extra;
   $("researchDate").closest(".context-button").hidden = operationPage;
-  $("contextNotice").hidden =
-    operationPage || (extra && state.profileDirectoryStatus !== "READ_FAILED");
+  $("contextNotice").hidden = operationPage || extra;
   $("d1MaterialFilters").hidden =
     !state.d1Requested || !["sectors", "stocks"].includes(page);
   $("d1MaterialQuality").hidden =
@@ -1958,9 +1952,9 @@ async function init() {
     select.replaceChildren();
     for (const date of dates) select.add(new Option(date, date));
     select.disabled = !dates.length;
-    const latest = dates.find((date) => uniquePriceVersion(date));
+    const latest = dates.find((date) => closedRawEntryForDate(date));
     if (!latest) {
-      message("contextText", "没有可唯一绑定的完整来源日期。");
+      message("contextText", "没有已闭合的完整来源日期。");
       return;
     }
     select.value = latest;
@@ -1970,104 +1964,15 @@ async function init() {
   }
 }
 
-function uniquePriceVersion(date) {
-  const closed = state.versions.filter(
-    (v) =>
-      v.session_date === date &&
-      v.price_coordinate === "RAW_UNADJUSTED" &&
-      v.version_status === "CLOSED" &&
-      v.source_capture_id != null,
-  );
-  return closed.length === 1 ? closed[0] : null;
-}
-
-function loadProfileDirectory() {
-  state.profileDirectoryStatus = "LOADING";
-  state.profileDirectoryError = null;
-  state.profilesReady = api("/api/source-symbol-price-profiles/snapshots")
-    .then((profiles) => {
-      if (!Array.isArray(profiles.snapshots))
-        throw new Error("画像目录返回格式无效");
-      state.profiles = profiles.snapshots;
-      state.profileDirectoryStatus = profiles.snapshots.length
-        ? "READY"
-        : "EMPTY";
-      return true;
-    })
-    .catch((error) => {
-      state.profiles = [];
-      state.profileDirectoryStatus = "READ_FAILED";
-      state.profileDirectoryError = error;
-      return false;
-    });
-  return state.profilesReady;
-}
-
-async function resolveCompletedProfileScope(targetSession, sourceCaptureId) {
-  const profilesReady = await loadProfileDirectory();
-  if (!profilesReady) return null;
-  const candidates = state.profiles.filter(
-    (item) =>
-      item.complete === true &&
-      item.target_session === targetSession &&
-      Number(item.source_capture_id) === Number(sourceCaptureId) &&
-      item.price_coordinate === "FORWARD_ADJUSTED",
-  );
-  try {
-    const capabilities = await api("/api/product/data-jobs/capabilities");
-    return selectProfileScopeFromRecentJobs(
-      candidates,
-      capabilities.recent_jobs,
-      targetSession,
-      sourceCaptureId,
-    );
-  } catch {
-    return null;
-  }
-}
-
-function profileDirectoryRetryButton() {
-  const retry = node("button", "重试读取画像目录", "button subtle");
-  retry.type = "button";
-  retry.addEventListener("click", () => void retryProfileDirectory());
-  return retry;
-}
-
-function showProfileDirectoryReadFailure(context = state.selected) {
-  if (context) {
-    context.profile_revision = null;
-    context.profile_status = "DIRECTORY_READ_FAILED";
-  }
-  const detail = state.profileDirectoryError?.message || "服务暂不可用";
-  const text = `画像目录读取失败（DIRECTORY_READ_FAILED），尚未判断画像可比性：${detail}`;
-  message("profileChangeSummary", "DIRECTORY_READ_FAILED");
-  message("profileChangeList", text);
-  $("contextText").replaceChildren(
-    node("span", `${context?.target_session || "当前日期"} · ${text} `),
-    profileDirectoryRetryButton(),
-  );
-  $("contextNotice").hidden = false;
-}
-
-async function retryProfileDirectory() {
-  if (state.profileDirectoryStatus === "LOADING") return;
-  const context = state.selected;
-  const detail = state.context;
-  const token = state.contextRequest;
-  if (!context?.contextReady || !detail) return;
-  message("contextText", `${context.target_session} · 正在重试读取画像目录…`);
-  $("contextNotice").hidden = false;
-  const ready = await loadProfileDirectory();
-  if (token !== state.contextRequest || state.selected !== context) return;
-  if (!ready) {
-    showProfileDirectoryReadFailure(context);
-    return;
-  }
-  context.profileResolution = resolveProfileForDate(
-    context,
-    token,
-    context.snapshotText,
-    detail,
+function closedRawEntryForDate(date) {
+  return (
+    state.versions.find(
+      (v) =>
+        v.session_date === date &&
+        v.price_coordinate === "RAW_UNADJUSTED" &&
+        v.version_status === "CLOSED" &&
+        v.source_capture_id != null,
+    ) || null
   );
 }
 
@@ -2083,11 +1988,11 @@ async function selectDate(target_session) {
   const token = state.contextRequest;
   const controller = new AbortController();
   state.contextController = controller;
-  const version = uniquePriceVersion(target_session);
+  const version = closedRawEntryForDate(target_session);
   if (!version) {
     message(
       "contextText",
-      `${target_session} 的BaoStock未复权捕获缺失或存在冲突，无法确定唯一价格来源。`,
+      `${target_session} 的BaoStock未复权行情尚未闭合，无法读取研究事实。`,
     );
     message("observationLabel", "来源不可用");
     return;
@@ -2101,7 +2006,7 @@ async function selectDate(target_session) {
   state.selected = selected;
   message(
     "contextText",
-    `${target_session} · BaoStock未复权来源代码池 ${version.row_count} 条；成员快照和画像状态正在读取。`,
+    `${target_session} · BaoStock未复权来源代码池 ${version.row_count} 条；正在读取成员快照与画像状态。`,
   );
   message("observationLabel", `${target_session} · BaoStock已保存行情`);
   $("metrics").replaceChildren(
@@ -2124,24 +2029,11 @@ async function selectDate(target_session) {
   if (activePage === "focus")
     message("focusAutoStatus", "正在读取交易日来源上下文…");
   try {
-    const requestedProfile = await resolveCompletedProfileScope(
-      target_session,
-      source_capture_id,
-    );
-    if (token !== state.contextRequest || state.selected !== selected) return;
     const contextQuery = new URLSearchParams({
       target_session,
       source_capture_id,
       price_coordinate: "FORWARD_ADJUSTED",
     });
-    if (requestedProfile) {
-      contextQuery.set(
-        "history_session_count",
-        String(requestedProfile.history_session_count),
-      );
-      if (typeof requestedProfile.profile_revision === "string")
-        contextQuery.set("profile_revision", requestedProfile.profile_revision);
-    }
     const c = await api(
       `/api/preview/sector-change-context?${contextQuery}`,
       undefined,
@@ -2176,9 +2068,12 @@ async function selectDate(target_session) {
         break;
       }
     }
+    const profileStatus =
+      c.profile_observation?.status === "PG_SOURCE_PROFILE_STORED"
+        ? "AVAILABLE"
+        : c.profile_observation?.status || "NOT_COMPUTED";
     Object.assign(selected, {
-      profile_revision: null,
-      profile_status: "NOT_COMPUTED",
+      profile_status: profileStatus,
       industry_snapshot_id: industry?.snapshot_id || null,
       concept_snapshot_id: concept?.snapshot_id || null,
       previous_session: c.previous_session,
@@ -2204,23 +2099,11 @@ async function selectDate(target_session) {
       `${target_session} · 当前成员回看 NON_PIT ${snapshotText || "成员不可用"} · 画像 ${selected.profile_status}`,
     );
     configureD1Filters();
-    selected.profileResolution = resolveProfileForDate(
-      selected,
-      token,
-      snapshotText,
-      c,
+    $("contextNotice").hidden = ["focus", "market", "diagnostics"].includes(
+      activePage,
     );
-    if (activePage === "focus") {
-      void selected.profileResolution.then(() => {
-        if (
-          token === state.contextRequest &&
-          state.selected === selected &&
-          activePage === "focus"
-        ) {
-          void loadExtra("focus");
-        }
-      });
-    }
+    void loadProfileChanges();
+    if (activePage === "focus") void loadExtra("focus");
     if (["market", "diagnostics"].includes(activePage))
       void loadExtra(activePage);
     void loadD0Overview(selected);
@@ -2233,66 +2116,6 @@ async function selectDate(target_session) {
       );
       if (activePage === "focus")
         message("focusAutoStatus", `来源上下文不可用：${error.message}`);
-    }
-  }
-}
-
-async function resolveProfileForDate(
-  c,
-  token,
-  snapshotText,
-  detail = state.context,
-) {
-  try {
-    if (token !== state.contextRequest || state.selected !== c) return;
-    const directoryReady = await state.profilesReady;
-    if (token !== state.contextRequest || state.selected !== c) return;
-    if (!directoryReady || state.profileDirectoryStatus === "READ_FAILED") {
-      showProfileDirectoryReadFailure(c);
-      return;
-    }
-    const observation = detail.profile_observation;
-    const selection = observation?.profile_revision_selection;
-    const revision =
-      selection?.selected_version_match === true &&
-      selection?.current_version_match_count === 1
-        ? selection.selected_profile_revision
-        : null;
-    const matches = state.profiles.filter(
-      (p) =>
-        p.complete &&
-        p.target_session === c.target_session &&
-        p.source_capture_id === c.source_capture_id &&
-        p.history_calendar_revision === detail.official_calendar_revision &&
-        p.price_coordinate === "FORWARD_ADJUSTED",
-    );
-    const profile = matches.length === 1 ? matches[0] : null;
-    c.profile_revision = profile?.profile_revision || null;
-    c.stock_history_session_count = profile?.history_session_count ?? null;
-    c.pg_history_session_count = profile?.history_session_count ?? null;
-    c.profile_status = profile
-      ? "AVAILABLE"
-      : revision
-        ? "NOT_COMPARABLE"
-        : observation?.status || "NOT_COMPUTED";
-    message(
-      "contextText",
-      `${c.target_session} · 当前成员回看 NON_PIT ${snapshotText || "成员不可用"} · 画像 ${c.profile_status}`,
-    );
-    $("contextNotice").hidden = ["focus", "market", "diagnostics"].includes(
-      activePage,
-    );
-    void loadProfileChanges();
-    if (activePage === "diagnostics") void loadExtra("diagnostics");
-  } catch (error) {
-    if (
-      token === state.contextRequest &&
-      state.selected === c &&
-      error.name !== "AbortError"
-    ) {
-      c.profile_status = "NOT_COMPUTED";
-      message("profileChangeSummary", "画像口径读取失败");
-      message("profileChangeList", `画像语义不可核验：${error.message}`);
     }
   }
 }
@@ -3532,7 +3355,6 @@ function sourceCandidateCohortKey(rule, ruleScope, sourceCaptureId) {
         key.rule === rule &&
         key.capture_count === 1 &&
         Number(key.source_capture_id) === Number(sourceCaptureId) &&
-        key.profile_revision === ruleScope.profile_revision &&
         Number(key.history) === Number(ruleScope.history_session_count) &&
         Number(key.d1_history) === Number(ruleScope.d1_history_session_count) &&
         key.window === ruleScope.event_window_start &&
@@ -3826,7 +3648,7 @@ async function loadFocusAuto(context, offset = 0) {
       "当前未按板块筛选；可从观察对象的行业/GN标签进入板内名单。";
   }
   void loadFocusMarketContext(context);
-  const previousPriceVersion = uniquePriceVersion(context?.previous_session);
+  const previousPriceVersion = closedRawEntryForDate(context?.previous_session);
   if (
     !context?.previous_session ||
     !context?.source_capture_id ||
@@ -3859,11 +3681,9 @@ async function loadFocusAuto(context, offset = 0) {
         : {}),
       ...(Number.isInteger(context.stock_history_session_count) &&
       context.stock_history_session_count >= 1 &&
-      context.stock_history_session_count <= 250 &&
-      typeof context.profile_revision === "string"
+      context.stock_history_session_count <= 250
         ? {
             history_session_count: context.stock_history_session_count,
-            profile_revision: context.profile_revision,
           }
         : {}),
       watch_group: state.focusAutoGroup,
@@ -4359,7 +4179,7 @@ function renderSourceObservationSegment(item, context) {
   readButton.type = "button";
   const result = node("div", undefined, "focus-observation-drilldown-result");
   readButton.addEventListener("click", async () => {
-    if (!item.profile_revision || !item.event_window_start) {
+    if (!item.event_window_start) {
       result.replaceChildren(
         node("p", "T0冻结键不完整；Cohort / Forward 为 NOT_COMPUTED。"),
       );
@@ -4370,7 +4190,6 @@ function renderSourceObservationSegment(item, context) {
     const key = {
       target_session: item.t0_session,
       source_capture_id: item.source_capture_id,
-      profile_revision: item.profile_revision,
       history: item.history_session_count,
       d1_history: item.d1_history_session_count,
       window: item.event_window_start,
@@ -4492,7 +4311,6 @@ function renderSourceObservationSegment(item, context) {
                 fact.target_session === item.t0_session &&
                 fact.rule_id === item.rule_id &&
                 String(fact.source_capture_id) === targetCaptureId &&
-                fact.profile_revision === item.profile_revision &&
                 fact.history_session_count === item.history_session_count &&
                 fact.d1_history_session_count ===
                   item.d1_history_session_count &&
@@ -4543,7 +4361,6 @@ function renderSourceObservationSegment(item, context) {
                   fact.rule_id === item.rule_id &&
                   String(fact.source_capture_id) ===
                     String(item.anchor_capture_id) &&
-                  fact.profile_revision === item.profile_revision &&
                   fact.history_session_count === item.history_session_count &&
                   fact.d1_history_session_count ===
                     item.d1_history_session_count &&
@@ -4888,7 +4705,7 @@ async function loadD0Overview(c) {
   const token = ++state.d0Request;
   if (c?.profileResolution) await c.profileResolution;
   if (token !== state.d0Request || state.selected !== c) return;
-  const before = uniquePriceVersion(c.previous_session);
+  const before = closedRawEntryForDate(c.previous_session);
   if (!before || !c.source_capture_id) {
     state.d0Result = null;
     state.d0Status = "UNKNOWN";
@@ -4935,11 +4752,9 @@ async function loadD0Overview(c) {
           : {}),
         ...(Number.isInteger(c.stock_history_session_count) &&
         c.stock_history_session_count >= 1 &&
-        c.stock_history_session_count <= 250 &&
-        typeof c.profile_revision === "string"
+        c.stock_history_session_count <= 250
           ? {
               history_session_count: c.stock_history_session_count,
-              profile_revision: c.profile_revision,
             }
           : {}),
         offset: state.d0Offset,
@@ -5133,7 +4948,7 @@ async function openD0Board(board, offset = 0) {
   message("memberList", "正在读取…");
   $("memberPrev").disabled = $("memberNext").disabled = true;
   if (!$("boardDialog").open) $("boardDialog").showModal();
-  const beforeVersion = uniquePriceVersion(c.previous_session);
+  const beforeVersion = closedRawEntryForDate(c.previous_session);
   try {
     let result;
     if (board.pulse_followup_only) {
@@ -5169,11 +4984,9 @@ async function openD0Board(board, offset = 0) {
           : {}),
         ...(Number.isInteger(c.stock_history_session_count) &&
         c.stock_history_session_count >= 1 &&
-        c.stock_history_session_count <= 250 &&
-        typeof c.profile_revision === "string"
+        c.stock_history_session_count <= 250
           ? {
               history_session_count: c.stock_history_session_count,
-              profile_revision: c.profile_revision,
             }
           : {}),
         board_kind: board.board_kind,
@@ -5546,11 +5359,9 @@ async function toggleBoardComparison(board) {
       concept_snapshot_id: context.concept_snapshot_id,
       ...(Number.isInteger(context.stock_history_session_count) &&
       context.stock_history_session_count >= 1 &&
-      context.stock_history_session_count <= 250 &&
-      typeof context.profile_revision === "string"
+      context.stock_history_session_count <= 250
         ? {
             history_session_count: context.stock_history_session_count,
-            profile_revision: context.profile_revision,
           }
         : {}),
       board_a: {
@@ -5836,101 +5647,19 @@ async function loadProfileChanges() {
     message("profileChangeList", "当前范围没有可用的此前官方会话。");
     return;
   }
-  const beforeRaw = uniquePriceVersion(previousDate);
-  if (!context.profile_revision || !beforeRaw) {
+  const beforeRaw = closedRawEntryForDate(previousDate);
+  if (!beforeRaw) {
     message("profileChangeSummary", "NOT_COMPARABLE");
     message(
       "profileChangeList",
-      "当前画像语义不唯一，或相邻会话来源不可唯一绑定；不能判断画像状态变化。",
+      "相邻会话来源不可唯一绑定；不能判断画像状态变化。",
     );
-    return;
-  }
-  const afterProfiles = state.profiles.filter(
-    (item) =>
-      item.complete &&
-      item.target_session === context.target_session &&
-      item.source_capture_id === context.source_capture_id &&
-      item.profile_revision === context.profile_revision,
-  );
-  const afterProfile = afterProfiles.length === 1 ? afterProfiles[0] : null;
-  if (!afterProfile || !Number.isInteger(afterProfile.history_session_count)) {
-    message("profileChangeSummary", "NOT_COMPARABLE");
-    message(
-      "profileChangeList",
-      "目标日没有唯一完整的Profile/N版本；不能推断相邻画像变化。",
-    );
-    return;
-  }
-  let beforeRevision;
-  try {
-    const beforeContext = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: previousDate, source_capture_id: beforeRaw.source_capture_id, price_coordinate: "FORWARD_ADJUSTED", history_session_count: String(afterProfile.history_session_count) })}`,
-      undefined,
-      controller.signal,
-    );
-    if (token !== state.profileChangeRequest || context !== state.selected)
-      return;
-    const selection =
-      beforeContext.profile_observation?.profile_revision_selection;
-    beforeRevision =
-      selection?.selected_version_match === true &&
-      selection?.current_version_match_count === 1
-        ? selection.selected_profile_revision
-        : null;
-    const beforeProfiles = state.profiles.filter(
-      (item) =>
-        item.complete &&
-        item.target_session === previousDate &&
-        item.source_capture_id === beforeRaw.source_capture_id &&
-        item.profile_revision === beforeRevision,
-    );
-    const beforeProfile =
-      beforeProfiles.length === 1 ? beforeProfiles[0] : null;
-    if (!beforeProfile || !afterProfile) {
-      message("profileChangeSummary", "NOT_COMPARABLE");
-      message(
-        "profileChangeList",
-        "相邻日缺少唯一适用的完整画像；不把来源或画像缺口当成股票状态变化。",
-      );
-      return;
-    }
-    if (
-      beforeProfile.history_session_count !== afterProfile.history_session_count
-    ) {
-      message("profileChangeSummary", "NOT_COMPARABLE");
-      message(
-        "profileChangeList",
-        `相邻画像窗口不等长：前一会话 ${beforeProfile.history_session_count} 个官方会话，目标会话 ${afterProfile.history_session_count} 个官方会话；现有Raw不足以提供同长度窗口，不把窗口差异当成股票状态变化。`,
-      );
-      return;
-    }
-    if (
-      beforeProfile.history_calendar_id !== afterProfile.history_calendar_id ||
-      beforeProfile.history_calendar_revision !==
-        afterProfile.history_calendar_revision ||
-      beforeProfile.price_coordinate !== afterProfile.price_coordinate
-    ) {
-      message("profileChangeSummary", "NOT_COMPARABLE");
-      message(
-        "profileChangeList",
-        "相邻画像的官方日历或价格坐标合同不一致；不把口径差异当成股票状态变化。",
-      );
-      return;
-    }
-  } catch (error) {
-    if (token === state.profileChangeRequest && error.name !== "AbortError") {
-      message("profileChangeSummary", "NOT_COMPARABLE");
-      message("profileChangeList", `相邻画像口径不可核验：${error.message}`);
-    }
     return;
   }
   const query = new URLSearchParams({
     before_session: previousDate,
     after_session: context.target_session,
-    before_source_capture_id: beforeRaw.source_capture_id,
-    before_profile_revision: beforeRevision,
-    after_source_capture_id: context.source_capture_id,
-    after_profile_revision: context.profile_revision,
+    price_coordinate: "FORWARD_ADJUSTED",
     offset: "0",
     limit: "15",
   });
@@ -6237,13 +5966,10 @@ async function openStock(symbol, row = {}) {
   );
   if (!$("stockDialog").open) $("stockDialog").showModal();
   try {
-    if (c.profileResolution) await c.profileResolution;
-    if (token !== state.stockRequest || state.selected !== c) return;
     const stockRequest = {
       symbol,
       target_session: c.target_session,
       session_count: c.stock_history_session_count,
-      profile_revision: c.profile_revision,
       d1_history_session_count: Number.isInteger(c.d1_history_session_count)
         ? c.d1_history_session_count
         : null,
@@ -6311,13 +6037,7 @@ async function openStock(symbol, row = {}) {
       core.append(fact(label, f.value, f.reason || f.quality));
     }
     root.append(core, node("h3", "已保存画像"));
-    const storedProfiles = node(
-      "div",
-      c.profile_revision
-        ? "正在读取适用画像…"
-        : `画像 ${c.profile_status || "NOT_COMPUTED"}：没有可证明唯一适用的修订。`,
-      "rule",
-    );
+    const storedProfiles = node("div", "正在读取已保存画像…", "rule");
     root.append(storedProfiles, node("h3", "即时计算的画像组件"));
     const profiles = node("div", null, "rule");
     const components = data.profile_preview?.components || [];
@@ -6689,44 +6409,41 @@ async function openStock(symbol, row = {}) {
     );
     const profileQuery = new URLSearchParams({
       target_session: c.target_session,
-      profile_revision: c.profile_revision,
       price_coordinate: "FORWARD_ADJUSTED",
       symbol,
       limit: "1",
     });
     if (detailCaptureId) profileQuery.set("source_capture_id", detailCaptureId);
-    if (c.profile_revision)
-      stockApi(`/api/source-symbol-price-profiles?${profileQuery}`)
-        .then((result) => {
-          if (token !== state.stockRequest) return;
-          const item = result.rows?.[0];
-          if (!item) {
-            storedProfiles.textContent =
-              "该代码在所选持久画像修订中没有记录；不能推断其他版本不存在。";
-            return;
-          }
-          if (
-            detailCaptureId &&
-            sourceCaptureIdFrom(item.source_capture_id) !== detailCaptureId
-          ) {
-            storedProfiles.textContent =
-              "画像来源捕获与个股详情不一致；没有展示该画像。";
-            return;
-          }
-          storedProfiles.replaceChildren();
-          for (let i = 0; i < (item.profile_field_ids || []).length; i++) {
-            storedProfiles.append(
-              node(
-                "div",
-                `${profileLabel(item.profile_field_ids[i])} · ${qualityLabel(item.profile_statuses?.[i])} · ${qualityLabel(item.profile_qualities?.[i])} · ${item.profile_reasons?.[i] || "—"}`,
-              ),
-            );
-          }
-        })
-        .catch((error) => {
-          if (token === state.stockRequest)
-            storedProfiles.textContent = `所选画像 UNKNOWN：${error.message}`;
-        });
+    stockApi(`/api/source-symbol-price-profiles?${profileQuery}`)
+      .then((result) => {
+        if (token !== state.stockRequest) return;
+        const item = result.rows?.[0];
+        if (!item) {
+          storedProfiles.textContent = "该代码当日没有已保存的持久画像记录。";
+          return;
+        }
+        if (
+          detailCaptureId &&
+          sourceCaptureIdFrom(item.source_capture_id) !== detailCaptureId
+        ) {
+          storedProfiles.textContent =
+            "画像来源捕获与个股详情不一致；没有展示该画像。";
+          return;
+        }
+        storedProfiles.replaceChildren();
+        for (let i = 0; i < (item.profile_field_ids || []).length; i++) {
+          storedProfiles.append(
+            node(
+              "div",
+              `${profileLabel(item.profile_field_ids[i])} · ${qualityLabel(item.profile_statuses?.[i])} · ${qualityLabel(item.profile_qualities?.[i])} · ${item.profile_reasons?.[i] || "—"}`,
+            ),
+          );
+        }
+      })
+      .catch((error) => {
+        if (token === state.stockRequest)
+          storedProfiles.textContent = `所选画像 UNKNOWN：${error.message}`;
+      });
     void loadCoordinateHistory(history.coordinate, ++history.coordinateRequest);
   } catch (error) {
     if (token === state.stockRequest)
@@ -7743,24 +7460,6 @@ async function loadExtra(page) {
           v.session_date === c.target_session &&
           v.source_capture_id === c.source_capture_id,
       );
-      const profiles = state.profiles.filter(
-        (p) =>
-          p.target_session === c.target_session &&
-          p.source_capture_id === c.source_capture_id &&
-          (c.profile_revision
-            ? p.profile_revision === c.profile_revision
-            : true),
-      );
-      const profileCount =
-        state.profileDirectoryStatus === "READ_FAILED"
-          ? `DIRECTORY_READ_FAILED · ${state.profileDirectoryError?.message || "读取失败"}`
-          : state.profileDirectoryStatus === "LOADING"
-            ? "目录读取中"
-            : profiles.length
-              ? profiles.length
-              : state.profileDirectoryStatus === "EMPTY"
-                ? "目录为空"
-                : "所选日期无已保存修订";
       const context = await api(
         `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session, source_capture_id: c.source_capture_id, price_coordinate: "FORWARD_ADJUSTED" })}`,
       );
@@ -7780,11 +7479,10 @@ async function loadExtra(page) {
             ? `${(version.price_coordinates || [version.price_coordinate]).filter(Boolean).join(" + ")} · QFQ ${version.qfq_row_count ?? "UNKNOWN"}/${version.qfq_expected_row_count ?? "UNKNOWN"} · ${version.version_status || "UNKNOWN"}`
             : "UNKNOWN",
         ],
-        ["画像修订数", profileCount],
-        ...profiles.map((p) => [
-          `画像 ${p.profile_revision}`,
-          `${p.source_symbol_count} / ${p.expected_source_symbol_count} · ${p.complete ? "已保存完整" : "不完整"} · ${p.history_session_count} 会话`,
-        ]),
+        [
+          "画像状态",
+          context.profile_observation?.status || c.profile_status || "UNKNOWN",
+        ],
         ...snapshots.map((s) => [
           s.source_kind,
           `${s.member_rows} 条 · 观测 ${s.observed_at} · ${s.clock_quality} · ${s.source_quality}`,
@@ -7844,7 +7542,6 @@ async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
     const query = {
       target_session: c.target_session,
       source_capture_id: c.source_capture_id,
-      profile_revision: key.profile_revision,
       rule: key.rule,
       history: key.history,
       d1_history: key.d1_history,
@@ -7867,7 +7564,6 @@ async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
         const forwardQuery = {
           target_session: c.target_session,
           source_capture_id: c.source_capture_id,
-          profile_revision: key.profile_revision,
           history: key.history,
           d1_history: key.d1_history,
           window: key.window,
@@ -7988,7 +7684,6 @@ $("readCohortEnrollment").addEventListener("click", async () => {
     const query = {
       target_session: c.target_session,
       source_capture_id: c.source_capture_id,
-      profile_revision: key.profile_revision,
       history: key.history,
       d1_history: key.d1_history,
       window: key.window,
@@ -8068,7 +7763,6 @@ $("focusReadStock").addEventListener("click", async () => {
       symbol,
       target_session: c.target_session,
       session_count: sessionCount,
-      profile_revision: c.profile_revision,
       d1_history_session_count: c.d1_history_session_count,
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,

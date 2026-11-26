@@ -513,10 +513,38 @@ def read_source_t0_pulse_transition_facts(
     return output
 
 
+_FROZEN_CORE_COLUMNS = (
+    "enrollment_id",
+    "target_session",
+    "source_capture_id",
+    "source_symbol",
+    "d0_fact_id",
+    "rule_fact_id",
+    "seed_fact_id",
+    "membership_snapshot_id",
+    "catalog_id",
+    "board_kind",
+    "board_native_id",
+    "board_context_key",
+    "membership_status",
+    "membership_mode",
+    "hypothesis_version",
+    "research_mode",
+    "price_coordinate",
+)
+_FROZEN_CORE_SET = frozenset(_FROZEN_CORE_COLUMNS)
+_RESTATABLE_COLUMNS = tuple(
+    name for name in _OBSERVATION_COLUMNS if name not in _FROZEN_CORE_SET
+)
+
+
 def persist_source_t0_early_observation_facts(
-    config: Mapping[str, Any], *, rows: Sequence[Mapping[str, Any]]
+    config: Mapping[str, Any],
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    allow_restatement: bool = False,
 ) -> dict[str, Any]:
-    """单事务幂等保存并逐键独立核对全部T0板内观察行。"""
+    """单事务幂等保存并逐键独立核对全部T0板内观察行；默认保护T0冻结证据不可覆盖。"""
     if not rows:
         raise T0EarlyObservationPgError(
             "T0_EARLY_ROWS_EMPTY", "没有可保存的T0板内观察事实"
@@ -533,12 +561,12 @@ def persist_source_t0_early_observation_facts(
         values = tuple(row[name] for name in _OBSERVATION_COLUMNS)
         key = (
             row["enrollment_id"],
+            row["hypothesis_version"],
             row["board_context_key"],
-            row["evidence_revision_key"],
         )
         if key in identity_keys:
             raise T0EarlyObservationPgError(
-                "T0_EARLY_ROW_DUPLICATED", "同一T0登记和证据修订出现重复板块上下文"
+                "T0_EARLY_ROW_DUPLICATED", "同一T0登记和假设版本出现重复板块上下文"
             )
         identity_keys.add(key)
         if (
@@ -560,15 +588,43 @@ def persist_source_t0_early_observation_facts(
     placeholders = ",".join(["%s"] * len(_OBSERVATION_COLUMNS))
     insert_sql = (
         f"INSERT INTO source_t0_early_observation_facts ({columns}) "
-        f"VALUES ({placeholders}) ON CONFLICT DO NOTHING"
+        f"VALUES ({placeholders}) "
+        "ON CONFLICT (enrollment_id,hypothesis_version,board_context_key) DO NOTHING"
     )
     readback_columns = ",".join(f"o.{name}" for name in _OBSERVATION_COLUMNS)
+    hypothesis_index = _OBSERVATION_COLUMNS.index("hypothesis_version")
     context_index = _OBSERVATION_COLUMNS.index("board_context_key")
-    revision_index = _OBSERVATION_COLUMNS.index("evidence_revision_key")
     expected_order = sorted(
         normalized,
-        key=lambda item: (item[0], item[context_index], item[revision_index]),
+        key=lambda item: (item[0], item[hypothesis_index], item[context_index]),
     )
+    frozen_indexes = tuple(
+        _OBSERVATION_COLUMNS.index(name) for name in _FROZEN_CORE_COLUMNS
+    )
+    restatable_indexes = tuple(
+        _OBSERVATION_COLUMNS.index(name) for name in _RESTATABLE_COLUMNS
+    )
+    readback_sql = f"""WITH expected(enrollment_id,hypothesis_version,board_context_key) AS (
+    SELECT * FROM unnest(%s::bigint[],%s::text[],%s::text[])
+)
+SELECT {readback_columns} FROM expected e
+JOIN source_t0_early_observation_facts o
+  ON o.enrollment_id=e.enrollment_id
+ AND o.hypothesis_version=e.hypothesis_version
+ AND o.board_context_key=e.board_context_key
+ORDER BY o.enrollment_id,o.hypothesis_version COLLATE "C",o.board_context_key COLLATE "C" """
+    key_params = (
+        [item[0] for item in expected_order],
+        [item[hypothesis_index] for item in expected_order],
+        [item[context_index] for item in expected_order],
+    )
+    update_sql = (
+        "UPDATE source_t0_early_observation_facts SET "
+        + ",".join(f"{name}=%s" for name in _RESTATABLE_COLUMNS)
+        + ",recorded_at=clock_timestamp() "
+        "WHERE enrollment_id=%s AND hypothesis_version=%s AND board_context_key=%s"
+    )
+
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
         cursor,
@@ -576,33 +632,56 @@ def persist_source_t0_early_observation_facts(
     ):
         cursor.executemany(insert_sql, normalized)
         inserted = int(cursor.rowcount)
-        cursor.execute(
-            f"""WITH expected(enrollment_id,board_context_key,evidence_revision_key) AS (
-    SELECT * FROM unnest(%s::bigint[],%s::text[],%s::text[])
-)
-SELECT {readback_columns} FROM expected e
-JOIN source_t0_early_observation_facts o
-  ON o.enrollment_id=e.enrollment_id
- AND o.board_context_key=e.board_context_key
- AND o.evidence_revision_key=e.evidence_revision_key
-ORDER BY o.enrollment_id,o.board_context_key COLLATE "C",o.evidence_revision_key COLLATE "C" """,
-            (
-                [item[0] for item in expected_order],
-                [item[context_index] for item in expected_order],
-                [item[revision_index] for item in expected_order],
-            ),
-        )
+        cursor.execute(readback_sql, key_params)
         readback = list(cursor.fetchall())
+        restated = 0
         if readback != expected_order:
-            raise T0EarlyObservationPgError(
-                "T0_EARLY_READBACK_MISMATCH",
-                "T0板内观察事实同事务读回与期望内容不一致；事务已回滚",
-            )
+            if not allow_restatement:
+                raise T0EarlyObservationPgError(
+                    "T0_EARLY_FROZEN_FACT_CONFLICT",
+                    "T0板内观察冻结事实已存在且内容不一致，禁止普通覆盖；事务已回滚",
+                )
+            if len(readback) != len(expected_order):
+                raise T0EarlyObservationPgError(
+                    "T0_EARLY_READBACK_MISMATCH",
+                    "T0板内观察事实同事务读回行数与期望不一致；事务已回滚",
+                )
+            for actual, expected in zip(readback, expected_order, strict=True):
+                if actual == expected:
+                    continue
+                if any(actual[i] != expected[i] for i in frozen_indexes):
+                    raise T0EarlyObservationPgError(
+                        "T0_EARLY_FROZEN_CORE_IMMUTABLE",
+                        "T0板内观察纠错不允许改写冻结核心列；事务已回滚",
+                    )
+                cursor.execute(
+                    update_sql,
+                    tuple(expected[i] for i in restatable_indexes)
+                    + (
+                        expected[0],
+                        expected[hypothesis_index],
+                        expected[context_index],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise T0EarlyObservationPgError(
+                        "T0_EARLY_RESTATEMENT_FAILED",
+                        "T0板内观察合法纠错未更新唯一业务行；事务已回滚",
+                    )
+                restated += 1
+            cursor.execute(readback_sql, key_params)
+            readback = list(cursor.fetchall())
+            if readback != expected_order:
+                raise T0EarlyObservationPgError(
+                    "T0_EARLY_READBACK_MISMATCH",
+                    "T0板内观察事实纠错后同事务读回与期望内容不一致；事务已回滚",
+                )
 
     return {
         "status": "PERSISTED",
         "rows_expected": len(normalized),
         "rows_inserted": inserted,
+        "rows_restated": restated,
         "readback_rows": len(readback),
         "readback_status": "AVAILABLE",
         "database_write_attempted": True,
@@ -612,14 +691,7 @@ ORDER BY o.enrollment_id,o.board_context_key COLLATE "C",o.evidence_revision_key
     }
 
 
-_READ_SELECT = """WITH latest AS (
-    SELECT DISTINCT ON (o.enrollment_id,o.board_context_key)
-           o.*
-    FROM source_t0_early_observation_facts o
-    WHERE o.enrollment_id=ANY(%s)
-    ORDER BY o.enrollment_id,o.board_context_key,o.recorded_at DESC,o.id DESC
-)
-SELECT o.id,o.enrollment_id,e.enrollment_kind,e.reason_code AS enrollment_reason_code,
+_READ_SELECT = """SELECT o.id,o.enrollment_id,e.enrollment_kind,e.reason_code AS enrollment_reason_code,
        o.target_session,o.source_capture_id,o.source_symbol,
        o.d0_fact_id,o.rule_fact_id,r.rule_id,r.rule_version,r.state AS rule_state,
        d.before_state AS d0_before_state,d.after_state AS d0_after_state,
@@ -715,7 +787,7 @@ SELECT o.id,o.enrollment_id,e.enrollment_kind,e.reason_code AS enrollment_reason
        ) AS driver_unknown_reason_codes,
        o.hypothesis_version,o.evidence_revision_key,o.research_mode,
        o.price_coordinate,o.recorded_at
-FROM latest o
+FROM source_t0_early_observation_facts o
 JOIN source_research_enrollments e ON e.id=o.enrollment_id
 LEFT JOIN source_rule_evaluations r ON r.id=o.rule_fact_id
 LEFT JOIN source_d0_launch_day_facts d ON d.id=o.d0_fact_id
@@ -730,6 +802,8 @@ LEFT JOIN LATERAL (
 ) m ON TRUE
 LEFT JOIN source_sector_cross_period_pulse_facts p ON p.id=o.pulse_fact_id
 LEFT JOIN source_sector_pulse_adjacent_transitions t ON t.id=o.pulse_transition_id
+WHERE o.enrollment_id=ANY(%s)
+  AND o.hypothesis_version='EARLY_BOARD_RELATIVE_T0_R1'
 ORDER BY o.enrollment_id,c.board_kind,c.board_native_id COLLATE "C" """
 
 
@@ -915,10 +989,7 @@ def read_source_t0_early_triage_summaries_for_symbols(
             """WITH selected_snapshots(board_kind,snapshot_id) AS (
     VALUES __SELECTED_SNAPSHOT_VALUES__
 ), latest AS MATERIALIZED (
-    SELECT DISTINCT ON (
-        o.enrollment_id,o.board_context_key,o.membership_snapshot_id
-    )
-           o.enrollment_id,o.source_symbol,o.seed_fact_id,
+    SELECT o.enrollment_id,o.source_symbol,o.seed_fact_id,
            o.membership_snapshot_id,
            o.board_kind,o.board_native_id,o.board_context_key,
            o.membership_mode,o.hypothesis_version,o.research_mode,
@@ -934,13 +1005,12 @@ def read_source_t0_early_triage_summaries_for_symbols(
     FROM source_t0_early_observation_facts o
     WHERE o.target_session=%s AND o.source_capture_id=%s
       AND o.source_symbol=ANY(%s)
+      AND o.hypothesis_version='EARLY_BOARD_RELATIVE_T0_R1'
       AND EXISTS (
           SELECT 1 FROM selected_snapshots selected
           WHERE selected.board_kind=o.board_kind
             AND selected.snapshot_id=o.membership_snapshot_id
       )
-    ORDER BY o.enrollment_id,o.board_context_key,
-             o.membership_snapshot_id,o.recorded_at DESC,o.id DESC
 ), evidence AS MATERIALIZED (
     SELECT o.*,COALESCE(c.board_name,o.board_native_id) AS board_name,
            o.research_case IN ('D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT')

@@ -22,8 +22,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "producer_symbol": "stock_a.sources.baostock.identity:normalize_baostock_symbol",
@@ -84,8 +83,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
       }
@@ -117,8 +115,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
       }
@@ -150,8 +147,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
       }
@@ -183,8 +179,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
       }
@@ -216,8 +211,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
       }
@@ -249,8 +243,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
       }
@@ -316,7 +309,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -352,7 +344,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -388,7 +379,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -424,7 +414,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -460,7 +449,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -493,8 +481,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
       }
@@ -526,8 +513,7 @@
         ],
         "context_dependencies": [
           "context.target_session",
-          "context.source_cutoff",
-          "context.source_capture_id"
+          "context.source_cutoff"
         ],
         "dependency_identity_policy": "ACTUAL_FIELD_VALUES_PLUS_SELECTED_PROVENANCE"
       }
@@ -562,7 +548,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -598,7 +583,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -634,7 +618,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -670,7 +653,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -706,7 +688,6 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.source_capture_id",
           "context.price_coordinate"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
@@ -748,7 +729,6 @@
           "context.target_session",
           "context.source_cutoff",
           "context.calendar_ref",
-          "context.source_capture_id",
           "context.price_coordinate_contract"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
@@ -800,7 +780,6 @@
           "context.target_session",
           "context.source_cutoff",
           "context.calendar_ref",
-          "context.source_capture_id",
           "context.price_coordinate_contract"
         ],
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",

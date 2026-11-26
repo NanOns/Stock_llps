@@ -193,12 +193,7 @@ def read_source_launch_watch_evidence(
     d1_history_session_count: int | None = None,
     single_symbol_only: bool = False,
     expected_before_session: date | None = None,
-    selected_profile_revision: str | None = None,
     selected_history_session_count: int | None = None,
-    cross_section_universe_capture_id: int | None = None,
-    cross_section_universe_version: str | None = None,
-    cross_section_contract_version: str | None = None,
-    universe_match_status: str | None = None,
     membership_snapshot_ids: Mapping[str, int | None] | None = None,
     _scope_symbol: str | None = None,
 ) -> dict[str, Any]:
@@ -232,38 +227,6 @@ def read_source_launch_watch_evidence(
                 or not 1 <= selected_history_session_count <= 250
             )
         )
-        or (
-            selected_profile_revision is not None
-            and not isinstance(selected_profile_revision, str)
-        )
-        or (
-            cross_section_universe_capture_id is not None
-            and (
-                type(cross_section_universe_capture_id) is not int
-                or cross_section_universe_capture_id <= 0
-            )
-        )
-        or (
-            cross_section_universe_version is not None
-            and (
-                not isinstance(cross_section_universe_version, str)
-                or not cross_section_universe_version.strip()
-            )
-        )
-        or (
-            cross_section_contract_version is not None
-            and (
-                not isinstance(cross_section_contract_version, str)
-                or not cross_section_contract_version.strip()
-            )
-        )
-        or (
-            universe_match_status is not None
-            and (
-                not isinstance(universe_match_status, str)
-                or not universe_match_status.strip()
-            )
-        )
     ):
         raise ValueError("D0首页研究证据读取键无效")
     if not symbols:
@@ -291,10 +254,6 @@ def read_source_launch_watch_evidence(
             or expected_before_session >= target_session
         ):
             raise ValueError("单股D0前态必须是目标日前的官方会话")
-        if selected_profile_revision is not None and not isinstance(
-            selected_profile_revision, str
-        ):
-            raise ValueError("单股研究证据画像修订键无效")
         if membership_snapshot_ids is not None and (
             not isinstance(membership_snapshot_ids, Mapping)
             or set(membership_snapshot_ids) != {"INDUSTRY", "CONCEPT"}
@@ -312,7 +271,6 @@ def read_source_launch_watch_evidence(
             source_symbols=symbols,
             d1_history_session_count=d1_history_session_count,
             expected_before_session=expected_before_session,
-            selected_profile_revision=selected_profile_revision,
             selected_history_session_count=selected_history_session_count,
             membership_snapshot_ids=membership_snapshot_ids,
             _scope_symbol=symbols[0],
@@ -383,7 +341,7 @@ def read_source_launch_watch_evidence(
         rule_scope_filter += " AND rule_id=ANY(%s)"
         rule_scope_params += (list(_POOL_RULE_IDS),)
         cursor.execute(
-            """SELECT rule_version, min(profile_revision), history_session_count,
+            """SELECT rule_version, history_session_count,
                       d1_history_session_count, event_window_start, calendar_revision,
                       scope, count(*)::bigint, count(DISTINCT source_symbol)::bigint,
                       count(DISTINCT rule_id)::bigint
@@ -405,9 +363,9 @@ def read_source_launch_watch_evidence(
         else:
             rule_scope_status = (
                 "AVAILABLE"
-                if int(rule_scopes[0][7]) == scoped_source_count * len(_POOL_RULE_IDS)
-                and int(rule_scopes[0][8]) == scoped_source_count
-                and int(rule_scopes[0][9]) == len(_POOL_RULE_IDS)
+                if int(rule_scopes[0][6]) == scoped_source_count * len(_POOL_RULE_IDS)
+                and int(rule_scopes[0][7]) == scoped_source_count
+                and int(rule_scopes[0][8]) == len(_POOL_RULE_IDS)
                 else "INCOMPLETE"
             )
         rule_scope = rule_scopes[0] if len(rule_scopes) == 1 else None
@@ -458,11 +416,11 @@ def read_source_launch_watch_evidence(
             (
                 *d1_scope_params,
                 _D1_STRUCTURE_PRODUCER_VERSION_7,
-                list(_D1_STRUCTURE_TYPES_7),
-                list(_D1_STRUCTURE_TYPES),
+                sorted(_D1_STRUCTURE_TYPES_7),
+                sorted(_D1_STRUCTURE_TYPES),
                 _D1_STRUCTURE_PRODUCER_VERSION_7,
-                list(_D1_STRUCTURE_TYPES_7),
-                list(_D1_STRUCTURE_TYPES),
+                sorted(_D1_STRUCTURE_TYPES_7),
+                sorted(_D1_STRUCTURE_TYPES),
             ),
         )
         from stock_a.storage.postgres.research_day_facts import (
@@ -643,7 +601,6 @@ def read_source_launch_watch_evidence(
                 expected_source_count=expected_source_count,
                 source_symbol=_scope_symbol,
                 expected_before_session=expected_before_session,
-                selected_profile_revision=selected_profile_revision,
                 membership_snapshot_ids=membership_snapshot_ids,
                 d1_scope=d1_scope,
             )
@@ -912,15 +869,14 @@ def read_source_launch_watch_evidence(
                     {
                         "scope": {
                             "rule_version": rule_scope[0],
-                            "profile_revision": rule_scope[1],
-                            "history_session_count": int(rule_scope[2]),
-                            "d1_history_session_count": int(rule_scope[3]),
+                            "history_session_count": int(rule_scope[1]),
+                            "d1_history_session_count": int(rule_scope[2]),
                             "partition_rule_ids": list(_POOL_RULE_IDS),
-                            "event_window_start": rule_scope[4].isoformat()
-                            if isinstance(rule_scope[4], date)
-                            else str(rule_scope[4]),
-                            "calendar_revision": rule_scope[5],
-                            "scope": rule_scope[6],
+                            "event_window_start": rule_scope[3].isoformat()
+                            if isinstance(rule_scope[3], date)
+                            else str(rule_scope[3]),
+                            "calendar_revision": rule_scope[4],
+                            "scope": rule_scope[5],
                         }
                     }
                     if _scope_symbol is not None and rule_scope is not None
@@ -980,9 +936,9 @@ def read_source_launch_watch_evidence(
         and rule_scope is not None
         and d1_scope is not None
         and rules_semantics_match
-        and rule_scope[5] == d1_scope[4]
-        and seed_scope[2] == rule_scope[2]
-        and rule_scope[3] == d1_scope[0]
+        and rule_scope[4] == d1_scope[4]
+        and seed_scope[2] == rule_scope[1]
+        and rule_scope[2] == d1_scope[0]
         and (
             d1_history_session_count is None or d1_scope[0] == d1_history_session_count
         )
@@ -1004,7 +960,6 @@ def read_source_launch_watch_evidence(
         "expected_source_count": expected_source_count,
         "candidate_count": len(symbols),
         "seed_status": seed_scope_status,
-        "seed_profile_revision": None,
         "seed_scope": {
             "producer_contract": seed_scope[0],
             "producer_version": seed_scope[1],
@@ -1027,18 +982,17 @@ def read_source_launch_watch_evidence(
         else "SCOPE_MISMATCH",
         "rule_scope": {
             "rule_version": rule_scope[0],
-            "profile_revision": rule_scope[1],
-            "history_session_count": rule_scope[2],
-            "d1_history_session_count": rule_scope[3],
+            "history_session_count": rule_scope[1],
+            "d1_history_session_count": rule_scope[2],
             "partition_rule_ids": list(_POOL_RULE_IDS),
-            "event_window_start": rule_scope[4].isoformat()
-            if isinstance(rule_scope[4], date)
-            else str(rule_scope[4]),
-            "calendar_revision": rule_scope[5],
-            "scope": rule_scope[6],
-            "stored_rows": int(rule_scope[7]),
-            "stored_source_symbols": int(rule_scope[8]),
-            "stored_rule_ids": int(rule_scope[9]),
+            "event_window_start": rule_scope[3].isoformat()
+            if isinstance(rule_scope[3], date)
+            else str(rule_scope[3]),
+            "calendar_revision": rule_scope[4],
+            "scope": rule_scope[5],
+            "stored_rows": int(rule_scope[6]),
+            "stored_source_symbols": int(rule_scope[7]),
+            "stored_rule_ids": int(rule_scope[8]),
         }
         if rule_scope
         else None,
@@ -1427,8 +1381,6 @@ def read_source_seed_t1_outcomes(
                     "t0_reasons": _reasons(s2_reasons),
                     "t1_state": None,
                     "t1_reasons": [],
-                    "t0_profile_revision": None,
-                    "t1_profile_revision": None,
                     "reason_codes": ["WAITING_FOR_FUTURE_SESSION"],
                     "interpretation": "SAME_SOURCE_S2_PREDICATE_ONLY",
                 }
@@ -1456,7 +1408,6 @@ def read_source_seed_t1_outcomes(
                             {
                                 "status": endpoint_seed_status,
                                 "transition": "UNKNOWN",
-                                "t1_profile_revision": None,
                                 "reason_codes": endpoint_seed_reasons,
                             }
                         )
@@ -1481,7 +1432,6 @@ def read_source_seed_t1_outcomes(
                                     "transition": f"{_state(s2_state)}_TO_{t1_s2_state}",
                                     "t1_state": t1_s2_state,
                                     "t1_reasons": _reasons(t1_s2_reasons),
-                                    "t1_profile_revision": None,
                                     "reason_codes": [],
                                 }
                             )
@@ -1552,7 +1502,6 @@ def read_source_seed_t1_outcomes(
                     "successor_capture_id": (
                         endpoint_capture_id if endpoint_capture_id else None
                     ),
-                    "profile_revision": None,
                     "calendar_revision": calendar_revision,
                     "source_seed": source_seed,
                     "s1": {"state": _state(s1_state), "reasons": reasons["s1"]},
@@ -1625,7 +1574,6 @@ def _read_single_symbol_context(
     expected_source_count: int,
     source_symbol: str,
     expected_before_session: date | None,
-    selected_profile_revision: str | None,
     membership_snapshot_ids: Mapping[str, int | None] | None,
     d1_scope: tuple[Any, ...] | None,
 ) -> dict[str, Any]:
@@ -1951,7 +1899,7 @@ def _read_single_symbol_context(
             """SELECT catalog.snapshot_id, catalog.board_kind,
                       catalog.board_native_id, catalog.board_name,
                       member.membership_quality, snapshot.observed_at,
-                      snapshot.source_valid_on, pulse.id, NULL::text AS profile_revision,
+                      snapshot.source_valid_on, pulse.id,
                       pulse.pulse_state, pulse.pulse_reason_codes,
                       pulse.dq5_pp_numerator, pulse.dq5_pp_denominator,
                       pulse.breadth_delta1_numerator,
@@ -2006,25 +1954,25 @@ def _read_single_symbol_context(
             else:
                 pulse_row = all_pulses[0]
                 pulse_ok = (
-                    pulse_row[21] == "COMPLETE"
-                    and pulse_row[22] == "NON_PIT_RETROSPECTIVE"
-                    and pulse_row[23] == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-                    and pulse_row[24] == "FORWARD_ADJUSTED"
-                    and pulse_row[25] == "NOT_EVALUATED"
-                    and int(pulse_row[18]) == int(pulse_row[15])
-                    and int(pulse_row[19]) == int(pulse_row[15])
-                    and int(pulse_row[26]) == expected_source_count
-                    and pulse_row[27] == "SOURCE_CROSS_PERIOD_PULSE_R1"
+                    pulse_row[20] == "COMPLETE"
+                    and pulse_row[21] == "NON_PIT_RETROSPECTIVE"
+                    and pulse_row[22] == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+                    and pulse_row[23] == "FORWARD_ADJUSTED"
+                    and pulse_row[24] == "NOT_EVALUATED"
+                    and int(pulse_row[17]) == int(pulse_row[14])
+                    and int(pulse_row[18]) == int(pulse_row[14])
+                    and int(pulse_row[25]) == expected_source_count
+                    and pulse_row[26] == "SOURCE_CROSS_PERIOD_PULSE_R1"
                 )
                 pulse_status = "AVAILABLE" if pulse_ok else "INCOMPLETE"
                 pulse_reasons = (
-                    _reasons(pulse_row[10])
+                    _reasons(pulse_row[9])
                     if pulse_ok
                     else ["PULSE_FACT_QUALITY_OR_DENOMINATOR_MISMATCH"]
                 )
             pulse_payload: dict[str, Any] = {
                 "status": pulse_status,
-                "state": _state(pulse_row[9]) if pulse_row else "UNKNOWN",
+                "state": _state(pulse_row[8]) if pulse_row else "UNKNOWN",
                 "reason_codes": pulse_reasons,
                 "transition_status": "NOT_COMPUTED",
                 "transition_state": "UNKNOWN",
@@ -2035,10 +1983,10 @@ def _read_single_symbol_context(
             }
             if pulse_row and pulse_status == "AVAILABLE":
                 metrics = {
-                    "dq5_pp_numerator": pulse_row[11],
-                    "dq5_pp_denominator": pulse_row[12],
-                    "breadth_delta1_numerator": pulse_row[13],
-                    "breadth_delta1_denominator": pulse_row[14],
+                    "dq5_pp_numerator": pulse_row[10],
+                    "dq5_pp_denominator": pulse_row[11],
+                    "breadth_delta1_numerator": pulse_row[12],
+                    "breadth_delta1_denominator": pulse_row[13],
                 }
                 if _fraction_payload:
                     pulse_payload["dq5_pp"] = _fraction_payload(metrics, "dq5_pp")
@@ -2047,19 +1995,18 @@ def _read_single_symbol_context(
                     )
                 pulse_payload.update(
                     {
-                        "member_count": int(pulse_row[15]),
-                        "mapped_count": int(pulse_row[16]),
-                        "unmapped_count": int(pulse_row[17]),
-                        "ret5_denominator": int(pulse_row[18]),
-                        "breadth_denominator": int(pulse_row[19]),
-                        "snapshot_source_quality": pulse_row[20],
+                        "member_count": int(pulse_row[14]),
+                        "mapped_count": int(pulse_row[15]),
+                        "unmapped_count": int(pulse_row[16]),
+                        "ret5_denominator": int(pulse_row[17]),
+                        "breadth_denominator": int(pulse_row[18]),
+                        "snapshot_source_quality": pulse_row[19],
                         "pulse_fact_id": int(pulse_row[7]),
-                        "profile_revision": pulse_row[8],
-                        "algorithm_contract": pulse_row[27],
-                        "catalog_id": int(pulse_row[28]),
-                        "research_mode": pulse_row[22],
-                        "price_coordinate": pulse_row[24],
-                        "formal_rotation_state": pulse_row[25],
+                        "algorithm_contract": pulse_row[26],
+                        "catalog_id": int(pulse_row[27]),
+                        "research_mode": pulse_row[21],
+                        "price_coordinate": pulse_row[23],
+                        "formal_rotation_state": pulse_row[24],
                     }
                 )
             memberships.append(
@@ -2129,7 +2076,6 @@ def read_source_launch_watch_page(
     limit: int,
     d1_history_session_count: int | None = None,
     selected_history_session_count: int | None = None,
-    selected_profile_revision: str | None = None,
     board_kind: str | None = None,
     board_native_id: str | None = None,
     board_snapshot_id: int | None = None,
@@ -2173,10 +2119,6 @@ def read_source_launch_watch_page(
         or not 1 <= selected_history_session_count <= 250
     ):
         invalid_fields.append("画像历史会话数")
-    if selected_profile_revision is not None and not isinstance(
-        selected_profile_revision, str
-    ):
-        invalid_fields.append("画像修订")
     if (board_kind is None) != (board_native_id is None):
         invalid_fields.append("板块类型与原生ID配对")
     if (board_kind is None) != (board_snapshot_id is None):

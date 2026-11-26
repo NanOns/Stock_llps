@@ -1487,16 +1487,7 @@ def build_data_job_plan(
             if len(cap_ids) == 1:
                 endpoint_capture_ids_by_session[day_text] = next(iter(cap_ids))
     allow_per_session_captures = (
-        "BAOSTOCK_PRICES" not in selected_source_modules
-        and bool(selected_modules)
-        and selected_modules
-        <= {
-            "R03_SECTOR_NATIVE",
-            "R03_SECTOR_ROTATION",
-            "R03_SECTOR_OVERLAP",
-            "R03_SECTOR_LOO",
-            "MARKET_BREADTH",
-        }
+        "BAOSTOCK_PRICES" not in selected_source_modules and bool(selected_modules)
     )
     price_capture_window_status = (
         "NO_CAPTURE_YET"
@@ -2341,7 +2332,6 @@ def _job_request_key(plan: Mapping[str, Any]) -> str:
         "initialization_mode": plan.get("initialization_mode", "REUSE_RAW"),
         "daily_mode": plan.get("daily_mode", "CUSTOM"),
         "reset_preview_fingerprint": plan.get("reset_preview_fingerprint"),
-        "source_version_fingerprint": plan.get("source_version_fingerprint"),
         "sector_snapshot_ids": plan.get("sector_snapshot_ids"),
         "cleanup_preview_key": plan.get("cleanup_preview", {}).get("preview_key"),
     }
@@ -2833,9 +2823,6 @@ class DataJobCoordinator:
                 completed["resume_existing_job"] = True
                 completed["resume_request_key"] = recent["request_key"]
                 completed["resume_job_id"] = str(recent["job_id"])
-                completed["source_version_fingerprint"] = recent[
-                    "source_version_fingerprint"
-                ]
                 completed["reset_preview_fingerprint"] = request[
                     "reset_preview_fingerprint"
                 ]
@@ -2926,51 +2913,6 @@ class DataJobCoordinator:
                 )
         plan["module_output_session_counts"] = output_counts
         plan["operation"] = request["operation"]
-        source_identity = [
-            {
-                "source_capture_id": capture_id,
-                "price_coordinate": coordinate,
-            }
-            for capture_id, coordinate in sorted(
-                {
-                    (
-                        int(item["source_capture_id"]),
-                        str(item["price_coordinate"]),
-                    )
-                    for item in plan.get("price_capture_inputs", ())
-                }
-            )
-        ]
-        request_identity = {
-            "algorithm_revision": "STOCK_A_DATA_JOB_ALGORITHM_R10",
-            "profile_semantics_contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R2",
-            "source_versions": source_identity,
-            "mode": request["mode"],
-            "initialization_mode": request["initialization_mode"],
-            "daily_mode": request["daily_mode"],
-            "source_modules": request["source_modules"],
-            "base_modules": request["base_modules"],
-            "research_modules": request["research_modules"],
-            "observation_target_sessions": plan.get("module_output_sessions", {}).get(
-                "OBSERVATION_SEGMENTS", ()
-            ),
-            "observation_rule_ids": request["observation_rule_ids"],
-            "replace_known_incomplete_observation_successors": request[
-                "replace_known_incomplete_observation_successors"
-            ],
-            "history_session_count": plan.get("history_session_count"),
-            "profile_history_session_count": plan.get("profile_history_session_count"),
-            "module_output_session_counts": output_counts,
-            "d1_history_session_count": plan.get("d1_calculation_session_count"),
-            "calendar_id": plan.get("calendar_id"),
-            "calendar_revision": plan.get("calendar_revision"),
-            "operation": request["operation"],
-        }
-        plan["source_version_fingerprint"] = hashlib.sha256(
-            json.dumps(request_identity, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
-        ).hexdigest()
         if "SECTOR_PULSE" in request["selected_modules"]:
             sector_source_will_generate = (
                 "TDX_SECTOR_MEMBERS" in request["source_modules"]
@@ -3271,16 +3213,6 @@ class DataJobCoordinator:
                     target_session=reset_target,
                     business_table=row["table"],
                 )
-            plan["source_version_fingerprint"] = hashlib.sha256(
-                json.dumps(
-                    {
-                        "request_fingerprint": plan["source_version_fingerprint"],
-                        "reset_preview_fingerprint": plan["reset_preview_fingerprint"],
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
             if not self.execution_authorized:
                 plan["executable"] = False
                 plan["status"] = "BLOCKED_NOT_AUTHORIZED"
@@ -3306,17 +3238,6 @@ class DataJobCoordinator:
                 cutoff=self.research_cutoff,
             )
             plan["cleanup_preview"]["module_label"] = _MODULES[cleanup_module][1]
-            cleanup_identity = {
-                "input_source_fingerprint": plan["source_version_fingerprint"],
-                "cleanup_preview_key": plan["cleanup_preview"].get("preview_key"),
-            }
-            plan["source_version_fingerprint"] = hashlib.sha256(
-                json.dumps(
-                    cleanup_identity,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
             if plan["cleanup_preview"].get("complete") is not True:
                 plan["executable"] = False
                 plan["status"] = "CLEANUP_SCOPE_UNAVAILABLE"
@@ -3416,7 +3337,6 @@ class DataJobCoordinator:
                     plan["module_output_session_counts"][module]
                     for module in plan["selected_modules"]
                 ],
-                "source_version_fingerprint": plan["source_version_fingerprint"],
                 "calendar_id": plan["calendar_id"],
                 "calendar_revision": plan["calendar_revision"],
                 "planned_units": plan["planned_unit_count"],
@@ -6798,10 +6718,15 @@ def _execute_shared_production_chain_impl(
         )
         if (
             window_status == "PER_SESSION_PAIRED_CAPTURES"
-            and type(target_cap) is int
             and not plan.get("missing_price_inputs")
+            and isinstance(ep_caps, Mapping)
+            and ep_caps
         ):
-            source_capture_id = int(target_cap)
+            if type(target_cap) is int:
+                source_capture_id = int(target_cap)
+            else:
+                latest_ep_key = sorted(ep_caps)[-1]
+                source_capture_id = int(ep_caps[latest_ep_key])
         elif (
             len(capture_ids) != 1
             or type(next(iter(capture_ids), None)) is not int
@@ -7136,45 +7061,8 @@ def _execute_shared_production_chain_impl(
                     and mkt_prev_t3.isoformat() in cap_by_day_mkt
                     else None
                 )
-                from stock_a.storage.postgres import source_raw as _sr_mkt
-
-                with _sr_mkt._transaction(
-                    config, write=False, statement_timeout_ms=5000
-                ) as (
-                    _mc,
-                    _mcur,
-                    _,
-                ):
-                    _mcur.execute(
-                        """
-                        SELECT DISTINCT profile_revision
-                        FROM stock.source_symbol_price_profiles
-                        WHERE source_capture_id=%s AND target_session=%s
-                          AND price_coordinate='FORWARD_ADJUSTED'
-                        """,
-                        (cap_mkt_t, day),
-                    )
-                    revs_t = [str(r[0]) for r in _mcur.fetchall() if r[0]]
-                    revs_t3: list[str] = []
-                    if mkt_t3_day is not None and cap_mkt_t3 is not None:
-                        _mcur.execute(
-                            """
-                            SELECT DISTINCT profile_revision
-                            FROM stock.source_symbol_price_profiles
-                            WHERE source_capture_id=%s AND target_session=%s
-                              AND price_coordinate='FORWARD_ADJUSTED'
-                            """,
-                            (cap_mkt_t3, mkt_t3_day),
-                        )
-                        revs_t3 = [str(r[0]) for r in _mcur.fetchall() if r[0]]
-                if len(revs_t) > 1 or len(revs_t3) > 1:
-                    raise DataJobError(
-                        "MARKET_BREADTH_PROFILE_AMBIGUOUS",
-                        f"市场宽度({day}/{mkt_t3_day})存在多个Profile修订(t={revs_t}, t3={revs_t3})，拒绝静默选首行或退回raw。",
-                        status=409,
-                    )
-                formal_prof_t = revs_t[0] if len(revs_t) == 1 else None
-                formal_prof_t3 = revs_t3[0] if len(revs_t3) == 1 else None
+                formal_prof_t = None
+                formal_prof_t3 = None
                 cs_t = (
                     plan.get("_cross_section_scope_by_day", {}).get(day.isoformat())
                     if isinstance(plan.get("_cross_section_scope_by_day"), Mapping)
@@ -7291,6 +7179,8 @@ def _execute_shared_production_chain_impl(
                                 "正式市场宽度日级事实行数与预期(1)不一致。",
                                 status=409,
                             )
+                        from stock_a.storage.postgres import source_raw as _sr_mkt
+
                         with _sr_mkt._transaction(
                             config, write=False, statement_timeout_ms=5000
                         ) as (_rc, _rcur, _):
@@ -7546,41 +7436,34 @@ def _execute_shared_production_chain_impl(
                         "成交参与依赖的精确市场宽度未保存。",
                         status=409,
                     )
-                profile_revision = profile_revision_by_session.get(day.isoformat())
-                if not profile_revision:
-                    from stock_a.application.pg_price_profiles import (
-                        source_symbol_price_profile_snapshots,
-                    )
+                from stock_a.application.pg_price_profiles import (
+                    source_symbol_price_profile_snapshots,
+                )
 
-                    expected_profile_window = int(
-                        profile_windows.get(
-                            day.isoformat(),
-                            plan.get("profile_history_session_count") or 1,
-                        )
+                expected_profile_window = int(
+                    profile_windows.get(
+                        day.isoformat(),
+                        plan.get("profile_history_session_count") or 1,
                     )
-                    profile_catalog = source_symbol_price_profile_snapshots(
-                        config, max_target_session=day
+                )
+                profile_catalog = source_symbol_price_profile_snapshots(
+                    config, max_target_session=day
+                )
+                profile_candidates = [
+                    item
+                    for item in profile_catalog.get("snapshots", ())
+                    if item.get("target_session") == day.isoformat()
+                    and item.get("source_capture_id") == source_capture_id
+                    and item.get("history_session_count") == expected_profile_window
+                    and item.get("complete") is True
+                ]
+                if len(profile_candidates) != 1:
+                    raise DataJobError(
+                        "MARKET_PARTICIPATION_PROFILE_SCOPE_AMBIGUOUS",
+                        "成交参与没有唯一绑定同日、同捕获、同窗口的完整Core/Profile。",
+                        status=409,
                     )
-                    profile_candidates = [
-                        item
-                        for item in profile_catalog.get("snapshots", ())
-                        if item.get("target_session") == day.isoformat()
-                        and item.get("source_capture_id") == source_capture_id
-                        and item.get("history_session_count") == expected_profile_window
-                        and item.get("complete") is True
-                    ]
-                    profile_revisions = {
-                        item.get("profile_revision")
-                        for item in profile_candidates
-                        if isinstance(item.get("profile_revision"), str)
-                    }
-                    if len(profile_revisions) != 1:
-                        raise DataJobError(
-                            "MARKET_PARTICIPATION_PROFILE_SCOPE_AMBIGUOUS",
-                            "成交参与没有唯一绑定同日、同捕获、同窗口的完整Core/Profile修订。",
-                            status=409,
-                        )
-                    profile_revision = next(iter(profile_revisions))
+                profile_revision = None
                 outcome = produce_market_participation(
                     config,
                     market,
@@ -7958,23 +7841,7 @@ def _execute_shared_production_chain_impl(
                             )
                         else:
                             idx_capture_id = None
-                env_prof_rev: str | None = plan.get("expected_profile_revision")
-                if not env_prof_rev:
-                    with _raw_tx(config, write=False, statement_timeout_ms=5000) as (
-                        _,
-                        _ecur,
-                        _,
-                    ):
-                        _ecur.execute(
-                            """SELECT DISTINCT profile_revision
-                               FROM stock.source_symbol_price_profiles
-                               WHERE source_capture_id=%s AND target_session=%s
-                                 AND price_coordinate='FORWARD_ADJUSTED'""",
-                            (source_capture_id, day),
-                        )
-                        _erevs = [str(r[0]) for r in _ecur.fetchall() if r[0]]
-                        if len(_erevs) == 1:
-                            env_prof_rev = _erevs[0]
+                env_prof_rev: str | None = None
                 ordered_env_sessions = tuple(
                     date.fromisoformat(s) if isinstance(s, str) else s
                     for s in plan.get("ordered_sessions", ())
@@ -8088,45 +7955,40 @@ def _execute_shared_production_chain_impl(
                 continue
             begin_callback(job_id=job_id, units=[unit])
             try:
-                profile_revision = profile_revision_by_session.get(day_text)
-                if not profile_revision:
-                    from stock_a.application.pg_price_profiles import (
-                        source_symbol_price_profile_snapshots,
-                    )
+                from stock_a.application.pg_price_profiles import (
+                    source_symbol_price_profile_snapshots,
+                )
 
-                    expected_profile_window = int(
-                        profile_windows.get(
-                            day_text,
-                            plan.get("profile_history_session_count") or 1,
-                        )
+                expected_profile_window = int(
+                    profile_windows.get(
+                        day_text,
+                        plan.get("profile_history_session_count") or 1,
                     )
-                    profile_catalog = source_symbol_price_profile_snapshots(
-                        config, max_target_session=day
+                )
+                profile_catalog = source_symbol_price_profile_snapshots(
+                    config, max_target_session=day
+                )
+                profile_snapshots = [
+                    item
+                    for item in profile_catalog.get("snapshots", ())
+                    if item.get("target_session") == day_text
+                    and item.get("source_capture_id") == source_capture_id
+                    and item.get("history_session_count") == expected_profile_window
+                    and item.get("complete") is True
+                ]
+                if len(profile_snapshots) != 1:
+                    raise DataJobError(
+                        "FOCUS_PROFILE_REVISION_AMBIGUOUS",
+                        f"{day_text}没有唯一完整的Core/Profile事实。",
+                        status=409,
                     )
-                    profile_revisions = {
-                        item.get("profile_revision")
-                        for item in profile_catalog.get("snapshots", ())
-                        if item.get("target_session") == day_text
-                        and item.get("source_capture_id") == source_capture_id
-                        and item.get("history_session_count") == expected_profile_window
-                        and item.get("complete") is True
-                        and isinstance(item.get("profile_revision"), str)
-                    }
-                    if len(profile_revisions) != 1:
-                        raise DataJobError(
-                            "FOCUS_PROFILE_REVISION_AMBIGUOUS",
-                            f"{day_text}没有唯一完整的Core/Profile修订。",
-                            status=409,
-                        )
-                    profile_revision = next(iter(profile_revisions))
-                    profile_revision_by_session[day_text] = profile_revision
                 report = run_source_formal_admission_range_from_saved(
                     config,
                     start_session=day,
                     target_session=day,
                     research_cutoff=cutoff,
                     source_capture_id=source_capture_id,
-                    profile_revisions_by_session={day_text: profile_revision},
+                    profile_revisions_by_session=None,
                 )
                 reports = report.get("reports", ())
                 if report.get("status") != "PERSISTED" or len(reports) != 1:
@@ -8152,7 +8014,6 @@ def _execute_shared_production_chain_impl(
                 if (
                     type(producer_version) is not str
                     or type(calendar_revision) is not str
-                    or not profile_revision
                     or expected_rows <= 0
                     or actual_rows != expected_rows
                 ):
@@ -8265,8 +8126,8 @@ def _execute_shared_production_chain_impl(
             profile_catalog = source_symbol_price_profile_snapshots(
                 config, max_target_session=day
             )
-            profile_candidates = {
-                item.get("profile_revision")
+            profile_candidates = [
+                item
                 for item in profile_catalog.get("snapshots", ())
                 if item.get("target_session") == day_text
                 and item.get("source_capture_id") == ep_cap
@@ -8275,15 +8136,14 @@ def _execute_shared_production_chain_impl(
                     or item.get("history_session_count") == expected_window
                 )
                 and item.get("complete") is True
-                and isinstance(item.get("profile_revision"), str)
-            }
+            ]
             if len(profile_candidates) != 1:
                 raise DataJobError(
                     "SECTOR_PROFILE_REVISION_AMBIGUOUS",
-                    f"{day_text}(capture={ep_cap})没有唯一完整的Core/Profile修订与窗口。",
+                    f"{day_text}(capture={ep_cap})没有唯一完整的Core/Profile与窗口。",
                     status=409,
                 )
-            expected_revision = next(iter(profile_candidates))
+            expected_revision = None
         seed_scope = read_source_pool_seed_forward_scope(
             config,
             target_session=day,
@@ -8291,29 +8151,18 @@ def _execute_shared_production_chain_impl(
             expected_source_count=source_version["research_expected_row_count"],
             profile_revision=expected_revision,
         )
-        revision = seed_scope.get("profile_revision")
         if (
-            not isinstance(revision, str)
-            or not revision
-            or seed_scope.get("source_count")
+            seed_scope.get("source_count")
             != source_version["research_expected_row_count"]
             or seed_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
             or seed_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
         ):
             raise DataJobError(
                 "SECTOR_SEED_SCOPE_NOT_CLOSED",
-                f"{day_text}(capture={ep_cap})的QFQ Seed/profile修订或完整分母未闭合。",
+                f"{day_text}(capture={ep_cap})的QFQ Seed或完整分母未闭合。",
                 status=409,
             )
-        if revision != expected_revision:
-            raise DataJobError(
-                "SECTOR_PROFILE_REVISION_MISMATCH",
-                f"{day_text}(capture={ep_cap})本次Core/Profile与已存Seed修订不一致。",
-                status=409,
-            )
-        if ep_cap == source_capture_id:
-            profile_revision_by_session[day_text] = revision
-        return revision
+        return None
 
     def inserted_count(value: Any) -> int:
         if type(value) is int:
@@ -8435,7 +8284,6 @@ def _execute_shared_production_chain_impl(
                     target_session=day,
                     research_cutoff=cutoff,
                     source_capture_id=source_capture_id,
-                    profile_revision=profile_revision,
                     industry_snapshot_id=snapshot_ids["INDUSTRY"],
                     concept_snapshot_id=snapshot_ids["CONCEPT"],
                 )
@@ -8443,7 +8291,6 @@ def _execute_shared_production_chain_impl(
                     report.get("source_capture_id") != source_capture_id
                     or report.get("price_coordinate") != "FORWARD_ADJUSTED"
                     or report.get("time_role") != "NON_PIT_RETROSPECTIVE"
-                    or report.get("profile_revision") != profile_revision
                     or report.get("status")
                     not in {
                         "WRITTEN_AND_TYPED_READBACK_VERIFIED",
@@ -8452,7 +8299,7 @@ def _execute_shared_production_chain_impl(
                 ):
                     raise DataJobError(
                         "SECTOR_PULSE_CAPTURE_IDENTITY_MISMATCH",
-                        "PULSE结果没有绑定预期paired capture、profile和QFQ坐标。",
+                        "PULSE结果没有绑定预期paired capture和QFQ坐标。",
                         status=409,
                     )
                 readback = read_source_sector_pulse_day(
@@ -8461,12 +8308,10 @@ def _execute_shared_production_chain_impl(
                     source_capture_id=source_capture_id,
                     source_pool_count=int(report["source_pool_count"]),
                     snapshot_ids=snapshot_ids,
-                    profile_revision=profile_revision,
                 )
                 expected_by_kind = report.get("board_count_by_kind", {})
                 if (
                     readback.get("status") != "AVAILABLE"
-                    or readback.get("profile_revision") != profile_revision
                     or set(readback.get("by_kind", {})) != {"INDUSTRY", "CONCEPT"}
                     or any(
                         readback["by_kind"][kind].get("status") != "AVAILABLE"
@@ -9441,7 +9286,6 @@ def _execute_shared_production_chain_impl(
                     report.get("status") not in {"PERSISTED", "IDEMPOTENT"}
                     or report.get("target_session") != day_text
                     or report.get("source_capture_id") != source_capture_id
-                    or report.get("profile_revision") != profile_revision
                     or seed_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
                     or seed_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
                     or type(expected_rows) is not int
@@ -9495,8 +9339,8 @@ def _execute_shared_production_chain_impl(
                     sector_snapshot_ids=snapshot_ids,
                 )
                 resolved_unit_keys.add(unit_key(unit))
-            except SourceT0EarlyObservationError as error:
-                if error.code == "T0_EARLY_NO_STORED_ENROLLMENTS":
+            except Exception as error:  # noqa: BLE001 - Focus中T0研究维度独立保留状态。
+                if getattr(error, "code", None) == "T0_EARLY_NO_STORED_ENROLLMENTS":
                     data_job_pg.mark_progress_unavailable(
                         config,
                         job_id=job_id,
@@ -9504,7 +9348,9 @@ def _execute_shared_production_chain_impl(
                         target_session=day,
                         business_table=unit["business_table"],
                         status="NOT_COMPUTED",
-                        error_code=error.code,
+                        error_code=str(
+                            getattr(error, "code", "T0_EARLY_NO_STORED_ENROLLMENTS")
+                        ),
                         error_message=(
                             "目标日没有已存T0登记；保留NOT_COMPUTED，不生成空范围观察。"
                         ),
@@ -9512,19 +9358,6 @@ def _execute_shared_production_chain_impl(
                     )
                     resolved_unit_keys.add(unit_key(unit))
                     continue
-                mark_units_incomplete(
-                    [unit],
-                    stage_code="FOCUS_RESEARCH_CONTEXT",
-                    error=error,
-                    message_prefix="T0早期观察PG生产未闭合",
-                )
-                incomplete_stage_errors.append(
-                    (
-                        error.code,
-                        f"T0早期观察({day_text})未闭合：{str(error)[:300]}",
-                    )
-                )
-            except Exception as error:  # noqa: BLE001 - Focus中T0研究维度独立保留状态。
                 mark_units_incomplete(
                     [unit],
                     stage_code="FOCUS_RESEARCH_CONTEXT",

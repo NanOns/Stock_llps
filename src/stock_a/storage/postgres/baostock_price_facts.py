@@ -2907,20 +2907,19 @@ def read_baostock_price_history_batch(
     *,
     source_symbols: Sequence[str],
     sessions: Sequence[date],
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     price_coordinate: str,
     cutoff: date,
     offset: int = 0,
     limit: int = 1000,
 ) -> dict[str, Any]:
-    """有界分页读取指定BaoStock捕获的多证券双坐标历史。"""
-    if (
-        type(cutoff) is not date
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
+    """有界分页读取BaoStock多证券双坐标历史（支持跨捕获读取）。"""
+    if type(cutoff) is not date or (
+        source_capture_id is not None
+        and (type(source_capture_id) is not int or source_capture_id <= 0)
     ):
         raise BaoStockPriceFactsError(
-            "PRICE_READ_SCOPE_INVALID", "批量历史缺少捕获或研究截止"
+            "PRICE_READ_SCOPE_INVALID", "批量历史缺少有效捕获或研究截止"
         )
     if price_coordinate not in (RAW_COORDINATE, QFQ_COORDINATE):
         raise BaoStockPriceFactsError(
@@ -2955,51 +2954,56 @@ def read_baostock_price_history_batch(
         _scope,
     ):
         _require_price_field_quality_migration(cursor)
-        cursor.execute(
-            """SELECT requested_symbol_count
-               FROM stock.source_captures
-               WHERE capture_id=%s AND provider='BAOSTOCK'
-                 AND range_end_session<=%s""",
-            (source_capture_id, cutoff),
-        )
-        capture = cursor.fetchone()
-        if capture is None:
-            coverage = [
-                {
-                    "session_date": session.isoformat(),
+        if source_capture_id is not None:
+            cursor.execute(
+                """SELECT requested_symbol_count
+                   FROM stock.source_captures
+                   WHERE capture_id=%s AND provider='BAOSTOCK'
+                     AND range_end_session<=%s""",
+                (source_capture_id, cutoff),
+            )
+            capture = cursor.fetchone()
+            if capture is None:
+                coverage = [
+                    {
+                        "session_date": session.isoformat(),
+                        "source_capture_id": source_capture_id,
+                        "price_coordinate": price_coordinate,
+                        "expected_symbol_count": None,
+                        "completed_request_count": 0,
+                        "unregistered_symbol_count": len(symbols),
+                        "row_count": 0,
+                        "symbol_count": 0,
+                        "quality_row_count": 0,
+                        "observed_value_row_count": 0,
+                        "coverage_status": "NOT_COMPUTED",
+                    }
+                    for session in target_sessions
+                ]
+                return {
+                    "status": "NOT_COMPUTED",
                     "source_capture_id": source_capture_id,
                     "price_coordinate": price_coordinate,
-                    "expected_symbol_count": None,
-                    "completed_request_count": 0,
-                    "unregistered_symbol_count": len(symbols),
-                    "row_count": 0,
-                    "symbol_count": 0,
-                    "quality_row_count": 0,
-                    "observed_value_row_count": 0,
-                    "coverage_status": "NOT_COMPUTED",
+                    "target_sessions": [item.isoformat() for item in target_sessions],
+                    "cutoff": cutoff.isoformat(),
+                    "rows": [],
+                    "coverage": coverage,
+                    "page": {
+                        "offset": offset,
+                        "limit": limit,
+                        "count": 0,
+                        "total": 0,
+                        "next_offset": None,
+                    },
+                    "database_write_attempted": False,
+                    "source_io_attempted": False,
                 }
-                for session in target_sessions
-            ]
-            return {
-                "status": "NOT_COMPUTED",
-                "source_capture_id": source_capture_id,
-                "price_coordinate": price_coordinate,
-                "target_sessions": [item.isoformat() for item in target_sessions],
-                "cutoff": cutoff.isoformat(),
-                "rows": [],
-                "coverage": coverage,
-                "page": {
-                    "offset": offset,
-                    "limit": limit,
-                    "count": 0,
-                    "total": 0,
-                    "next_offset": None,
-                },
-                "database_write_attempted": False,
-                "source_io_attempted": False,
-            }
+        capture_filter = (
+            "d.source_capture_id=%s AND " if source_capture_id is not None else ""
+        )
+        capture_args = (source_capture_id,) if source_capture_id is not None else ()
         cursor.execute(
-            """SELECT count(*)::bigint
+            f"""SELECT count(*)::bigint
                FROM stock.source_raw_daily d
                JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
                JOIN stock.source_baostock_unit_contracts u
@@ -3010,14 +3014,14 @@ def read_baostock_price_history_batch(
                JOIN stock.source_capture_requests qr
                  ON qr.capture_id=d.source_capture_id AND qr.source_code=d.source_code
                 AND qr.adjustment_flag='2'
-               WHERE d.source_capture_id=%s AND d.source_symbol=ANY(%s::text[])
+               WHERE {capture_filter}d.source_symbol=ANY(%s::text[])
                  AND d.session_date=ANY(%s::date[]) AND d.session_date<=%s
                  AND c.provider='BAOSTOCK' AND c.range_end_session<=%s
                  AND c.price_coordinates @> ARRAY[
                      'RAW_UNADJUSTED','FORWARD_ADJUSTED'
                  ]::text[]""",
             (
-                source_capture_id,
+                *capture_args,
                 list(symbols),
                 list(target_sessions),
                 cutoff,
@@ -3027,14 +3031,14 @@ def read_baostock_price_history_batch(
         total = int(cursor.fetchone()[0])
         cursor.execute(
             _PRICE_READ_SELECT
-            + " AND d.source_capture_id=%s"
+            + (" AND d.source_capture_id=%s" if source_capture_id is not None else "")
             + " AND d.source_symbol=ANY(%s::text[])"
             + " AND d.session_date=ANY(%s::date[])"
             + " ORDER BY d.session_date,d.source_symbol OFFSET %s LIMIT %s",
             (
                 cutoff,
                 cutoff,
-                source_capture_id,
+                *capture_args,
                 list(symbols),
                 list(target_sessions),
                 offset,
@@ -3046,79 +3050,163 @@ def read_baostock_price_history_batch(
             _price_row_payload(dict(zip(names, values, strict=True)), price_coordinate)
             for values in cursor.fetchall()
         ]
-        cursor.execute(
-            """WITH request_codes AS (
-                   SELECT requested.source_code,
-                          count(request.capture_id)::bigint AS request_count,
-                          count(DISTINCT request.adjustment_flag)::bigint
-                              AS coordinate_count,
-                          count(DISTINCT request.eligible_start_session)::bigint
-                              AS start_count,
-                          count(DISTINCT request.eligible_end_session)::bigint
-                              AS end_count,
-                          bool_and(
-                              request.request_status IN ('COMPLETED','NO_DATA')
-                              AND (request.request_status='NO_DATA'
-                                   OR request.completed_through_session>=request.range_end_session)
-                          ) AS complete,
-                          min(request.eligible_start_session) AS eligible_start,
-                          max(request.eligible_end_session) AS eligible_end
-                   FROM unnest(%s::text[]) AS requested(source_code)
-                   LEFT JOIN stock.source_capture_requests request
-                     ON request.capture_id=%s
-                    AND request.source_code=requested.source_code
-                    AND request.range_end_session<=%s
-                   GROUP BY requested.source_code
-               ), eligible AS (
-                   SELECT d.session_date,
-                          count(*) FILTER (
-                              WHERE r.request_count=2 AND r.coordinate_count=2
-                                AND r.start_count=1 AND r.end_count=1
-                                AND d.session_date BETWEEN r.eligible_start AND r.eligible_end
-                          )::bigint AS expected_symbols,
-                          count(*) FILTER (
-                              WHERE r.request_count=2 AND r.coordinate_count=2
-                                AND r.start_count=1 AND r.end_count=1
-                                AND d.session_date BETWEEN r.eligible_start AND r.eligible_end
-                                AND r.complete
-                          )::bigint AS completed_requests,
-                          count(*) FILTER (
-                              WHERE r.request_count<>2 OR r.coordinate_count<>2
-                                OR r.start_count<>1 OR r.end_count<>1
-                          )::bigint AS unregistered_symbols
-                   FROM (SELECT unnest(%s::date[]) AS session_date) d
-                   CROSS JOIN request_codes r
-                   GROUP BY d.session_date
-               ), stored AS (
-                   SELECT session_date,count(*)::bigint AS row_count,
-                          count(DISTINCT source_symbol)::bigint AS symbol_count,
-                          count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint AS raw_quality_rows,
-                          count(*) FILTER (WHERE price_quality='OBSERVED')::bigint AS raw_observed_rows,
-                          count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint AS qfq_quality_rows,
-                          count(*) FILTER (WHERE qfq_price_quality='OBSERVED')::bigint AS qfq_observed_rows
-                   FROM stock.source_raw_daily
-                   WHERE source_capture_id=%s AND source_symbol=ANY(%s::text[])
-                     AND session_date=ANY(%s::date[]) AND session_date<=%s
-                   GROUP BY session_date
-               )
-                SELECT e.session_date,e.expected_symbols,e.completed_requests,
-                       e.unregistered_symbols,
-                      coalesce(s.row_count,0),coalesce(s.symbol_count,0),
-                      coalesce(s.raw_quality_rows,0),coalesce(s.raw_observed_rows,0),
-                      coalesce(s.qfq_quality_rows,0),coalesce(s.qfq_observed_rows,0)
-               FROM eligible e LEFT JOIN stored s USING (session_date)
-               ORDER BY e.session_date""",
-            (
-                list(source_codes),
-                source_capture_id,
-                cutoff,
-                list(target_sessions),
-                source_capture_id,
-                list(symbols),
-                list(target_sessions),
-                cutoff,
-            ),
-        )
+        if source_capture_id is not None:
+            cursor.execute(
+                """WITH request_codes AS (
+                       SELECT requested.source_code,
+                              count(request.capture_id)::bigint AS request_count,
+                              count(DISTINCT request.adjustment_flag)::bigint
+                                  AS coordinate_count,
+                              count(DISTINCT request.eligible_start_session)::bigint
+                                  AS start_count,
+                              count(DISTINCT request.eligible_end_session)::bigint
+                                  AS end_count,
+                              bool_and(
+                                  request.request_status IN ('COMPLETED','NO_DATA')
+                                  AND (request.request_status='NO_DATA'
+                                       OR request.completed_through_session>=request.range_end_session)
+                              ) AS complete,
+                              min(request.eligible_start_session) AS eligible_start,
+                              max(request.eligible_end_session) AS eligible_end
+                       FROM unnest(%s::text[]) AS requested(source_code)
+                       LEFT JOIN stock.source_capture_requests request
+                         ON request.capture_id=%s
+                        AND request.source_code=requested.source_code
+                        AND request.range_end_session<=%s
+                       GROUP BY requested.source_code
+                   ), eligible AS (
+                       SELECT d.session_date,
+                              count(*) FILTER (
+                                  WHERE r.request_count=2 AND r.coordinate_count=2
+                                    AND r.start_count=1 AND r.end_count=1
+                                    AND d.session_date BETWEEN r.eligible_start AND r.eligible_end
+                              )::bigint AS expected_symbols,
+                              count(*) FILTER (
+                                  WHERE r.request_count=2 AND r.coordinate_count=2
+                                    AND r.start_count=1 AND r.end_count=1
+                                    AND d.session_date BETWEEN r.eligible_start AND r.eligible_end
+                                    AND r.complete
+                              )::bigint AS completed_requests,
+                              count(*) FILTER (
+                                  WHERE r.request_count<>2 OR r.coordinate_count<>2
+                                    OR r.start_count<>1 OR r.end_count<>1
+                              )::bigint AS unregistered_symbols
+                       FROM (SELECT unnest(%s::date[]) AS session_date) d
+                       CROSS JOIN request_codes r
+                       GROUP BY d.session_date
+                   ), stored AS (
+                       SELECT session_date,count(*)::bigint AS row_count,
+                              count(DISTINCT source_symbol)::bigint AS symbol_count,
+                              count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint AS raw_quality_rows,
+                              count(*) FILTER (WHERE price_quality='OBSERVED')::bigint AS raw_observed_rows,
+                              count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint AS qfq_quality_rows,
+                              count(*) FILTER (WHERE qfq_price_quality='OBSERVED')::bigint AS qfq_observed_rows
+                       FROM stock.source_raw_daily
+                       WHERE source_capture_id=%s AND source_symbol=ANY(%s::text[])
+                         AND session_date=ANY(%s::date[]) AND session_date<=%s
+                       GROUP BY session_date
+                   )
+                    SELECT e.session_date,e.expected_symbols,e.completed_requests,
+                           e.unregistered_symbols,
+                          coalesce(s.row_count,0),coalesce(s.symbol_count,0),
+                          coalesce(s.raw_quality_rows,0),coalesce(s.raw_observed_rows,0),
+                          coalesce(s.qfq_quality_rows,0),coalesce(s.qfq_observed_rows,0)
+                   FROM eligible e LEFT JOIN stored s USING (session_date)
+                   ORDER BY e.session_date""",
+                (
+                    list(source_codes),
+                    source_capture_id,
+                    cutoff,
+                    list(target_sessions),
+                    source_capture_id,
+                    list(symbols),
+                    list(target_sessions),
+                    cutoff,
+                ),
+            )
+        else:
+            cursor.execute(
+                """WITH session_codes AS (
+                       SELECT d.session_date,
+                              requested.source_code,
+                              rd.source_capture_id
+                       FROM (SELECT unnest(%s::date[]) AS session_date) d
+                       CROSS JOIN unnest(%s::text[]) AS requested(source_code)
+                       LEFT JOIN stock.source_raw_daily rd
+                         ON rd.session_date=d.session_date
+                        AND rd.source_code=requested.source_code
+                        AND rd.session_date<=%s
+                   ), request_codes AS (
+                       SELECT sc.session_date,
+                              sc.source_code,
+                              count(request.capture_id)::bigint AS request_count,
+                              count(DISTINCT request.adjustment_flag)::bigint
+                                  AS coordinate_count,
+                              count(DISTINCT request.eligible_start_session)::bigint
+                                  AS start_count,
+                              count(DISTINCT request.eligible_end_session)::bigint
+                                  AS end_count,
+                              bool_and(
+                                  request.request_status IN ('COMPLETED','NO_DATA')
+                                  AND (request.request_status='NO_DATA'
+                                       OR request.completed_through_session>=request.range_end_session)
+                              ) AS complete,
+                              min(request.eligible_start_session) AS eligible_start,
+                              max(request.eligible_end_session) AS eligible_end
+                       FROM session_codes sc
+                       LEFT JOIN stock.source_capture_requests request
+                         ON request.capture_id=sc.source_capture_id
+                        AND request.source_code=sc.source_code
+                        AND request.range_end_session<=%s
+                       GROUP BY sc.session_date, sc.source_code
+                   ), eligible AS (
+                       SELECT r.session_date,
+                              count(*) FILTER (
+                                  WHERE r.request_count=2 AND r.coordinate_count=2
+                                    AND r.start_count=1 AND r.end_count=1
+                                    AND r.session_date BETWEEN r.eligible_start AND r.eligible_end
+                              )::bigint AS expected_symbols,
+                              count(*) FILTER (
+                                  WHERE r.request_count=2 AND r.coordinate_count=2
+                                    AND r.start_count=1 AND r.end_count=1
+                                    AND r.session_date BETWEEN r.eligible_start AND r.eligible_end
+                                    AND r.complete
+                              )::bigint AS completed_requests,
+                              count(*) FILTER (
+                                  WHERE r.request_count<>2 OR r.coordinate_count<>2
+                                    OR r.start_count<>1 OR r.end_count<>1
+                              )::bigint AS unregistered_symbols
+                       FROM request_codes r
+                       GROUP BY r.session_date
+                   ), stored AS (
+                       SELECT session_date,count(*)::bigint AS row_count,
+                              count(DISTINCT source_symbol)::bigint AS symbol_count,
+                              count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint AS raw_quality_rows,
+                              count(*) FILTER (WHERE price_quality='OBSERVED')::bigint AS raw_observed_rows,
+                              count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint AS qfq_quality_rows,
+                              count(*) FILTER (WHERE qfq_price_quality='OBSERVED')::bigint AS qfq_observed_rows
+                       FROM stock.source_raw_daily
+                       WHERE source_symbol=ANY(%s::text[])
+                         AND session_date=ANY(%s::date[]) AND session_date<=%s
+                       GROUP BY session_date
+                   )
+                    SELECT e.session_date,e.expected_symbols,e.completed_requests,
+                           e.unregistered_symbols,
+                          coalesce(s.row_count,0),coalesce(s.symbol_count,0),
+                          coalesce(s.raw_quality_rows,0),coalesce(s.raw_observed_rows,0),
+                          coalesce(s.qfq_quality_rows,0),coalesce(s.qfq_observed_rows,0)
+                   FROM eligible e LEFT JOIN stored s USING (session_date)
+                   ORDER BY e.session_date""",
+                (
+                    list(target_sessions),
+                    list(source_codes),
+                    cutoff,
+                    cutoff,
+                    list(symbols),
+                    list(target_sessions),
+                    cutoff,
+                ),
+            )
         coverage = []
         for row in cursor.fetchall():
             (
@@ -3210,12 +3298,7 @@ def read_baostock_price_page(
         or not 1 <= limit <= maximum_page_size
         or type(allow_full_pool_page) is not bool
         or allow_full_pool_page
-        and (
-            type(source_capture_id) is not int
-            or source_capture_id <= 0
-            or market != "ALL"
-            or board != "ALL"
-        )
+        and (market != "ALL" or board != "ALL")
         or market not in {"ALL", "SH", "SZ", "BJ"}
         or board not in {"ALL", "MAIN_BOARD", "GEM", "STAR_BOARD", "BEIJING_BOARD"}
         or price_coordinate not in (RAW_COORDINATE, QFQ_COORDINATE)
