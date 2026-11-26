@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.application.source_sector_change_research import (
@@ -288,6 +288,84 @@ def resolve_source_sector_snapshot_pair(config: Mapping[str, Any]) -> dict[str, 
         },
         "snapshots": [public_snapshot(industry), public_snapshot(concept)],
     }
+
+
+def resolve_source_sector_snapshot_pairs_by_session(
+    config: Mapping[str, Any],
+    sessions: Sequence[date],
+) -> dict[str, dict[str, int]]:
+    """按目标官方会话日期解析同次观察的行业与GN快照对；优先精确匹配会话日，否则回退最新合法配对。"""
+    from datetime import timedelta
+
+    catalog = query_tdx_sector_source_snapshot_catalog(dict(config))
+    if catalog.get("status") != "AVAILABLE":
+        return {}
+    by_kind: dict[str, list[dict[str, Any]]] = {"INDUSTRY": [], "CONCEPT": []}
+    for row in catalog.get("snapshots", ()):
+        if not isinstance(row, Mapping):
+            continue
+        source_kind = row.get("source_kind")
+        board_kind = (
+            "INDUSTRY"
+            if source_kind == "TDX_TDXHY_CFG"
+            else "CONCEPT"
+            if source_kind == "TDX_INFOHARBOR_BLOCK_DAT"
+            else None
+        )
+        if board_kind is None:
+            continue
+        parsed = _snapshot_catalog_record(row, board_kind)
+        if parsed is not None:
+            by_kind[board_kind].append(parsed)
+    concept_by_obs = {row["observed_at_utc"]: row for row in by_kind["CONCEPT"]}
+    candidates = [
+        (ind, concept_by_obs[ind["observed_at_utc"]])
+        for ind in by_kind["INDUSTRY"]
+        if ind["observed_at_utc"] in concept_by_obs
+    ]
+    if not candidates:
+        return {}
+    shanghai_tz = timezone(timedelta(hours=8))
+    by_day: dict[date, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for ind, con in candidates:
+        obs_dt = ind["observed_at_utc"]
+        obs_day = (
+            obs_dt.astimezone(shanghai_tz).date()
+            if getattr(obs_dt, "tzinfo", None) is not None
+            else obs_dt.date()
+        )
+        by_day.setdefault(obs_day, []).append((ind, con))
+    latest_ind, latest_con = max(
+        candidates,
+        key=lambda p: (
+            p[0]["observed_at_utc"],
+            p[0]["snapshot_id"],
+            p[1]["snapshot_id"],
+        ),
+    )
+    default_pair = {
+        "INDUSTRY": int(latest_ind["snapshot_id"]),
+        "CONCEPT": int(latest_con["snapshot_id"]),
+    }
+    out: dict[str, dict[str, int]] = {}
+    for day in sessions:
+        day_cands = by_day.get(day)
+        if day_cands:
+            ind_d, con_d = max(
+                day_cands,
+                key=lambda p: (
+                    p[0]["observed_at_utc"],
+                    p[0]["snapshot_id"],
+                    p[1]["snapshot_id"],
+                ),
+            )
+            out[day.isoformat()] = {
+                "INDUSTRY": int(ind_d["snapshot_id"]),
+                "CONCEPT": int(con_d["snapshot_id"]),
+            }
+        else:
+            out[day.isoformat()] = dict(default_pair)
+    return out
 
 
 def _valid_profile_revision(value: Any) -> bool:

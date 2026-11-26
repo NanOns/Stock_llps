@@ -438,6 +438,7 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "replace_known_incomplete_observation_successors",
         "reset_confirmed",
         "reset_preview_fingerprint",
+        "sector_snapshot_ids_by_session",
     }
     if set(body) - allowed:
         raise DataJobError("DATA_JOB_INPUT_INVALID", "任务参数包含未登记字段。")
@@ -657,6 +658,11 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "reset_preview_fingerprint": body.get("reset_preview_fingerprint"),
         "has_module_selection": has_module_selection,
         "legacy_request": legacy,
+        "sector_snapshot_ids_by_session": (
+            body.get("sector_snapshot_ids_by_session")
+            if isinstance(body.get("sector_snapshot_ids_by_session"), Mapping)
+            else None
+        ),
     }
 
 
@@ -1469,9 +1475,38 @@ def build_data_job_plan(
         for item in price_capture_inputs
         if item["session_date"] in raw_window_sessions
     }
+    endpoint_capture_ids_by_session: dict[str, int] = {}
+    for day in raw_window:
+        day_text = day.isoformat()
+        by_coord = capture_versions.get(day_text, {})
+        if all(coordinate in by_coord for coordinate in price_coordinates):
+            cap_ids = {
+                int(by_coord[coordinate]["source_capture_id"])
+                for coordinate in price_coordinates
+            }
+            if len(cap_ids) == 1:
+                endpoint_capture_ids_by_session[day_text] = next(iter(cap_ids))
+    allow_per_session_captures = (
+        "BAOSTOCK_PRICES" not in selected_source_modules
+        and bool(selected_modules)
+        and selected_modules
+        <= {
+            "R03_SECTOR_NATIVE",
+            "R03_SECTOR_ROTATION",
+            "R03_SECTOR_OVERLAP",
+            "R03_SECTOR_LOO",
+            "MARKET_BREADTH",
+        }
+    )
     price_capture_window_status = (
         "NO_CAPTURE_YET"
         if not selected_window_capture_ids
+        else "PER_SESSION_PAIRED_CAPTURES"
+        if (
+            len(selected_window_capture_ids) > 1
+            and allow_per_session_captures
+            and not missing_price_inputs
+        )
         else "MIXED_SOURCE_CAPTURE_IDS"
         if len(selected_window_capture_ids) > 1
         else "PAIRED_CAPTURE_ID_AVAILABLE"
@@ -2348,6 +2383,21 @@ def build_data_job_plan(
         },
         "stage_units": units,
         "planned_unit_count": len(units),
+        "endpoint_capture_ids_by_session": endpoint_capture_ids_by_session,
+        "sector_snapshot_ids_by_session": (
+            {
+                str(k): {
+                    "INDUSTRY": int(v["INDUSTRY"]),
+                    "CONCEPT": int(v["CONCEPT"]),
+                }
+                for k, v in request["sector_snapshot_ids_by_session"].items()
+                if isinstance(v, Mapping)
+                and type(v.get("INDUSTRY")) is int
+                and type(v.get("CONCEPT")) is int
+            }
+            if request.get("sector_snapshot_ids_by_session")
+            else dict(sector_pair.get("snapshot_ids_by_session") or {})
+        ),
         "database_write_attempted": False,
         "source_io_attempted": False,
     }
@@ -2597,9 +2647,23 @@ class DataJobCoordinator:
         } & set(request["selected_modules"]):
             from stock_a.application.source_sector_pulse import (
                 resolve_source_sector_snapshot_pair,
+                resolve_source_sector_snapshot_pairs_by_session,
             )
 
             sector_pair = resolve_source_sector_snapshot_pair(self.config)
+            if sector_pair.get("status") == "AVAILABLE":
+                _, _, _all_sess = _load_official_sessions(self.research_cutoff)
+                _recent_sess = recent_official_sessions(
+                    _all_sess,
+                    through=self.research_cutoff,
+                    count=min(len(_all_sess), 30),
+                )
+                sector_pair = {
+                    **sector_pair,
+                    "snapshot_ids_by_session": resolve_source_sector_snapshot_pairs_by_session(
+                        self.config, _recent_sess
+                    ),
+                }
         forward_path_seed_availability: dict[str, bool] = {}
         plan = build_data_job_plan(
             body,
@@ -5487,7 +5551,10 @@ def _execute_baostock_universe_stage(
             transport=transport,
             enforce_quota=True,
         )
-        if not basic_res.get("complete") or basic_res.get("status") != "RESPONSE_RECEIVED":
+        if (
+            not basic_res.get("complete")
+            or basic_res.get("status") != "RESPONSE_RECEIVED"
+        ):
             raise DataJobError(
                 "BAOSTOCK_STOCK_BASIC_FETCH_FAILED",
                 f"BaoStock证券基本资料采集未完成: {basic_res.get('status')} ({basic_res.get('reason')})",
@@ -5502,7 +5569,9 @@ def _execute_baostock_universe_stage(
         actual_basic_rows = read_baostock_stock_basic_scope(
             config, source_capture_id=capture_id, cutoff=cutoff
         )
-        actual_basic_symbols = tuple(item["source_symbol"] for item in actual_basic_rows)
+        actual_basic_symbols = tuple(
+            item["source_symbol"] for item in actual_basic_rows
+        )
         if actual_basic_symbols != expected_basic_symbols:
             raise DataJobError(
                 "BAOSTOCK_STOCK_BASIC_READBACK_MISMATCH",
@@ -6697,70 +6766,132 @@ def _execute_shared_production_chain_impl(
         profile_revision_filter: str | None = None,
     ) -> None:
         from stock_a.storage.postgres import source_raw as _sr_inv
+        from stock_a.storage.postgres.data_jobs import (
+            _escape_like_literal,
+            _parse_r03_scope_and_member,
+        )
         from stock_a.storage.postgres.r03_formal_sector import invalidate_r03_from_date
 
-        scope_pattern = (
-            f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision_filter}:NON_PIT"
-            if profile_revision_filter
-            else f"BAOSTOCK_CAP_{source_capture_id}:%"
-        )
+        if profile_revision_filter:
+            scope_cond = "scope_key = %s"
+            scope_arg = f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision_filter}:NON_PIT"
+        else:
+            scope_cond = "scope_key LIKE %s ESCAPE '\\'"
+            scope_arg = _escape_like_literal(f"BAOSTOCK_CAP_{source_capture_id}:") + "%"
+
+        affected_partitions: set[tuple[date, str, str]] = set()
+        affected_scopes_by_min_day: dict[str, date] = {}
         with _sr_inv._transaction(config, write=False, statement_timeout_ms=5000) as (
             _c,
             _cur,
             _,
         ):
+            for tbl in (
+                "stock.r03_sector_native_day_facts",
+                "stock.r03_sector_rotation_board_day_facts",
+            ):
+                _cur.execute(
+                    f"""
+                    SELECT DISTINCT trade_date, scope_key, member_version
+                    FROM {tbl}
+                    WHERE trade_date >= %s AND {scope_cond}
+                    """,
+                    (from_session, scope_arg),
+                )
+                for td, sk, mv in _cur.fetchall():
+                    if sk:
+                        affected_partitions.add((td, str(sk), str(mv)))
+                        if (
+                            str(sk) not in affected_scopes_by_min_day
+                            or td < affected_scopes_by_min_day[str(sk)]
+                        ):
+                            affected_scopes_by_min_day[str(sk)] = td
             _cur.execute(
-                """
-                SELECT DISTINCT scope_key
-                FROM stock.r03_sector_native_day_facts
-                WHERE trade_date >= %s AND scope_key LIKE %s
+                f"""
+                SELECT DISTINCT episode_id, trade_date
+                FROM stock.r03_sector_rotation_board_day_facts
+                WHERE episode_id IS NOT NULL AND trade_date >= %s AND {scope_cond}
                 """,
-                (from_session, scope_pattern),
+                (from_session, scope_arg),
             )
-            scopes = [str(r[0]) for r in _cur.fetchall() if r[0]]
-        for sk in scopes:
+            ep_cutoffs: dict[int, date] = {}
+            for ep_id, td in _cur.fetchall():
+                ep_i = int(ep_id)
+                if ep_i not in ep_cutoffs or td < ep_cutoffs[ep_i]:
+                    ep_cutoffs[ep_i] = td
+            for ep_i, min_ep_d in ep_cutoffs.items():
+                _cur.execute(
+                    """
+                    SELECT DISTINCT trade_date, scope_key, member_version
+                    FROM stock.r03_sector_rotation_board_day_facts
+                    WHERE episode_id = %s AND trade_date >= %s
+                    """,
+                    (ep_i, min_ep_d),
+                )
+                for td, sk, mv in _cur.fetchall():
+                    if sk:
+                        affected_partitions.add((td, str(sk), str(mv)))
+                        if (
+                            str(sk) not in affected_scopes_by_min_day
+                            or td < affected_scopes_by_min_day[str(sk)]
+                        ):
+                            affected_scopes_by_min_day[str(sk)] = td
+        for sk, min_d in affected_scopes_by_min_day.items():
             invalidate_r03_from_date(
                 config,
-                from_trade_date=from_session,
+                from_trade_date=min_d,
                 scope_key=sk,
                 include_formal_market=False,
             )
-        if scopes:
-            with _sr_inv._transaction(config, write=True, statement_timeout_ms=5000) as (
+        if affected_partitions:
+            r03_prog_tables = [
+                "stock.r03_sector_native_day_facts",
+                "stock.r03_sector_rotation_board_day_facts",
+                "stock.r03_sector_rotation_episodes",
+                "stock.r03_sector_rotation_day_states",
+                "stock.r03_sector_overlap_clusters",
+                "stock.r03_sector_loo_support_facts",
+            ]
+            with _sr_inv._transaction(
+                config, write=True, statement_timeout_ms=5000
+            ) as (
                 _c,
                 _cur,
                 _,
             ):
-                _cur.execute(
-                    """
-                    UPDATE stock.data_job_progress
-                    SET status='NOT_COMPUTED', completed_units=0, expected_rows=NULL,
-                        verified_rows=NULL, error_code='UPSTREAM_RECOMPUTED',
-                        error_message='上游输入已修订重算，R03板块后继需重算。',
-                        updated_at=clock_timestamp(), completed_at=NULL, verified_at=NULL
-                    WHERE target_session >= %s
-                      AND source_capture_id=%s
-                      AND business_table=ANY(%s)
-                      AND status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
-                      AND (%s::uuid IS NULL OR job_id<>%s)
-                    RETURNING job_id
-                    """,
-                    (
-                        from_session,
-                        source_capture_id,
-                        [
-                            "stock.r03_sector_native_day_facts",
-                            "stock.r03_sector_rotation_board_day_facts",
-                            "stock.r03_sector_rotation_episodes",
-                            "stock.r03_sector_rotation_day_states",
-                            "stock.r03_sector_overlap_clusters",
-                            "stock.r03_sector_loo_support_facts",
-                        ],
-                        job_id,
-                        job_id,
-                    ),
-                )
-                inv_job_ids = {r[0] for r in _cur.fetchall()}
+                inv_job_ids: set[Any] = set()
+                for td, sk, mv in sorted(affected_partitions):
+                    c_id, p_rev, i_id, co_id = _parse_r03_scope_and_member(sk, mv)
+                    p_conds = ["target_session=%s", "business_table=ANY(%s)"]
+                    p_args: list[Any] = [td, r03_prog_tables]
+                    if c_id is not None:
+                        p_conds.append("source_capture_id=%s")
+                        p_args.append(c_id)
+                    if p_rev is not None:
+                        p_conds.append("profile_revision=%s")
+                        p_args.append(p_rev)
+                    if i_id is not None:
+                        p_conds.append("industry_snapshot_id=%s")
+                        p_args.append(i_id)
+                    if co_id is not None:
+                        p_conds.append("concept_snapshot_id=%s")
+                        p_args.append(co_id)
+                    p_args.extend([job_id, job_id])
+                    _cur.execute(
+                        f"""
+                        UPDATE stock.data_job_progress
+                        SET status='NOT_COMPUTED', completed_units=0, expected_rows=NULL,
+                            verified_rows=NULL, error_code='UPSTREAM_RECOMPUTED',
+                            error_message='上游输入已修订重算，R03板块后继需重算。',
+                            updated_at=clock_timestamp(), completed_at=NULL, verified_at=NULL
+                        WHERE {" AND ".join(p_conds)}
+                          AND status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
+                          AND (%s::uuid IS NULL OR job_id<>%s)
+                        RETURNING job_id
+                        """,
+                        tuple(p_args),
+                    )
+                    inv_job_ids.update(r[0] for r in _cur.fetchall())
                 for inv_jid in inv_job_ids:
                     _cur.execute(
                         """
@@ -6894,7 +7025,24 @@ def _execute_shared_production_chain_impl(
             if isinstance(item, Mapping)
             and item.get("price_coordinate") in {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
         }
+        window_status = (
+            plan.get("source_capture_preview", {}).get("window_status")
+            if isinstance(plan.get("source_capture_preview"), Mapping)
+            else None
+        )
+        ep_caps = plan.get("endpoint_capture_ids_by_session")
+        target_cap = (
+            ep_caps.get(plan.get("target_session"))
+            if isinstance(ep_caps, Mapping)
+            else None
+        )
         if (
+            window_status == "PER_SESSION_PAIRED_CAPTURES"
+            and type(target_cap) is int
+            and not plan.get("missing_price_inputs")
+        ):
+            source_capture_id = int(target_cap)
+        elif (
             len(capture_ids) != 1
             or type(next(iter(capture_ids), None)) is not int
             or not capture_inputs
@@ -6904,7 +7052,8 @@ def _execute_shared_production_chain_impl(
                 "派生任务必须解析到覆盖所需会话和双坐标的同一PG source_capture_id。",
                 status=409,
             )
-        source_capture_id = int(next(iter(capture_ids)))
+        else:
+            source_capture_id = int(next(iter(capture_ids)))
     if isinstance(plan, dict) and source_capture_id is not None:
         plan["_paired_source_capture_id"] = source_capture_id
 
@@ -7145,7 +7294,10 @@ def _execute_shared_production_chain_impl(
                         universe_capture_id=report.get("universe_capture_id"),
                     )
                     resolved_unit_keys.add(unit_key(unit))
-                if plan.get("operation") == "RECOMPUTE" and report.get("status") != "NO_CHANGE":
+                if (
+                    plan.get("operation") == "RECOMPUTE"
+                    and report.get("status") != "NO_CHANGE"
+                ):
                     _invalidate_r03_for_upstream_recompute(day)
             except Exception as error:  # noqa: BLE001
                 mark_units_incomplete(
@@ -7205,16 +7357,31 @@ def _execute_shared_production_chain_impl(
                 )
 
                 ordered_mkt_days = [
-                    date.fromisoformat(s)
-                    for s in plan.get("ordered_sessions", ())
+                    date.fromisoformat(s) for s in plan.get("ordered_sessions", ())
                 ]
                 mkt_idx = ordered_mkt_days.index(day) if day in ordered_mkt_days else -1
                 mkt_t3_day = ordered_mkt_days[mkt_idx - 3] if mkt_idx >= 3 else None
                 mkt_prev_t = ordered_mkt_days[mkt_idx - 1] if mkt_idx >= 1 else None
                 mkt_prev_t3 = ordered_mkt_days[mkt_idx - 4] if mkt_idx >= 4 else None
+                cap_by_day_mkt = plan.get("endpoint_capture_ids_by_session")
+                cap_mkt_t = (
+                    int(cap_by_day_mkt[day.isoformat()])
+                    if isinstance(cap_by_day_mkt, Mapping)
+                    and day.isoformat() in cap_by_day_mkt
+                    else source_capture_id
+                )
+                cap_mkt_t3 = (
+                    int(cap_by_day_mkt[mkt_t3_day.isoformat()])
+                    if isinstance(cap_by_day_mkt, Mapping)
+                    and mkt_t3_day is not None
+                    and mkt_t3_day.isoformat() in cap_by_day_mkt
+                    else cap_mkt_t
+                )
                 from stock_a.storage.postgres import source_raw as _sr_mkt
 
-                with _sr_mkt._transaction(config, write=False, statement_timeout_ms=5000) as (
+                with _sr_mkt._transaction(
+                    config, write=False, statement_timeout_ms=5000
+                ) as (
                     _mc,
                     _mcur,
                     _,
@@ -7226,7 +7393,7 @@ def _execute_shared_production_chain_impl(
                         WHERE source_capture_id=%s AND target_session=%s
                           AND price_coordinate='FORWARD_ADJUSTED'
                         """,
-                        (source_capture_id, day),
+                        (cap_mkt_t, day),
                     )
                     revs_t = [str(r[0]) for r in _mcur.fetchall() if r[0]]
                     revs_t3: list[str] = []
@@ -7238,13 +7405,13 @@ def _execute_shared_production_chain_impl(
                             WHERE source_capture_id=%s AND target_session=%s
                               AND price_coordinate='FORWARD_ADJUSTED'
                             """,
-                            (source_capture_id, mkt_t3_day),
+                            (cap_mkt_t3, mkt_t3_day),
                         )
                         revs_t3 = [str(r[0]) for r in _mcur.fetchall() if r[0]]
-                if len(revs_t) > 1:
+                if len(revs_t) > 1 or len(revs_t3) > 1:
                     raise DataJobError(
                         "MARKET_BREADTH_PROFILE_AMBIGUOUS",
-                        f"市场宽度({day})存在多个Profile修订({revs_t})，拒绝静默选首行。",
+                        f"市场宽度({day}/{mkt_t3_day})存在多个Profile修订(t={revs_t}, t3={revs_t3})，拒绝静默选首行或退回raw。",
                         status=409,
                     )
                 formal_prof_t = revs_t[0] if len(revs_t) == 1 else None
@@ -7255,7 +7422,9 @@ def _execute_shared_production_chain_impl(
                     else None
                 )
                 cs_t3 = (
-                    plan.get("_cross_section_scope_by_day", {}).get(mkt_t3_day.isoformat())
+                    plan.get("_cross_section_scope_by_day", {}).get(
+                        mkt_t3_day.isoformat()
+                    )
                     if mkt_t3_day is not None
                     and isinstance(plan.get("_cross_section_scope_by_day"), Mapping)
                     else None
@@ -7264,13 +7433,18 @@ def _execute_shared_production_chain_impl(
                     config,
                     target_session=day,
                     t3_session=mkt_t3_day,
-                    source_capture_id=source_capture_id,
+                    source_capture_id=cap_mkt_t,
+                    source_capture_id_t3=cap_mkt_t3,
                     profile_revision=formal_prof_t,
                     profile_revision_t3=formal_prof_t3,
                     prev_session_t=mkt_prev_t,
                     prev_session_t3=mkt_prev_t3,
-                    universe_version_t=cs_t.get("universe_version") if isinstance(cs_t, Mapping) else None,
-                    universe_version_t3=cs_t3.get("universe_version") if isinstance(cs_t3, Mapping) else None,
+                    universe_version_t=cs_t.get("universe_version")
+                    if isinstance(cs_t, Mapping)
+                    else None,
+                    universe_version_t3=cs_t3.get("universe_version")
+                    if isinstance(cs_t3, Mapping)
+                    else None,
                     universe_capture_id=plan.get("_universe_source_capture_id"),
                     allow_revision=bool(plan.get("allow_revision", False)),
                 )
@@ -7325,10 +7499,12 @@ def _execute_shared_production_chain_impl(
                             config,
                             business_table=table,
                             target_session=day,
-                            source_capture_id=source_capture_id,
+                            source_capture_id=cap_mkt_t,
                             profile_revision=formal_prof_t,
                             producer_version=R03_CONTRACT_VERSION,
-                            universe_version=formal_breadth_res.get("universe_version_t"),
+                            universe_version=formal_breadth_res.get(
+                                "universe_version_t"
+                            ),
                             research_cutoff=cutoff,
                         )
                         expected_rows = 1
@@ -7347,7 +7523,7 @@ def _execute_shared_production_chain_impl(
                             stage_code="MARKET_BREADTH",
                             target_session=day,
                             business_table=table,
-                            source_capture_id=source_capture_id,
+                            source_capture_id=cap_mkt_t,
                             profile_history_session_count=None,
                             d1_history_session_count=None,
                             expected_rows=expected_rows,
@@ -7505,7 +7681,10 @@ def _execute_shared_production_chain_impl(
             producer_version="STOCK_A_CORE_PROFILE_BAOSTOCK_QFQ_R2",
         )
         resolved_unit_keys.add(unit_key(unit))
-        if plan.get("operation") == "RECOMPUTE" and profile.get("status") != "IDEMPOTENT_READBACK":
+        if (
+            plan.get("operation") == "RECOMPUTE"
+            and profile.get("status") != "IDEMPOTENT_READBACK"
+        ):
             _invalidate_r03_for_upstream_recompute(
                 day,
                 profile_revision_filter=profile.get("profile_revision"),
@@ -7989,10 +8168,9 @@ def _execute_shared_production_chain_impl(
                         calendar_revision=unit_calendar_revision,
                     )
                     resolved_unit_keys.add(unit_key(unit))
-                if (
-                    plan.get("operation") == "RECOMPUTE"
-                    and str(source_result.get("status")) not in {"IDEMPOTENT_READBACK", "NO_CHANGE"}
-                ):
+                if plan.get("operation") == "RECOMPUTE" and str(
+                    source_result.get("status")
+                ) not in {"IDEMPOTENT_READBACK", "NO_CHANGE"}:
                     _invalidate_r03_for_upstream_recompute(day)
             except Exception as error:  # noqa: BLE001 - 故障按真实单日域披露。
                 mark_units_incomplete(
@@ -8279,8 +8457,11 @@ def _execute_shared_production_chain_impl(
             )
         return {kind: int(snapshot_ids[kind]) for kind in ("INDUSTRY", "CONCEPT")}
 
-    def profile_revision_for_session(day: date) -> str:
+    def profile_revision_for_session(
+        day: date, *, capture_id: int | None = None
+    ) -> str:
         day_text = day.isoformat()
+        ep_cap = int(capture_id) if capture_id is not None else int(source_capture_id)
         from stock_a.application.pg_research import read_source_version_context
         from stock_a.storage.postgres.static_research_facts import (
             read_source_pool_seed_forward_scope,
@@ -8290,13 +8471,13 @@ def _execute_shared_production_chain_impl(
             config,
             target_session=day,
             research_cutoff=cutoff,
-            source_capture_id=source_capture_id,
+            source_capture_id=ep_cap,
             price_coordinate="FORWARD_ADJUSTED",
         )
         if (
             source_version.get("status") != "AVAILABLE"
             or source_version.get("version_status") != "COMPLETE"
-            or source_version.get("source_capture_id") != source_capture_id
+            or source_version.get("source_capture_id") != ep_cap
             or source_version.get("price_coordinate") != "FORWARD_ADJUSTED"
             or source_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
             or type(source_version.get("capture_expected_row_count")) is not int
@@ -8304,10 +8485,14 @@ def _execute_shared_production_chain_impl(
         ):
             raise DataJobError(
                 "SECTOR_PROFILE_SOURCE_NOT_CLOSED",
-                f"{day_text}没有截止内闭合的BaoStock QFQ paired capture。",
+                f"{day_text}(capture={ep_cap})没有截止内闭合的BaoStock QFQ paired capture。",
                 status=409,
             )
-        expected_revision = profile_revision_by_session.get(day_text)
+        expected_revision = (
+            profile_revision_by_session.get(day_text)
+            if ep_cap == source_capture_id
+            else None
+        )
         if expected_revision is None:
             from stock_a.application.pg_price_profiles import (
                 source_symbol_price_profile_snapshots,
@@ -8325,7 +8510,7 @@ def _execute_shared_production_chain_impl(
                 item.get("profile_revision")
                 for item in profile_catalog.get("snapshots", ())
                 if item.get("target_session") == day_text
-                and item.get("source_capture_id") == source_capture_id
+                and item.get("source_capture_id") == ep_cap
                 and (
                     expected_window is None
                     or item.get("history_session_count") == expected_window
@@ -8336,14 +8521,14 @@ def _execute_shared_production_chain_impl(
             if len(profile_candidates) != 1:
                 raise DataJobError(
                     "SECTOR_PROFILE_REVISION_AMBIGUOUS",
-                    f"{day_text}没有唯一完整的Core/Profile修订与窗口。",
+                    f"{day_text}(capture={ep_cap})没有唯一完整的Core/Profile修订与窗口。",
                     status=409,
                 )
             expected_revision = next(iter(profile_candidates))
         seed_scope = read_source_pool_seed_forward_scope(
             config,
             target_session=day,
-            source_capture_id=source_capture_id,
+            source_capture_id=ep_cap,
             expected_source_count=source_version["research_expected_row_count"],
             profile_revision=expected_revision,
         )
@@ -8358,16 +8543,17 @@ def _execute_shared_production_chain_impl(
         ):
             raise DataJobError(
                 "SECTOR_SEED_SCOPE_NOT_CLOSED",
-                f"{day_text}的QFQ Seed/profile修订或完整分母未闭合。",
+                f"{day_text}(capture={ep_cap})的QFQ Seed/profile修订或完整分母未闭合。",
                 status=409,
             )
         if revision != expected_revision:
             raise DataJobError(
                 "SECTOR_PROFILE_REVISION_MISMATCH",
-                f"{day_text}本次Core/Profile与已存Seed修订不一致。",
+                f"{day_text}(capture={ep_cap})本次Core/Profile与已存Seed修订不一致。",
                 status=409,
             )
-        profile_revision_by_session[day_text] = revision
+        if ep_cap == source_capture_id:
+            profile_revision_by_session[day_text] = revision
         return revision
 
     def inserted_count(value: Any) -> int:
@@ -9042,27 +9228,55 @@ def _execute_shared_production_chain_impl(
             if not day_units:
                 continue
             try:
-                profile_revision = profile_revision_for_session(day)
-                resolved_snapshots = (
-                    snapshot_ids if snapshot_ids is not None else paired_sector_snapshots()
+                cap_by_day = plan.get("endpoint_capture_ids_by_session")
+                cap_t = (
+                    int(cap_by_day[day_text])
+                    if isinstance(cap_by_day, Mapping) and day_text in cap_by_day
+                    else source_capture_id
                 )
+                profile_revision = profile_revision_for_session(day, capture_id=cap_t)
+                snap_by_day = plan.get("sector_snapshot_ids_by_session")
+                if isinstance(snap_by_day, Mapping) and day_text in snap_by_day:
+                    resolved_snapshots = snap_by_day[day_text]
+                else:
+                    resolved_snapshots = (
+                        snapshot_ids
+                        if snapshot_ids is not None
+                        else paired_sector_snapshots()
+                    )
                 ordered_days = [
-                    date.fromisoformat(s)
-                    for s in plan.get("ordered_sessions", ())
+                    date.fromisoformat(s) for s in plan.get("ordered_sessions", ())
                 ] or [date.fromisoformat(d_txt) for d_txt in all_r03_days]
                 idx_day = ordered_days.index(day) if day in ordered_days else -1
                 t1_day = ordered_days[idx_day - 1] if idx_day >= 1 else None
                 t3_day = ordered_days[idx_day - 3] if idx_day >= 3 else None
-                def _safe_endpoint_profile_rev(ep_day: date | None) -> str | None:
+                cap_t1 = (
+                    int(cap_by_day[t1_day.isoformat()])
+                    if isinstance(cap_by_day, Mapping)
+                    and t1_day is not None
+                    and t1_day.isoformat() in cap_by_day
+                    else cap_t
+                )
+                cap_t3 = (
+                    int(cap_by_day[t3_day.isoformat()])
+                    if isinstance(cap_by_day, Mapping)
+                    and t3_day is not None
+                    and t3_day.isoformat() in cap_by_day
+                    else cap_t
+                )
+
+                def _safe_endpoint_profile_rev(
+                    ep_day: date | None, *, ep_cap: int
+                ) -> str | None:
                     if ep_day is None:
                         return None
                     try:
-                        return profile_revision_for_session(ep_day)
+                        return profile_revision_for_session(ep_day, capture_id=ep_cap)
                     except DataJobError:
                         return None
 
-                prof_rev_t1 = _safe_endpoint_profile_rev(t1_day)
-                prof_rev_t3 = _safe_endpoint_profile_rev(t3_day)
+                prof_rev_t1 = _safe_endpoint_profile_rev(t1_day, ep_cap=cap_t1)
+                prof_rev_t3 = _safe_endpoint_profile_rev(t3_day, ep_cap=cap_t3)
                 cs_by_day = (
                     plan.get("_cross_section_scope_by_day", {})
                     if isinstance(plan.get("_cross_section_scope_by_day"), Mapping)
@@ -9085,19 +9299,18 @@ def _execute_shared_production_chain_impl(
                     and isinstance(cs_by_day.get(t3_day.isoformat()), Mapping)
                     else None
                 )
-                snap_by_day = plan.get("sector_snapshot_ids_by_session")
                 if isinstance(snap_by_day, Mapping):
                     snaps_for_endpoints = {
-                        "t": snap_by_day.get(day_text, resolved_snapshots),
+                        "t": resolved_snapshots,
                         "t1": (
-                            snap_by_day.get(t1_day.isoformat(), resolved_snapshots)
-                            if t1_day is not None
-                            else resolved_snapshots
+                            snap_by_day.get(t1_day.isoformat())
+                            if t1_day is not None and t1_day.isoformat() in snap_by_day
+                            else None
                         ),
                         "t3": (
-                            snap_by_day.get(t3_day.isoformat(), resolved_snapshots)
-                            if t3_day is not None
-                            else resolved_snapshots
+                            snap_by_day.get(t3_day.isoformat())
+                            if t3_day is not None and t3_day.isoformat() in snap_by_day
+                            else None
                         ),
                     }
                 else:
@@ -9106,27 +9319,12 @@ def _execute_shared_production_chain_impl(
                         "t1": resolved_snapshots,
                         "t3": resolved_snapshots,
                     }
-                cap_by_day = plan.get("endpoint_capture_ids_by_session")
-                cap_t1 = (
-                    int(cap_by_day[t1_day.isoformat()])
-                    if isinstance(cap_by_day, Mapping)
-                    and t1_day is not None
-                    and t1_day.isoformat() in cap_by_day
-                    else source_capture_id
-                )
-                cap_t3 = (
-                    int(cap_by_day[t3_day.isoformat()])
-                    if isinstance(cap_by_day, Mapping)
-                    and t3_day is not None
-                    and t3_day.isoformat() in cap_by_day
-                    else source_capture_id
-                )
                 r03_res = run_r03_formal_sector_for_session(
                     config,
                     target_session=day,
                     t1_session=t1_day,
                     t3_session=t3_day,
-                    source_capture_id=source_capture_id,
+                    source_capture_id=cap_t,
                     profile_revision=profile_revision,
                     profile_revision_t1=prof_rev_t1,
                     profile_revision_t3=prof_rev_t3,
@@ -9158,7 +9356,7 @@ def _execute_shared_production_chain_impl(
                         config,
                         business_table=unit["business_table"],
                         target_session=day,
-                        source_capture_id=source_capture_id,
+                        source_capture_id=cap_t,
                         profile_revision=profile_revision,
                         sector_snapshot_ids=resolved_snapshots,
                         research_cutoff=cutoff,
@@ -9169,12 +9367,13 @@ def _execute_shared_production_chain_impl(
                         )
                         no_chg = ins == 0 and int(r03_res["native_pg"]["skipped"]) > 0
                     elif mod == "R03_SECTOR_ROTATION":
-                        ins = int(r03_res["rotation_pg"].get("board_days_inserted", 0)) + int(
-                            r03_res["rotation_pg"].get("board_days_updated", 0)
-                        )
+                        ins = int(
+                            r03_res["rotation_pg"].get("board_days_inserted", 0)
+                        ) + int(r03_res["rotation_pg"].get("board_days_updated", 0))
                         no_chg = (
                             ins == 0
-                            and int(r03_res["rotation_pg"].get("board_days_skipped", 0)) > 0
+                            and int(r03_res["rotation_pg"].get("board_days_skipped", 0))
+                            > 0
                         )
                     elif mod == "R03_SECTOR_OVERLAP":
                         ins = int(r03_res["overlap_pg"]["clusters_inserted"]) + int(
@@ -9194,6 +9393,7 @@ def _execute_shared_production_chain_impl(
                             f"{mod}({day_text})预期行数{expected_rows}，实际读回{actual_rows}。",
                         )
                     expected_keys_map = r03_res.get("expected_keys") or {}
+                    expected_sub_keys_map = r03_res.get("expected_sub_keys") or {}
                     if mod in expected_keys_map:
                         from stock_a.storage.postgres.r03_formal_sector import (
                             verify_r03_partition_keys,
@@ -9207,18 +9407,19 @@ def _execute_shared_production_chain_impl(
                             member_version=str(r03_res["member_version"]),
                             contract_version=R03_CONTRACT_VERSION,
                             expected_keys=set(expected_keys_map[mod]),
+                            expected_sub_keys=expected_sub_keys_map.get(mod),
                         )
                         if not key_check.get("matched"):
                             raise DataJobError(
                                 "R03_STAGE_KEY_SET_MISMATCH",
-                                f"{mod}({day_text})业务键集合与预期不匹配：missing={key_check.get('missing')}, extra={key_check.get('extra')}。",
+                                f"{mod}({day_text})业务键集合与预期不匹配：missing={key_check.get('missing')}, extra={key_check.get('extra')}, sub_missing={key_check.get('sub_missing')}, sub_extra={key_check.get('sub_extra')}。",
                             )
                     progress_callback(
                         job_id=job_id,
                         stage_code=mod,
                         target_session=day,
                         business_table=unit["business_table"],
-                        source_capture_id=source_capture_id,
+                        source_capture_id=cap_t,
                         profile_history_session_count=None,
                         d1_history_session_count=None,
                         expected_rows=expected_rows,

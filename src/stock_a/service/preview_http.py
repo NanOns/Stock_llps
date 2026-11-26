@@ -4283,8 +4283,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 read_r03_overlap_day,
             )
 
-            r03_scope = f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
-            r03_member_ver = f"IND_{body['industry_snapshot_id']}:CON_{body['concept_snapshot_id']}"
+            r03_scope = (
+                f"BAOSTOCK_CAP_{source_capture_id}:PROF_{profile_revision}:NON_PIT"
+            )
+            r03_member_ver = (
+                f"IND_{body['industry_snapshot_id']}:CON_{body['concept_snapshot_id']}"
+            )
             native_res = read_r03_native_day_facts(
                 config,
                 trade_date=target,
@@ -4894,7 +4898,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     if trend_cls is None and isinstance(index_observations, Mapping):
                         for idx_item in index_observations.get("items") or ():
                             if isinstance(idx_item, Mapping):
-                                cand = idx_item.get("trend_classification") or idx_item.get("trend")
+                                cand = idx_item.get(
+                                    "trend_classification"
+                                ) or idx_item.get("trend")
                                 if cand in {"STRONG", "NEUTRAL", "WEAK"}:
                                     trend_cls = cand
                                     break
@@ -4936,30 +4942,42 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 req_profile_rev = values.get("profile_revision")
                 req_u_t = values.get("universe_version_t")
                 req_u_t3 = values.get("universe_version_t3")
-                if capture_id_val is not None:
+                effective_capture_id = capture_id_val
+                if effective_capture_id is None and market is not None:
+                    effective_capture_id = getattr(
+                        market.cohort, "source_capture_id", None
+                    )
+                if effective_capture_id is not None:
                     with source_raw._transaction(
-                        self.preview_server.state.config, write=False, statement_timeout_ms=5000
+                        self.preview_server.state.config,
+                        write=False,
+                        statement_timeout_ms=5000,
                     ) as (_c, _cur, _):
                         scope_sql = """
                             SELECT DISTINCT scope_key
                             FROM stock.r03_formal_market_breadth_facts
                             WHERE trade_date=%s AND scope_key LIKE %s
                         """
-                        scope_params: list[Any] = [target, f"BAOSTOCK_CAP_{capture_id_val}:%"]
+                        scope_params: list[Any] = [
+                            target,
+                            f"BAOSTOCK_CAP_{int(effective_capture_id)}:%",
+                        ]
                         if req_profile_rev:
                             scope_sql += " AND scope_key=%s"
-                            scope_params.append(f"BAOSTOCK_CAP_{capture_id_val}:PROF_{req_profile_rev}:NON_PIT")
+                            scope_params.append(
+                                f"BAOSTOCK_CAP_{int(effective_capture_id)}:PROF_{req_profile_rev}:NON_PIT"
+                            )
                         _cur.execute(scope_sql, tuple(scope_params))
                         matched_scopes = [str(r[0]) for r in _cur.fetchall()]
                     if not matched_scopes:
                         formal_breadth = {
                             "status": "NOT_READY_HISTORICAL_UNIVERSE",
-                            "reason": f"捕获 {capture_id_val} 在 {target} 尚无已保存的正式市场宽度事实（禁止串读其他捕获）。",
+                            "reason": f"捕获 {effective_capture_id} 在 {target} 尚无已保存的正式市场宽度事实（禁止串读其他捕获）。",
                         }
                     elif len(matched_scopes) > 1:
                         formal_breadth = {
                             "status": "AMBIGUOUS_SCOPE",
-                            "reason": f"捕获 {capture_id_val} 在 {target} 匹配到多个正式市场宽度口径({matched_scopes})，须指定精确 profile_revision。",
+                            "reason": f"捕获 {effective_capture_id} 在 {target} 匹配到多个正式市场宽度口径({matched_scopes})，须指定精确 profile_revision。",
                         }
                     else:
                         mkt_scope_hint = matched_scopes[0]
@@ -4971,12 +4989,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             universe_version_t3=req_u_t3,
                         )
                 else:
-                    formal_breadth = read_r03_formal_market_breadth(
-                        self.preview_server.state.config,
-                        trade_date=target,
-                        universe_version_t=req_u_t,
-                        universe_version_t3=req_u_t3,
-                    )
+                    formal_breadth = {
+                        "status": "NOT_READY_HISTORICAL_UNIVERSE",
+                        "reason": f"目标日 {target} 未绑定有效市场来源捕获（禁止跨捕获串读）。",
+                    }
                 if formal_breadth.get("status") in {
                     "OBSERVED",
                     "UNKNOWN",
@@ -5011,11 +5027,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "limit",
                     "offset",
                 }
-                required = {"trade_date", "scope_key", "member_version", "contract_version"}
+                required = {
+                    "trade_date",
+                    "scope_key",
+                    "member_version",
+                    "contract_version",
+                }
                 values = _query(self.path, allowed)
                 if not required.issubset(set(values)):
                     raise PreviewHttpError(
-                        400, "QUERY_REQUIRED", "须提供trade_date、scope_key、member_version与contract_version"
+                        400,
+                        "QUERY_REQUIRED",
+                        "须提供trade_date、scope_key、member_version与contract_version",
                     )
                 trade_d = _iso_date(values["trade_date"])
                 if trade_d > self.preview_server.state.research_cutoff:
@@ -5027,7 +5050,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 b_kind = values.get("board_kind")
                 if b_kind is not None and b_kind not in {"INDUSTRY", "CONCEPT"}:
                     raise PreviewHttpError(
-                        400, "INVALID_BOARD_KIND", "board_kind 仅允许 INDUSTRY 或 CONCEPT。"
+                        400,
+                        "INVALID_BOARD_KIND",
+                        "board_kind 仅允许 INDUSTRY 或 CONCEPT。",
                     )
                 try:
                     limit_val = int(values["limit"]) if "limit" in values else 50
@@ -5038,7 +5063,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ) from err
                 if limit_val <= 0 or limit_val > 500 or offset_val < 0:
                     raise PreviewHttpError(
-                        400, "INVALID_PAGINATION", "limit 须在 [1, 500] 且 offset >= 0。"
+                        400,
+                        "INVALID_PAGINATION",
+                        "limit 须在 [1, 500] 且 offset >= 0。",
                     )
                 from stock_a.storage.postgres.r03_formal_sector import (
                     read_r03_native_day_facts,
@@ -5080,11 +5107,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 values = _query(self.path, allowed)
                 if not required.issubset(set(values)):
                     raise PreviewHttpError(
-                        400, "QUERY_REQUIRED", "须提供board_kind、board_id、scope_key与contract_version"
+                        400,
+                        "QUERY_REQUIRED",
+                        "须提供board_kind、board_id、scope_key与contract_version",
                     )
                 if values["board_kind"] not in {"INDUSTRY", "CONCEPT"}:
                     raise PreviewHttpError(
-                        400, "INVALID_BOARD_KIND", "board_kind 仅允许 INDUSTRY 或 CONCEPT。"
+                        400,
+                        "INVALID_BOARD_KIND",
+                        "board_kind 仅允许 INDUSTRY 或 CONCEPT。",
                     )
                 as_of = (
                     _iso_date(values["as_of_date"])
@@ -5109,7 +5140,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     contract_version=values["contract_version"],
                     as_of_date=as_of,
                 )
-                self._send_json(200, {"ok": True, "as_of_date": as_of.isoformat(), **rot_res})
+                self._send_json(
+                    200, {"ok": True, "as_of_date": as_of.isoformat(), **rot_res}
+                )
                 return
             if parsed.path == "/api/product/r03-sector-loo":
                 required = {
@@ -5127,7 +5160,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                 if values["board_kind"] not in {"INDUSTRY", "CONCEPT"}:
                     raise PreviewHttpError(
-                        400, "INVALID_BOARD_KIND", "board_kind 仅允许 INDUSTRY 或 CONCEPT。"
+                        400,
+                        "INVALID_BOARD_KIND",
+                        "board_kind 仅允许 INDUSTRY 或 CONCEPT。",
                     )
                 trade_d = _iso_date(values["trade_date"])
                 if trade_d > self.preview_server.state.research_cutoff:
@@ -5374,16 +5409,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     from stock_a.application.r03_formal_sector import (
                         R03_CONTRACT_VERSION,
                     )
-                    from stock_a.storage.postgres import source_raw as _sr_dir
                     from stock_a.storage.postgres.r03_formal_sector import (
                         read_r03_native_day_facts,
                         read_r03_overlap_day,
+                        read_r03_rotation_board_day_summary,
                     )
 
-                    r03_scope = (
-                        f"BAOSTOCK_CAP_{source['source_capture_id']}:PROF_{prof_rev}:NON_PIT"
+                    r03_scope = f"BAOSTOCK_CAP_{source['source_capture_id']}:PROF_{prof_rev}:NON_PIT"
+                    r03_member_ver = (
+                        f"IND_{industry_snapshot_id}:CON_{concept_snapshot_id}"
                     )
-                    r03_member_ver = f"IND_{industry_snapshot_id}:CON_{concept_snapshot_id}"
                     r03_native = read_r03_native_day_facts(
                         self.preview_server.state.config,
                         trade_date=target,
@@ -5398,26 +5433,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         member_version=r03_member_ver,
                         contract_version=R03_CONTRACT_VERSION,
                     )
-                    rot_by_key: dict[tuple[str, str], dict[str, Any]] = {}
-                    with _sr_dir._transaction(
+                    r03_rot_summary = read_r03_rotation_board_day_summary(
                         self.preview_server.state.config,
-                        write=False,
-                        statement_timeout_ms=5000,
-                    ) as (_dc, _dcur, _):
-                        _dcur.execute(
-                            """
-                            SELECT board_kind, board_id, rotation_state, last_known_state, reason_code
-                            FROM stock.r03_sector_rotation_board_day_facts
-                            WHERE trade_date=%s AND scope_key=%s AND member_version=%s AND contract_version=%s
-                            """,
-                            (target, r03_scope, r03_member_ver, R03_CONTRACT_VERSION),
-                        )
-                        for bk, bid, r_st, lk_st, rsn in _dcur.fetchall():
-                            rot_by_key[(str(bk), str(bid))] = {
-                                "rotation_state": str(r_st),
-                                "last_known_state": lk_st,
-                                "reason_code": rsn,
-                            }
+                        trade_date=target,
+                        scope_key=r03_scope,
+                        member_version=r03_member_ver,
+                        contract_version=R03_CONTRACT_VERSION,
+                    )
+                    rot_by_key: dict[tuple[str, str], dict[str, Any]] = dict(
+                        r03_rot_summary.get("items") or {}
+                    )
                     native_by_key = {
                         (str(it["board_kind"]), str(it["board_id"])): it
                         for it in r03_native.get("items", ())
@@ -5436,17 +5461,37 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         rt_it = rot_by_key.get(dk)
                         if n_it or o_it or rt_it:
                             dir_item["r03_formal"] = {
-                                "effective_maturity": n_it.get("effective_maturity") if n_it else None,
-                                "display_maturity": n_it.get("display_maturity") if n_it else None,
-                                "health_state": n_it.get("health_state") if n_it else None,
-                                "exhaustion_level": n_it.get("exhaustion_level") if n_it else None,
-                                "emergence_level": n_it.get("emergence_level") if n_it else None,
-                                "priority_status": n_it.get("priority_status") if n_it else None,
-                                "priority_rank": n_it.get("priority_rank") if n_it else None,
-                                "unique_share_status": o_it.get("unique_share_status") if o_it else None,
-                                "unique_share": str(o_it["unique_share"]) if o_it and o_it.get("unique_share") is not None else None,
+                                "effective_maturity": n_it.get("effective_maturity")
+                                if n_it
+                                else None,
+                                "display_maturity": n_it.get("display_maturity")
+                                if n_it
+                                else None,
+                                "health_state": n_it.get("health_state")
+                                if n_it
+                                else None,
+                                "exhaustion_level": n_it.get("exhaustion_level")
+                                if n_it
+                                else None,
+                                "emergence_level": n_it.get("emergence_level")
+                                if n_it
+                                else None,
+                                "priority_status": n_it.get("priority_status")
+                                if n_it
+                                else None,
+                                "priority_rank": n_it.get("priority_rank")
+                                if n_it
+                                else None,
+                                "unique_share_status": o_it.get("unique_share_status")
+                                if o_it
+                                else None,
+                                "unique_share": str(o_it["unique_share"])
+                                if o_it and o_it.get("unique_share") is not None
+                                else None,
                                 "cluster_id": o_it.get("cluster_id") if o_it else None,
-                                "rotation_state": rt_it.get("rotation_state") if rt_it else None,
+                                "rotation_state": rt_it.get("rotation_state")
+                                if rt_it
+                                else None,
                             }
                     result["r03_formal_sector_context"] = {
                         "scope_key": r03_scope,
@@ -5454,6 +5499,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "contract_version": R03_CONTRACT_VERSION,
                         "native_status": r03_native.get("status"),
                         "overlap_status": r03_overlap.get("status"),
+                        "rotation_status": r03_rot_summary.get("status"),
                         "clusters": r03_overlap.get("clusters", []),
                         "pairs": [
                             {
