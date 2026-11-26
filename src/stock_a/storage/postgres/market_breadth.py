@@ -106,7 +106,7 @@ _CHANGE_COLUMNS = (
 _CHANGE_KEY = (
     "before_session",
     "target_session",
-    "target_source_capture_id",
+    "target_calendar_id",
     "target_calendar_revision",
     "target_contract_version",
 )
@@ -166,8 +166,8 @@ def _persist_market_breadth_once(
     if (
         type(target_session) is not date
         or target_session > market.research_cutoff
-        or type(capture_id) is not int
-        or capture_id <= 0
+        or capture_id is not None
+        and (type(capture_id) is not int or capture_id <= 0)
         or cohort.price_coordinate != "FORWARD_ADJUSTED"
         or result.n_source != len(result.symbols)
     ):
@@ -222,33 +222,48 @@ def _persist_market_breadth_once(
         cursor,
         _,
     ):
-        cursor.execute(
-            """SELECT provider,range_end_session,price_coordinates,
-                      source_time_quality,source_available_at,read_started_at,
-                      validated_at,source_clock_role
-               FROM stock.source_captures WHERE capture_id=%s FOR SHARE""",
-            (capture_id,),
-        )
-        capture = cursor.fetchone()
-        if (
-            capture is None
-            or capture[0] != "BAOSTOCK"
-            or capture[1] > market.research_cutoff
-            or set(capture[2] or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
-        ):
-            raise MarketBreadthPgError(
-                "MARKET_BREADTH_CAPTURE_INVALID",
-                "市场宽度必须绑定截止内BaoStock双坐标捕获",
+        capture = None
+        if capture_id is not None:
+            cursor.execute(
+                """SELECT provider,range_end_session,price_coordinates,
+                          source_time_quality,source_available_at,read_started_at,
+                          validated_at,source_clock_role
+                   FROM stock.source_captures WHERE capture_id=%s FOR SHARE""",
+                (capture_id,),
             )
+            capture = cursor.fetchone()
+            if (
+                capture is None
+                or capture[0] != "BAOSTOCK"
+                or capture[1] > market.research_cutoff
+                or "FORWARD_ADJUSTED" not in set(capture[2] or ())
+            ):
+                raise MarketBreadthPgError(
+                    "MARKET_BREADTH_CAPTURE_INVALID",
+                    "市场宽度捕获溯源必须是截止内BaoStock QFQ来源",
+                )
+        capture_meta = (
+            (
+                capture[3],
+                _clock(capture[4]),
+                _clock(capture[5]),
+                _clock(capture[6]),
+                capture[7],
+            )
+            if capture is not None
+            else (
+                "UNKNOWN",
+                None,
+                None,
+                None,
+                "PER_COORDINATE_SOURCE_CLOCK",
+            )
+        )
         day = (
             target_session,
             capture_id,
             cohort.price_coordinate,
-            capture[3],
-            _clock(capture[4]),
-            _clock(capture[5]),
-            _clock(capture[6]),
-            capture[7],
+            *capture_meta,
             cohort.calendar_id,
             cohort.calendar_revision,
             *window[:4],
@@ -261,10 +276,31 @@ def _persist_market_breadth_once(
             market.pg_result["history_row_count"],
         )
         key = tuple(day[_DAY_COLUMNS.index(name)] for name in _KEY)
+        cursor.execute(
+            """SELECT source_symbol,qfq_source_capture_id FROM stock.source_raw_daily
+               WHERE session_date=%s
+                 AND board IN ('MAIN_BOARD', 'GEM')
+               ORDER BY source_symbol""",
+            (target_session,),
+        )
+        raw_rows = [
+            {"source_symbol": row[0], "qfq_source_capture_id": row[1]}
+            for row in cursor.fetchall()
+        ]
+        if len(raw_rows) != result.n_source or {
+            row["source_symbol"] for row in raw_rows
+        } != {item.source_symbol for item in result.symbols}:
+            raise MarketBreadthPgError(
+                "MARKET_BREADTH_RAW_MISMATCH",
+                "宽度事实与QFQ有效证券集合或完整分母不一致",
+            )
+        qfq_capture_by_symbol = {
+            row["source_symbol"]: row["qfq_source_capture_id"] for row in raw_rows
+        }
         rows = [
             (
                 *key,
-                capture_id,
+                qfq_capture_by_symbol[item.source_symbol],
                 item.source_symbol,
                 *_fraction(item.ret1_t),
                 *_fraction(item.ret1_t_minus_3),
@@ -277,33 +313,6 @@ def _persist_market_breadth_once(
             )
             for item in sorted(result.symbols, key=lambda value: value.source_symbol)
         ]
-        cursor.execute(
-            """SELECT source_symbol,qfq_source_capture_id FROM stock.source_raw_daily
-               WHERE session_date=%s
-                 AND board IN ('MAIN_BOARD', 'GEM')
-                 AND qfq_bar_status='TARGET_PRESENT'
-                 AND qfq_price_quality='OBSERVED'
-               ORDER BY source_symbol""",
-            (target_session,),
-        )
-        raw_rows = [
-            {"source_symbol": row[0], "qfq_source_capture_id": row[1]}
-            for row in cursor.fetchall()
-        ]
-        if (
-            len(raw_rows) != result.n_source
-            or {row["source_symbol"] for row in raw_rows}
-            != {item.source_symbol for item in result.symbols}
-            or any(
-                type(row["qfq_source_capture_id"]) is not int
-                or row["qfq_source_capture_id"] <= 0
-                for row in raw_rows
-            )
-        ):
-            raise MarketBreadthPgError(
-                "MARKET_BREADTH_RAW_MISMATCH",
-                "宽度事实与QFQ有效证券集合或完整分母不一致",
-            )
         cursor.execute(
             f"SELECT id,{', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE target_session=%s",
             (target_session,),
@@ -419,8 +428,8 @@ def _change_row(
             before_capture is not None
             and (type(before_capture) is not int or before_capture <= 0)
         )
-        or type(target_capture) is not int
-        or target_capture <= 0
+        or target_capture is not None
+        and (type(target_capture) is not int or target_capture <= 0)
         or (
             status == "COMPARABLE"
             and (reason is not None or before_capture != target_capture)

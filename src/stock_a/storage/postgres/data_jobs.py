@@ -511,80 +511,82 @@ def read_raw_coverage(config: Mapping[str, Any], *, cutoff: date) -> dict[str, A
         )
     with source_raw._transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """WITH request_codes AS (
-                   SELECT capture_id,source_code,
-                          count(*)=2
-                            AND count(DISTINCT adjustment_flag)=2
-                            AND count(DISTINCT eligible_start_session)=1
-                            AND count(DISTINCT eligible_end_session)=1
-                            AND bool_and(
-                                request_status IN ('COMPLETED','NO_DATA')
-                                AND (request_status='NO_DATA'
-                                     OR completed_through_session>=range_end_session)
-                            ) AS code_requests_complete,
-                          min(eligible_start_session) AS eligible_start_session,
-                          max(eligible_end_session) AS eligible_end_session,
-                          coalesce(sum(response_row_count),0)::bigint
-                              AS response_row_count
-                   FROM stock.source_capture_requests
-                   WHERE range_end_session<=%s
-                   GROUP BY capture_id,source_code
-               ), price_sessions AS (
-                   SELECT DISTINCT d.session_date,d.source_capture_id
-                   FROM stock.source_raw_daily d
-                   JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
-                   WHERE d.session_date<=%s
-                     AND c.provider='BAOSTOCK'
-                     AND c.range_end_session<=%s
-                     AND c.price_coordinates @> ARRAY[
-                         'RAW_UNADJUSTED','FORWARD_ADJUSTED'
-                     ]::text[]
-               ), request_coverage AS (
-                   SELECT s.session_date,s.source_capture_id,
-                          count(*) FILTER (
-                              WHERE s.session_date BETWEEN r.eligible_start_session
-                                                       AND r.eligible_end_session
-                          )::bigint AS expected_symbol_count,
-                          coalesce(bool_and(r.code_requests_complete) FILTER (
-                              WHERE s.session_date BETWEEN r.eligible_start_session
-                                                       AND r.eligible_end_session
-                          ),FALSE) AS requests_complete,
-                          coalesce(sum(r.response_row_count) FILTER (
-                              WHERE s.session_date BETWEEN r.eligible_start_session
-                                                       AND r.eligible_end_session
-                          ),0)::bigint AS capture_request_response_row_count
-                   FROM price_sessions s
-                   JOIN request_codes r ON r.capture_id=s.source_capture_id
-                   GROUP BY s.session_date,s.source_capture_id
-               ), raw_rows AS (
-                   SELECT d.session_date,d.source_capture_id,
+            f"""WITH coordinate_rows AS (
+                   SELECT d.session_date,d.raw_source_capture_id AS capture_id,
+                          'RAW_UNADJUSTED'::text AS coordinate,d.source_symbol,
+                          d.source_code,d.price_quality AS field_quality
+                     FROM stock.source_raw_daily d
+                     JOIN stock.source_captures c
+                       ON c.capture_id=d.raw_source_capture_id
+                    WHERE d.session_date<=%s AND d.raw_source_capture_id IS NOT NULL
+                      AND c.provider='BAOSTOCK' AND c.range_end_session<=%s
+                      AND c.price_coordinates @> ARRAY['RAW_UNADJUSTED']::text[]
+                   UNION ALL
+                   SELECT d.session_date,d.qfq_source_capture_id AS capture_id,
+                          'FORWARD_ADJUSTED'::text AS coordinate,d.source_symbol,
+                          d.source_code,d.qfq_price_quality AS field_quality
+                     FROM stock.source_raw_daily d
+                     JOIN stock.source_captures c
+                       ON c.capture_id=d.qfq_source_capture_id
+                    WHERE d.session_date<=%s AND d.qfq_source_capture_id IS NOT NULL
+                      AND c.provider='BAOSTOCK' AND c.range_end_session<=%s
+                      AND c.price_coordinates @> ARRAY['FORWARD_ADJUSTED']::text[]
+               ), coordinate_scopes AS (
+                   SELECT DISTINCT session_date,coordinate,capture_id
+                     FROM coordinate_rows
+               ), expected AS (
+                   SELECT s.session_date,s.coordinate,
+                          count(DISTINCT upper(r.source_code))::bigint
+                              AS expected_symbol_count
+                     FROM coordinate_scopes s
+                     JOIN stock.source_capture_requests r
+                       ON r.capture_id=s.capture_id
+                      AND r.adjustment_flag=CASE s.coordinate
+                          WHEN 'RAW_UNADJUSTED' THEN '3' ELSE '2' END
+                      AND r.range_end_session<=%s
+                      AND s.session_date BETWEEN r.eligible_start_session
+                                              AND r.eligible_end_session
+                    GROUP BY s.session_date,s.coordinate
+               ), fact_counts AS (
+                   SELECT f.session_date,f.coordinate,
+                          array_agg(DISTINCT f.capture_id ORDER BY f.capture_id)
+                              AS source_capture_ids,
+                          count(DISTINCT f.capture_id)::bigint AS capture_count,
                           count(*)::bigint AS row_count,
-                          count(DISTINCT d.source_symbol)::bigint AS symbol_count,
-                          count(*) FILTER (WHERE d.price_quality IS NOT NULL)::bigint
-                              AS raw_quality_row_count,
-                          count(*) FILTER (WHERE d.price_quality='OBSERVED')::bigint
-                              AS raw_observed_row_count,
-                          count(*) FILTER (WHERE d.qfq_price_quality IS NOT NULL)::bigint
-                              AS qfq_quality_row_count,
-                          count(*) FILTER (WHERE d.qfq_price_quality='OBSERVED')::bigint
-                              AS qfq_observed_row_count
-                   FROM stock.source_raw_daily d
-                   JOIN price_sessions s
-                     ON s.session_date=d.session_date
-                    AND s.source_capture_id=d.source_capture_id
-                   GROUP BY d.session_date,d.source_capture_id
+                          count(DISTINCT f.source_symbol)::bigint AS symbol_count,
+                          count(*) FILTER (WHERE f.field_quality IS NOT NULL)::bigint
+                              AS quality_row_count,
+                          count(*) FILTER (WHERE f.field_quality='OBSERVED')::bigint
+                              AS observed_value_row_count,
+                          coalesce(bool_and(coalesce(
+                              active_request.request_status IN ('COMPLETED','NO_DATA')
+                              AND (active_request.request_status='NO_DATA'
+                                   OR active_request.completed_through_session
+                                      >=active_request.range_end_session),
+                              FALSE
+                          )),FALSE) AS requests_complete,
+                          coalesce(sum(active_request.response_row_count),0)::bigint
+                              AS capture_request_response_row_count
+                     FROM coordinate_rows f
+                     LEFT JOIN stock.source_capture_requests active_request
+                       ON active_request.capture_id=f.capture_id
+                      AND upper(active_request.source_code)=upper(f.source_code)
+                      AND active_request.adjustment_flag=CASE f.coordinate
+                          WHEN 'RAW_UNADJUSTED' THEN '3' ELSE '2' END
+                      AND active_request.range_end_session<=%s
+                      AND f.session_date BETWEEN active_request.eligible_start_session
+                                             AND active_request.eligible_end_session
+                    GROUP BY f.session_date,f.coordinate
                )
-               SELECT d.session_date,d.source_capture_id,r.requests_complete,
-                      r.expected_symbol_count,r.capture_request_response_row_count,
-                      d.row_count,d.symbol_count,
-                      d.raw_quality_row_count,d.raw_observed_row_count,
-                      d.qfq_quality_row_count,d.qfq_observed_row_count
-               FROM raw_rows d
-               JOIN request_coverage r
-                 ON r.session_date=d.session_date
-                AND r.source_capture_id=d.source_capture_id
-               ORDER BY d.session_date,d.source_capture_id""",
-            (cutoff, cutoff, cutoff),
+                SELECT f.session_date,f.coordinate,f.source_capture_ids,
+                       f.capture_count,f.requests_complete,
+                       coalesce(e.expected_symbol_count,0),
+                       f.capture_request_response_row_count,f.row_count,
+                       f.symbol_count,f.quality_row_count,f.observed_value_row_count
+                  FROM fact_counts f
+                  LEFT JOIN expected e USING (session_date,coordinate)
+                 ORDER BY f.session_date,f.coordinate""",
+            (cutoff, cutoff, cutoff, cutoff, cutoff, cutoff),
         )
         coverage_rows = cursor.fetchall()
         cursor.execute(
@@ -626,92 +628,82 @@ def read_raw_coverage(config: Mapping[str, Any], *, cutoff: date) -> dict[str, A
         d1_windows = [int(row[0]) for row in cursor.fetchall()]
 
     price_coordinate_versions: list[dict[str, Any]] = []
-    by_session_capture: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
+    versions_by_session_coordinate: dict[str, dict[str, dict[str, Any]]] = {}
     for row in coverage_rows:
         (
             session,
-            capture_id,
+            coordinate,
+            source_capture_ids,
+            capture_count,
             requests_complete,
             expected_symbols,
             request_response_rows,
             row_count,
             symbol_count,
-            raw_quality_count,
-            raw_observed_count,
-            qfq_quality_count,
-            qfq_observed_count,
+            quality_count,
+            observed_count,
         ) = row
         session_text = session.isoformat()
-        capture_id = int(capture_id)
+        capture_ids = sorted({int(value) for value in source_capture_ids or ()})
+        capture_count = int(capture_count)
         expected_symbols = int(expected_symbols)
         row_count = int(row_count)
-        closed_rows = (
+        symbol_count = int(symbol_count)
+        quality_count = int(quality_count)
+        observed_count = int(observed_count)
+        closed = (
             bool(requests_complete)
             and expected_symbols > 0
             and row_count == expected_symbols
-            and int(symbol_count) == row_count
+            and symbol_count == row_count
+            and quality_count == row_count
         )
-        coordinate_values = (
-            (
-                "RAW_UNADJUSTED",
-                int(raw_quality_count),
-                int(raw_observed_count),
+        version = {
+            "session_date": session_text,
+            "source_capture_id": capture_ids[0] if len(capture_ids) == 1 else None,
+            "source_capture_ids": capture_ids,
+            "capture_count": capture_count,
+            "price_coordinate": coordinate,
+            "coverage_status": "COMPLETE" if closed else "INCOMPLETE",
+            "requests_complete": bool(requests_complete),
+            "capture_requested_symbol_count": (
+                expected_symbols if len(capture_ids) == 1 else None
             ),
-            (
-                "FORWARD_ADJUSTED",
-                int(qfq_quality_count),
-                int(qfq_observed_count),
-            ),
+            "row_count": row_count,
+            "expected_row_count": expected_symbols,
+            "capture_request_response_row_count": int(request_response_rows),
+            "symbol_count": symbol_count,
+            "quality_row_count": quality_count,
+            "observed_value_row_count": observed_count,
+        }
+        price_coordinate_versions.append(version)
+        versions_by_session_coordinate.setdefault(session_text, {})[coordinate] = (
+            version
         )
-        for coordinate, quality_count, observed_count in coordinate_values:
-            status = (
-                "COMPLETE"
-                if closed_rows and quality_count == row_count
-                else "INCOMPLETE"
-            )
-            version = {
-                "session_date": session_text,
-                "source_capture_id": capture_id,
-                "price_coordinate": coordinate,
-                "coverage_status": status,
-                "requests_complete": bool(requests_complete),
-                "row_count": row_count,
-                "expected_row_count": expected_symbols,
-                "capture_request_response_row_count": int(request_response_rows),
-                "symbol_count": int(symbol_count),
-                "quality_row_count": quality_count,
-                "observed_value_row_count": observed_count,
-            }
-            price_coordinate_versions.append(version)
-            by_session_capture.setdefault((session_text, capture_id), {})[
-                coordinate
-            ] = version
 
-    captures_by_session: dict[str, list[int]] = {}
-    for session_text, capture_id in by_session_capture:
-        captures_by_session.setdefault(session_text, []).append(capture_id)
-    complete_capture_by_key: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
-    for key, coordinates in by_session_capture.items():
-        if set(coordinates) == {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"} and all(
-            item["coverage_status"] == "COMPLETE" for item in coordinates.values()
-        ):
-            complete_capture_by_key[key] = coordinates
+    coordinate_status_by_session = {
+        session_text: {
+            coordinate: version["coverage_status"]
+            for coordinate, version in by_coordinate.items()
+        }
+        for session_text, by_coordinate in versions_by_session_coordinate.items()
+    }
     closed_sessions = sorted(
         session_text
-        for session_text, capture_ids in captures_by_session.items()
-        if len(capture_ids) == 1
-        and (session_text, capture_ids[0]) in complete_capture_by_key
+        for session_text, by_coordinate in coordinate_status_by_session.items()
+        if set(by_coordinate) == {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
+        and all(status == "COMPLETE" for status in by_coordinate.values())
     )
     ambiguous_sessions = sorted(
         session_text
-        for session_text, capture_ids in captures_by_session.items()
-        if len(capture_ids) != 1
-        or (session_text, capture_ids[0]) not in complete_capture_by_key
+        for session_text, by_coordinate in coordinate_status_by_session.items()
+        if session_text not in closed_sessions
+        or set(by_coordinate) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
     )
-    raw_version_by_key = {
-        key: coordinates["RAW_UNADJUSTED"]
-        for key, coordinates in complete_capture_by_key.items()
-        if key[0] in closed_sessions
+    raw_version_by_session = {
+        session_text: by_coordinate["RAW_UNADJUSTED"]
+        for session_text, by_coordinate in versions_by_session_coordinate.items()
+        if "RAW_UNADJUSTED" in by_coordinate
     }
 
     complete_profiles = []
@@ -722,18 +714,18 @@ def read_raw_coverage(config: Mapping[str, Any], *, cutoff: date) -> dict[str, A
         profile_rows_count,
     ) in profile_rows:
         session_text = target_session.isoformat()
-        key = (session_text, int(capture_id))
-        raw_version = raw_version_by_key.get(key)
+        raw_version = raw_version_by_session.get(session_text)
         if raw_version is not None and int(profile_rows_count) == int(
             raw_version["row_count"]
         ):
+            coordinate_versions = versions_by_session_coordinate.get(session_text, {})
             complete_profiles.append(
                 {
                     "target_session": target_session,
                     "source_capture_id": int(capture_id),
                     "source_capture_ids_by_coordinate": {
-                        "RAW_UNADJUSTED": int(capture_id),
-                        "FORWARD_ADJUSTED": int(capture_id),
+                        coordinate: version.get("source_capture_id")
+                        for coordinate, version in coordinate_versions.items()
                     },
                     "history_session_count": int(history_count),
                     "row_count": int(profile_rows_count),
@@ -764,15 +756,16 @@ def read_raw_coverage(config: Mapping[str, Any], *, cutoff: date) -> dict[str, A
     ) in breadth_rows:
         session_text = target_session.isoformat()
         capture_id = int(capture_id)
-        version = raw_version_by_key.get((session_text, capture_id))
+        version = raw_version_by_session.get(session_text)
         if version is not None and int(symbol_rows) == int(version["row_count"]):
+            coordinate_versions = versions_by_session_coordinate.get(session_text, {})
             breadth_completed_versions.append(
                 {
                     "target_session": session_text,
                     "source_capture_id": capture_id,
                     "source_capture_ids_by_coordinate": {
-                        "RAW_UNADJUSTED": capture_id,
-                        "FORWARD_ADJUSTED": capture_id,
+                        coordinate: item.get("source_capture_id")
+                        for coordinate, item in coordinate_versions.items()
                     },
                     "contract_version": contract_version,
                     "calendar_revision": calendar_revision,

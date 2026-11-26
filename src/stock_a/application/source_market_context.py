@@ -84,7 +84,7 @@ def compute_source_market_context(
     *,
     target_session: date,
     research_cutoff: date,
-    source_capture_id: int,
+    source_capture_id: int | None,
 ) -> SourceMarketContextRead:
     """按固定官方日历和paired BaoStock捕获读取QFQ市场宽度。"""
     if (
@@ -97,7 +97,9 @@ def compute_source_market_context(
             "目标交易会话不得晚于显式研究截止日",
             category="ARGUMENT",
         )
-    if type(source_capture_id) is not int or source_capture_id <= 0:
+    if source_capture_id is not None and (
+        type(source_capture_id) is not int or source_capture_id <= 0
+    ):
         raise SourceMarketContextError(
             "MARKET_BREADTH_CAPTURE_ID_INVALID",
             "source_capture_id必须是正数BIGINT",
@@ -130,42 +132,49 @@ def compute_source_market_context(
         )
 
     session_window = calendar["sessions"][target_index - 4 : target_index + 1]
-    try:
-        roster = read_baostock_capture_roster(
-            config,
-            source_capture_id=source_capture_id,
-            cutoff=research_cutoff,
-        )
-    except BaoStockPriceFactsError as error:
-        raise SourceMarketContextError(
-            error.code, str(error), category="UNAVAILABLE"
-        ) from error
-    if roster.get("status") != "AVAILABLE":
-        raise SourceMarketContextError(
-            "MARKET_BREADTH_CAPTURE_UNAVAILABLE",
-            "目标BaoStock paired捕获目录不可用或为空",
-            category="NOT_EVALUABLE",
-        )
-    # This paired capture defines only the source-observation cohort for this
-    # source-level metric. It is not the formal historical Research Universe;
-    # R03 resolves that denominator from the date-effective session directory.
-    roster_by_symbol = {
-        item["source_symbol"]: item for item in roster.get("symbols", [])
-    }
+    roster: Mapping[str, Any] | None = None
     from stock_a.sources.baostock.identity import eligible_research_board
 
-    source_symbols = tuple(
-        sorted(
-            symbol
-            for symbol, item in roster_by_symbol.items()
-            if eligible_research_board(symbol) is not None
-            and item.get("eligible_start_session")
-            and item.get("eligible_end_session")
-            and item["eligible_start_session"]
-            <= target_session.isoformat()
-            <= item["eligible_end_session"]
+    if source_capture_id is not None:
+        try:
+            roster = read_baostock_capture_roster(
+                config,
+                source_capture_id=source_capture_id,
+                cutoff=research_cutoff,
+            )
+        except BaoStockPriceFactsError as error:
+            raise SourceMarketContextError(
+                error.code, str(error), category="UNAVAILABLE"
+            ) from error
+        if roster.get("status") != "AVAILABLE":
+            raise SourceMarketContextError(
+                "MARKET_BREADTH_CAPTURE_UNAVAILABLE",
+                "目标BaoStock paired捕获目录不可用或为空",
+                category="NOT_EVALUABLE",
+            )
+        # This paired capture defines only the source-observation cohort for this
+        # source-level metric. It is not the formal historical Research Universe.
+        roster_by_symbol = {
+            item["source_symbol"]: item for item in roster.get("symbols", [])
+        }
+        source_symbols = tuple(
+            sorted(
+                symbol
+                for symbol, item in roster_by_symbol.items()
+                if eligible_research_board(symbol) is not None
+                and item.get("eligible_start_session")
+                and item.get("eligible_end_session")
+                and item["eligible_start_session"]
+                <= target_session.isoformat()
+                <= item["eligible_end_session"]
+            )
         )
-    )
+    else:
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_SOURCE_COHORT_CAPTURE_NOT_UNIQUE",
+            "当前目标日没有唯一且完整的来源级固定池捕获，现存Raw行不足以证明固定池分母；正式市场宽度由R03日期有效名录独立计算。",
+            category="NOT_EVALUABLE",
+        )
     if not source_symbols:
         raise SourceMarketContextError(
             "MARKET_BREADTH_CAPTURE_EMPTY_AT_TARGET",
@@ -218,6 +227,8 @@ def compute_source_market_context(
         ) from error
 
     def missing_status(symbol: str, session: date) -> tuple[str, str]:
+        if source_capture_id is None:
+            return "READ_FAILED", "SOURCE_COHORT_SESSION_ROW_NOT_STORED"
         if not (
             roster_by_symbol[symbol]["eligible_start_session"]
             <= session.isoformat()
@@ -286,15 +297,31 @@ def compute_source_market_context(
                     trade_status_reason=trade_status_reason,
                 )
             )
+    source_time_quality = (
+        roster["source_time_quality"]
+        if roster is not None
+        else "PER_COORDINATE_SOURCE_TIME"
+    )
+    source_clock_role = (
+        roster["source_clock_role"]
+        if roster is not None
+        else "PER_COORDINATE_SOURCE_CLOCK"
+    )
+    capture_read_started_at = (
+        roster["captured_at_start"] if roster is not None else None
+    )
+    capture_validated_at = (
+        roster["captured_at_validated"] if roster is not None else None
+    )
     source_version = {
         "source_capture_id": source_capture_id,
         "provider": "BAOSTOCK",
         "price_coordinate": "FORWARD_ADJUSTED",
         "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
-        "source_time_quality": roster["source_time_quality"],
-        "source_clock_role": roster["source_clock_role"],
-        "capture_read_started_at": roster["captured_at_start"],
-        "capture_validated_at": roster["captured_at_validated"],
+        "source_time_quality": source_time_quality,
+        "source_clock_role": source_clock_role,
+        "capture_read_started_at": capture_read_started_at,
+        "capture_validated_at": capture_validated_at,
         "source_available_at": None,
         "price_row_count": len(source_symbols),
         "capture_expected_price_row_count": len(source_symbols),
@@ -463,7 +490,7 @@ def read_source_market_context(
 
     cohort = SourceCohortIdentity(
         target_session=target_session,
-        source_capture_id=int(day["source_capture_id"]),
+        source_capture_id=day["source_capture_id"],
         price_coordinate="FORWARD_ADJUSTED",
         source_time_quality=day["source_time_quality"],
         source_available_at=clock("source_available_at"),
@@ -631,7 +658,8 @@ def prepare_source_market_breadth_change(
         type(before_session) is not date
         or calculation.session_window[-1] != target_session
         or calculation.session_window[-2] != before_session
-        or source_capture_id <= 0
+        or source_capture_id is not None
+        and source_capture_id <= 0
         or calculation.n_source != len(target_symbols)
     ):
         raise SourceMarketContextError(

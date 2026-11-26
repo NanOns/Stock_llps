@@ -102,6 +102,8 @@ _MIGRATION_FILES = (
     "0088_single_effective_fact_final_closure.sql",
     "0089_source_raw_coordinate_capture_provenance.sql",
     "0090_source_s2_capture_provenance_nullable.sql",
+    "0091_cross_section_capture_provenance_nullable.sql",
+    "0092_market_breadth_capture_provenance_nullable.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -118,6 +120,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_R03_R04_PROFILE_DIRECT_KEY_PG_OLD_CONTROL_CLEANUP_R1": frozenset({12}),
     "R04_R05_RESEARCH_FACTS_R2": frozenset({13}),
     "R04_R05_SOURCE_D1_EVENTS_R2": frozenset({14}),
+    "R00_R03_POST_SINGLE_FACT_REAUDIT_CLOSURE_20261126": frozenset({89, 90, 91, 92}),
     "R06_BACKEND_D0_D1_PG_PERSISTENCE_CODE_R1": frozenset({15}),
     "R06_ALL_EXISTING_STATIC_RESEARCH_PG_CLOSED_R1": frozenset({16, 17, 18}),
     "R06_SECTOR_CROSS_PERIOD_PULSE_FACTS_R1": frozenset({19}),
@@ -179,7 +182,6 @@ _TASK_SCOPE_MIGRATIONS = {
     "R03_PHASE_CLOSURE_ROUND2_FINAL_20261126": frozenset({86}),
     "SINGLE_EFFECTIVE_FACT_REMOVE_MULTIVERSION_20261126": frozenset({87}),
     "SINGLE_EFFECTIVE_FACT_FINAL_CLOSURE_20261126": frozenset({88}),
-    "R00_R03_POST_SINGLE_FACT_REAUDIT_CLOSURE_20261126": frozenset({89, 90}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -433,6 +435,8 @@ _RELATIONS_BY_MIGRATION_COUNT[87] = _RELATIONS_BY_MIGRATION_COUNT[86]
 _RELATIONS_BY_MIGRATION_COUNT[88] = _RELATIONS_BY_MIGRATION_COUNT[87]
 _RELATIONS_BY_MIGRATION_COUNT[89] = _RELATIONS_BY_MIGRATION_COUNT[88]
 _RELATIONS_BY_MIGRATION_COUNT[90] = _RELATIONS_BY_MIGRATION_COUNT[89]
+_RELATIONS_BY_MIGRATION_COUNT[91] = _RELATIONS_BY_MIGRATION_COUNT[90]
+_RELATIONS_BY_MIGRATION_COUNT[92] = _RELATIONS_BY_MIGRATION_COUNT[91]
 
 
 class BindingRefused(Exception):

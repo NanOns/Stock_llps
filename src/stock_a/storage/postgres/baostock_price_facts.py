@@ -2785,8 +2785,6 @@ LEFT JOIN stock.source_capture_requests qfq_request
   ON qfq_request.capture_id=d.qfq_source_capture_id
  AND qfq_request.source_code=d.source_code AND qfq_request.adjustment_flag='2'
 WHERE c.provider='BAOSTOCK'
-  AND c.range_end_session<=%s
-  AND c.price_coordinates @> ARRAY['RAW_UNADJUSTED','FORWARD_ADJUSTED']::text[]
   AND d.session_date<=%s
 """
 
@@ -2967,12 +2965,13 @@ def read_baostock_price_history_rows_cursor(
         "" if source_capture_id is None else f" AND d.{coordinate_capture_column}=%s"
     )
     coordinate_capture_scope = (
+        f" AND {coordinate_capture_alias}.provider='BAOSTOCK'"
         f" AND {coordinate_capture_alias}.range_end_session<=%s"
         f" AND {coordinate_capture_alias}.price_coordinates @> ARRAY[%s]::text[]"
     )
     result = []
     for start in range(0, len(normalized_symbols), chunk_size):
-        params: list[Any] = [cutoff, cutoff]
+        params: list[Any] = [cutoff]
         if source_capture_id is not None:
             params.append(source_capture_id)
         params.extend(
@@ -3228,12 +3227,12 @@ def read_baostock_price_history_batch(
                 else ""
             )
             + f" AND {coordinate_capture_alias}.range_end_session<=%s"
+            + f" AND {coordinate_capture_alias}.provider='BAOSTOCK'"
             + f" AND {coordinate_capture_alias}.price_coordinates @> ARRAY[%s]::text[]"
             + " AND d.source_symbol=ANY(%s::text[])"
             + " AND d.session_date=ANY(%s::date[])"
             + " ORDER BY d.session_date,d.source_symbol OFFSET %s LIMIT %s",
             (
-                cutoff,
                 cutoff,
                 *capture_args,
                 cutoff,
@@ -3403,8 +3402,8 @@ def read_baostock_price_history_batch(
                 (
                     list(target_sessions),
                     list(source_codes),
-                    coordinate_flag,
                     cutoff,
+                    coordinate_flag,
                     cutoff,
                     list(symbols),
                     list(target_sessions),
@@ -3581,10 +3580,10 @@ def read_baostock_price_page(
             + f" AND (%s::bigint IS NULL OR d.{capture_column}=%s)"
             + f" AND {where_market} AND {where_board}"
             + f" AND {capture_alias}.range_end_session<=%s"
+            + f" AND {capture_alias}.provider='BAOSTOCK'"
             + f" AND {capture_alias}.price_coordinates @> ARRAY[%s]::text[]"
             + " ORDER BY d.source_symbol LIMIT %s OFFSET %s",
             (
-                cutoff,
                 cutoff,
                 target_session,
                 source_capture_id,
@@ -3754,13 +3753,16 @@ def read_baostock_price_detail(
             _PRICE_READ_SELECT
             + " AND d.source_symbol=%s AND d.session_date=%s"
             + " AND (d.raw_source_capture_id IS NOT NULL OR d.qfq_source_capture_id IS NOT NULL)"
-            + " AND (d.raw_source_capture_id IS NULL OR raw_capture.range_end_session<=%s)"
-            + " AND (d.qfq_source_capture_id IS NULL OR qfq_capture.range_end_session<=%s)"
+            + " AND (d.raw_source_capture_id IS NULL OR (raw_capture.provider='BAOSTOCK'"
+            + " AND raw_capture.range_end_session<=%s"
+            + " AND raw_capture.price_coordinates @> ARRAY['RAW_UNADJUSTED']::text[]))"
+            + " AND (d.qfq_source_capture_id IS NULL OR (qfq_capture.provider='BAOSTOCK'"
+            + " AND qfq_capture.range_end_session<=%s"
+            + " AND qfq_capture.price_coordinates @> ARRAY['FORWARD_ADJUSTED']::text[]))"
             + " AND (%s::bigint IS NULL OR d.source_capture_id=%s"
             + " OR d.raw_source_capture_id=%s OR d.qfq_source_capture_id=%s)"
             + " ORDER BY d.source_symbol LIMIT 2",
             (
-                research_cutoff,
                 research_cutoff,
                 normalized_symbol,
                 target_session,

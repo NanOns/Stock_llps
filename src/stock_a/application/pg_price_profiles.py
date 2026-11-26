@@ -184,8 +184,10 @@ def _records_for_page(
             raise PgPriceProfileError(
                 "PROFILE_COMPONENT_COUNT_INVALID", "现役Profile11分项没有完整返回"
             )
-        source_time_quality = source_context.get("source_time_quality") or "UNKNOWN"
-        source_available_at = source_context.get("source_available_at")
+        source_time_quality = target_row.get("source_time_quality") or "UNKNOWN"
+        source_available_at = target_row.get("capture_available_at")
+        if source_available_at is None:
+            source_available_at = target_row.get("observed_started_at")
         if isinstance(source_available_at, str):
             source_available_at = datetime.fromisoformat(source_available_at)
         record: dict[str, Any] = {

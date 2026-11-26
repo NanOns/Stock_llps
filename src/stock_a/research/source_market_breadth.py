@@ -24,9 +24,9 @@ class SourceCohortIdentity:
     price_coordinate: str
     source_time_quality: str
     source_available_at: str | None
-    capture_read_started_at: str
-    capture_validated_at: str
-    source_clock_role: str
+    capture_read_started_at: str | None
+    capture_validated_at: str | None
+    source_clock_role: str | None
     price_row_count: int
     capture_expected_price_row_count: int
     target_present_count: int
@@ -122,11 +122,10 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
     ):
         raise ValueError("来源目标日必须是截止日前的明确会话")
     if (
-        type(cohort.source_capture_id) is not int
-        or cohort.source_capture_id <= 0
-        or cohort.price_coordinate != _PRICE_COORDINATE
-    ):
-        raise ValueError("市场宽度来源必须绑定BaoStock捕获和QFQ坐标")
+        cohort.source_capture_id is not None
+        and (type(cohort.source_capture_id) is not int or cohort.source_capture_id <= 0)
+    ) or cohort.price_coordinate != _PRICE_COORDINATE:
+        raise ValueError("市场宽度来源捕获溯源或QFQ坐标无效")
     if (
         inputs.calendar_id != cohort.calendar_id
         or inputs.calendar_revision != cohort.calendar_revision
@@ -153,7 +152,7 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
         != cohort.price_row_count
     ):
         raise ValueError("Raw行数或来源状态分母不闭合")
-    if (
+    if cohort.source_capture_id is not None and (
         not cohort.source_clock_role
         or not cohort.capture_read_started_at
         or not cohort.capture_validated_at
@@ -229,8 +228,6 @@ def _observed_close(
         return None, "OFFICIAL_SESSION_MISMATCH", None
     if observation.source_capture_id is None:
         return None, "QFQ_SOURCE_CAPTURE_ID_MISSING", None
-    if observation.source_capture_id != cohort.source_capture_id:
-        return None, "SOURCE_CAPTURE_MISMATCH", None
     if observation.price_coordinate != _PRICE_COORDINATE:
         return None, "PRICE_COORDINATE_NOT_FORWARD_ADJUSTED", None
     if observation.bar_status == "CONFIRMED_SUSPENSION":
@@ -322,6 +319,41 @@ def calculate_source_market_breadth(
             if current_t3 is not None and previous_t3 is not None
             else None
         )
+        pair_t = (
+            bars.get((source_symbol, target_session)),
+            bars.get((source_symbol, t_minus_1)),
+        )
+        pair_t3 = (
+            bars.get((source_symbol, t_minus_3)),
+            bars.get((source_symbol, t_minus_4)),
+        )
+        if ret_t is not None and (
+            pair_t[0] is None
+            or pair_t[1] is None
+            or pair_t[0].source_capture_id is None
+            or pair_t[0].source_capture_id != pair_t[1].source_capture_id
+        ):
+            ret_t = None
+            reason_t = "QFQ_SOURCE_CAPTURE_MISMATCH"
+        if ret_t3 is not None and (
+            pair_t3[0] is None
+            or pair_t3[1] is None
+            or pair_t3[0].source_capture_id is None
+            or pair_t3[0].source_capture_id != pair_t3[1].source_capture_id
+        ):
+            ret_t3 = None
+            reason_t3 = "QFQ_SOURCE_CAPTURE_MISMATCH"
+        if ret_t is not None and ret_t3 is not None:
+            qfq_sources = {
+                observation.source_capture_id
+                for observation in (*pair_t, *pair_t3)
+                if observation is not None
+            }
+            if len(qfq_sources) != 1 or None in qfq_sources:
+                ret_t = None
+                ret_t3 = None
+                reason_t = "QFQ_CROSS_PERIOD_BASIS_UNPROVEN"
+                reason_t3 = "QFQ_CROSS_PERIOD_BASIS_UNPROVEN"
         positive_t = int(ret_t > 0) if ret_t is not None else None
         positive_t3 = int(ret_t3 > 0) if ret_t3 is not None else None
         missing_t = reason_t or reason_t1

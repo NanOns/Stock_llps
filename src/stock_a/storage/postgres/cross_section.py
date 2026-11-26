@@ -62,7 +62,7 @@ def _to_db_numeric(
 def _build_endpoint_rows(
     *,
     target_session: date,
-    price_capture_id: int,
+    price_capture_id: int | None,
     universe_capture_id: int | None,
     calendar_id: str,
     calendar_revision: str,
@@ -125,7 +125,7 @@ def persist_cross_section_day_facts(
     config: Mapping[str, Any],
     *,
     batch_result: Mapping[str, Any],
-    price_capture_id: int,
+    price_capture_id: int | None,
     universe_capture_id: int | None,
     universe_version: str | None = None,
     calendar_id: str,
@@ -429,14 +429,14 @@ def read_cross_section_day_bundle(
         ep_rows = cursor.fetchall()
 
     by_entity: dict[str, dict[str, FieldValue]] = {}
-    actual_price_capture_id: int | None = price_capture_id
+    observed_price_capture_ids: set[int] = set()
     actual_universe_capture_id: int | None = universe_capture_id
     actual_calendar_revision: str | None = calendar_revision
     actual_contract_version: str = contract_version
     for row in rows:
         sym = str(row[0])
-        if actual_price_capture_id is None and row[41] is not None:
-            actual_price_capture_id = int(row[41])
+        if row[41] is not None:
+            observed_price_capture_ids.add(int(row[41]))
         if actual_universe_capture_id is None and row[42] is not None:
             actual_universe_capture_id = int(row[42])
         if actual_calendar_revision is None and row[43] is not None:
@@ -518,7 +518,11 @@ def read_cross_section_day_bundle(
         "status": bundle_status,
         "reason": bundle_reason,
         "target_session": target_session,
-        "price_capture_id": actual_price_capture_id,
+        "price_capture_id": (
+            next(iter(observed_price_capture_ids))
+            if len(observed_price_capture_ids) == 1
+            else None
+        ),
         "universe_capture_id": actual_universe_capture_id
         if actual_universe_capture_id is not None
         else universe_capture_id_val,

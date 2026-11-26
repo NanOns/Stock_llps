@@ -1451,9 +1451,11 @@ def build_data_job_plan(
                 for coordinate in missing_coordinates
             )
     selected_window_capture_ids = {
-        int(item["source_capture_id"])
+        item["source_capture_id"]
         for item in price_capture_inputs
         if item["session_date"] in raw_window_sessions
+        and type(item["source_capture_id"]) is int
+        and item["source_capture_id"] > 0
     }
     has_any_captured_facts = any(
         any(coordinate in by_coordinate for coordinate in price_coordinates)
@@ -6971,20 +6973,8 @@ def _execute_shared_production_chain_impl(
             if isinstance(ep_caps, Mapping)
             else None
         )
-        if (
-            window_status == "PER_SESSION_COORDINATE_CAPTURES"
-            and not plan.get("missing_price_inputs")
-            and isinstance(ep_caps, Mapping)
-            and ep_caps
-        ):
-            if type(target_cap) is int:
-                source_capture_id = int(target_cap)
-            else:
-                raise DataJobError(
-                    "BAOSTOCK_TARGET_COORDINATE_CAPTURE_AMBIGUOUS",
-                    "目标日QFQ坐标没有唯一真实捕获身份；保留逐证券事实，不以其它日期或最大捕获号代替。",
-                    status=409,
-                )
+        if window_status == "PER_SESSION_COORDINATE_CAPTURES" and bool(capture_inputs):
+            source_capture_id = int(target_cap) if type(target_cap) is int else None
         elif (
             len(capture_ids) != 1
             or type(next(iter(capture_ids), None)) is not int
@@ -7008,8 +6998,6 @@ def _execute_shared_production_chain_impl(
                 status=409,
             )
         return
-    assert source_capture_id is not None
-
     cutoff = date.fromisoformat(plan["research_cutoff"])
     ep_caps = plan.get("endpoint_capture_ids_by_session")
     coordinate_caps = plan.get("endpoint_capture_ids_by_session_coordinate", {})
@@ -8356,7 +8344,7 @@ def _execute_shared_production_chain_impl(
         day: date, *, capture_id: int | None = None
     ) -> str:
         day_text = day.isoformat()
-        ep_cap = int(capture_id) if capture_id is not None else int(source_capture_id)
+        ep_cap = capture_id if capture_id is not None else source_capture_id
         from stock_a.application.pg_research import read_source_version_context
         from stock_a.storage.postgres.static_research_facts import (
             read_source_pool_seed_forward_scope,

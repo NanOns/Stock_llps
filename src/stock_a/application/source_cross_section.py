@@ -368,7 +368,8 @@ def persist_source_cross_section_for_session(
     persist_report = persist_cross_section_day_facts(
         config,
         batch_result=batch_result,
-        price_capture_id=source_capture_id,
+        # 目标日横截面可能由多个证券/日期捕获组合而成，不伪造一个整体捕获键。
+        price_capture_id=None,
         universe_capture_id=universe_capture_id,
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
