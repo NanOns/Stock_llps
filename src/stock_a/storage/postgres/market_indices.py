@@ -573,6 +573,7 @@ def read_market_environment_display(
         "raw_status": row[6],
         "raw_label": row[7],
         "displayed_label": row[8],
+        "display_label": row[8],
         "display_status": row[9],
         "pending_label": row[10],
         "pending_count": int(row[11]),
@@ -790,6 +791,15 @@ def read_market_index_daily_scope(
     )
 
 
+def _normalize_optional_text_arg(value: str | None, *, name: str) -> str | None:
+    """校验可选文本参数，非空时返回去除首尾空白的字符串，空字符串拒绝。"""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"INVALID_{name.upper()}")
+    return value.strip()
+
+
 def persist_market_indices_and_environment_for_session(
     config: Mapping[str, Any],
     *,
@@ -799,10 +809,31 @@ def persist_market_indices_and_environment_for_session(
     index_capture_id: int,
     index_contract: Mapping[str, Any] | None = None,
     rule_version: str = "MARKET_PRESENTATION_R1",
+    profile_revision: str | None = None,
+    formal_scope_key: str | None = None,
+    universe_version_t: str | None = None,
+    universe_version_t3: str | None = None,
 ) -> dict[str, Any]:
-    """离线生产单日全部启用参考指数日因子与目标日四轴复合市场环境展示状态。"""
+    """离线生产单日全部启用参考指数日因子与目标日四轴复合市场环境展示状态。
+
+    宽度轴优先并仅消费 `stock.r03_formal_market_breadth_facts` 的已闭合正式宽度；
+    正式宽度缺失、未完成、非 OBSERVED 或口径歧义时均标 `UNKNOWN`，严禁回退使用
+    `b_fixed_source` 冒充正式宽度。参与度轴按合同版本与可选 `profile_revision` 精确过滤。
+    """
     if target_session > research_cutoff:
         raise ValueError("市场指数与环境目标日不得晚于研究截止日")
+    norm_profile_revision = _normalize_optional_text_arg(
+        profile_revision, name="profile_revision"
+    )
+    norm_formal_scope_key = _normalize_optional_text_arg(
+        formal_scope_key, name="formal_scope_key"
+    )
+    norm_universe_t = _normalize_optional_text_arg(
+        universe_version_t, name="universe_version_t"
+    )
+    norm_universe_t3 = _normalize_optional_text_arg(
+        universe_version_t3, name="universe_version_t3"
+    )
     calendar_data, _, calendar_revision, calendar_sessions = _load_calendar(
         research_cutoff
     )
@@ -835,10 +866,15 @@ def persist_market_indices_and_environment_for_session(
     primary_symbol = str(primary_item["source_symbol"])
     enabled_symbols = [str(item["source_symbol"]) for item in enabled_indices]
 
-    # 1. 读取该 index_capture_id 下全部启用指数 <= target_session 的日线点位
+    from stock_a.storage.postgres.market_participation import (
+        MARKET_PARTICIPATION_CONTRACT,
+    )
+
+    # 1. 读取该 index_capture_id 下全部启用指数 <= target_session 的日线点位、参与度与正式宽度候选
     bars_by_symbol: dict[str, dict[date, IndexDailyBar]] = {
         sym: {} for sym in enabled_symbols
     }
+    formal_candidates: list[tuple[str, str, str]] = []
     with _transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
@@ -863,24 +899,74 @@ def persist_market_indices_and_environment_for_session(
                 bar_status=str(bs),
             )
 
-        cursor.execute(
-            """SELECT classification, status
-               FROM stock.source_market_participation_days
-               WHERE target_session = %s
-                 AND source_capture_id = %s
-                 AND calendar_revision = %s
-               ORDER BY id DESC
-               LIMIT 1""",
-            (target_session, stock_capture_id, calendar_revision),
-        )
-        part_row = cursor.fetchone()
-        participation_axis = (
-            str(part_row[0])
-            if part_row is not None
-            and part_row[1] not in {"NOT_COMPUTED", "NOT_COMPARABLE", "INCOMPLETE"}
-            and part_row[0] in {"EXPANDING", "NORMAL", "THIN"}
-            else "UNKNOWN"
-        )
+        part_sql = """
+            SELECT classification, status, profile_revision
+            FROM stock.source_market_participation_days
+            WHERE target_session = %s
+              AND source_capture_id = %s
+              AND calendar_revision = %s
+              AND contract_version = %s
+        """
+        part_params: list[Any] = [
+            target_session,
+            stock_capture_id,
+            calendar_revision,
+            MARKET_PARTICIPATION_CONTRACT,
+        ]
+        if norm_profile_revision is not None:
+            part_sql += " AND profile_revision = %s"
+            part_params.append(norm_profile_revision)
+        part_sql += " ORDER BY profile_revision, id"
+        cursor.execute(part_sql, tuple(part_params))
+        part_rows = cursor.fetchall()
+        if len(part_rows) == 0:
+            participation_axis = "UNKNOWN"
+            participation_source_status = "MISSING"
+        elif len(part_rows) > 1:
+            # 拒绝任意取最新行，多 profile_revision 歧义时显式标未知
+            participation_axis = "UNKNOWN"
+            participation_source_status = "AMBIGUOUS_PROFILE_REVISION"
+        else:
+            part_row = part_rows[0]
+            participation_axis = (
+                str(part_row[0])
+                if part_row[1] not in {"NOT_COMPUTED", "NOT_COMPARABLE", "INCOMPLETE"}
+                and part_row[0] in {"EXPANDING", "NORMAL", "THIN"}
+                else "UNKNOWN"
+            )
+            participation_source_status = (
+                "OBSERVED" if participation_axis != "UNKNOWN" else str(part_row[1])
+            )
+
+        formal_sql = """
+            SELECT scope_key, universe_version_t, universe_version_t3
+            FROM stock.r03_formal_market_breadth_facts
+            WHERE trade_date = %s
+              AND contract_version = %s
+              AND SPLIT_PART(scope_key, ':', 1) = %s
+        """
+        formal_params: list[Any] = [
+            target_session,
+            "R03_FORMAL_SECTOR_V1",
+            f"BAOSTOCK_CAP_{int(stock_capture_id)}",
+        ]
+        if norm_formal_scope_key is not None:
+            formal_sql += " AND scope_key = %s"
+            formal_params.append(norm_formal_scope_key)
+        if norm_profile_revision is not None:
+            formal_sql += " AND SPLIT_PART(scope_key, ':', 2) = %s"
+            formal_params.append(f"PROF_{norm_profile_revision}")
+        if norm_universe_t is not None:
+            formal_sql += " AND universe_version_t = %s"
+            formal_params.append(norm_universe_t)
+        if norm_universe_t3 is not None:
+            formal_sql += " AND universe_version_t3 = %s"
+            formal_params.append(norm_universe_t3)
+        formal_sql += " ORDER BY scope_key, universe_version_t, universe_version_t3"
+        cursor.execute(formal_sql, tuple(formal_params))
+        formal_candidates = [
+            (str(r[0]), str(r[1]), str(r[2])) for r in cursor.fetchall()
+        ]
 
         # E02：读取紧邻前一官方交易日的已存环境状态作为 initial_state，保障跨日两日确认/UNKNOWN保留语义
         target_idx = calendar_sessions.index(target_session)
@@ -920,9 +1006,45 @@ def persist_market_indices_and_environment_for_session(
                     "primary_index_symbol": str(prev_row[4]),
                 }
 
-    # E03/R07：直接从主宽度事实（read_source_market_context）读取 B_fixed_source；
-    # 仅在合法的宽度未计算/无记录业务异常时降级 UNKNOWN，严禁吞掉 SQL/代码/配置异常
+    # C03：仅使用正式市场宽度 r03_formal_market_breadth_facts 驱动 breadth_axis，严禁回退到 b_fixed_source
     breadth_axis = "UNKNOWN"
+    formal_breadth_status = "MISSING"
+    formal_breadth_scope: dict[str, str] | None = None
+    if len(formal_candidates) > 1:
+        formal_breadth_status = "AMBIGUOUS_SCOPE"
+    elif len(formal_candidates) == 1:
+        from stock_a.storage.postgres.r03_formal_sector import (
+            read_r03_formal_market_breadth,
+        )
+
+        matched_scope_key, matched_u_t, matched_u_t3 = formal_candidates[0]
+        formal_breadth_scope = {
+            "scope_key": matched_scope_key,
+            "universe_version_t": matched_u_t,
+            "universe_version_t3": matched_u_t3,
+        }
+        formal_breadth = read_r03_formal_market_breadth(
+            config,
+            trade_date=target_session,
+            scope_key=matched_scope_key,
+            universe_version_t=matched_u_t,
+            universe_version_t3=matched_u_t3,
+        )
+        formal_breadth_status = str(formal_breadth.get("status") or "UNKNOWN")
+        exact = formal_breadth.get("exact")
+        if (
+            formal_breadth_status == "OBSERVED"
+            and isinstance(exact, Mapping)
+            and type(exact.get("numerator")) is int
+            and type(exact.get("denominator")) is int
+            and exact["denominator"] > 0
+        ):
+            breadth_axis = classify_market_breadth(
+                Fraction(exact["numerator"], exact["denominator"])
+            )
+
+    # 保留旧 b_fixed_source 作为来源级诊断参考，不参与正式环境 breadth_axis 判定
+    diagnostic_b_fixed_source: str | None = None
     from stock_a.application.source_market_context import (
         SourceMarketContextError,
         read_source_market_context,
@@ -936,7 +1058,8 @@ def persist_market_indices_and_environment_for_session(
             source_capture_id=stock_capture_id,
             include_symbols=False,
         )
-        breadth_axis = classify_market_breadth(mkt_ctx.calculation.b_fixed_source)
+        if mkt_ctx.calculation.b_fixed_source is not None:
+            diagnostic_b_fixed_source = str(mkt_ctx.calculation.b_fixed_source)
     except SourceMarketContextError as ctx_err:
         err_code = str(getattr(ctx_err, "code", "") or "")
         if (
@@ -951,7 +1074,7 @@ def persist_market_indices_and_environment_for_session(
             or "NOT_AVAILABLE" in err_code
             or "NOT_COMPUTED" in err_code
         ):
-            breadth_axis = "UNKNOWN"
+            diagnostic_b_fixed_source = None
         else:
             raise
 
@@ -1052,4 +1175,8 @@ def persist_market_indices_and_environment_for_session(
             "participation": participation_axis,
             "pressure": pressure_axis,
         },
+        "formal_breadth_status": formal_breadth_status,
+        "formal_breadth_scope": formal_breadth_scope,
+        "participation_source_status": participation_source_status,
+        "diagnostic_b_fixed_source": diagnostic_b_fixed_source,
     }

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, datetime, timezone
 from fractions import Fraction
+import inspect
 from typing import Any
 
 from stock_a.application.source_market_context import (
@@ -89,20 +90,55 @@ def _is_valid_ohlc(o: Any, h: Any, l: Any, c: Any) -> bool:
 
 
 def _check_capture_dual_coordinates(cur: Any, source_capture_id: int) -> bool:
+    """校验来源捕获是否具备双价格坐标且处于已验证闭合完成态（无未完成请求或运行中/失败进度）。"""
     cur.execute(
         """
-        SELECT price_coordinates
+        SELECT price_coordinates, validated_at, normalized_count, provider
         FROM stock.source_captures
         WHERE capture_id=%s
         """,
         (source_capture_id,),
     )
     row = cur.fetchone()
-    if row is not None and row[0] is not None:
-        coords = {str(x) for x in row[0]}
-        if {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}.issubset(coords):
-            return True
-    return False
+    if row is None or row[0] is None:
+        return False
+    coords = {str(x) for x in row[0]}
+    if not {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}.issubset(coords):
+        return False
+    if row[1] is None:
+        return False
+    if row[2] is None or int(row[2]) <= 0:
+        return False
+    if row[3] is not None and str(row[3]) != "BAOSTOCK":
+        return False
+    cur.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM stock.source_capture_requests
+            WHERE capture_id=%s
+              AND request_status NOT IN ('COMPLETED', 'NO_DATA')
+        )
+        """,
+        (source_capture_id,),
+    )
+    if bool(cur.fetchone()[0]):
+        return False
+    cur.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM stock.data_job_progress
+            WHERE source_capture_id=%s
+              AND business_table='stock.source_raw_daily'
+              AND status IN ('FAILED', 'INCOMPLETE', 'RUNNING')
+        )
+        """,
+        (source_capture_id,),
+    )
+    if bool(cur.fetchone()[0]):
+        return False
+    return True
 
 
 def _check_captures_qfq_comparable(
@@ -298,11 +334,7 @@ def _load_endpoint_observations(
                 q_close,
                 q_pq,
             ) = raw[1:]
-            raw_ohlc_ok = (
-                _is_valid_ohlc(r_open, r_high, r_low, r_close)
-                if (r_open is not None and r_high is not None and r_low is not None)
-                else (r_close is not None and Fraction(str(r_close)) > 0)
-            )
+            raw_ohlc_ok = _is_valid_ohlc(r_open, r_high, r_low, r_close)
             if (
                 bar_status == "TARGET_PRESENT"
                 and r_ts_q == "OBSERVED"
@@ -320,19 +352,22 @@ def _load_endpoint_observations(
             eff_amt_q = amt_q or r_amt_q
             raw_amount = (
                 Fraction(str(r_amt))
-                if r_amt is not None
+                if bar_status == "TARGET_PRESENT"
+                and r_ts_q == "OBSERVED"
+                and str(r_ts) == "1"
+                and r_amt is not None
                 and eff_amt_q in {"OBSERVED", "RAW_SOURCE_VALUE_OBSERVED"}
                 and Fraction(str(r_amt)) >= 0
                 else None
             )
-            qfq_ohlc_ok = (
-                _is_valid_ohlc(q_open, q_high, q_low, q_close)
-                if (q_open is not None and q_high is not None and q_low is not None)
-                else (q_close is not None and Fraction(str(q_close)) > 0)
-            )
+            qfq_ohlc_ok = _is_valid_ohlc(q_open, q_high, q_low, q_close)
             qfq_close = (
                 Fraction(str(q_close))
-                if qfq_bs == "TARGET_PRESENT" and q_pq == "OBSERVED" and qfq_ohlc_ok
+                if qfq_bs == "TARGET_PRESENT"
+                and q_pq == "OBSERVED"
+                and qfq_ohlc_ok
+                and r_ts_q == "OBSERVED"
+                and str(r_ts) == "1"
                 else None
             )
 
@@ -352,54 +387,14 @@ def _load_endpoint_observations(
                 rps20 = Fraction(str(cs[2]))
             elif cs[1] is not None:
                 rps20 = Fraction(str(cs[1]))
-        last_actual_qfq_close = None
         quote_age: int | None = (
             0 if q_state == "TRUE" and qfq_close is not None else None
         )
-        if q_state == "CONFIRMED_SUSPENSION":
-            from stock_a.application.data_jobs import _load_official_sessions
-
-            _cal_id, _cal_rev, off_sessions = _load_official_sessions(session)
-            prev_official = [d for d in off_sessions if d < session][-20:]
-            expected_desc = list(reversed(prev_official))
-            cur.execute(
-                """
-                SELECT session_date, bar_status, raw_tradestatus_value, raw_tradestatus_quality,
-                       qfq_bar_status, qfq_close, qfq_price_quality
-                FROM stock.source_raw_daily
-                WHERE source_capture_id=%s AND source_symbol=%s AND session_date < %s
-                ORDER BY session_date DESC
-                LIMIT 21
-                """,
-                (source_capture_id, sym, session),
-            )
-            hist_by_day = {r[0]: r for r in cur.fetchall()}
-            for idx_age, exp_day in enumerate(expected_desc, start=1):
-                h_row = hist_by_day.get(exp_day)
-                if h_row is None:
-                    # 官方会话存在真实缺行（非已证停牌），禁止跨缺日寻找旧价
-                    break
-                _h_day, h_bs, h_ts, h_ts_q, h_qbs, h_qc, h_qpq = h_row
-                if (
-                    h_bs == "TARGET_PRESENT"
-                    and h_ts_q == "OBSERVED"
-                    and str(h_ts) == "1"
-                    and h_qbs == "TARGET_PRESENT"
-                    and h_qpq == "OBSERVED"
-                    and h_qc is not None
-                    and Fraction(str(h_qc)) > 0
-                ):
-                    last_actual_qfq_close = Fraction(str(h_qc))
-                    quote_age = idx_age
-                    break
-                if not (h_ts_q == "OBSERVED" and str(h_ts) == "0"):
-                    # 区间存在非已证停牌的未知缺口，禁止估值
-                    break
         obs[sym] = {
             "actual_quote_state": q_state,
             "raw_close": raw_close,
             "qfq_close": qfq_close,
-            "last_actual_qfq_close": last_actual_qfq_close,
+            "last_actual_qfq_close": None,
             "quote_age": quote_age,
             "raw_amount": raw_amount,
             "ret1": ret1,
@@ -410,6 +405,66 @@ def _load_endpoint_observations(
             "seed_state": seed_state if seed_state in {"TRUE", "FALSE"} else "UNKNOWN",
             "rps20": rps20,
         }
+
+    suspended_syms = [
+        sym
+        for sym in sym_list
+        if obs[sym]["actual_quote_state"] == "CONFIRMED_SUSPENSION"
+    ]
+    if suspended_syms:
+        from stock_a.application.data_jobs import _load_official_sessions
+
+        _cal_id, _cal_rev, off_sessions = _load_official_sessions(session)
+        prev_official = [d for d in off_sessions if d < session][-20:]
+        expected_desc = list(reversed(prev_official))
+        if expected_desc:
+            cur.execute(
+                """
+                SELECT source_symbol, session_date, bar_status, raw_tradestatus_value,
+                       raw_tradestatus_quality, qfq_bar_status, qfq_open, qfq_high,
+                       qfq_low, qfq_close, qfq_price_quality
+                FROM stock.source_raw_daily
+                WHERE source_capture_id=%s
+                  AND source_symbol=ANY(%s)
+                  AND session_date >= %s
+                  AND session_date < %s
+                """,
+                (source_capture_id, suspended_syms, expected_desc[-1], session),
+            )
+            hist_by_sym_day = {(str(r[0]), r[1]): r for r in cur.fetchall()}
+            for sym in suspended_syms:
+                for idx_age, exp_day in enumerate(expected_desc, start=1):
+                    h_row = hist_by_sym_day.get((sym, exp_day))
+                    if h_row is None:
+                        # 官方会话存在真实缺行（非已证停牌），禁止跨缺日寻找旧价
+                        break
+                    (
+                        _h_sym,
+                        _h_day,
+                        h_bs,
+                        h_ts,
+                        h_ts_q,
+                        h_qbs,
+                        h_qo,
+                        h_qh,
+                        h_ql,
+                        h_qc,
+                        h_qpq,
+                    ) = h_row
+                    if (
+                        h_bs == "TARGET_PRESENT"
+                        and h_ts_q == "OBSERVED"
+                        and str(h_ts) == "1"
+                        and h_qbs == "TARGET_PRESENT"
+                        and h_qpq == "OBSERVED"
+                        and _is_valid_ohlc(h_qo, h_qh, h_ql, h_qc)
+                    ):
+                        obs[sym]["last_actual_qfq_close"] = Fraction(str(h_qc))
+                        obs[sym]["quote_age"] = idx_age
+                        break
+                    if not (h_ts_q == "OBSERVED" and str(h_ts) == "0"):
+                        # 区间存在非已证停牌的未知缺口，禁止估值
+                        break
     return obs
 
 
@@ -425,6 +480,28 @@ def _load_known_basic_symbols(cur: Any, source_capture_id: int) -> set[str]:
     return {str(r[0]) for r in cur.fetchall() if r[0]}
 
 
+_SNAPSHOT_SOURCE_KIND = {
+    "INDUSTRY": "TDX_TDXHY_CFG",
+    "CONCEPT": "TDX_INFOHARBOR_BLOCK_DAT",
+}
+_NON_PIT_SOURCE_QUALITIES = frozenset({"COMPLETE_NON_PIT", "PARTIAL_NON_PIT"})
+
+
+def _parse_observed_at(val: Any) -> datetime | None:
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        dt = val
+    else:
+        try:
+            dt = datetime.fromisoformat(str(val))
+        except (TypeError, ValueError):
+            return None
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return None
+    return dt
+
+
 def _load_snapshot_boards(
     cur: Any,
     snap_map: Mapping[str, int] | None,
@@ -433,6 +510,7 @@ def _load_snapshot_boards(
 ) -> tuple[
     list[tuple[str, str, list[MemberSlot], bool]], set[str], dict[str, str | None]
 ]:
+    """严格校验并加载 TDX 快照目录与成员槽位；保留 UNMAPPED 槽位并区分 COMPLETE_NON_PIT/PARTIAL_NON_PIT。"""
     boards_meta: list[tuple[str, str, list[MemberSlot], bool]] = []
     all_symbols: set[str] = set()
     primary_industry: dict[str, str | None] = {}
@@ -440,82 +518,189 @@ def _load_snapshot_boards(
     if not snap_map:
         return boards_meta, all_symbols, primary_industry
 
+    ind_raw = snap_map.get("INDUSTRY")
+    con_raw = snap_map.get("CONCEPT")
+    if ind_raw is not None and con_raw is not None:
+        if (
+            type(ind_raw) is not int
+            or ind_raw <= 0
+            or type(con_raw) is not int
+            or con_raw <= 0
+            or ind_raw == con_raw
+        ):
+            raise R03FormalSectorPgError(
+                "SECTOR_SNAPSHOT_PAIR_SCOPE_INVALID",
+                "行业与GN概念快照ID必须是不同的正整数。",
+            )
+
+    observed_by_kind: dict[str, datetime] = {}
     for kind in ("INDUSTRY", "CONCEPT"):
         snap_id = snap_map.get(kind)
         if snap_id is None:
             continue
+        if type(snap_id) is not int or snap_id <= 0:
+            raise R03FormalSectorPgError(
+                "SECTOR_SNAPSHOT_PAIR_SCOPE_INVALID",
+                f"{kind} 快照ID必须是正整数。",
+            )
         cur.execute(
             """
-            SELECT source_quality
-            FROM stock.tdx_sector_source_snapshots
-            WHERE snapshot_id=%s
+            SELECT s.snapshot_id, s.source_kind, s.observed_at,
+                   s.source_valid_on, s.source_known_at, s.source_available_at,
+                   s.clock_quality, s.research_mode, s.source_quality,
+                   COALESCE(c.catalog_rows, 0)::bigint,
+                   COALESCE(c.industry_catalog_rows, 0)::bigint,
+                   COALESCE(c.concept_catalog_rows, 0)::bigint,
+                   COALESCE(c.excluded_catalog_rows, 0)::bigint,
+                   COALESCE(m.member_rows, 0)::bigint,
+                   COALESCE(m.industry_member_rows, 0)::bigint,
+                   COALESCE(m.concept_member_rows, 0)::bigint,
+                   COALESCE(m.invalid_membership_quality_rows, 0)::bigint
+            FROM stock.tdx_sector_source_snapshots s
+            LEFT JOIN LATERAL (
+                SELECT count(*)::bigint AS catalog_rows,
+                       count(*) FILTER (WHERE board_kind='INDUSTRY')::bigint AS industry_catalog_rows,
+                       count(*) FILTER (WHERE board_kind='CONCEPT')::bigint AS concept_catalog_rows,
+                       count(*) FILTER (WHERE board_kind NOT IN ('INDUSTRY', 'CONCEPT'))::bigint AS excluded_catalog_rows
+                FROM stock.tdx_sector_catalog
+                WHERE snapshot_id = s.snapshot_id
+            ) c ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT count(*)::bigint AS member_rows,
+                       count(*) FILTER (WHERE member.board_kind='INDUSTRY')::bigint AS industry_member_rows,
+                       count(*) FILTER (WHERE member.board_kind='CONCEPT')::bigint AS concept_member_rows,
+                       count(*) FILTER (WHERE member.membership_quality NOT IN ('OBSERVED_SOURCE_RELATION', 'UNMAPPED'))::bigint AS invalid_membership_quality_rows
+                FROM stock.tdx_sector_members member
+                JOIN stock.tdx_sector_catalog catalog ON catalog.id = member.catalog_id
+                WHERE catalog.snapshot_id = s.snapshot_id
+            ) m ON TRUE
+            WHERE s.snapshot_id=%s
             """,
             (int(snap_id),),
         )
         snap_row = cur.fetchone()
-        snap_quality = (
-            str(snap_row[0]) if snap_row and snap_row[0] is not None else None
-        )
-        quality_head = (
-            snap_quality.split(";", 1)[0].strip().upper()
-            if snap_quality is not None
-            else ""
-        )
-        snapshot_complete = snap_row is not None and quality_head in {
-            "COMPLETE",
-            "COMPLETE_NON_PIT",
-            "PARTIAL_NON_PIT",
-            "VALID",
-            "VERIFIED",
-            "AVAILABLE",
-            "PRESENT",
-            "OK",
-        }
+        snapshot_complete = False
+        quality_code = ""
+        if snap_row is not None:
+            (
+                _sid,
+                src_kind,
+                obs_at_raw,
+                src_valid_on,
+                src_known_at,
+                src_available_at,
+                clock_q,
+                res_mode,
+                src_quality,
+                cat_rows,
+                ind_cat_rows,
+                con_cat_rows,
+                excl_cat_rows,
+                mem_rows,
+                ind_mem_rows,
+                con_mem_rows,
+                invalid_mq_rows,
+            ) = snap_row
+            obs_dt = _parse_observed_at(obs_at_raw)
+            if obs_dt is not None:
+                observed_by_kind[kind] = obs_dt.astimezone(timezone.utc)
+            quality_parts = (
+                str(src_quality).split(";") if isinstance(src_quality, str) else []
+            )
+            quality_code = quality_parts[0].strip().upper() if quality_parts else ""
+            quality_counts: dict[str, int] = {}
+            for part in quality_parts[1:]:
+                name, sep, raw_val = part.partition("=")
+                if sep and raw_val.isdecimal():
+                    quality_counts[name] = int(raw_val)
+            unmapped_decl = quality_counts.get("UNMAPPED_SOURCE_ROWS")
+            other_cat_rows = con_cat_rows if kind == "INDUSTRY" else ind_cat_rows
+            other_mem_rows = con_mem_rows if kind == "INDUSTRY" else ind_mem_rows
+            unmapped_decl_ok = unmapped_decl is not None and (
+                (quality_code == "COMPLETE_NON_PIT" and unmapped_decl == 0)
+                or (quality_code == "PARTIAL_NON_PIT" and unmapped_decl > 0)
+            )
+            snapshot_complete = (
+                src_kind == _SNAPSHOT_SOURCE_KIND.get(kind)
+                and obs_dt is not None
+                and res_mode == "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
+                and clock_q == "UNKNOWN"
+                and src_valid_on is None
+                and src_known_at is None
+                and src_available_at is None
+                and quality_code in _NON_PIT_SOURCE_QUALITIES
+                and unmapped_decl_ok
+                and cat_rows > 0
+                and mem_rows > 0
+                and other_cat_rows == 0
+                and other_mem_rows == 0
+                and excl_cat_rows == 0
+                and invalid_mq_rows == 0
+            )
+
         cur.execute(
             """
-            SELECT c.board_native_id, m.source_symbol, m.membership_quality
+            SELECT c.board_native_id, m.id, m.source_symbol, m.membership_quality
             FROM stock.tdx_sector_catalog c
             LEFT JOIN stock.tdx_sector_members m ON m.catalog_id = c.id
             WHERE c.snapshot_id=%s AND c.board_kind=%s
-            ORDER BY c.board_native_id, m.source_record_ordinal, m.source_symbol
+            ORDER BY c.board_native_id, m.source_record_ordinal, m.source_symbol, m.id
             """,
             (int(snap_id), kind),
         )
         by_board: dict[str, list[MemberSlot]] = {}
         seen_slots: set[tuple[str, str]] = set()
-        for bid, sym, mq in cur.fetchall():
+        actual_has_unmapped = False
+        for bid, m_id, sym, mq in cur.fetchall():
             bid_str = str(bid)
             by_board.setdefault(bid_str, [])
-            if sym is None:
+            if m_id is None:
                 continue
-            if (bid_str, sym) in seen_slots:
-                continue
-            seen_slots.add((bid_str, sym))
-            mapped_eid = (
-                sym
-                if (mq != "UNMAPPED" and (not known_symbols or sym in known_symbols))
-                else None
-            )
-            slot = MemberSlot(
-                slot_id=f"{kind}:{bid_str}:{sym}", entity_id=mapped_eid, symbol=sym
-            )
-            by_board[bid_str].append(slot)
-            if mapped_eid is not None:
-                all_symbols.add(mapped_eid)
+            if (
+                sym is not None
+                and mq != "UNMAPPED"
+                and (known_symbols is None or sym in known_symbols)
+            ):
+                if (bid_str, sym) in seen_slots:
+                    continue
+                seen_slots.add((bid_str, sym))
+                slot = MemberSlot(
+                    slot_id=f"{kind}:{bid_str}:{sym}", entity_id=sym, symbol=sym
+                )
+                by_board[bid_str].append(slot)
+                all_symbols.add(sym)
                 if kind == "INDUSTRY":
-                    if mapped_eid in industry_conflicts:
+                    if sym in industry_conflicts:
                         continue
-                    if (
-                        mapped_eid in primary_industry
-                        and primary_industry[mapped_eid] != bid_str
-                    ):
-                        primary_industry[mapped_eid] = None
-                        industry_conflicts.add(mapped_eid)
+                    if sym in primary_industry and primary_industry[sym] != bid_str:
+                        primary_industry[sym] = None
+                        industry_conflicts.add(sym)
                     else:
-                        primary_industry[mapped_eid] = bid_str
+                        primary_industry[sym] = bid_str
+            else:
+                if mq == "UNMAPPED" or sym is None:
+                    actual_has_unmapped = True
+                slot = MemberSlot(
+                    slot_id=f"{kind}:{bid_str}:row_{m_id}",
+                    entity_id=None,
+                    symbol=sym,
+                )
+                by_board[bid_str].append(slot)
+        if quality_code == "COMPLETE_NON_PIT" and actual_has_unmapped:
+            snapshot_complete = False
         for bid_str, slots in sorted(by_board.items()):
             # 保留完整名单中的 UNMAPPED 槽位，不因单个成员未映射而直接判整份快照不完整
             boards_meta.append((kind, bid_str, slots, snapshot_complete))
+
+    if (
+        "INDUSTRY" in observed_by_kind
+        and "CONCEPT" in observed_by_kind
+        and observed_by_kind["INDUSTRY"] != observed_by_kind["CONCEPT"]
+    ):
+        raise R03FormalSectorPgError(
+            "SECTOR_SNAPSHOT_PAIR_OBSERVATION_MISMATCH",
+            "行业与GN概念快照不是同一次来源观察。",
+        )
     return boards_meta, all_symbols, primary_industry
 
 
@@ -679,6 +864,16 @@ def assemble_r03_session_inputs(
             universe_version=universe_version,
             universe_capture_id=universe_capture_id,
         )
+        eff_u_cap_t1 = (
+            universe_capture_id_t1
+            if universe_capture_id_t1 is not None
+            else universe_capture_id
+        )
+        eff_u_cap_t3 = (
+            universe_capture_id_t3
+            if universe_capture_id_t3 is not None
+            else universe_capture_id
+        )
         u_ver_t1, u_syms_t1 = (
             _resolve_session_universe_members(
                 cur,
@@ -686,7 +881,7 @@ def assemble_r03_session_inputs(
                 session=t1_session,
                 price_capture_id=cap_t1,
                 universe_version=universe_version_t1,
-                universe_capture_id=universe_capture_id_t1,
+                universe_capture_id=eff_u_cap_t1,
             )
             if t1_session is not None and cap_t1 is not None
             else (None, set())
@@ -698,7 +893,7 @@ def assemble_r03_session_inputs(
                 session=t3_session,
                 price_capture_id=cap_t3,
                 universe_version=universe_version_t3,
-                universe_capture_id=universe_capture_id_t3,
+                universe_capture_id=eff_u_cap_t3,
             )
             if t3_session is not None and cap_t3 is not None
             else (None, set())
@@ -959,6 +1154,62 @@ def _extract_rotation_inputs(
     }
 
 
+def _compute_session_gap(
+    prev_trade_date: date | None,
+    trade_date: date,
+    official_sessions: Sequence[date] | None = None,
+) -> int | None:
+    """从官方交易日历计算 prev_trade_date 到 trade_date 的交易日间隔（>=1）。"""
+    if prev_trade_date is None or prev_trade_date >= trade_date:
+        return None
+    sessions = official_sessions
+    if sessions is None:
+        from stock_a.application.data_jobs import _load_official_sessions
+
+        _cal_id, _cal_rev, sessions = _load_official_sessions(trade_date)
+    gap = sum(1 for d in sessions if prev_trade_date < d <= trade_date)
+    return max(1, gap)
+
+
+def _call_compute_sector_native_day(
+    *,
+    boards_t: Sequence[Mapping[str, Any]],
+    boards_t1: Mapping[Any, Mapping[str, Any]],
+    boards_t3: Mapping[Any, Mapping[str, Any]],
+    previous_states: Mapping[Any, Mapping[str, Any]] | None = None,
+    previous_session_missing: bool = False,
+    prev_trade_date: date | None = None,
+    session_gap: int | None = None,
+) -> list[dict[str, Any]]:
+    """调用 compute_sector_native_day，兼容可选前态缺失与间隔参数。"""
+    params = inspect.signature(compute_sector_native_day).parameters
+    kwargs: dict[str, Any] = {
+        "boards_t": boards_t,
+        "boards_t1": boards_t1,
+        "boards_t3": boards_t3,
+        "previous_states": previous_states,
+    }
+    if "previous_session_missing" in params:
+        kwargs["previous_session_missing"] = previous_session_missing
+    if "prev_trade_date" in params:
+        kwargs["prev_trade_date"] = prev_trade_date
+    if "session_gap" in params:
+        kwargs["session_gap"] = session_gap
+    return compute_sector_native_day(**kwargs)
+
+
+def _call_step_rotation(
+    *,
+    session_gap: int | None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """调用 step_rotation_state_machine，兼容可选 session_gap 参数。"""
+    params = inspect.signature(step_rotation_state_machine).parameters
+    if "session_gap" in params:
+        kwargs["session_gap"] = session_gap if session_gap is not None else 1
+    return step_rotation_state_machine(**kwargs)
+
+
 def run_r03_formal_sector_day(
     config: Mapping[str, Any],
     *,
@@ -976,6 +1227,9 @@ def run_r03_formal_sector_day(
     allow_revision: bool = False,
     coordinate_comparable_t1: bool = True,
     coordinate_comparable_t1_by_board: Mapping[tuple[str, str], bool] | None = None,
+    previous_session_missing: bool = False,
+    prev_trade_date: date | None = None,
+    session_gap: int | None = None,
 ) -> dict[str, Any]:
     """执行单日 R03 正式 Native、资格、前态、Rotation、Overlap 与 LOO 离线生产并幂等落库。"""
     active_modules = modules or {
@@ -985,12 +1239,30 @@ def run_r03_formal_sector_day(
         "R03_SECTOR_LOO",
     }
 
-    native_rows = compute_sector_native_day(
+    native_rows = _call_compute_sector_native_day(
         boards_t=boards_t,
         boards_t1=boards_t1,
         boards_t3=boards_t3,
         previous_states=previous_states,
+        previous_session_missing=previous_session_missing,
+        prev_trade_date=prev_trade_date,
+        session_gap=session_gap,
     )
+    for nr in native_rows:
+        bkey = (str(nr["board_kind"]), str(nr["board_id"]))
+        ps = (
+            previous_states.get(bkey) or previous_states.get(nr["board_id"])
+            if previous_states
+            else None
+        )
+        if "prev_trade_date" not in nr:
+            nr["prev_trade_date"] = prev_trade_date if ps is not None else None
+        if "session_gap" not in nr:
+            nr["session_gap"] = session_gap if ps is not None else None
+        if "prev_exhaustion_level" not in nr:
+            nr["prev_exhaustion_level"] = (
+                ps.get("exhaustion_level") if ps is not None else None
+            )
     native_pg = {"inserted": 0, "updated": 0, "skipped": 0}
     if "R03_SECTOR_NATIVE" in active_modules:
         native_pg = write_r03_native_day_facts(
@@ -1018,12 +1290,28 @@ def run_r03_formal_sector_day(
         t1_by_key = {
             (str(b["board_kind"]), str(b["board_id"])): b for b in boards_t1.values()
         }
+        official_sessions_cache: Sequence[date] | None = None
+        if any(
+            rec_prev.get("prev_trade_date") is not None
+            for rec_prev in (rotation_recovery or {}).values()
+        ):
+            from stock_a.application.data_jobs import _load_official_sessions
+
+            _cal_id, _cal_rev, official_sessions_cache = _load_official_sessions(
+                trade_date
+            )
         rot_records: list[dict[str, Any]] = []
         for nr in native_rows:
             bkey = (str(nr["board_kind"]), str(nr["board_id"]))
             bt = t_by_key[bkey]
             bt1 = t1_by_key.get(bkey)
             rec_prev = (rotation_recovery or {}).get(bkey)
+            rec_prev_td: date | None = (
+                rec_prev.get("prev_trade_date") if rec_prev else None
+            )
+            rot_session_gap = _compute_session_gap(
+                rec_prev_td, trade_date, official_sessions_cache
+            )
             missing_prev_session = (
                 bool(rec_prev.get("missing_previous_session", False))
                 if rec_prev
@@ -1084,7 +1372,8 @@ def run_r03_formal_sector_day(
                 )
 
             if missing_prev_session and prev_state_dict is not None:
-                st_res = step_rotation_state_machine(
+                st_res = _call_step_rotation(
+                    session_gap=rot_session_gap,
                     contract_valid=contract_ok,
                     previous_episode_state=prev_state_dict,
                     t_minus_1_d2_maturity=prev_d2 if active_prev else "NONE",
@@ -1098,7 +1387,8 @@ def run_r03_formal_sector_day(
                     input_missing_reason="ROTATION_MISSING_PREVIOUS_SESSION",
                 )
             else:
-                st_res = step_rotation_state_machine(
+                st_res = _call_step_rotation(
+                    session_gap=rot_session_gap,
                     contract_valid=contract_ok,
                     previous_episode_state=prev_state_dict,
                     t_minus_1_d2_maturity=prev_d2 if active_prev else "NONE",
@@ -1219,6 +1509,8 @@ def run_r03_formal_sector_day(
                     "basket": new_basket,
                     "state_result": st_res,
                     "basket_metrics": basket_metrics,
+                    "prev_trade_date": rec_prev_td,
+                    "session_gap": rot_session_gap,
                 }
             )
         seen_rot_keys = {(rec["board_kind"], rec["board_id"]) for rec in rot_records}
@@ -1231,8 +1523,13 @@ def run_r03_formal_sector_day(
             prev_lk = prev_sd.get("last_known_state", prev_sd.get("state"))
             if prev_lk in {None, "NONE", "FAILED", "OUT"}:
                 continue
+            rec_prev_td = rec_prev.get("prev_trade_date")
+            rot_session_gap = _compute_session_gap(
+                rec_prev_td, trade_date, official_sessions_cache
+            )
             # 整个板块缺目录时属于合法输入缺失 UNKNOWN，不走合同错误拒绝分支，保留原 last_known_state、accepted_once、market_age 与原篮子
-            miss_res = step_rotation_state_machine(
+            miss_res = _call_step_rotation(
+                session_gap=rot_session_gap,
                 contract_valid=True,
                 previous_episode_state=prev_sd,
                 t_minus_1_d2_maturity="NONE",
@@ -1255,6 +1552,8 @@ def run_r03_formal_sector_day(
                     "basket": None,
                     "state_result": miss_res,
                     "basket_metrics": None,
+                    "prev_trade_date": rec_prev_td,
+                    "session_gap": rot_session_gap,
                 }
             )
         expected_rotation_rows = len(rot_records)
@@ -1310,17 +1609,36 @@ def run_r03_formal_sector_day(
     )
     loo_written = 0
     if "R03_SECTOR_LOO" in active_modules:
+        kind_membership_known_map: dict[str, bool] = {}
+        for bk in ("INDUSTRY", "CONCEPT"):
+            scoped_t = [b for b in boards_t if str(b["board_kind"]) == bk]
+            if not scoped_t or not all(
+                bool(b.get("membership_complete", True)) for b in scoped_t
+            ):
+                kind_membership_known_map[bk] = False
+                continue
+            ok_t1 = True
+            if boards_t1:
+                scoped_t1 = [
+                    b for b in boards_t1.values() if str(b["board_kind"]) == bk
+                ]
+                ok_t1 = bool(scoped_t1) and all(
+                    bool(b.get("membership_complete", True)) for b in scoped_t1
+                )
+            ok_t3 = True
+            if boards_t3:
+                scoped_t3 = [
+                    b for b in boards_t3.values() if str(b["board_kind"]) == bk
+                ]
+                ok_t3 = bool(scoped_t3) and all(
+                    bool(b.get("membership_complete", True)) for b in scoped_t3
+                )
+            kind_membership_known_map[bk] = ok_t1 and ok_t3
+
         loo_batch: list[tuple[str, Mapping[str, Any]]] = []
         for target in loo_target_list:
             bk = str(target.get("board_kind", "CONCEPT"))
-            scoped_kind_boards = [b for b in boards_t if str(b["board_kind"]) == bk]
-            kind_membership_known = (
-                all(
-                    bool(b.get("membership_complete", True)) for b in scoped_kind_boards
-                )
-                if scoped_kind_boards
-                else False
-            )
+            kind_membership_known = kind_membership_known_map.get(bk, False)
             loo_res = compute_sector_loo_and_support(
                 target_entity_id=str(target["entity_id"]),
                 boards_t=boards_t,
@@ -1441,39 +1759,41 @@ def _load_qfq_ret1_from_raw(
     sym_list = sorted(set(symbols))
     cur.execute(
         """
-        SELECT source_symbol, session_date, qfq_bar_status, qfq_close, qfq_price_quality,
+        SELECT source_symbol, session_date, bar_status, qfq_bar_status,
+               qfq_open, qfq_high, qfq_low, qfq_close, qfq_price_quality,
                raw_tradestatus_value, raw_tradestatus_quality
         FROM stock.source_raw_daily
         WHERE source_capture_id=%s AND session_date=ANY(%s) AND source_symbol=ANY(%s)
         """,
         (source_capture_id, [prev_session, session], sym_list),
     )
-    by_sym_day: dict[tuple[str, date], tuple[str, Any, str, Any, Any]] = {}
-    for sym, s_day, q_bs, q_c, q_pq, r_ts, r_ts_q in cur.fetchall():
-        by_sym_day[(str(sym), s_day)] = (str(q_bs), q_c, str(q_pq), r_ts, r_ts_q)
+    by_sym_day: dict[tuple[str, date], tuple[Any, ...]] = {}
+    for row in cur.fetchall():
+        by_sym_day[(str(row[0]), row[1])] = row[2:]
+
+    def _endpoint_valid_close(rec: tuple[Any, ...] | None) -> Fraction | None:
+        if rec is None:
+            return None
+        bs, q_bs, q_o, q_h, q_l, q_c, q_pq, r_ts, r_ts_q = rec
+        if (
+            bs == "TARGET_PRESENT"
+            and q_bs == "TARGET_PRESENT"
+            and r_ts_q == "OBSERVED"
+            and str(r_ts) == "1"
+            and q_pq == "OBSERVED"
+            and _is_valid_ohlc(q_o, q_h, q_l, q_c)
+        ):
+            return Fraction(str(q_c))
+        return None
+
     out: dict[str, Fraction | None] = {}
     for sym in sym_list:
-        curr = by_sym_day.get((sym, session))
-        prev = by_sym_day.get((sym, prev_session))
-        if curr is None or prev is None:
+        c_val = _endpoint_valid_close(by_sym_day.get((sym, session)))
+        p_val = _endpoint_valid_close(by_sym_day.get((sym, prev_session)))
+        if c_val is not None and p_val is not None and p_val > 0:
+            out[sym] = (c_val - p_val) / p_val
+        else:
             out[sym] = None
-            continue
-        if (
-            curr[0] == "TARGET_PRESENT"
-            and curr[2] == "OBSERVED"
-            and curr[1] is not None
-            and curr[4] == "OBSERVED"
-            and str(curr[3]) == "1"
-            and prev[0] == "TARGET_PRESENT"
-            and prev[2] == "OBSERVED"
-            and prev[1] is not None
-        ):
-            c_val = Fraction(str(curr[1]))
-            p_val = Fraction(str(prev[1]))
-            if c_val > 0 and p_val > 0:
-                out[sym] = (c_val - p_val) / p_val
-                continue
-        out[sym] = None
     return out
 
 
@@ -1491,6 +1811,7 @@ def produce_formal_market_breadth_for_session(
     universe_version_t: str | None = None,
     universe_version_t3: str | None = None,
     universe_capture_id: int | None = None,
+    universe_capture_id_t3: int | None = None,
     scope_key: str | None = None,
     allow_revision: bool = False,
 ) -> dict[str, Any]:
@@ -1501,7 +1822,11 @@ def produce_formal_market_breadth_for_session(
         else f"BAOSTOCK_CAP_{source_capture_id}:MARKET_QFQ:NON_PIT"
     )
     cap_t = int(source_capture_id)
-    cap_t3 = int(source_capture_id_t3) if source_capture_id_t3 is not None else cap_t
+    eff_u_cap_t3 = (
+        universe_capture_id_t3
+        if universe_capture_id_t3 is not None
+        else universe_capture_id
+    )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _conn,
         cur,
@@ -1529,14 +1854,29 @@ def produce_formal_market_breadth_for_session(
                 "exact": None,
                 "breadth_value": None,
             }
+        elif source_capture_id_t3 is None:
+            res = {
+                "status": "UNKNOWN",
+                "reason": "MISSING_T3_CAPTURE",
+                "universe_version_t": str(u_ver_t or "MISSING"),
+                "universe_version_t3": "MISSING",
+                "n_t": len(u_syms_t),
+                "n_t3": 0,
+                "n_common": 0,
+                "n_eligible": 0,
+                "unknown_count": 0,
+                "exact": None,
+                "breadth_value": None,
+            }
         else:
+            cap_t3 = int(source_capture_id_t3)
             u_ver_t3, u_syms_t3 = _resolve_session_universe_members(
                 cur,
                 config=config,
                 session=t3_session,
                 price_capture_id=cap_t3,
                 universe_version=universe_version_t3,
-                universe_capture_id=universe_capture_id,
+                universe_capture_id=eff_u_cap_t3,
             )
             if u_ver_t is None or u_ver_t3 is None:
                 res = {
@@ -1771,8 +2111,18 @@ def run_r03_formal_sector_for_session(
             "R03_UNIVERSE_MISSING",
             f"交易日 {target_session} 缺少权威日期有效 Research Universe，禁止将 LOO 空结果标记为已完成。",
         )
-    prev_states = (
-        read_r03_previous_lifecycle_states(
+    if t1_session is None:
+        prev_states = {}
+        native_previous_session_missing = False
+        native_prev_trade_date: date | None = None
+        native_session_gap: int | None = None
+    elif prev_scope_key is None or prev_member_ver is None:
+        prev_states = {}
+        native_previous_session_missing = True
+        native_prev_trade_date = None
+        native_session_gap = None
+    else:
+        prev_meta = read_r03_previous_lifecycle_states(
             config,
             previous_trade_date=t1_session,
             scope_key=resolved_scope,
@@ -1780,12 +2130,16 @@ def run_r03_formal_sector_for_session(
             contract_version=R03_CONTRACT_VERSION,
             previous_scope_key=prev_scope_key,
             previous_member_version=prev_member_ver,
+            return_metadata=True,
         )
-        if t1_session is not None
-        and prev_scope_key is not None
-        and prev_member_ver is not None
-        else {}
-    )
+        prev_states = prev_meta["items"]
+        native_previous_session_missing = bool(prev_meta["previous_session_missing"])
+        native_prev_trade_date = None if native_previous_session_missing else t1_session
+        native_session_gap = (
+            _compute_session_gap(native_prev_trade_date, target_session)
+            if native_prev_trade_date is not None
+            else None
+        )
     prev_clusters_res = (
         read_r03_overlap_day(
             config,
@@ -1816,6 +2170,9 @@ def run_r03_formal_sector_for_session(
         allow_revision=allow_revision,
         coordinate_comparable_t1=bool(assembled.get("qfq_comparable_t1", True)),
         coordinate_comparable_t1_by_board=assembled.get("qfq_comparable_t1_by_board"),
+        previous_session_missing=native_previous_session_missing,
+        prev_trade_date=native_prev_trade_date,
+        session_gap=native_session_gap,
     )
     day_res["formal_market_breadth"] = None
     day_res["universe_version_t"] = assembled.get("universe_version_t")

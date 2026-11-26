@@ -62,14 +62,27 @@ def write_r03_native_day_facts(
         _,
     ):
         for row in rows:
+            conc = row.get("concentration") or {}
+            rq = row["raw_qualification"]
+            lc = row["lifecycle"]
+            sw = row["seed_wilson"]
+            sg_raw = row.get("session_gap")
+            if sg_raw is None:
+                sg_raw = lc.get("session_gap")
+            prev_td = row.get("prev_trade_date") or lc.get("prev_trade_date")
+            j_cnt = row.get("joined_count")
+            e_cnt = row.get("exited_count")
+            m_delta_status = row.get("membership_delta_status") or (
+                "OBSERVED" if (j_cnt is not None and e_cnt is not None) else "UNKNOWN"
+            )
             vals = (
                 int(row["n"]),
                 int(row["actual_quote_count"]),
                 int(row["suspended_count"]),
                 int(row["unknown_quote_count"]),
                 int(row.get("isolated_count", 0)),
-                int(row.get("joined_count", 0)),
-                int(row.get("exited_count", 0)),
+                int(j_cnt) if j_cnt is not None else None,
+                int(e_cnt) if e_cnt is not None else None,
                 int(row["rs5"]["known"]),
                 int(row["rs20"]["known"]),
                 int(row["breadth"]["known"]),
@@ -88,32 +101,65 @@ def write_r03_native_day_facts(
                 _num(row.get("breadth_delta1")),
                 _num(row.get("breadth_delta3")),
                 _num(row.get("ma20_delta3")),
-                _num(row["seed_wilson"].get("point_value")),
-                _num(row["seed_wilson"].get("lower")),
-                _num(row["seed_wilson"].get("upper")),
-                _num(row["concentration"].get("top1_concentration")),
-                _num(row["concentration"].get("top3_concentration")),
-                row["raw_qualification"]["safety"]["state"],
-                row["raw_qualification"]["prewatch_raw"]["state"],
-                row["raw_qualification"]["warm_raw"]["state"],
-                row["raw_qualification"]["confirmed_raw"]["state"],
-                row["lifecycle"]["effective_maturity"],
-                row["lifecycle"]["maturity_lower"],
-                row["lifecycle"]["maturity_upper"],
-                row["lifecycle"]["display_maturity"],
-                row["lifecycle"].get("last_known_maturity"),
-                row["lifecycle"]["display_quality"],
-                int(row["lifecycle"]["downgrade_streak"]),
-                row["lifecycle"].get("downgrade_target"),
-                int(row["lifecycle"]["prewatch_no_improve_count"]),
-                _num(row["lifecycle"].get("prewatch_dq5_baseline")),
-                bool(row["lifecycle"].get("prewatch_exited", False)),
-                row["lifecycle"]["health"],
+                _num(sw.get("point_value")),
+                _num(sw.get("lower")),
+                _num(sw.get("upper")),
+                _num(conc.get("top1_concentration")),
+                _num(conc.get("top3_concentration")),
+                rq["safety"]["state"],
+                rq["prewatch_raw"]["state"],
+                rq["warm_raw"]["state"],
+                rq["confirmed_raw"]["state"],
+                lc["effective_maturity"],
+                lc["maturity_lower"],
+                lc["maturity_upper"],
+                lc["display_maturity"],
+                lc.get("last_known_maturity"),
+                lc["display_quality"],
+                int(lc["downgrade_streak"]),
+                lc.get("downgrade_target"),
+                int(lc["prewatch_no_improve_count"]),
+                _num(lc.get("prewatch_dq5_baseline")),
+                bool(lc.get("prewatch_exited", False)),
+                lc["health"],
                 row["exhaustion"]["level"],
                 row["emergence"]["level"],
                 row["priority"]["priority_status"],
                 row["priority"].get("rank_position"),
                 row["priority"].get("reason"),
+                bool(row.get("membership_complete", True)),
+                str(m_delta_status),
+                int(row.get("rs5_peer_count", row.get("peer_count", 0)) or 0),
+                int(row.get("rs20_peer_count", row.get("peer_count", 0)) or 0),
+                int(row.get("seed_k", sw.get("k", 0)) or 0),
+                int(row.get("seed_f", sw.get("f", 0)) or 0),
+                int(row.get("seed_u", sw.get("u", 0)) or 0),
+                _num(row.get("quote_coverage")),
+                int(row["breadth_delta1_common_count"])
+                if row.get("breadth_delta1_common_count") is not None
+                else None,
+                int(row["breadth_delta3_common_count"])
+                if row.get("breadth_delta3_common_count") is not None
+                else None,
+                int(row["ma20_delta3_common_count"])
+                if row.get("ma20_delta3_common_count") is not None
+                else None,
+                str(conc.get("status", "UNKNOWN")),
+                conc.get("reason"),
+                rq["safety"].get("reason"),
+                rq["prewatch_raw"].get("reason"),
+                rq["warm_raw"].get("reason"),
+                rq["confirmed_raw"].get("reason"),
+                row["exhaustion"].get("reason"),
+                row["emergence"].get("reason"),
+                row["rs5"].get("reason"),
+                row["rs20"].get("reason"),
+                row["breadth"].get("reason"),
+                row["ma20_width"].get("reason"),
+                row["amr20_median"].get("reason"),
+                prev_td,
+                int(sg_raw) if sg_raw is not None else None,
+                row.get("prev_exhaustion_level"),
             )
             cur.execute(
                 """
@@ -128,7 +174,15 @@ def write_r03_native_day_facts(
                        maturity_upper, display_maturity, last_known_maturity, display_quality,
                        downgrade_streak, downgrade_target, prewatch_no_improve_count,
                        prewatch_dq5_baseline, prewatch_exited, health_state, exhaustion_level,
-                       emergence_level, priority_status, priority_rank, reason_code
+                       emergence_level, priority_status, priority_rank, reason_code,
+                       membership_complete, membership_delta_status, rs5_peer_count, rs20_peer_count,
+                       seed_k, seed_f, seed_u, quote_coverage,
+                       breadth_delta1_common_count, breadth_delta3_common_count, ma20_delta3_common_count,
+                       concentration_status, concentration_reason, safety_reason,
+                       prewatch_raw_reason, warm_raw_reason, confirmed_raw_reason,
+                       exhaustion_reason, emergence_reason, rs5_reason, rs20_reason,
+                       breadth_reason, ma20_reason, amr20_reason,
+                       prev_trade_date, session_gap, prev_exhaustion_level
                 FROM stock.r03_sector_native_day_facts
                 WHERE trade_date=%s AND board_kind=%s AND board_id=%s
                   AND scope_key=%s AND member_version=%s AND contract_version=%s
@@ -173,6 +227,14 @@ def write_r03_native_day_facts(
                         downgrade_streak=%s, downgrade_target=%s, prewatch_no_improve_count=%s,
                         prewatch_dq5_baseline=%s, prewatch_exited=%s, health_state=%s, exhaustion_level=%s,
                         emergence_level=%s, priority_status=%s, priority_rank=%s, reason_code=%s,
+                        membership_complete=%s, membership_delta_status=%s, rs5_peer_count=%s, rs20_peer_count=%s,
+                        seed_k=%s, seed_f=%s, seed_u=%s, quote_coverage=%s,
+                        breadth_delta1_common_count=%s, breadth_delta3_common_count=%s, ma20_delta3_common_count=%s,
+                        concentration_status=%s, concentration_reason=%s, safety_reason=%s,
+                        prewatch_raw_reason=%s, warm_raw_reason=%s, confirmed_raw_reason=%s,
+                        exhaustion_reason=%s, emergence_reason=%s, rs5_reason=%s, rs20_reason=%s,
+                        breadth_reason=%s, ma20_reason=%s, amr20_reason=%s,
+                        prev_trade_date=%s, session_gap=%s, prev_exhaustion_level=%s,
                         recorded_at=now()
                     WHERE trade_date=%s AND board_kind=%s AND board_id=%s
                       AND scope_key=%s AND member_version=%s AND contract_version=%s
@@ -205,13 +267,23 @@ def write_r03_native_day_facts(
                     maturity_upper, display_maturity, last_known_maturity, display_quality,
                     downgrade_streak, downgrade_target, prewatch_no_improve_count,
                     prewatch_dq5_baseline, prewatch_exited, health_state, exhaustion_level,
-                    emergence_level, priority_status, priority_rank, reason_code
+                    emergence_level, priority_status, priority_rank, reason_code,
+                    membership_complete, membership_delta_status, rs5_peer_count, rs20_peer_count,
+                    seed_k, seed_f, seed_u, quote_coverage,
+                    breadth_delta1_common_count, breadth_delta3_common_count, ma20_delta3_common_count,
+                    concentration_status, concentration_reason, safety_reason,
+                    prewatch_raw_reason, warm_raw_reason, confirmed_raw_reason,
+                    exhaustion_reason, emergence_reason, rs5_reason, rs20_reason,
+                    breadth_reason, ma20_reason, amr20_reason,
+                    prev_trade_date, session_gap, prev_exhaustion_level
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -299,7 +371,10 @@ def _read_r03_partition_progress_state(
     else:
         sql += " AND universe_version_t=%s AND universe_version_t3=%s"
         params.extend([str(universe_version_t), str(universe_version_t3)])
-    sql += " ORDER BY updated_at DESC LIMIT 1"
+    sql += (
+        " ORDER BY (CASE WHEN status = 'RUNNING' THEN 0 ELSE 1 END) ASC,"
+        " updated_at DESC, job_id DESC LIMIT 1"
+    )
     cur.execute(sql, tuple(params))
     row = cur.fetchone()
     if row is None:
@@ -351,15 +426,21 @@ def read_r03_native_day_facts(
                 "reason": "该精确分区 R03 Native 任务状态未完成，禁止读取半成品。",
             }
         if total_count == 0:
-            if (
-                prog_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}
-                and prog_expected == 0
+            if prog_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"} and (
+                prog_expected == 0 or board_kind is not None
             ):
                 return {
                     "status": "AVAILABLE_EMPTY",
                     "total_count": 0,
                     "items": [],
                     "reason": "该日期已完成计算且合法结果为空（0行）。",
+                }
+            if prog_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}:
+                return {
+                    "status": "INCOMPLETE",
+                    "total_count": 0,
+                    "items": [],
+                    "reason": "该精确分区进度为已完成但实际行数为 0（与预期行数不符），禁止读取半成品。",
                 }
             return {
                 "status": "NOT_COMPUTED",
@@ -387,7 +468,15 @@ def read_r03_native_day_facts(
                    maturity_upper, display_maturity, last_known_maturity, display_quality,
                    downgrade_streak, downgrade_target, prewatch_no_improve_count,
                    prewatch_dq5_baseline, prewatch_exited, health_state, exhaustion_level,
-                   emergence_level, priority_status, priority_rank, reason_code
+                   emergence_level, priority_status, priority_rank, reason_code,
+                   membership_complete, membership_delta_status, rs5_peer_count, rs20_peer_count,
+                   seed_k, seed_f, seed_u, quote_coverage,
+                   breadth_delta1_common_count, breadth_delta3_common_count, ma20_delta3_common_count,
+                   concentration_status, concentration_reason, safety_reason,
+                   prewatch_raw_reason, warm_raw_reason, confirmed_raw_reason,
+                   exhaustion_reason, emergence_reason, rs5_reason, rs20_reason,
+                   breadth_reason, ma20_reason, amr20_reason,
+                   prev_trade_date, session_gap, prev_exhaustion_level
             FROM stock.r03_sector_native_day_facts
             {where_sql}
             ORDER BY priority_rank ASC NULLS LAST, board_kind ASC, board_id ASC
@@ -416,8 +505,9 @@ def read_r03_previous_lifecycle_states(
     contract_version: str,
     previous_scope_key: str | None = None,
     previous_member_version: str | None = None,
-) -> dict[tuple[str, str], dict[str, Any]]:
-    """从 PG 恢复上一官方交易日的板块成熟、降级目标与 PREWATCH 基准前态；仅按显式合法版本连续，绝不盲目全局回退。"""
+    return_metadata: bool = False,
+) -> dict[Any, Any]:
+    """从 PG 恢复上一官方交易日的板块成熟、降级目标与 PREWATCH 基准前态；区分冷启动与前日缺失/未完成。"""
     target_scope = previous_scope_key or scope_key
     target_mem = previous_member_version or member_version
     res = read_r03_native_day_facts(
@@ -427,9 +517,20 @@ def read_r03_previous_lifecycle_states(
         member_version=target_mem,
         contract_version=contract_version,
     )
-    if res["status"] == "AVAILABLE":
-        return {(item["board_kind"], item["board_id"]): item for item in res["items"]}
-    return {}
+    items = (
+        {(item["board_kind"], item["board_id"]): item for item in res["items"]}
+        if res["status"] == "AVAILABLE"
+        else {}
+    )
+    if return_metadata:
+        return {
+            "status": res["status"],
+            "previous_trade_date": previous_trade_date,
+            "previous_session_missing": res["status"] != "AVAILABLE",
+            "items": items,
+            "reason": res.get("reason"),
+        }
+    return items
 
 
 def write_r03_rotation_day(
@@ -576,6 +677,12 @@ def write_r03_rotation_day(
                         )
 
             st = rec["state_result"]
+            rec_prev_td = rec.get("prev_trade_date") or st.get("prev_trade_date")
+            rec_sg_raw = rec.get("session_gap")
+            if rec_sg_raw is None:
+                rec_sg_raw = st.get("session_gap")
+            bd_session_gap = int(rec_sg_raw) if rec_sg_raw is not None else None
+            st_session_gap = int(rec_sg_raw) if rec_sg_raw is not None else 1
             b_kind = str(rec.get("board_kind") or (basket.board_kind if basket else ""))
             b_id = str(rec.get("board_id") or (basket.board_id if basket else ""))
             if b_kind and b_id:
@@ -592,10 +699,13 @@ def write_r03_rotation_day(
                     pulse_raw_str,
                     st.get("last_known_state"),
                     st.get("reason"),
+                    rec_prev_td,
+                    bd_session_gap,
                 )
                 cur.execute(
                     """
-                    SELECT episode_id, rotation_state, pulse_raw_state, last_known_state, reason_code
+                    SELECT episode_id, rotation_state, pulse_raw_state, last_known_state,
+                           reason_code, prev_trade_date, session_gap
                     FROM stock.r03_sector_rotation_board_day_facts
                     WHERE trade_date=%s AND board_kind=%s AND board_id=%s
                       AND scope_key=%s AND member_version=%s AND contract_version=%s
@@ -623,7 +733,8 @@ def write_r03_rotation_day(
                             """
                             UPDATE stock.r03_sector_rotation_board_day_facts SET
                                 episode_id=%s, rotation_state=%s, pulse_raw_state=%s,
-                                last_known_state=%s, reason_code=%s, recorded_at=now()
+                                last_known_state=%s, reason_code=%s,
+                                prev_trade_date=%s, session_gap=%s, recorded_at=now()
                             WHERE trade_date=%s AND board_kind=%s AND board_id=%s
                               AND scope_key=%s AND member_version=%s AND contract_version=%s
                             """,
@@ -644,8 +755,8 @@ def write_r03_rotation_day(
                         INSERT INTO stock.r03_sector_rotation_board_day_facts (
                             trade_date, board_kind, board_id, scope_key, member_version,
                             contract_version, episode_id, rotation_state, pulse_raw_state,
-                            last_known_state, reason_code
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            last_known_state, reason_code, prev_trade_date, session_gap
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             trade_date,
@@ -662,6 +773,23 @@ def write_r03_rotation_day(
             if episode_pg_id is None:
                 continue
             bm = rec.get("basket_metrics") or {}
+            pr_obj = bm.get("price_retention")
+            if isinstance(pr_obj, Mapping):
+                pr_val = _num(pr_obj.get("value"))
+                pr_state = str(pr_obj.get("state") or "UNKNOWN")
+                pr_reason = pr_obj.get("reason")
+            else:
+                pr_val = _num(pr_obj)
+                pr_state = str(bm.get("price_retention_state") or "UNKNOWN")
+                pr_reason = bm.get("price_retention_reason")
+            sr_obj = bm.get("seed_retention") or {}
+            br_obj = bm.get("breadth_retention") or {}
+            hr_obj = bm.get("strong_retention") or {}
+            diff_obj = bm.get("diffusion") or {}
+            early_obj = bm.get("early") or {}
+            mature_obj = bm.get("mature") or {}
+            ent_c = bm.get("entered_count")
+            ex_c = bm.get("exited_count")
             vals = (
                 st["state"],
                 st.get("last_known_state"),
@@ -675,15 +803,32 @@ def write_r03_rotation_day(
                 _num(st.get("dq5")),
                 _num(bm.get("formation_r")),
                 _num(bm.get("post_r")),
-                _num((bm.get("seed_retention") or {}).get("value")),
-                _num((bm.get("breadth_retention") or {}).get("value")),
-                _num((bm.get("strong_retention") or {}).get("value")),
-                (bm.get("diffusion") or {}).get("state", "UNKNOWN"),
-                (bm.get("early") or {}).get("state", "UNKNOWN"),
-                (bm.get("mature") or {}).get("state", "UNKNOWN"),
+                _num(sr_obj.get("value")),
+                _num(br_obj.get("value")),
+                _num(hr_obj.get("value")),
+                diff_obj.get("state", "UNKNOWN"),
+                early_obj.get("state", "UNKNOWN"),
+                mature_obj.get("state", "UNKNOWN"),
                 bm.get("valuation_quality", "UNKNOWN"),
                 bm.get("max_quote_age"),
                 st.get("reason"),
+                rec_prev_td,
+                st_session_gap,
+                pr_val,
+                pr_state,
+                pr_reason,
+                bm.get("valuation_reason"),
+                sr_obj.get("state", "UNKNOWN"),
+                sr_obj.get("reason"),
+                br_obj.get("state", "UNKNOWN"),
+                br_obj.get("reason"),
+                hr_obj.get("state", "UNKNOWN"),
+                hr_obj.get("reason"),
+                int(ent_c) if ent_c is not None else None,
+                int(ex_c) if ex_c is not None else None,
+                diff_obj.get("reason"),
+                early_obj.get("reason"),
+                mature_obj.get("reason"),
             )
             cur.execute(
                 """
@@ -691,7 +836,14 @@ def write_r03_rotation_day(
                        accepted_once, armed, out_neg_streak, prev_mature_true, dq5,
                        formation_r, post_r, seed_retention, breadth_retention,
                        strong_retention, diffusion_state, early_state, mature_state,
-                       valuation_quality, max_quote_age, reason_code
+                       valuation_quality, max_quote_age, reason_code,
+                       prev_trade_date, session_gap, price_retention, price_retention_state,
+                       price_retention_reason, valuation_reason,
+                       seed_retention_state, seed_retention_reason,
+                       breadth_retention_state, breadth_retention_reason,
+                       strong_retention_state, strong_retention_reason,
+                       entered_count, exited_count,
+                       diffusion_reason, early_reason, mature_reason
                 FROM stock.r03_sector_rotation_day_states
                 WHERE episode_id=%s AND trade_date=%s
                 """,
@@ -722,6 +874,13 @@ def write_r03_rotation_day(
                         seed_retention=%s, breadth_retention=%s, strong_retention=%s,
                         diffusion_state=%s, early_state=%s, mature_state=%s,
                         valuation_quality=%s, max_quote_age=%s, reason_code=%s,
+                        prev_trade_date=%s, session_gap=%s, price_retention=%s, price_retention_state=%s,
+                        price_retention_reason=%s, valuation_reason=%s,
+                        seed_retention_state=%s, seed_retention_reason=%s,
+                        breadth_retention_state=%s, breadth_retention_reason=%s,
+                        strong_retention_state=%s, strong_retention_reason=%s,
+                        entered_count=%s, exited_count=%s,
+                        diffusion_reason=%s, early_reason=%s, mature_reason=%s,
                         recorded_at=now()
                     WHERE episode_id=%s AND trade_date=%s
                     """,
@@ -737,9 +896,19 @@ def write_r03_rotation_day(
                     market_age, eval_age, accepted_once, armed, out_neg_streak,
                     prev_mature_true, dq5, formation_r, post_r, seed_retention,
                     breadth_retention, strong_retention, diffusion_state, early_state,
-                    mature_state, valuation_quality, max_quote_age, reason_code
+                    mature_state, valuation_quality, max_quote_age, reason_code,
+                    prev_trade_date, session_gap, price_retention, price_retention_state,
+                    price_retention_reason, valuation_reason,
+                    seed_retention_state, seed_retention_reason,
+                    breadth_retention_state, breadth_retention_reason,
+                    strong_retention_state, strong_retention_reason,
+                    entered_count, exited_count,
+                    diffusion_reason, early_reason, mature_reason
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (episode_pg_id, trade_date) + vals,
@@ -1065,7 +1234,7 @@ def read_r03_rotation_recovery_states(
                     },
                 }
         else:
-            mem_filter = " AND e.member_version=%s" if prev_mem is not None else ""
+            mem_filter = " AND b.member_version=%s" if prev_mem is not None else ""
             params_hist: list[Any] = [
                 prev_scope or scope_key,
                 contract_version,
@@ -1075,58 +1244,85 @@ def read_r03_rotation_recovery_states(
                 params_hist.append(prev_mem)
             cur.execute(
                 f"""
-                SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
-                       e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
-                       s.trade_date, s.rotation_state, s.last_known_state, s.stale,
-                       s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
-                       s.prev_mature_true, s.dq5, e.frozen_member_count,
-                       e.scope_key, e.member_version
-                FROM stock.r03_sector_rotation_episodes e
-                JOIN stock.r03_sector_rotation_day_states s ON s.episode_id = e.id
-                WHERE e.scope_key=%s AND e.contract_version=%s AND s.trade_date < %s
+                SELECT b.board_kind, b.board_id, b.trade_date, b.episode_id,
+                       b.rotation_state, b.last_known_state, b.reason_code,
+                       b.scope_key, b.member_version,
+                       e.id, e.episode_key, e.t0_session, e.parent_episode_id,
+                       e.s0_known, e.u0_known, e.h0_known, e.left_censored,
+                       e.frozen_member_count, e.scope_key,
+                       s.stale, s.market_age, s.eval_age, s.accepted_once,
+                       s.armed, s.out_neg_streak, s.prev_mature_true, s.dq5
+                FROM stock.r03_sector_rotation_board_day_facts b
+                LEFT JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
+                LEFT JOIN stock.r03_sector_rotation_day_states s
+                  ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                WHERE b.scope_key=%s AND b.contract_version=%s AND b.trade_date < %s
                 {mem_filter}
-                ORDER BY e.board_kind, e.board_id, s.trade_date DESC, e.id DESC
+                ORDER BY b.board_kind, b.board_id, b.trade_date DESC, b.id DESC
                 """,
                 tuple(params_hist),
             )
             for r in cur.fetchall():
-                key = (str(r[2]), str(r[3]))
-                if key in out or not _is_partition_complete(
-                    r[10], str(r[22]), str(r[23])
-                ):
+                key = (str(r[0]), str(r[1]))
+                if key in out or not _is_partition_complete(r[2], str(r[7]), str(r[8])):
                     continue
-                basket = _build_basket(
-                    int(r[0]),
-                    str(r[1]),
-                    str(r[2]),
-                    str(r[3]),
-                    r[4],
-                    bool(r[6]),
-                    bool(r[7]),
-                    bool(r[8]),
-                    bool(r[9]),
-                    int(r[21]),
-                )
-                out[key] = {
-                    "episode_pg_id": int(r[0]),
-                    "episode_scope_key": str(r[22]),
-                    "parent_episode_id": r[5],
-                    "basket": basket,
-                    "prev_trade_date": r[10],
-                    "missing_previous_session": False,
-                    "state_dict": {
-                        "state": str(r[11]),
-                        "last_known_state": r[12],
-                        "stale": bool(r[13]),
-                        "market_age": int(r[14]),
-                        "eval_age": int(r[15]),
-                        "accepted_once": bool(r[16]),
-                        "armed": bool(r[17]),
-                        "out_neg_streak": int(r[18]),
-                        "prev_mature_true": bool(r[19]),
-                        "dq5": Fraction(r[20]) if r[20] is not None else None,
-                    },
-                }
+                b_td = r[2]
+                bd_ep_id = r[3]
+                if bd_ep_id is not None and r[9] is not None and r[19] is not None:
+                    basket = _build_basket(
+                        int(r[9]),
+                        str(r[10]),
+                        str(r[0]),
+                        str(r[1]),
+                        r[11],
+                        bool(r[13]),
+                        bool(r[14]),
+                        bool(r[15]),
+                        bool(r[16]),
+                        int(r[17]),
+                    )
+                    out[key] = {
+                        "episode_pg_id": int(r[9]),
+                        "episode_scope_key": str(r[18]),
+                        "parent_episode_id": r[12],
+                        "basket": basket,
+                        "prev_trade_date": b_td,
+                        "missing_previous_session": False,
+                        "state_dict": {
+                            "state": str(r[4]),
+                            "last_known_state": r[5],
+                            "stale": bool(r[19]),
+                            "market_age": int(r[20]),
+                            "eval_age": int(r[21]),
+                            "accepted_once": bool(r[22]),
+                            "armed": bool(r[23]),
+                            "out_neg_streak": int(r[24]),
+                            "prev_mature_true": bool(r[25]),
+                            "dq5": Fraction(r[26]) if r[26] is not None else None,
+                        },
+                    }
+                elif bd_ep_id is None:
+                    out[key] = {
+                        "episode_pg_id": None,
+                        "episode_scope_key": None,
+                        "parent_episode_id": None,
+                        "basket": None,
+                        "prev_trade_date": b_td,
+                        "missing_previous_session": False,
+                        "state_dict": {
+                            "state": str(r[4]),
+                            "last_known_state": r[5],
+                            "stale": False,
+                            "market_age": 0,
+                            "eval_age": 0,
+                            "accepted_once": False,
+                            "armed": False,
+                            "out_neg_streak": 0,
+                            "prev_mature_true": False,
+                            "dq5": None,
+                            "reason": r[6],
+                        },
+                    }
         return out
 
 
@@ -1149,7 +1345,8 @@ def read_r03_rotation_timeline(
     ):
         bd_sql = """
             SELECT b.trade_date, b.episode_id, b.rotation_state, b.pulse_raw_state,
-                   b.last_known_state, b.reason_code, b.scope_key, b.member_version
+                   b.last_known_state, b.reason_code, b.scope_key, b.member_version,
+                   b.prev_trade_date, b.session_gap
             FROM stock.r03_sector_rotation_board_day_facts b
             WHERE b.board_kind=%s AND b.board_id=%s AND b.scope_key=%s AND b.contract_version=%s
         """
@@ -1229,7 +1426,8 @@ def read_r03_rotation_timeline(
         if family_ep_ids:
             hist_sql = """
                 SELECT b.trade_date, b.episode_id, b.rotation_state, b.pulse_raw_state,
-                       b.last_known_state, b.reason_code, b.scope_key, b.member_version
+                       b.last_known_state, b.reason_code, b.scope_key, b.member_version,
+                       b.prev_trade_date, b.session_gap
                 FROM stock.r03_sector_rotation_board_day_facts b
                 WHERE b.board_kind=%s AND b.board_id=%s AND b.contract_version=%s
                   AND b.episode_id = ANY(%s)
@@ -1282,6 +1480,14 @@ def read_r03_rotation_timeline(
             ep_sql += " ORDER BY t0_session ASC, id ASC"
             cur.execute(ep_sql, tuple(ep_params))
             ep_rows = cur.fetchall()
+            found_ep_ids = {int(ep[0]) for ep in ep_rows}
+            if found_ep_ids != family_ep_ids:
+                return {
+                    "status": "INCOMPLETE",
+                    "episodes": [],
+                    "board_day_facts": [],
+                    "reason": "Rotation 父子表不闭合：部分关联 Episode 主记录缺失。",
+                }
         episodes = []
         for ep in ep_rows:
             ep_id = int(ep[0])
@@ -1295,12 +1501,26 @@ def read_r03_rotation_timeline(
             )
             m_cols = [d[0] for d in cur.description]
             members = [dict(zip(m_cols, mr, strict=True)) for mr in cur.fetchall()]
+            if int(ep[4]) <= 0 or len(members) != int(ep[4]):
+                return {
+                    "status": "INCOMPLETE",
+                    "episodes": [],
+                    "board_day_facts": [],
+                    "reason": f"Episode({ep_id})冻结篮子成员子表不闭合，禁止读取半成品。",
+                }
             st_sql = """
                 SELECT trade_date, rotation_state, last_known_state, stale, market_age,
                        eval_age, accepted_once, armed, out_neg_streak, formation_r, post_r,
                        seed_retention, breadth_retention, strong_retention,
                        diffusion_state, early_state, mature_state,
-                       valuation_quality, max_quote_age, reason_code
+                       valuation_quality, max_quote_age, reason_code,
+                       prev_trade_date, session_gap, price_retention, price_retention_state,
+                       price_retention_reason, valuation_reason,
+                       seed_retention_state, seed_retention_reason,
+                       breadth_retention_state, breadth_retention_reason,
+                       strong_retention_state, strong_retention_reason,
+                       entered_count, exited_count,
+                       diffusion_reason, early_reason, mature_reason
                 FROM stock.r03_sector_rotation_day_states
                 WHERE episode_id=%s
             """
@@ -1317,6 +1537,14 @@ def read_r03_rotation_timeline(
                 for sr in cur.fetchall()
                 if not allowed_days or sr[0] in allowed_days
             ]
+            state_days = {sr["trade_date"] for sr in states}
+            if allowed_days and not allowed_days.issubset(state_days):
+                return {
+                    "status": "INCOMPLETE",
+                    "episodes": [],
+                    "board_day_facts": [],
+                    "reason": f"Episode({ep_id})缺少已完成日的 day_states 子表记录，禁止读取半成品。",
+                }
             episodes.append(
                 {
                     "episode_pg_id": ep_id,
@@ -1431,11 +1659,15 @@ def write_r03_overlap_results(
                 list(c["parent_cluster_ids"]),
                 c["representative_board_id"],
                 c["representative_status"],
+                c.get("cluster_reason"),
+                c.get("representative_reason"),
+                int(c.get("unknown_edge_count", 0) or 0),
             )
             cur.execute(
                 """
                 SELECT cluster_status, member_board_ids, parent_cluster_ids,
-                       representative_board_id, representative_status
+                       representative_board_id, representative_status,
+                       cluster_reason, representative_reason, unknown_edge_count
                 FROM stock.r03_sector_overlap_clusters
                 WHERE trade_date=%s AND board_kind=%s AND cluster_id=%s
                   AND scope_key=%s AND member_version=%s AND contract_version=%s
@@ -1463,7 +1695,9 @@ def write_r03_overlap_results(
                     """
                     UPDATE stock.r03_sector_overlap_clusters SET
                         cluster_status=%s, member_board_ids=%s, parent_cluster_ids=%s,
-                        representative_board_id=%s, representative_status=%s, recorded_at=now()
+                        representative_board_id=%s, representative_status=%s,
+                        cluster_reason=%s, representative_reason=%s, unknown_edge_count=%s,
+                        recorded_at=now()
                     WHERE trade_date=%s AND board_kind=%s AND cluster_id=%s
                       AND scope_key=%s AND member_version=%s AND contract_version=%s
                     """,
@@ -1484,8 +1718,9 @@ def write_r03_overlap_results(
                 INSERT INTO stock.r03_sector_overlap_clusters (
                     trade_date, board_kind, cluster_id, scope_key, member_version,
                     contract_version, cluster_status, member_board_ids,
-                    parent_cluster_ids, representative_board_id, representative_status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    parent_cluster_ids, representative_board_id, representative_status,
+                    cluster_reason, representative_reason, unknown_edge_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     trade_date,
@@ -1749,7 +1984,8 @@ def read_r03_overlap_day(
         cur.execute(
             f"""
             SELECT board_kind, cluster_id, cluster_status, member_board_ids,
-                   parent_cluster_ids, representative_board_id, representative_status
+                   parent_cluster_ids, representative_board_id, representative_status,
+                   cluster_reason, representative_reason, unknown_edge_count
             FROM stock.r03_sector_overlap_clusters
             {where_sql}
             ORDER BY board_kind ASC, cluster_id ASC
@@ -1798,9 +2034,8 @@ def read_r03_overlap_day(
                 "reason": "该精确分区 Overlap 任务状态未完成，禁止读取半成品。",
             }
         if not clusters and not board_facts:
-            if (
-                ov_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}
-                and ov_expected == 0
+            if ov_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"} and (
+                ov_expected == 0 or board_kind is not None
             ):
                 return {
                     "status": "AVAILABLE_EMPTY",
@@ -1808,6 +2043,14 @@ def read_r03_overlap_day(
                     "board_facts": [],
                     "pairs": [],
                     "reason": "该日期 Overlap 已完成计算且合法结果为空（0簇）。",
+                }
+            if ov_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}:
+                return {
+                    "status": "INCOMPLETE",
+                    "clusters": [],
+                    "board_facts": [],
+                    "pairs": [],
+                    "reason": "该精确分区 Overlap 进度为已完成但实际行数为 0（与预期不符），禁止读取半成品。",
                 }
             return {
                 "status": "NOT_COMPUTED",
@@ -1824,6 +2067,47 @@ def read_r03_overlap_day(
                 "pairs": [],
                 "reason": "该精确分区 Overlap 缺少已验证完成进度记录，禁止读取半成品。",
             }
+        # 校验 clusters、board_facts 与 pair_facts 多表闭合
+        cluster_keys = {(str(c["board_kind"]), str(c["cluster_id"])) for c in clusters}
+        board_keys = {
+            (str(bf["board_kind"]), str(bf["board_id"])) for bf in board_facts
+        }
+        for bf in board_facts:
+            cid = bf.get("cluster_id")
+            if (
+                cid is not None
+                and (str(bf["board_kind"]), str(cid)) not in cluster_keys
+            ):
+                return {
+                    "status": "INCOMPLETE",
+                    "clusters": [],
+                    "board_facts": [],
+                    "pairs": [],
+                    "reason": "Overlap 板块事实引用了缺失的簇记录，禁止读取半成品。",
+                }
+        boards_in_clusters_by_kind: dict[str, set[str]] = {}
+        for c in clusters:
+            bk = str(c["board_kind"])
+            for bid in c.get("member_board_ids") or ():
+                if (bk, str(bid)) not in board_keys:
+                    return {
+                        "status": "INCOMPLETE",
+                        "clusters": [],
+                        "board_facts": [],
+                        "pairs": [],
+                        "reason": "Overlap 簇成员在 board_facts 子表中缺失，禁止读取半成品。",
+                    }
+                boards_in_clusters_by_kind.setdefault(bk, set()).add(str(bid))
+        pair_kinds = {str(p["board_kind"]) for p in pairs}
+        for bk, bids in boards_in_clusters_by_kind.items():
+            if len(bids) >= 2 and bk not in pair_kinds:
+                return {
+                    "status": "INCOMPLETE",
+                    "clusters": [],
+                    "board_facts": [],
+                    "pairs": [],
+                    "reason": f"Overlap {bk} 存在多板块簇但缺少 pair_facts 边事实，禁止读取半成品。",
+                }
         return {
             "status": "AVAILABLE",
             "clusters": clusters,
@@ -1879,15 +2163,52 @@ def _write_r03_loo_support_in_cursor(
     allow_revision: bool = False,
 ) -> dict[str, int]:
     inserted = updated = skipped = 0
+    loo_boards = loo_result.get("loo_boards", ())
+    cand_count = int(loo_result.get("candidate_count", len(loo_boards)) or 0)
+    if loo_result.get("qualified_candidate_count") is not None:
+        qual_cand_count = int(loo_result["qualified_candidate_count"])
+    else:
+        qual_cand_count = sum(
+            1
+            for c in loo_boards
+            if c.get("raw_qualification", {}).get("safety", {}).get("state") == "TRUE"
+            and any(
+                c.get("raw_qualification", {}).get(k, {}).get("state") == "TRUE"
+                for k in ("confirmed_raw", "warm_raw", "prewatch_raw")
+            )
+        )
+    if "matches_primary_industry" in loo_result:
+        matches_primary = loo_result.get("matches_primary_industry")
+    elif (
+        board_kind == "INDUSTRY"
+        and loo_result.get("support_status") == "SELECTED"
+        and loo_result.get("primary_industry_id") is not None
+        and loo_result.get("algorithm_support_board_id") is not None
+    ):
+        matches_primary = str(loo_result["algorithm_support_board_id"]) == str(
+            loo_result["primary_industry_id"]
+        )
+    else:
+        matches_primary = None
+    selected_bid = (
+        str(loo_result["algorithm_support_board_id"])
+        if loo_result.get("support_status") == "SELECTED"
+        and loo_result.get("algorithm_support_board_id") is not None
+        else None
+    )
     vals = (
         loo_result.get("primary_industry_id"),
         loo_result.get("algorithm_support_board_id"),
         loo_result["support_status"],
         loo_result.get("reason"),
+        cand_count,
+        qual_cand_count,
+        matches_primary,
     )
     cur.execute(
         """
-        SELECT id, primary_industry_id, algorithm_support_board_id, support_status, reason_code
+        SELECT id, primary_industry_id, algorithm_support_board_id, support_status, reason_code,
+               candidate_count, qualified_candidate_count, matches_primary_industry
         FROM stock.r03_sector_loo_support_facts
         WHERE trade_date=%s AND target_entity_id=%s AND board_kind=%s
           AND scope_key=%s AND member_version=%s AND contract_version=%s
@@ -1908,7 +2229,8 @@ def _write_r03_loo_support_in_cursor(
             """
             SELECT board_id, safety_state, prewatch_raw_state, warm_raw_state,
                    confirmed_raw_state, emergence_level, seed_wilson_point,
-                   rs5_pct, dq5, reason_code
+                   rs5_pct, dq5, reason_code,
+                   is_selected_support, breadth_delta3, ma20_delta3, top1_concentration
             FROM stock.r03_sector_loo_candidate_facts
             WHERE loo_fact_id=%s
             ORDER BY board_id
@@ -1923,10 +2245,14 @@ def _write_r03_loo_support_in_cursor(
                 str(r[3]),
                 str(r[4]),
                 str(r[5]) if r[5] is not None else None,
-                Decimal(str(r[6])) if r[6] is not None else None,
-                Decimal(str(r[7])) if r[7] is not None else None,
-                Decimal(str(r[8])) if r[8] is not None else None,
+                _num(r[6]),
+                _num(r[7]),
+                _num(r[8]),
                 str(r[9]) if r[9] is not None else None,
+                bool(r[10]),
+                _num(r[11]),
+                _num(r[12]),
+                _num(r[13]),
             )
             for r in cur.fetchall()
         ]
@@ -1946,10 +2272,30 @@ def _write_r03_loo_support_in_cursor(
                 str(c["priority"]["reason"])
                 if c.get("priority", {}).get("reason") is not None
                 else None,
+                bool(c.get("is_selected_support"))
+                if "is_selected_support" in c
+                else (selected_bid is not None and str(c["board_id"]) == selected_bid),
+                _num(c.get("breadth_delta3")),
+                _num(c.get("ma20_delta3")),
+                _num(
+                    c.get(
+                        "top1_concentration",
+                        (c.get("concentration") or {}).get("top1_concentration"),
+                    )
+                ),
             )
-            for c in loo_result.get("loo_boards", ())
+            for c in loo_boards
         )
-        if existing[1:] == vals and existing_cands == new_cands:
+        cands_same = len(existing_cands) == len(new_cands) and all(
+            all(
+                _dec_eq(ec, nc)
+                if isinstance(nc, Decimal) or isinstance(ec, Decimal)
+                else ec == nc
+                for ec, nc in zip(erow, nrow, strict=True)
+            )
+            for erow, nrow in zip(existing_cands, new_cands, strict=True)
+        )
+        if existing[1:] == vals and cands_same:
             skipped += 1
         elif not allow_revision:
             raise R03FormalSectorPgError(
@@ -1961,7 +2307,9 @@ def _write_r03_loo_support_in_cursor(
                 """
                 UPDATE stock.r03_sector_loo_support_facts SET
                     primary_industry_id=%s, algorithm_support_board_id=%s,
-                    support_status=%s, reason_code=%s, recorded_at=now()
+                    support_status=%s, reason_code=%s,
+                    candidate_count=%s, qualified_candidate_count=%s,
+                    matches_primary_industry=%s, recorded_at=now()
                 WHERE id=%s
                 """,
                 vals + (loo_id,),
@@ -1977,8 +2325,9 @@ def _write_r03_loo_support_in_cursor(
             INSERT INTO stock.r03_sector_loo_support_facts (
                 trade_date, target_entity_id, board_kind, scope_key, member_version,
                 contract_version, primary_industry_id, algorithm_support_board_id,
-                support_status, reason_code
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                support_status, reason_code, candidate_count, qualified_candidate_count,
+                matches_primary_industry
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -1995,15 +2344,23 @@ def _write_r03_loo_support_in_cursor(
         inserted += 1
 
     if inserted or updated:
-        for cand in loo_result.get("loo_boards", ()):
+        for cand in loo_boards:
             rq = cand["raw_qualification"]
+            is_sel = (
+                bool(cand.get("is_selected_support"))
+                if "is_selected_support" in cand
+                else (
+                    selected_bid is not None and str(cand["board_id"]) == selected_bid
+                )
+            )
             cur.execute(
                 """
                 INSERT INTO stock.r03_sector_loo_candidate_facts (
                     loo_fact_id, board_id, safety_state, prewatch_raw_state,
                     warm_raw_state, confirmed_raw_state, emergence_level,
-                    seed_wilson_point, rs5_pct, dq5, reason_code
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    seed_wilson_point, rs5_pct, dq5, reason_code,
+                    is_selected_support, breadth_delta3, ma20_delta3, top1_concentration
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     loo_id,
@@ -2017,6 +2374,15 @@ def _write_r03_loo_support_in_cursor(
                     _num(cand.get("rs5_pct")),
                     _num(cand.get("dq5")),
                     cand["priority"].get("reason"),
+                    is_sel,
+                    _num(cand.get("breadth_delta3")),
+                    _num(cand.get("ma20_delta3")),
+                    _num(
+                        cand.get(
+                            "top1_concentration",
+                            (cand.get("concentration") or {}).get("top1_concentration"),
+                        )
+                    ),
                 ),
             )
     return {"inserted": inserted, "updated": updated, "skipped": skipped}
@@ -2220,7 +2586,7 @@ def read_r03_loo_support_fact(
         cur,
         _,
     ):
-        loo_status, _loo_expected = _read_r03_partition_progress_state(
+        loo_status, loo_expected = _read_r03_partition_progress_state(
             cur,
             trade_date=trade_date,
             business_table="stock.r03_sector_loo_support_facts",
@@ -2239,7 +2605,8 @@ def read_r03_loo_support_fact(
         cur.execute(
             """
             SELECT id, primary_industry_id, algorithm_support_board_id,
-                   support_status, reason_code
+                   support_status, reason_code,
+                   candidate_count, qualified_candidate_count, matches_primary_industry
             FROM stock.r03_sector_loo_support_facts
             WHERE trade_date=%s AND target_entity_id=%s AND board_kind=%s
               AND scope_key=%s AND member_version=%s AND contract_version=%s
@@ -2255,6 +2622,17 @@ def read_r03_loo_support_fact(
         )
         row = cur.fetchone()
         if row is None:
+            if (
+                loo_status in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}
+                and loo_expected == 0
+            ):
+                return {
+                    "status": "AVAILABLE_EMPTY",
+                    "target_entity_id": target_entity_id,
+                    "board_kind": board_kind,
+                    "candidates": [],
+                    "reason": "该日期 LOO 已完成计算且合法结果为空（0行）。",
+                }
             return {
                 "status": "NOT_COMPUTED",
                 "target_entity_id": target_entity_id,
@@ -2271,11 +2649,13 @@ def read_r03_loo_support_fact(
                 "reason": "该精确分区 LOO 缺少已验证完成进度记录，禁止读取半成品。",
             }
         loo_id = int(row[0])
+        cand_count = int(row[5]) if row[5] is not None else 0
         cur.execute(
             """
             SELECT board_id, safety_state, prewatch_raw_state, warm_raw_state,
                    confirmed_raw_state, emergence_level, seed_wilson_point,
-                   rs5_pct, dq5, reason_code
+                   rs5_pct, dq5, reason_code,
+                   is_selected_support, breadth_delta3, ma20_delta3, top1_concentration
             FROM stock.r03_sector_loo_candidate_facts
             WHERE loo_fact_id=%s ORDER BY board_id ASC
             """,
@@ -2283,6 +2663,27 @@ def read_r03_loo_support_fact(
         )
         c_cols = [d[0] for d in cur.description]
         candidates = [dict(zip(c_cols, cr, strict=True)) for cr in cur.fetchall()]
+        if cand_count > 0 and len(candidates) != cand_count:
+            return {
+                "status": "INCOMPLETE",
+                "target_entity_id": target_entity_id,
+                "board_kind": board_kind,
+                "candidates": [],
+                "reason": "LOO 候选子表与支持父表数量不闭合，禁止读取半成品。",
+            }
+        if (
+            row[3] == "SELECTED"
+            and row[2] is not None
+            and cand_count > 0
+            and str(row[2]) not in {str(c["board_id"]) for c in candidates}
+        ):
+            return {
+                "status": "INCOMPLETE",
+                "target_entity_id": target_entity_id,
+                "board_kind": board_kind,
+                "candidates": [],
+                "reason": "LOO 选中支持板块不在候选子表中，父子表不闭合。",
+            }
         return {
             "status": "AVAILABLE",
             "target_entity_id": target_entity_id,
@@ -2291,6 +2692,9 @@ def read_r03_loo_support_fact(
             "algorithm_support_board_id": row[2],
             "support_status": row[3],
             "reason": row[4],
+            "candidate_count": cand_count,
+            "qualified_candidate_count": int(row[6]) if row[6] is not None else 0,
+            "matches_primary_industry": row[7],
             "candidates": candidates,
         }
 

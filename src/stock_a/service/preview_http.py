@@ -4895,15 +4895,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                     if trend_cls not in {"STRONG", "NEUTRAL", "WEAK"}:
                         trend_cls = None
-                    if trend_cls is None and isinstance(index_observations, Mapping):
-                        for idx_item in index_observations.get("items") or ():
-                            if isinstance(idx_item, Mapping):
-                                cand = idx_item.get(
-                                    "trend_classification"
-                                ) or idx_item.get("trend")
-                                if cand in {"STRONG", "NEUTRAL", "WEAK"}:
-                                    trend_cls = cand
-                                    break
                     composite = market_environment_label(
                         trend_cls,
                         None,
@@ -4996,6 +4987,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 if formal_breadth.get("status") in {
                     "OBSERVED",
                     "UNKNOWN",
+                    "INCOMPLETE",
+                    "NOT_COMPUTED",
                     "AMBIGUOUS_SCOPE",
                     "NOT_READY_HISTORICAL_UNIVERSE",
                 }:
@@ -5004,6 +4997,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     pressure_axis=pressure_for_risk,
                     breadth_axis=breadth_for_risk,
                     participation_axis=participation,
+                    formal_breadth=formal_breadth,
+                    breadth_change=breadth_change,
+                    environment_display=environment_display,
                 )
                 self._send_json(
                     200,
@@ -5090,6 +5086,23 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     contract_version=values["contract_version"],
                     board_kind=b_kind,
                 )
+                n_items = native_res.get("items") or ()
+                exh_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0, "UNKNOWN": 0}
+                chg_counts: dict[str, int] = {}
+                for n_it in n_items:
+                    el = str(n_it.get("exhaustion_level") or "UNKNOWN")
+                    exh_counts[el] = exh_counts.get(el, 0) + 1
+                    pel = n_it.get("prev_exhaustion_level")
+                    dq_lbl = str(n_it.get("display_quality") or "")
+                    if dq_lbl == "FIRST_OBSERVED" or pel is None:
+                        chg_key = "FIRST_OBSERVED"
+                    elif pel == "UNKNOWN" and el != "UNKNOWN":
+                        chg_key = "BECAME_KNOWN"
+                    elif pel == el:
+                        chg_key = "UNCHANGED"
+                    else:
+                        chg_key = f"{pel}_TO_{el}"
+                    chg_counts[chg_key] = chg_counts.get(chg_key, 0) + 1
                 self._send_json(
                     200,
                     {
@@ -5098,6 +5111,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "scope_key": values["scope_key"],
                         "native": native_res,
                         "overlap": overlap_res,
+                        "sector_risk_summary": {
+                            "total_boards": int(
+                                native_res.get("total_count", len(n_items))
+                            ),
+                            "page_board_count": len(n_items),
+                            "exhaustion_counts": exh_counts,
+                            "risk_change_counts": chg_counts,
+                        },
                     },
                 )
                 return
@@ -5328,9 +5349,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "search",
                     "offset",
                     "limit",
+                    "sort_mode",
                 }
                 values = _query(self.path, allowed)
-                required = allowed - {"search", "offset", "limit"}
+                required = allowed - {"search", "offset", "limit", "sort_mode"}
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
@@ -5428,6 +5450,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         read_source_sector_pulse_directory_page,
                     )
 
+                    sort_mode = values.get("sort_mode", "source_pulse")
+                    if sort_mode not in {"source_pulse", "formal_priority"}:
+                        raise PreviewHttpError(
+                            400,
+                            "SECTOR_PULSE_DIRECTORY_SORT_MODE_INVALID",
+                            "sort_mode 仅允许 source_pulse 或 formal_priority",
+                        )
                     prof_rev = _profile_revision(values["profile_revision"])
                     result = read_source_sector_pulse_directory_page(
                         self.preview_server.state.config,
@@ -5445,8 +5474,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         horizon_targets=horizon_targets,
                         board_kind=board_kind,
                         search=search,
-                        offset=offset,
-                        limit=limit,
+                        offset=0 if sort_mode == "formal_priority" else offset,
+                        limit=500 if sort_mode == "formal_priority" else limit,
                     )
                     from stock_a.application.r03_formal_sector import (
                         R03_CONTRACT_VERSION,
@@ -5515,6 +5544,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 "exhaustion_level": n_it.get("exhaustion_level")
                                 if n_it
                                 else None,
+                                "exhaustion_reason": n_it.get("exhaustion_reason")
+                                if n_it
+                                else None,
+                                "prev_exhaustion_level": n_it.get(
+                                    "prev_exhaustion_level"
+                                )
+                                if n_it
+                                else None,
                                 "emergence_level": n_it.get("emergence_level")
                                 if n_it
                                 else None,
@@ -5522,6 +5559,27 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 if n_it
                                 else None,
                                 "priority_rank": n_it.get("priority_rank")
+                                if n_it
+                                else None,
+                                "safety_state": n_it.get("safety_state")
+                                if n_it
+                                else None,
+                                "safety_reason": n_it.get("safety_reason")
+                                if n_it
+                                else None,
+                                "membership_complete": n_it.get("membership_complete")
+                                if n_it
+                                else None,
+                                "quote_coverage": str(n_it["quote_coverage"])
+                                if n_it and n_it.get("quote_coverage") is not None
+                                else None,
+                                "seed_k": n_it.get("seed_k") if n_it else None,
+                                "seed_f": n_it.get("seed_f") if n_it else None,
+                                "seed_u": n_it.get("seed_u") if n_it else None,
+                                "rs5_peer_count": n_it.get("rs5_peer_count")
+                                if n_it
+                                else None,
+                                "rs20_peer_count": n_it.get("rs20_peer_count")
                                 if n_it
                                 else None,
                                 "unique_share_status": o_it.get("unique_share_status")
@@ -5535,6 +5593,23 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 if rt_it
                                 else None,
                             }
+                    if sort_mode == "formal_priority":
+                        all_items = list(result.get("items") or ())
+                        all_items.sort(
+                            key=lambda it: (
+                                (it.get("r03_formal") or {}).get("priority_rank")
+                                is None,
+                                int(
+                                    (it.get("r03_formal") or {}).get("priority_rank")
+                                    or 999999
+                                ),
+                                str(it.get("board_kind", "")),
+                                str(it.get("board_native_id", "")),
+                            )
+                        )
+                        result["total_count"] = len(all_items)
+                        result["items"] = all_items[offset : offset + limit]
+                        result["sort_mode"] = "formal_priority"
                     result["r03_formal_sector_context"] = {
                         "scope_key": r03_scope,
                         "member_version": r03_member_ver,

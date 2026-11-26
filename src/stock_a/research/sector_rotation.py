@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
 from typing import Any
 
@@ -137,13 +138,16 @@ def evaluate_basket_metrics(
     top1_concentration: Fraction | None,
     quote_states_u: Mapping[str, str] | None = None,
     last_actual_quotes_u: Mapping[str, tuple[Fraction, int]] | None = None,
+    formation_r_t0: Fraction | None = None,
 ) -> dict[str, Any]:
-    """计算后继日 u 的 formation_R、post_R（支持<=20会话已证停牌MARKED_ESTIMATE）、留存与扩散指标。"""
-    form_r: Fraction | None = Fraction(0)
-    post_r: Fraction | None = Fraction(0)
+    """计算后继日 u 的 formation_R、post_R（支持<=20会话已证停牌MARKED_ESTIMATE）、价格留存、三留存与扩散指标。"""
+    form_r_acc = Fraction(0)
+    post_r_acc = Fraction(0)
+    eff_prices: dict[str, Fraction | None] = {}
     has_marked = False
-    max_quote_age: int | None = 0
-    valuation_quality = "OBSERVED"
+    has_unknown_price = False
+    valuation_reason: str | None = None
+    max_quote_age_val = 0
     for eid in basket.members:
         q_state = (
             quote_states_u.get(eid, "TRUE") if quote_states_u is not None else "TRUE"
@@ -157,19 +161,55 @@ def evaluate_basket_metrics(
             if est is not None and est[0] > 0 and 0 < est[1] <= 20:
                 eff_price = est[0]
                 has_marked = True
-                if max_quote_age is not None:
-                    max_quote_age = max(max_quote_age, int(est[1]))
+                max_quote_age_val = max(max_quote_age_val, int(est[1]))
+            elif est is not None and est[1] > 20 and valuation_reason is None:
+                valuation_reason = "SUSPENSION_EXCEEDED_20_SESSIONS"
+        eff_prices[eid] = eff_price
         if eff_price is None:
-            form_r = None
-            post_r = None
-            valuation_quality = "UNKNOWN"
-            max_quote_age = None
-            break
+            has_unknown_price = True
+            if valuation_reason is None:
+                valuation_reason = (
+                    "SUSPENSION_QUOTE_MISSING"
+                    if q_state == "CONFIRMED_SUSPENSION"
+                    else "ACTUAL_PRICE_MISSING"
+                )
+            continue
         w = basket.weights[eid]
-        form_r += w * (eff_price / basket.b_prices[eid] - 1)
-        post_r += w * (eff_price / basket.p_prices[eid] - 1)
-    if valuation_quality != "UNKNOWN" and has_marked:
-        valuation_quality = "MARKED_ESTIMATE"
+        form_r_acc += w * (eff_price / basket.b_prices[eid] - 1)
+        post_r_acc += w * (eff_price / basket.p_prices[eid] - 1)
+
+    if has_unknown_price:
+        form_r: Fraction | None = None
+        post_r: Fraction | None = None
+        valuation_quality = "UNKNOWN"
+        max_quote_age: int | None = max_quote_age_val if has_marked else None
+    else:
+        form_r = form_r_acc
+        post_r = post_r_acc
+        valuation_quality = "MARKED_ESTIMATE" if has_marked else "OBSERVED"
+        max_quote_age = max_quote_age_val
+        if has_marked:
+            valuation_reason = "MARKED_SUSPENSION_ESTIMATE"
+
+    # 价格留存：formation_R(u) / formation_R(t0)
+    if formation_r_t0 is None or form_r is None:
+        price_retention: Fraction | Decimal | None = None
+        price_retention_state = "UNKNOWN"
+        price_retention_reason: str | None = (
+            "FORMATION_R_T0_UNKNOWN"
+            if formation_r_t0 is None
+            else "FORMATION_R_UNKNOWN"
+        )
+    elif formation_r_t0 <= Fraction(0):
+        price_retention = None
+        price_retention_state = "NA"
+        price_retention_reason = "FORMATION_R_T0_NON_POSITIVE"
+    else:
+        price_retention = (
+            Decimal("1") if form_r == formation_r_t0 else form_r / formation_r_t0
+        )
+        price_retention_state = "OBSERVED"
+        price_retention_reason = None
 
     # Seed 留存
     if not basket.s0_known:
@@ -184,13 +224,13 @@ def evaluate_basket_metrics(
             val = Fraction(sum(1 for s in states if s == "TRUE"), len(basket.s0_seed))
             seed_ret = {"state": "OBSERVED", "value": val, "reason": None}
 
-    # Breadth 留存：U0 中当前 C >= 冻结 p_j 的比例（等号计保留）
+    # Breadth 留存：U0 中当前 eff_price >= 冻结 p_j 的比例（等号计保留，复用停牌 MARKED_ESTIMATE）
     if not basket.u0_known:
         breadth_ret = {"state": "UNKNOWN", "value": None, "reason": "U0_UNKNOWN"}
     elif not basket.u0_up:
         breadth_ret = {"state": "NA", "value": None, "reason": "U0_EMPTY"}
     else:
-        if any(prices_u.get(eid) is None for eid in basket.u0_up):
+        if any(eff_prices.get(eid) is None for eid in basket.u0_up):
             breadth_ret = {
                 "state": "UNKNOWN",
                 "value": None,
@@ -200,7 +240,7 @@ def evaluate_basket_metrics(
             kept = sum(
                 1
                 for eid in basket.u0_up
-                if prices_u[eid] >= basket.p_prices[eid]  # type: ignore[operator]
+                if eff_prices[eid] >= basket.p_prices[eid]  # type: ignore[operator]
             )
             breadth_ret = {
                 "state": "OBSERVED",
@@ -232,7 +272,7 @@ def evaluate_basket_metrics(
                 "reason": None,
             }
 
-    # 扩散：固定 B 中相邻可评估会话 Seed FALSE->TRUE entered, TRUE->FALSE exited
+    # 扩散：固定 B 中相邻可评估会话 Seed FALSE->TRUE entered, TRUE->FALSE exited（完整遍历，不提前 break）
     entered = 0
     exited = 0
     diffusion_unknown = False
@@ -241,7 +281,7 @@ def evaluate_basket_metrics(
         su = seed_u.get(eid, "UNKNOWN")
         if sp not in {"TRUE", "FALSE"} or su not in {"TRUE", "FALSE"}:
             diffusion_unknown = True
-            break
+            continue
         if sp == "FALSE" and su == "TRUE":
             entered += 1
         elif sp == "TRUE" and su == "FALSE":
@@ -313,15 +353,28 @@ def evaluate_basket_metrics(
         "formation_r": form_r,
         "post_r": post_r,
         "valuation_quality": valuation_quality,
+        "valuation_reason": valuation_reason,
         "max_quote_age": max_quote_age,
+        "price_retention": price_retention,
+        "price_retention_state": price_retention_state,
+        "price_retention_reason": price_retention_reason,
         "seed_retention": seed_ret,
+        "seed_retention_state": seed_ret["state"],
+        "seed_retention_reason": seed_ret["reason"],
         "breadth_retention": breadth_ret,
+        "breadth_retention_state": breadth_ret["state"],
+        "breadth_retention_reason": breadth_ret["reason"],
         "strong_retention": strong_ret,
-        "entered_count": entered,
-        "exited_count": exited,
+        "strong_retention_state": strong_ret["state"],
+        "strong_retention_reason": strong_ret["reason"],
+        "entered_count": None if diffusion_unknown else entered,
+        "exited_count": None if diffusion_unknown else exited,
         "diffusion": diffusion,
+        "diffusion_reason": diffusion.get("reason"),
         "early": early,
+        "early_reason": early.get("reason"),
         "mature": mature,
+        "mature_reason": mature.get("reason"),
     }
 
 
@@ -335,8 +388,11 @@ def step_rotation_state_machine(
     pulse_raw: Mapping[str, Any],
     basket_metrics: Mapping[str, Any] | None,
     input_missing_reason: str | None = None,
+    session_gap: int = 1,
 ) -> dict[str, Any]:
     """严格按 §11.3 10 步有序合同推进单个 Rotation 状态步。"""
+    if session_gap < 1:
+        raise ValueError("session_gap 必须 >= 1")
     # 1. 精确合同/前态/坐标/日历错 -> 拒绝，不改旧终态
     if not contract_valid:
         return {
@@ -379,7 +435,7 @@ def step_rotation_state_machine(
                 "last_known_state": str(effective_prev_state),
                 "stale": True,
                 "armed": False,
-                "market_age": prev_market_age + 1,
+                "market_age": prev_market_age + session_gap,
                 "eval_age": prev_age,
                 "accepted_once": bool(
                     previous_episode_state.get("accepted_once", False)
@@ -414,7 +470,7 @@ def step_rotation_state_machine(
                     "last_known_state": effective_prev_state,
                     "stale": False,
                     "armed": True,
-                    "market_age": prev_market_age + 1,
+                    "market_age": prev_market_age + session_gap,
                     "eval_age": previous_episode_state.get("eval_age", 0),  # type: ignore[union-attr]
                     "accepted_once": previous_episode_state.get("accepted_once", False),  # type: ignore[union-attr]
                     "out_neg_streak": 0,
@@ -427,7 +483,7 @@ def step_rotation_state_machine(
                 "last_known_state": effective_prev_state,
                 "stale": False,
                 "armed": False,
-                "market_age": prev_market_age + 1,
+                "market_age": prev_market_age + session_gap,
                 "eval_age": previous_episode_state.get("eval_age", 0),  # type: ignore[union-attr]
                 "accepted_once": previous_episode_state.get("accepted_once", False),  # type: ignore[union-attr]
                 "out_neg_streak": 0,
@@ -457,7 +513,7 @@ def step_rotation_state_machine(
                     "last_known_state": effective_prev_state,
                     "stale": False,
                     "armed": True,
-                    "market_age": prev_market_age + 1,
+                    "market_age": prev_market_age + session_gap,
                     "eval_age": previous_episode_state.get("eval_age", 0),  # type: ignore[union-attr]
                     "accepted_once": previous_episode_state.get("accepted_once", False),  # type: ignore[union-attr]
                     "out_neg_streak": 0,
@@ -470,7 +526,7 @@ def step_rotation_state_machine(
                 "last_known_state": effective_prev_state,
                 "stale": True,
                 "armed": armed,
-                "market_age": prev_market_age + 1,
+                "market_age": prev_market_age + session_gap,
                 "eval_age": previous_episode_state.get("eval_age", 0),  # type: ignore[union-attr]
                 "accepted_once": previous_episode_state.get("accepted_once", False),  # type: ignore[union-attr]
                 "out_neg_streak": 0,
@@ -497,7 +553,9 @@ def step_rotation_state_machine(
             "last_known_state": effective_prev_state,
             "stale": effective_prev_state is not None,
             "armed": armed,
-            "market_age": (prev_market_age + 1) if previous_episode_state else 0,
+            "market_age": (prev_market_age + session_gap)
+            if previous_episode_state
+            else 0,
             "eval_age": 0,
             "accepted_once": False,
             "out_neg_streak": 0,
@@ -510,11 +568,11 @@ def step_rotation_state_machine(
     assert previous_episode_state is not None
     assert basket_metrics is not None
     prev_state = str(effective_prev_state)
-    prev_was_unknown = raw_prev_state == "UNKNOWN"
+    prev_was_unknown = raw_prev_state in {"UNKNOWN", "REJECTED"}
     prev_age = int(previous_episode_state.get("eval_age", 0))
     prev_market_age = int(previous_episode_state.get("market_age", prev_age))
     next_age = prev_age + 1
-    next_market_age = prev_market_age + 1
+    next_market_age = prev_market_age + session_gap
     accepted_once = bool(previous_episode_state.get("accepted_once", False))
     prev_out_streak = (
         0 if prev_was_unknown else int(previous_episode_state.get("out_neg_streak", 0))

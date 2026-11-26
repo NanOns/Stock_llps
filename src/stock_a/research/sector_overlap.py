@@ -144,7 +144,7 @@ def compute_sector_overlap(
                         "board_kind": kind,
                         "board_id_a": a_id,
                         "board_id_b": b_id,
-                        "jaccard_status": "OBSERVED" if j is not None else "UNKNOWN",
+                        "jaccard_status": "OBSERVED" if j is not None else "NA",
                         "jaccard_value": j,
                         "reason": None if j is not None else "EMPTY_UNION",
                     }
@@ -186,11 +186,20 @@ def compute_sector_overlap(
             parent_ids = sorted(
                 str(pc["cluster_id"])
                 for pc in prev_by_kind.get(kind, [])
-                if set(pc["member_board_ids"]) & comp_set
+                if str(pc["cluster_id"]) != cid
+                and (set(pc["member_board_ids"]) & comp_set)
             )
             cluster_unknown = idx in unknown_affected_comps
+            unknown_edge_count = sum(
+                1
+                for a_id, b_id in unknown_edges
+                if a_id in comp_set or b_id in comp_set
+            )
+            cluster_reason = (
+                "UNKNOWN_EDGE_CROSSES_COMPONENTS" if cluster_unknown else None
+            )
 
-            # 按 Priority 选择代表；若存在 UNKNOWN Priority 候选则代表 UNKNOWN
+            # 按 Priority 选择代表；未知边界簇或存在 UNKNOWN Priority 候选则代表 UNKNOWN
             rankable_members = [
                 prio_by_key[(kind, bid)]
                 for bid in comp
@@ -202,16 +211,23 @@ def compute_sector_overlap(
                 and prio_by_key[(kind, bid)]["priority_status"] == "UNKNOWN"
                 for bid in comp
             )
-            if has_unknown_prio:
+            if cluster_unknown:
                 rep_id = None
                 rep_status = "UNKNOWN"
+                rep_reason = "CLUSTER_BOUNDARY_UNKNOWN"
+            elif has_unknown_prio:
+                rep_id = None
+                rep_status = "UNKNOWN"
+                rep_reason = "PRIORITY_UNKNOWN"
             elif rankable_members:
                 rankable_members.sort(key=lambda p: p["sort_key"])
                 rep_id = str(rankable_members[0]["board_id"])
                 rep_status = "SELECTED"
+                rep_reason = None
             else:
                 rep_id = sorted(comp)[0]
                 rep_status = "FALLBACK_ID"
+                rep_reason = "NO_RANKABLE_MEMBER_FALLBACK_ID"
 
             clusters.append(
                 {
@@ -220,8 +236,11 @@ def compute_sector_overlap(
                     "member_board_ids": comp,
                     "parent_cluster_ids": parent_ids,
                     "cluster_status": "UNKNOWN" if cluster_unknown else "KNOWN",
+                    "cluster_reason": cluster_reason,
                     "representative_board_id": rep_id,
                     "representative_status": rep_status,
+                    "representative_reason": rep_reason,
+                    "unknown_edge_count": unknown_edge_count,
                 }
             )
 

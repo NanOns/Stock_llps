@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from statistics import median
@@ -19,38 +20,76 @@ from typing import Any
 def tri(state: bool | None, reason: str | None = None) -> dict[str, Any]:
     """构造标准三态字典。"""
     if state is True:
-        return {"state": "TRUE", "reason": None}
+        return {"state": "TRUE", "reason": None, "reasons": ()}
     if state is False:
-        return {"state": "FALSE", "reason": reason}
-    return {"state": "UNKNOWN", "reason": reason or "INPUT_UNKNOWN"}
+        reasons = (reason,) if reason else ()
+        return {"state": "FALSE", "reason": reason, "reasons": reasons}
+    eff_reason = reason or "INPUT_UNKNOWN"
+    return {"state": "UNKNOWN", "reason": eff_reason, "reasons": (eff_reason,)}
+
+
+def _collect_item_reasons(item: Mapping[str, Any], default_reason: str) -> list[str]:
+    """从三态子项提取全部原因码，兼容仅含 reason 的字典。"""
+    raw_reasons = item.get("reasons")
+    if isinstance(raw_reasons, (list, tuple)) and raw_reasons:
+        return [str(r) for r in raw_reasons if r]
+    r = item.get("reason")
+    return [str(r or default_reason)]
 
 
 def tri_and(*items: Mapping[str, Any]) -> dict[str, Any]:
-    """Kleene 三态逻辑与：任一 FALSE 支配 UNKNOWN。"""
+    """Kleene 三态逻辑与：任一 FALSE 支配 UNKNOWN，并收集全部失败/未知原因。"""
+    false_reasons: list[str] = []
     unknown_reasons: list[str] = []
     for item in items:
         state = item["state"]
         if state == "FALSE":
-            return {"state": "FALSE", "reason": item.get("reason")}
-        if state != "TRUE":
-            unknown_reasons.append(str(item.get("reason") or "INPUT_UNKNOWN"))
+            false_reasons.extend(_collect_item_reasons(item, "CONDITION_FALSE"))
+        elif state != "TRUE":
+            unknown_reasons.extend(_collect_item_reasons(item, "INPUT_UNKNOWN"))
+    if false_reasons:
+        dedup = tuple(dict.fromkeys(false_reasons))
+        return {"state": "FALSE", "reason": dedup[0], "reasons": dedup}
     if unknown_reasons:
-        return {"state": "UNKNOWN", "reason": unknown_reasons[0]}
-    return {"state": "TRUE", "reason": None}
+        dedup = tuple(dict.fromkeys(unknown_reasons))
+        return {"state": "UNKNOWN", "reason": dedup[0], "reasons": dedup}
+    return {"state": "TRUE", "reason": None, "reasons": ()}
 
 
 def tri_or(*items: Mapping[str, Any]) -> dict[str, Any]:
-    """Kleene 三态逻辑或：任一 TRUE 支配 UNKNOWN。"""
+    """Kleene 三态逻辑或：任一 TRUE 支配 UNKNOWN，并收集全部失败/未知原因。"""
+    false_reasons: list[str] = []
     unknown_reasons: list[str] = []
+    has_true = False
     for item in items:
         state = item["state"]
         if state == "TRUE":
-            return {"state": "TRUE", "reason": None}
-        if state != "FALSE":
-            unknown_reasons.append(str(item.get("reason") or "INPUT_UNKNOWN"))
+            has_true = True
+        elif state == "FALSE":
+            false_reasons.extend(_collect_item_reasons(item, "CONDITION_FALSE"))
+        else:
+            unknown_reasons.extend(_collect_item_reasons(item, "INPUT_UNKNOWN"))
+    if has_true:
+        return {"state": "TRUE", "reason": None, "reasons": ()}
     if unknown_reasons:
-        return {"state": "UNKNOWN", "reason": unknown_reasons[0]}
-    return {"state": "FALSE", "reason": None}
+        dedup = tuple(dict.fromkeys(unknown_reasons))
+        return {"state": "UNKNOWN", "reason": dedup[0], "reasons": dedup}
+    dedup_false = tuple(dict.fromkeys(false_reasons))
+    return {
+        "state": "FALSE",
+        "reason": dedup_false[0] if dedup_false else None,
+        "reasons": dedup_false,
+    }
+
+
+def _join_reasons(tri_result: Mapping[str, Any]) -> str | None:
+    """将三态结果中的全部原因码以 ';' 去重拼接为可读原因串。"""
+    reasons = tri_result.get("reasons")
+    if isinstance(reasons, (list, tuple)) and reasons:
+        dedup = list(dict.fromkeys(str(r) for r in reasons if r))
+        return ";".join(dedup) if dedup else None
+    r = tri_result.get("reason")
+    return str(r) if r else None
 
 
 def _to_fraction(value: Any) -> Fraction | None:
@@ -336,11 +375,21 @@ def compute_endpoint_board_primitives(
         tri(coordinate_ready, "COORDINATE_NOT_READY"),
     )
 
-    rs5_ok, rs5_reason = _endpoint_primitive_gate(ret5_vals, n)
-    rs20_ok, rs20_reason = _endpoint_primitive_gate(ret20_vals, n)
-    b_ok, b_reason = _endpoint_primitive_gate(ret1_vals, n)
-    ma_ok = n >= 5 and len(above_ma20_flags) >= 5 and 5 * len(above_ma20_flags) >= 4 * n
-    amr_ok, amr_reason = _endpoint_primitive_gate(amr20_vals, n)
+    if not membership_complete:
+        rs5_ok, rs5_reason = False, "MEMBERSHIP_INCOMPLETE"
+        rs20_ok, rs20_reason = False, "MEMBERSHIP_INCOMPLETE"
+        b_ok, b_reason = False, "MEMBERSHIP_INCOMPLETE"
+        ma_ok, ma_reason = False, "MEMBERSHIP_INCOMPLETE"
+        amr_ok, amr_reason = False, "MEMBERSHIP_INCOMPLETE"
+    else:
+        rs5_ok, rs5_reason = _endpoint_primitive_gate(ret5_vals, n)
+        rs20_ok, rs20_reason = _endpoint_primitive_gate(ret20_vals, n)
+        b_ok, b_reason = _endpoint_primitive_gate(ret1_vals, n)
+        ma_ok = (
+            n >= 5 and len(above_ma20_flags) >= 5 and 5 * len(above_ma20_flags) >= 4 * n
+        )
+        ma_reason = None if ma_ok else "MA20_GATE_UNMET"
+        amr_ok, amr_reason = _endpoint_primitive_gate(amr20_vals, n)
 
     rs5_val = Fraction(median(ret5_vals)) if rs5_ok else None
     rs20_val = Fraction(median(ret20_vals)) if rs20_ok else None
@@ -382,10 +431,13 @@ def compute_endpoint_board_primitives(
             "reason": "MEMBERSHIP_INCOMPLETE",
         }
 
+    unmapped_count = sum(1 for slot in norm_members if slot.entity_id is None)
     return {
         "board_id": board_id,
         "board_kind": board_kind,
         "members": norm_members,
+        "membership_complete": membership_complete,
+        "unmapped_count": unmapped_count,
         "n": n,
         "actual_quote_count": actual_count,
         "suspended_count": suspended_count,
@@ -393,21 +445,32 @@ def compute_endpoint_board_primitives(
         "isolated_count": isolated_count,
         "quote_coverage": quote_cov,
         "safety": safety,
+        "safety_reason": _join_reasons(safety),
         "rs5": {"value": rs5_val, "known": len(ret5_vals), "reason": rs5_reason},
+        "rs5_reason": rs5_reason,
         "rs20": {"value": rs20_val, "known": len(ret20_vals), "reason": rs20_reason},
+        "rs20_reason": rs20_reason,
         "breadth": {"value": breadth_val, "known": len(ret1_vals), "reason": b_reason},
+        "breadth_reason": b_reason,
         "ma20_width": {
             "value": ma20_val,
             "known": len(above_ma20_flags),
-            "reason": None if ma_ok else "MA20_GATE_UNMET",
+            "reason": ma_reason,
         },
+        "ma20_reason": ma_reason,
         "amr20_median": {
             "value": amr20_val,
             "known": len(amr20_vals),
             "reason": amr_reason,
         },
+        "amr20_reason": amr_reason,
+        "seed_k": seed_k,
+        "seed_f": seed_f,
+        "seed_u": seed_u,
         "seed_wilson": wilson,
         "concentration": concentration,
+        "concentration_status": concentration["status"],
+        "concentration_reason": concentration["reason"],
         "observations": observations,
     }
 
@@ -428,6 +491,8 @@ def rank_endpoint_boards(
             copied["rs5_pct"] = None
             copied["rs20_pct"] = None
             copied["peer_count"] = 0
+            copied["rs5_peer_count"] = 0
+            copied["rs20_peer_count"] = 0
             ranked[board_key] = copied
             continue
         peers = by_kind.get(board["board_kind"], [])
@@ -444,6 +509,8 @@ def rank_endpoint_boards(
             _midrank_percentile(rs20_peers, own20) if own20 is not None else None
         )
         copied["peer_count"] = len(peers)
+        copied["rs5_peer_count"] = len(rs5_peers)
+        copied["rs20_peer_count"] = len(rs20_peers)
         ranked[board_key] = copied
     return ranked
 
@@ -454,9 +521,16 @@ def _common_member_delta(
     members_u: Sequence[MemberSlot],
     obs_u: Mapping[str, Mapping[str, Any]],
     field: str,
+    *,
+    membership_complete_t: bool = True,
+    membership_complete_u: bool = True,
+    unmapped_t: int = 0,
+    unmapped_u: int = 0,
 ) -> dict[str, Any]:
     """在 M_t ∩ M_u 且两端 E_x 交集上重算共同成员宽度/MA 变化（ALG-21）。"""
     membership = compute_membership_delta(members_t, members_u)
+    eff_unmapped_t = max(unmapped_t, len(membership["unmapped_t"]))
+    eff_unmapped_u = max(unmapped_u, len(membership["unmapped_u"]))
     common_ids = membership["common_entity_ids"]
     vals_t: list[Any] = []
     vals_u: list[Any] = []
@@ -473,13 +547,45 @@ def _common_member_delta(
                 vals_t.append(vt)
                 vals_u.append(vu)
 
-    n_t = membership["n_t"]
-    n_u = membership["n_u"]
-    if n_t < 5 or n_u < 5 or len(vals_t) < 5 or 5 * len(vals_t) < 4 * max(n_t, n_u):
+    common_known_count = len(vals_t)
+    if (
+        not membership_complete_t
+        or not membership_complete_u
+        or eff_unmapped_t > 0
+        or eff_unmapped_u > 0
+    ):
+        membership_incomplete = {
+            **membership,
+            "joined_entity_ids": (),
+            "exited_entity_ids": (),
+        }
         return {
             "delta": None,
-            "common_eval_count": len(vals_t),
+            "common_eval_count": common_known_count,
+            "common_known_count": common_known_count,
+            "membership_delta": membership_incomplete,
+            "membership_delta_status": "UNKNOWN",
+            "joined_entity_ids": (),
+            "exited_entity_ids": (),
+            "reason": "MEMBERSHIP_INCOMPLETE",
+        }
+
+    n_t = membership["n_t"]
+    n_u = membership["n_u"]
+    if (
+        n_t < 5
+        or n_u < 5
+        or common_known_count < 5
+        or 5 * common_known_count < 4 * max(n_t, n_u)
+    ):
+        return {
+            "delta": None,
+            "common_eval_count": common_known_count,
+            "common_known_count": common_known_count,
             "membership_delta": membership,
+            "membership_delta_status": "OBSERVED",
+            "joined_entity_ids": tuple(membership["joined_entity_ids"]),
+            "exited_entity_ids": tuple(membership["exited_entity_ids"]),
             "reason": "COMMON_COVERAGE_UNMET",
         }
 
@@ -492,8 +598,12 @@ def _common_member_delta(
 
     return {
         "delta": rate_t - rate_u,
-        "common_eval_count": len(vals_t),
+        "common_eval_count": common_known_count,
+        "common_known_count": common_known_count,
         "membership_delta": membership,
+        "membership_delta_status": "OBSERVED",
+        "joined_entity_ids": tuple(membership["joined_entity_ids"]),
+        "exited_entity_ids": tuple(membership["exited_entity_ids"]),
         "reason": None,
     }
 
@@ -559,6 +669,7 @@ def evaluate_sector_raw_qualification(
 
 
 _MATURITY_ORDER = {"NONE": 0, "PREWATCH": 1, "WARM": 2, "CONFIRMED": 3}
+_VALID_MATURITIES = frozenset(_MATURITY_ORDER)
 
 
 def advance_sector_maturity_and_health(
@@ -567,6 +678,9 @@ def advance_sector_maturity_and_health(
     dq5: Fraction | None,
     previous_state: Mapping[str, Any] | None,
     hard_damaged: bool = False,
+    previous_session_missing: bool = False,
+    prev_trade_date: date | None = None,
+    session_gap: int | None = None,
 ) -> dict[str, Any]:
     """按 §10.2 计算今日有效资格、2日滞后展示成熟、PREWATCH 10日退出与板块 health。"""
     c_state = raw_qual["confirmed_raw"]["state"]
@@ -607,16 +721,36 @@ def advance_sector_maturity_and_health(
         health = "STABLE"
 
     prev_display = previous_state.get("display_maturity") if previous_state else None
-    prev_last_known = (
-        previous_state.get("last_known_maturity") if previous_state else None
+    prev_effective = (
+        previous_state.get("effective_maturity") if previous_state else None
     )
-    if prev_last_known is None and prev_display in {
-        "NONE",
-        "PREWATCH",
-        "WARM",
-        "CONFIRMED",
-    }:
-        prev_last_known = prev_display
+    prev_display_quality = (
+        previous_state.get("display_quality") if previous_state else None
+    )
+    prev_last_known_display = (
+        previous_state.get("last_known_display") if previous_state else None
+    )
+    if prev_last_known_display is None and prev_display in _VALID_MATURITIES:
+        prev_last_known_display = prev_display
+    if (
+        prev_last_known_display is None
+        and previous_state is not None
+        and previous_state.get("last_known_maturity") in _VALID_MATURITIES
+    ):
+        prev_last_known_display = previous_state.get("last_known_maturity")
+
+    prev_last_known_effective = (
+        previous_state.get("last_known_effective") if previous_state else None
+    )
+    if prev_last_known_effective is None and prev_effective in _VALID_MATURITIES:
+        prev_last_known_effective = prev_effective
+    if (
+        prev_last_known_effective is None
+        and previous_state is not None
+        and previous_state.get("last_known_maturity") in _VALID_MATURITIES
+    ):
+        prev_last_known_effective = previous_state.get("last_known_maturity")
+
     prev_downgrade_streak = int(
         previous_state.get("downgrade_streak", 0) if previous_state else 0
     )
@@ -634,19 +768,28 @@ def advance_sector_maturity_and_health(
     )
 
     if effective_maturity == "UNKNOWN":
+        held_display = (
+            prev_display
+            if prev_display in _VALID_MATURITIES
+            else prev_last_known_display
+        )
         return {
             "effective_maturity": "UNKNOWN",
             "maturity_lower": lower,
             "maturity_upper": upper,
-            "display_maturity": prev_last_known or "UNKNOWN",
-            "last_known_maturity": prev_last_known,
-            "display_quality": "STALE" if prev_last_known else "UNKNOWN",
+            "display_maturity": held_display or "UNKNOWN",
+            "last_known_display": prev_last_known_display,
+            "last_known_effective": prev_last_known_effective,
+            "last_known_maturity": prev_last_known_display,
+            "display_quality": "STALE" if held_display is not None else "UNKNOWN",
             "downgrade_streak": 0,
             "downgrade_target": None,
             "prewatch_no_improve_count": prev_prewatch_age,
             "prewatch_dq5_baseline": prev_dq5_base,
             "prewatch_exited": prev_prewatch_exited,
             "health": health,
+            "prev_trade_date": prev_trade_date,
+            "session_gap": session_gap,
         }
 
     # 若昨日因 PREWATCH 10日无改善退出且今日仍仅达 PREWATCH，当日不重入
@@ -655,13 +798,23 @@ def advance_sector_maturity_and_health(
         effective_maturity = "NONE"
         prewatch_exited = True
 
-    if prev_display is None or prev_display == "UNKNOWN":
+    recovered_from_unknown = (
+        prev_effective == "UNKNOWN"
+        or prev_display_quality == "STALE"
+        or prev_display == "UNKNOWN"
+    )
+    if prev_display is None or prev_display == "UNKNOWN" or recovered_from_unknown:
+        anchor = (
+            prev_display
+            if prev_display in _VALID_MATURITIES
+            else prev_last_known_display
+        )
         if (
-            prev_last_known is not None
-            and _MATURITY_ORDER[effective_maturity] < _MATURITY_ORDER[prev_last_known]
+            anchor is not None
+            and _MATURITY_ORDER[effective_maturity] < _MATURITY_ORDER[anchor]
         ):
             # 从 UNKNOWN 恢复后降级重新从 1 计数
-            display_maturity = prev_last_known
+            display_maturity = anchor
             downgrade_streak = 1
             downgrade_target = effective_maturity
             display_quality = "OBSERVED"
@@ -669,9 +822,12 @@ def advance_sector_maturity_and_health(
             display_maturity = effective_maturity
             downgrade_streak = 0
             downgrade_target = None
-            display_quality = (
-                "FIRST_OBSERVED" if prev_last_known is None else "OBSERVED"
-            )
+            if previous_state is None and previous_session_missing:
+                display_quality = "STALE"
+            elif anchor is not None or prev_last_known_effective is not None:
+                display_quality = "OBSERVED"
+            else:
+                display_quality = "FIRST_OBSERVED"
     elif _MATURITY_ORDER[effective_maturity] > _MATURITY_ORDER[prev_display]:
         display_maturity = effective_maturity
         downgrade_streak = 0
@@ -701,14 +857,17 @@ def advance_sector_maturity_and_health(
         downgrade_target = None
         display_quality = "OBSERVED"
 
-    # PREWATCH 10 日无改善（同版 dq5 相对归零基准 < 3pp）退出
+    # PREWATCH 10 日无改善（同版 dq5 相对归零基准 < 3pp）退出；dq5 未知时不累加
     prewatch_no_improve_count = 0
     prewatch_dq5_baseline = None
     if display_maturity == "PREWATCH" and not prewatch_exited:
         if prev_display != "PREWATCH" or prev_dq5_base is None:
             prewatch_dq5_baseline = dq5
             prewatch_no_improve_count = 0
-        elif dq5 is not None and (dq5 - prev_dq5_base) >= Fraction(3):
+        elif dq5 is None:
+            prewatch_dq5_baseline = prev_dq5_base
+            prewatch_no_improve_count = prev_prewatch_age
+        elif (dq5 - prev_dq5_base) >= Fraction(3):
             prewatch_dq5_baseline = dq5
             prewatch_no_improve_count = 0
         else:
@@ -726,6 +885,8 @@ def advance_sector_maturity_and_health(
         "maturity_lower": lower,
         "maturity_upper": upper,
         "display_maturity": display_maturity,
+        "last_known_display": display_maturity,
+        "last_known_effective": effective_maturity,
         "last_known_maturity": effective_maturity,
         "display_quality": display_quality,
         "downgrade_streak": downgrade_streak,
@@ -734,6 +895,8 @@ def advance_sector_maturity_and_health(
         "prewatch_dq5_baseline": prewatch_dq5_baseline,
         "prewatch_exited": prewatch_exited,
         "health": health,
+        "prev_trade_date": prev_trade_date,
+        "session_gap": session_gap,
     }
 
 
@@ -917,6 +1080,9 @@ def compute_sector_native_day(
     boards_t1: Mapping[Any, Mapping[str, Any]],
     boards_t3: Mapping[Any, Mapping[str, Any]],
     previous_states: Mapping[Any, Mapping[str, Any]] | None = None,
+    prev_trade_date: date | None = None,
+    session_gap: int | None = None,
+    previous_session_missing: bool = False,
 ) -> list[dict[str, Any]]:
     """串联 ALG-21/22/23/30/31/32 计算单日全板块正式 Native、资格、前态、风险与 Priority。"""
     ranked_t = rank_endpoint_boards(
@@ -949,9 +1115,18 @@ def compute_sector_native_day(
                 nt3["members"],
                 nt3["observations"],
                 "ret1",
+                membership_complete_t=bool(nt.get("membership_complete", True)),
+                membership_complete_u=bool(nt3.get("membership_complete", True)),
             )
             if nt3 is not None
-            else {"delta": None, "reason": "PRIOR_T3_MISSING"}
+            else {
+                "delta": None,
+                "common_known_count": None,
+                "membership_delta_status": "UNKNOWN",
+                "joined_entity_ids": (),
+                "exited_entity_ids": (),
+                "reason": "PRIOR_T3_MISSING",
+            }
         )
         md3_info = (
             _common_member_delta(
@@ -960,9 +1135,18 @@ def compute_sector_native_day(
                 nt3["members"],
                 nt3["observations"],
                 "above_ma20",
+                membership_complete_t=bool(nt.get("membership_complete", True)),
+                membership_complete_u=bool(nt3.get("membership_complete", True)),
             )
             if nt3 is not None
-            else {"delta": None, "reason": "PRIOR_T3_MISSING"}
+            else {
+                "delta": None,
+                "common_known_count": None,
+                "membership_delta_status": "UNKNOWN",
+                "joined_entity_ids": (),
+                "exited_entity_ids": (),
+                "reason": "PRIOR_T3_MISSING",
+            }
         )
         bd1_info = (
             _common_member_delta(
@@ -971,9 +1155,18 @@ def compute_sector_native_day(
                 normalize_member_slots(nt1["members"]),
                 nt1["observations"],
                 "ret1",
+                membership_complete_t=bool(nt.get("membership_complete", True)),
+                membership_complete_u=bool(nt1.get("membership_complete", True)),
             )
             if nt1 is not None
-            else {"delta": None, "reason": "PRIOR_T1_MISSING"}
+            else {
+                "delta": None,
+                "common_known_count": None,
+                "membership_delta_status": "UNKNOWN",
+                "joined_entity_ids": (),
+                "exited_entity_ids": (),
+                "reason": "PRIOR_T1_MISSING",
+            }
         )
         raw_qual = evaluate_sector_raw_qualification(
             nt,
@@ -988,6 +1181,9 @@ def compute_sector_native_day(
             raw_qual,
             dq5=dq5,
             previous_state=prev_state,
+            previous_session_missing=previous_session_missing,
+            prev_trade_date=prev_trade_date,
+            session_gap=session_gap,
         )
         exhaustion = compute_sector_exhaustion_risk(
             rs20_pct=nt["rs20_pct"],
@@ -1000,7 +1196,26 @@ def compute_sector_native_day(
             breadth_delta3=bd3_info["delta"],
             seed_wilson_point=sw_point,
         )
-        m_delta = bd3_info.get("membership_delta") or {}
+        m_delta_status = (
+            str(bd3_info.get("membership_delta_status", "UNKNOWN"))
+            if nt3 is not None
+            else "UNKNOWN"
+        )
+        joined_count = (
+            len(bd3_info.get("joined_entity_ids", ()))
+            if m_delta_status == "OBSERVED"
+            else None
+        )
+        exited_count = (
+            len(bd3_info.get("exited_entity_ids", ()))
+            if m_delta_status == "OBSERVED"
+            else None
+        )
+        prev_exhaustion_level = None
+        if prev_state is not None:
+            prev_exhaustion_level = prev_state.get("exhaustion_level") or (
+                prev_state.get("exhaustion") or {}
+            ).get("level")
         results.append(
             {
                 **nt,
@@ -1009,12 +1224,24 @@ def compute_sector_native_day(
                 "breadth_delta1": bd1_info["delta"],
                 "breadth_delta3": bd3_info["delta"],
                 "ma20_delta3": md3_info["delta"],
-                "joined_count": len(m_delta.get("joined_entity_ids", ())),
-                "exited_count": len(m_delta.get("exited_entity_ids", ())),
+                "breadth_delta1_common_count": bd1_info.get("common_known_count"),
+                "breadth_delta3_common_count": bd3_info.get("common_known_count"),
+                "ma20_delta3_common_count": md3_info.get("common_known_count"),
+                "joined_count": joined_count,
+                "exited_count": exited_count,
+                "membership_delta_status": m_delta_status,
+                "prewatch_raw_reason": _join_reasons(raw_qual["prewatch_raw"]),
+                "warm_raw_reason": _join_reasons(raw_qual["warm_raw"]),
+                "confirmed_raw_reason": _join_reasons(raw_qual["confirmed_raw"]),
                 "raw_qualification": raw_qual,
                 "lifecycle": lifecycle,
                 "exhaustion": exhaustion,
+                "exhaustion_reason": exhaustion.get("reason"),
                 "emergence": emergence,
+                "emergence_reason": emergence.get("reason"),
+                "prev_trade_date": prev_trade_date,
+                "session_gap": session_gap,
+                "prev_exhaustion_level": prev_exhaustion_level,
             }
         )
 
@@ -1044,12 +1271,24 @@ def compute_sector_loo_and_support(
             "algorithm_support_board_id": None,
             "support_status": "UNKNOWN",
             "reason": "MEMBERSHIP_SOURCE_MISSING",
+            "candidate_count": 0,
+            "qualified_candidate_count": 0,
             "loo_boards": [],
         }
 
     scoped_t = [
         b for b in boards_t if board_kind is None or str(b["board_kind"]) == board_kind
     ]
+    scoped_t1 = {
+        k: b
+        for k, b in boards_t1.items()
+        if board_kind is None or str(b["board_kind"]) == board_kind
+    }
+    scoped_t3 = {
+        k: b
+        for k, b in boards_t3.items()
+        if board_kind is None or str(b["board_kind"]) == board_kind
+    }
     reduced_t = []
     member_keys: set[tuple[str, str]] = set()
     for b in scoped_t:
@@ -1058,30 +1297,52 @@ def compute_sector_loo_and_support(
             member_keys.add(_board_key(b))
         reduced_t.append({**b, "members": slots})
 
+    if not scoped_t:
+        return {
+            "target_entity_id": target_entity_id,
+            "primary_industry_id": primary_industry_id,
+            "algorithm_support_board_id": None,
+            "support_status": "UNKNOWN",
+            "reason": "BOARD_KIND_SOURCE_MISSING",
+            "candidate_count": 0,
+            "qualified_candidate_count": 0,
+            "loo_boards": [],
+        }
+
+    all_scoped_endpoints = [*scoped_t, *scoped_t1.values(), *scoped_t3.values()]
+    has_unmapped_slot = any(
+        any(s.entity_id is None for s in b["members"]) for b in all_scoped_endpoints
+    )
+    has_incomplete_membership = any(
+        not b.get("membership_complete", True) for b in all_scoped_endpoints
+    )
+    if has_unmapped_slot or has_incomplete_membership:
+        if not member_keys:
+            reason = "MEMBERSHIP_INCOMPLETE_CANNOT_PROVE_UNASSIGNED"
+        elif has_unmapped_slot:
+            reason = "UNMAPPED_MEMBER_AFFECTS_LOO"
+        else:
+            reason = "MEMBERSHIP_INCOMPLETE_AFFECTS_LOO"
+        return {
+            "target_entity_id": target_entity_id,
+            "primary_industry_id": primary_industry_id,
+            "algorithm_support_board_id": None,
+            "support_status": "UNKNOWN",
+            "reason": reason,
+            "candidate_count": len(member_keys),
+            "qualified_candidate_count": 0,
+            "loo_boards": [],
+        }
+
     if not member_keys:
-        if not scoped_t or any(
-            not b.get("membership_complete", True)
-            or any(s.entity_id is None for s in b["members"])
-            for b in scoped_t
-        ):
-            return {
-                "target_entity_id": target_entity_id,
-                "primary_industry_id": primary_industry_id,
-                "algorithm_support_board_id": None,
-                "support_status": "UNKNOWN",
-                "reason": (
-                    "BOARD_KIND_SOURCE_MISSING"
-                    if not scoped_t
-                    else "MEMBERSHIP_INCOMPLETE_CANNOT_PROVE_UNASSIGNED"
-                ),
-                "loo_boards": [],
-            }
         return {
             "target_entity_id": target_entity_id,
             "primary_industry_id": primary_industry_id,
             "algorithm_support_board_id": None,
             "support_status": "NA",
             "reason": "NO_APPLICABLE_BOARD",
+            "candidate_count": 0,
+            "qualified_candidate_count": 0,
             "loo_boards": [],
         }
 
@@ -1090,16 +1351,14 @@ def compute_sector_loo_and_support(
             **b,
             "members": [s for s in b["members"] if s.entity_id != target_entity_id],
         }
-        for k, b in boards_t1.items()
-        if board_kind is None or str(b["board_kind"]) == board_kind
+        for k, b in scoped_t1.items()
     }
     reduced_t3 = {
         k: {
             **b,
             "members": [s for s in b["members"] if s.entity_id != target_entity_id],
         }
-        for k, b in boards_t3.items()
-        if board_kind is None or str(b["board_kind"]) == board_kind
+        for k, b in scoped_t3.items()
     }
 
     recomputed = compute_sector_native_day(
@@ -1107,7 +1366,17 @@ def compute_sector_loo_and_support(
         boards_t1=reduced_t1,
         boards_t3=reduced_t3,
     )
-    candidates = [r for r in recomputed if _board_key(r) in member_keys]
+    candidates = [
+        {
+            **r,
+            "is_selected_support": False,
+            "breadth_delta3": r.get("breadth_delta3"),
+            "ma20_delta3": r.get("ma20_delta3"),
+            "top1_concentration": r["concentration"].get("top1_concentration"),
+        }
+        for r in recomputed
+        if _board_key(r) in member_keys
+    ]
 
     def _qual_bounds(row: Mapping[str, Any]) -> tuple[int, int]:
         rq = row["raw_qualification"]
@@ -1152,6 +1421,8 @@ def compute_sector_loo_and_support(
             "algorithm_support_board_id": None,
             "support_status": "UNKNOWN",
             "reason": "LOO_QUALIFICATION_UNKNOWN",
+            "candidate_count": len(candidates),
+            "qualified_candidate_count": len(qualified_candidates),
             "loo_boards": candidates,
         }
 
@@ -1162,6 +1433,8 @@ def compute_sector_loo_and_support(
             "algorithm_support_board_id": None,
             "support_status": "NA",
             "reason": "NO_QUALIFIED_LOO_BOARD",
+            "candidate_count": len(candidates),
+            "qualified_candidate_count": 0,
             "loo_boards": candidates,
         }
 
@@ -1179,6 +1452,8 @@ def compute_sector_loo_and_support(
                 "algorithm_support_board_id": None,
                 "support_status": "UNKNOWN",
                 "reason": "LOO_TIEBREAK_KEY_UNKNOWN",
+                "candidate_count": len(candidates),
+                "qualified_candidate_count": len(qualified_candidates),
                 "loo_boards": candidates,
             }
         top_tier.sort(
@@ -1190,12 +1465,17 @@ def compute_sector_loo_and_support(
         )
 
     best = top_tier[0]
+    best_key = _board_key(best)
+    for c in candidates:
+        c["is_selected_support"] = _board_key(c) == best_key
     return {
         "target_entity_id": target_entity_id,
         "primary_industry_id": primary_industry_id,
         "algorithm_support_board_id": best["board_id"],
         "support_status": "SELECTED",
         "reason": None,
+        "candidate_count": len(candidates),
+        "qualified_candidate_count": len(qualified_candidates),
         "loo_boards": candidates,
     }
 
@@ -1205,26 +1485,75 @@ def compute_market_risk_projection(
     pressure_axis: Mapping[str, Any] | None,
     breadth_axis: Mapping[str, Any] | None,
     participation_axis: Mapping[str, Any] | None,
+    formal_breadth: Mapping[str, Any] | None = None,
+    breadth_change: Mapping[str, Any] | None = None,
+    environment_display: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """MKT-06 / ALG-31：独立投影市场压力、宽度、参与三轴风险，不合成未采用总分。"""
+
+    def _extract_known_count(axis: Mapping[str, Any]) -> Any:
+        if axis.get("known_count") is not None:
+            return axis.get("known_count")
+        if axis.get("assessable_count") is not None:
+            return axis.get("assessable_count")
+        return axis.get("n_eligible")
 
     def _project_axis(name: str, axis: Mapping[str, Any] | None) -> dict[str, Any]:
         if not axis:
             return {"axis": name, "status": "NOT_COMPUTED", "classification": "UNKNOWN"}
-        return {
+        projected: dict[str, Any] = {
             "axis": name,
             "status": axis.get("status", "UNKNOWN"),
             "classification": axis.get("classification", "UNKNOWN"),
             "coverage": axis.get("coverage"),
-            "known_count": axis.get("known_count"),
+            "known_count": _extract_known_count(axis),
             "unknown_count": axis.get("unknown_count"),
         }
+        if name == "breadth":
+            projected["n_t"] = axis.get("n_t")
+            projected["n_t3"] = axis.get("n_t3")
+            projected["n_common"] = axis.get("n_common")
+            projected["n_eligible"] = axis.get("n_eligible")
+        return projected
+
+    effective_breadth = formal_breadth if formal_breadth is not None else breadth_axis
+    breadth_projected = _project_axis("breadth", effective_breadth)
+    breadth_denominators = {
+        "n_t": effective_breadth.get("n_t") if effective_breadth else None,
+        "n_t3": effective_breadth.get("n_t3") if effective_breadth else None,
+        "n_common": effective_breadth.get("n_common") if effective_breadth else None,
+        "n_eligible": effective_breadth.get("n_eligible")
+        if effective_breadth
+        else None,
+        "unknown_count": effective_breadth.get("unknown_count")
+        if effective_breadth
+        else None,
+    }
+    breadth_change_out = (
+        {
+            "change_status": breadth_change.get("change_status", "UNKNOWN"),
+            "delta": breadth_change.get("delta"),
+        }
+        if breadth_change is not None
+        else {"change_status": "UNKNOWN", "delta": None}
+    )
+    env_display_status = "UNKNOWN"
+    if environment_display is not None:
+        env_display_status = str(
+            environment_display.get("display_status")
+            or environment_display.get("display_quality")
+            or environment_display.get("status")
+            or "UNKNOWN"
+        )
 
     return {
         "axes": {
             "pressure": _project_axis("pressure", pressure_axis),
-            "breadth": _project_axis("breadth", breadth_axis),
+            "breadth": breadth_projected,
             "participation": _project_axis("participation", participation_axis),
         },
+        "breadth_denominators": breadth_denominators,
+        "breadth_change": breadth_change_out,
+        "environment_display_status": env_display_status,
         "composite_risk_score": None,
     }
