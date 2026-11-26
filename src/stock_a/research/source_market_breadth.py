@@ -20,7 +20,7 @@ class SourceCohortIdentity:
     """目标日paired BaoStock捕获和实际时钟身份。"""
 
     target_session: date
-    source_capture_id: int
+    source_capture_id: int | None
     price_coordinate: str
     source_time_quality: str
     source_available_at: str | None
@@ -38,11 +38,11 @@ class SourceCohortIdentity:
 
 @dataclass(frozen=True)
 class QfqPriceObservation:
-    """一个paired捕获、官方会话和来源代码的QFQ收盘观察。"""
+    """一个BaoStock QFQ来源捕获、官方会话和来源代码的收盘观察。"""
 
     source_symbol: str
     session_date: date
-    source_capture_id: int
+    source_capture_id: int | None
     selected_close: Decimal | Fraction | int | None
     price_quality: str
     price_reason: str | None
@@ -227,6 +227,8 @@ def _observed_close(
         return None, "QFQ_SESSION_ROW_MISSING", None
     if observation.session_date != expected_session:
         return None, "OFFICIAL_SESSION_MISMATCH", None
+    if observation.source_capture_id is None:
+        return None, "QFQ_SOURCE_CAPTURE_ID_MISSING", None
     if observation.source_capture_id != cohort.source_capture_id:
         return None, "SOURCE_CAPTURE_MISMATCH", None
     if observation.price_coordinate != _PRICE_COORDINATE:

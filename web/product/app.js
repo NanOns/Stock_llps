@@ -5876,8 +5876,6 @@ async function resolveStockCodeInput(value, context) {
     target_session: context.target_session,
     stock_code: input,
   };
-  const captureId = sourceCaptureIdFrom(context.source_capture_id);
-  if (captureId) query.source_capture_id = captureId;
   const result = await api(
     `/api/product/resolve-stock-code?${new URLSearchParams(query)}`,
   );
@@ -5901,6 +5899,7 @@ async function openStock(symbol, row = {}) {
   try {
     const resolved = await resolveStockCodeInput(symbol, selected);
     selectedCaptureId = sourceCaptureIdFrom(
+      resolved.source_capture_ids_by_coordinate?.RAW_UNADJUSTED,
       resolved.source_capture_id,
       selectedCaptureId,
     );
@@ -5979,7 +5978,13 @@ async function openStock(symbol, row = {}) {
     if (selectedCaptureId) stockRequest.source_capture_id = selectedCaptureId;
     const data = await stockApi("/api/preview/stock", stockRequest);
     if (token !== state.stockRequest) return;
+    const detailCoordinateCaptureIds =
+      data.source_capture_ids_by_coordinate ||
+      data.raw?.source_capture_ids_by_coordinate ||
+      {};
     const detailCaptureId = sourceCaptureIdFrom(
+      detailCoordinateCaptureIds.RAW_UNADJUSTED,
+      data.raw?.source_capture_id,
       data.source_capture_id,
       data.source_version?.source_capture_id,
       data.raw?.source_capture_id,
@@ -6179,7 +6184,13 @@ async function openStock(symbol, row = {}) {
         request === history.coordinateRequest &&
         token === state.stockRequest &&
         selected === state.selected;
-      const expectedCaptureId = sourceCaptureIdFrom(detailCaptureId);
+      const coordinateCaptureIds =
+        data.source_capture_ids_by_coordinate ||
+        data.raw?.source_capture_ids_by_coordinate ||
+        {};
+      const expectedCaptureId = sourceCaptureIdFrom(
+        coordinateCaptureIds[coordinate],
+      );
       const queryValues = {
         target_session: c.target_session,
         symbol,
@@ -6192,10 +6203,6 @@ async function openStock(symbol, row = {}) {
         session_count: c.stock_history_session_count,
         price_coordinate: coordinate,
       };
-      if (expectedCaptureId) {
-        queryValues.source_capture_id = String(expectedCaptureId);
-        timelineRequest.source_capture_id = String(expectedCaptureId);
-      }
       const query = new URLSearchParams(queryValues);
       const [periodResult, dayResult] = await Promise.allSettled([
         stockApi(`/api/source-symbol/raw-periods?${query}`),
@@ -6206,14 +6213,12 @@ async function openStock(symbol, row = {}) {
       function responseCaptureId(result, label) {
         if (result.price_coordinate !== coordinate)
           throw new Error(`${label}价格坐标与请求不一致`);
+        const actualCaptureId = sourceCaptureIdFrom(result.source_capture_id);
         if (
-          result.source_capture_id === null ||
-          result.source_capture_id === undefined ||
-          !String(result.source_capture_id).trim()
+          expectedCaptureId &&
+          actualCaptureId &&
+          actualCaptureId !== String(expectedCaptureId)
         )
-          throw new Error(`${label}响应缺少来源捕获身份`);
-        const actualCaptureId = String(result.source_capture_id);
-        if (expectedCaptureId && actualCaptureId !== String(expectedCaptureId))
           throw new Error(`${label}来源捕获与请求不一致`);
         return actualCaptureId;
       }

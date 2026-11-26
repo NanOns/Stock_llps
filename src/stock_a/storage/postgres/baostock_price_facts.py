@@ -26,12 +26,19 @@ _NON_PIT_CLOCK_ROLE = "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
 _NAME_PARSER_CONTRACT = "BAOSTOCK_QUERY_STOCK_BASIC/R1"
 _NAME_SOURCE_FILE = "BAOSTOCK_QUERY_STOCK_BASIC"
 _PRICE_FIELD_QUALITY_MIGRATION_ID = 66
+_COORDINATE_CAPTURE_MIGRATION_ID = 89
 _PRICE_COLUMNS = (
     "source_symbol",
     "market",
     "board",
     "session_date",
     "source_capture_id",
+    "raw_source_capture_id",
+    "qfq_source_capture_id",
+    "raw_observed_started_at",
+    "raw_observed_completed_at",
+    "qfq_observed_started_at",
+    "qfq_observed_completed_at",
     "bar_status",
     "bar_reason",
     "raw_open",
@@ -123,6 +130,27 @@ _PRICE_COLUMNS = (
     "raw_is_st_value",
     "raw_is_st_quality",
     "raw_is_st_reason",
+)
+_PRICE_TRACE_ONLY_COLUMNS = frozenset(
+    {
+        "source_capture_id",
+        "raw_source_capture_id",
+        "qfq_source_capture_id",
+        "observed_started_at",
+        "observed_completed_at",
+        "raw_observed_started_at",
+        "raw_observed_completed_at",
+        "qfq_observed_started_at",
+        "qfq_observed_completed_at",
+        "source_clock_role",
+        "source_available_at",
+        "returned_fields",
+        "raw_response_fields",
+        "qfq_response_fields",
+    }
+)
+_PRICE_BUSINESS_COLUMNS = tuple(
+    column for column in _PRICE_COLUMNS if column not in _PRICE_TRACE_ONLY_COLUMNS
 )
 _RAW_PRICE_COLUMNS = (
     "raw_open",
@@ -245,6 +273,19 @@ def _require_price_field_quality_migration(cursor: Any) -> None:
         raise BaoStockPriceFactsError(
             "PRICE_FIELD_QUALITY_MIGRATION_REQUIRED",
             "0066字段级价格质量迁移未应用，拒绝读写新价格投影",
+        )
+
+
+def _require_coordinate_capture_migration(cursor: Any) -> None:
+    cursor.execute(
+        "SELECT EXISTS (SELECT 1 FROM migration_ledger "
+        "WHERE migration_id=%s AND lineage='STOCK_A_INITIAL_R1')",
+        (_COORDINATE_CAPTURE_MIGRATION_ID,),
+    )
+    if cursor.fetchone() != (True,):
+        raise BaoStockPriceFactsError(
+            "COORDINATE_CAPTURE_MIGRATION_REQUIRED",
+            "0089坐标捕获来源迁移未应用，拒绝读写双坐标价格事实",
         )
 
 
@@ -1946,6 +1987,28 @@ def _build_price_row(
         "board": board,
         "session_date": session,
         "source_capture_id": capture_id,
+        "raw_source_capture_id": capture_id if raw_complete else None,
+        "qfq_source_capture_id": capture_id if qfq_complete else None,
+        "raw_observed_started_at": (
+            raw_request.get("last_attempt_started_at") or observed_started_at
+            if raw_complete
+            else None
+        ),
+        "raw_observed_completed_at": (
+            raw_request.get("last_attempt_completed_at") or observed_completed_at
+            if raw_complete
+            else None
+        ),
+        "qfq_observed_started_at": (
+            qfq_request.get("last_attempt_started_at") or observed_started_at
+            if qfq_complete
+            else None
+        ),
+        "qfq_observed_completed_at": (
+            qfq_request.get("last_attempt_completed_at") or observed_completed_at
+            if qfq_complete
+            else None
+        ),
         "bar_status": bar_status,
         "bar_reason": bar_reason,
         **raw_payload,
@@ -2016,8 +2079,17 @@ def _merge_price_row(
     qfq_key = (source_code, "2")
     raw_incoming_complete = _attempts_complete(raw_attempt_status)
     qfq_incoming_complete = _attempts_complete(qfq_attempt_status)
-    raw_was_complete = prior_statuses.get(raw_key) in {"COMPLETED", "NO_DATA"}
-    qfq_was_complete = prior_statuses.get(qfq_key) in {"COMPLETED", "NO_DATA"}
+    incoming_capture_id = incoming.get("source_capture_id")
+    raw_same_capture = existing.get("raw_source_capture_id") == incoming_capture_id
+    qfq_same_capture = existing.get("qfq_source_capture_id") == incoming_capture_id
+    raw_was_complete = raw_same_capture and prior_statuses.get(raw_key) in {
+        "COMPLETED",
+        "NO_DATA",
+    }
+    qfq_was_complete = qfq_same_capture and prior_statuses.get(qfq_key) in {
+        "COMPLETED",
+        "NO_DATA",
+    }
     groups = (
         (_RAW_PRICE_COLUMNS, raw_incoming_complete, raw_was_complete, True),
         (_RAW_ACTIVITY_COLUMNS, raw_incoming_complete, raw_was_complete, True),
@@ -2064,20 +2136,16 @@ def _merge_price_row(
         if not raw_was_complete:
             merged["bar_status"] = incoming.get("bar_status")
             merged["bar_reason"] = incoming.get("bar_reason")
-    if incoming.get("observed_started_at") is not None:
-        prior_start = merged.get("observed_started_at")
-        merged["observed_started_at"] = (
-            incoming["observed_started_at"]
-            if prior_start is None
-            else min(prior_start, incoming["observed_started_at"])
-        )
-    if incoming.get("observed_completed_at") is not None:
-        prior_end = merged.get("observed_completed_at")
-        merged["observed_completed_at"] = (
-            incoming["observed_completed_at"]
-            if prior_end is None
-            else max(prior_end, incoming["observed_completed_at"])
-        )
+    if raw_incoming_complete:
+        merged["raw_source_capture_id"] = incoming_capture_id
+        merged["raw_observed_started_at"] = incoming.get("raw_observed_started_at")
+        merged["raw_observed_completed_at"] = incoming.get("raw_observed_completed_at")
+    if qfq_incoming_complete:
+        merged["qfq_source_capture_id"] = incoming_capture_id
+        merged["qfq_observed_started_at"] = incoming.get("qfq_observed_started_at")
+        merged["qfq_observed_completed_at"] = incoming.get("qfq_observed_completed_at")
+    merged["observed_started_at"] = incoming.get("observed_started_at")
+    merged["observed_completed_at"] = incoming.get("observed_completed_at")
     merged["source_capture_id"] = incoming["source_capture_id"]
     merged["source_symbol"] = incoming["source_symbol"]
     merged["source_clock_role"] = incoming["source_clock_role"]
@@ -2117,6 +2185,7 @@ def persist_baostock_price_batch(
         _scope,
     ):
         _require_price_field_quality_migration(cursor)
+        _require_coordinate_capture_migration(cursor)
         cursor.execute(
             """SELECT provider,capture_uuid,range_start_session,range_end_session,
                       price_coordinates,parser_contract,requested_symbol_count,
@@ -2211,6 +2280,10 @@ def persist_baostock_price_batch(
         raw_rows_inserted = 0
         raw_rows_updated = 0
         raw_rows_unchanged = 0
+        price_rows_business_changed = 0
+        price_rows_business_changed_by_session: dict[date, int] = {}
+        price_rows_inserted_by_session: dict[date, int] = {}
+        price_rows_updated_business_by_session: dict[date, int] = {}
         for key, record in record_by_key.items():
             source_symbol, session = key
             source_code, normalized_symbol = _normalized_code(
@@ -2297,13 +2370,25 @@ def persist_baostock_price_batch(
                 source_code=source_code,
             )
             desired_rows[key] = merged
+            if _price_row_business_changed(existing, merged):
+                price_rows_business_changed += 1
+                price_rows_business_changed_by_session[session] = (
+                    price_rows_business_changed_by_session.get(session, 0) + 1
+                )
             if existing is None:
                 raw_rows_inserted += 1
+                price_rows_inserted_by_session[session] = (
+                    price_rows_inserted_by_session.get(session, 0) + 1
+                )
             elif any(
                 not _same_row_value(existing.get(name), merged.get(name))
                 for name in _PRICE_COLUMNS
             ):
                 raw_rows_updated += 1
+                if _price_row_business_changed(existing, merged):
+                    price_rows_updated_business_by_session[session] = (
+                        price_rows_updated_business_by_session.get(session, 0) + 1
+                    )
             else:
                 raw_rows_unchanged += 1
 
@@ -2375,7 +2460,7 @@ def persist_baostock_price_batch(
             (source_capture_id,),
         )
         normalized_count = int(cursor.fetchone()[0])
-        facts_changed = _price_facts_changed(raw_rows_inserted, raw_rows_updated)
+        facts_changed = price_rows_business_changed > 0
         cursor.execute(
             """UPDATE stock.source_captures
                SET normalized_count=%s,
@@ -2479,6 +2564,23 @@ def persist_baostock_price_batch(
             "price_rows_inserted": raw_rows_inserted,
             "price_rows_updated": raw_rows_updated,
             "price_rows_unchanged": raw_rows_unchanged,
+            "price_rows_business_changed": price_rows_business_changed,
+            "price_rows_business_changed_by_session": {
+                session.isoformat(): count
+                for session, count in sorted(
+                    price_rows_business_changed_by_session.items()
+                )
+            },
+            "price_rows_inserted_by_session": {
+                session.isoformat(): count
+                for session, count in sorted(price_rows_inserted_by_session.items())
+            },
+            "price_rows_updated_business_by_session": {
+                session.isoformat(): count
+                for session, count in sorted(
+                    price_rows_updated_business_by_session.items()
+                )
+            },
             "capture_normalized_row_count": normalized_count,
             "readback_rows": len(desired_rows),
             "database_write_attempted": True,
@@ -2614,6 +2716,25 @@ _PRICE_READ_SELECT = """SELECT
     c.validated_at AS capture_validated_at,
     c.source_time_quality,c.source_clock_role AS capture_clock_role,
     c.source_available_at AS capture_available_at,
+    d.raw_source_capture_id,d.qfq_source_capture_id,
+    d.raw_observed_started_at,d.raw_observed_completed_at,
+    d.qfq_observed_started_at,d.qfq_observed_completed_at,
+    raw_capture.capture_uuid AS raw_capture_uuid,
+    raw_capture.range_start_session AS raw_capture_range_start_session,
+    raw_capture.range_end_session AS raw_capture_range_end_session,
+    raw_capture.read_started_at AS raw_capture_read_started_at,
+    raw_capture.validated_at AS raw_capture_validated_at,
+    raw_capture.source_time_quality AS raw_capture_time_quality,
+    raw_capture.source_clock_role AS raw_capture_clock_role,
+    raw_capture.source_available_at AS raw_capture_available_at,
+    qfq_capture.capture_uuid AS qfq_capture_uuid,
+    qfq_capture.range_start_session AS qfq_capture_range_start_session,
+    qfq_capture.range_end_session AS qfq_capture_range_end_session,
+    qfq_capture.read_started_at AS qfq_capture_read_started_at,
+    qfq_capture.validated_at AS qfq_capture_validated_at,
+    qfq_capture.source_time_quality AS qfq_capture_time_quality,
+    qfq_capture.source_clock_role AS qfq_capture_clock_role,
+    qfq_capture.source_available_at AS qfq_capture_available_at,
     d.source_symbol,d.source_code,d.market,d.board,d.session_date,
     d.bar_status,d.bar_reason,d.raw_open,d.raw_high,d.raw_low,d.raw_close,
     d.raw_open_quality,d.raw_open_reason,d.raw_high_quality,d.raw_high_reason,
@@ -2640,24 +2761,28 @@ _PRICE_READ_SELECT = """SELECT
     d.raw_is_st_reason,d.returned_fields,u.unit_contract_version,
     u.close_input_unit,u.close_to_cny,u.amount_input_unit,u.amount_to_cny,
     u.volume_input_unit,u.volume_to_shares,u.turn_input_unit,
-    raw_request.request_status AS raw_request_status,
+    COALESCE(raw_request.request_status,'NOT_ATTEMPTED') AS raw_request_status,
     raw_request.response_row_count AS raw_request_row_count,
     raw_request.last_attempt_started_at AS raw_request_started_at,
     raw_request.last_attempt_completed_at AS raw_request_completed_at,
-    qfq_request.request_status AS qfq_request_status,
+    COALESCE(qfq_request.request_status,'NOT_ATTEMPTED') AS qfq_request_status,
     qfq_request.response_row_count AS qfq_request_row_count,
     qfq_request.last_attempt_started_at AS qfq_request_started_at,
     qfq_request.last_attempt_completed_at AS qfq_request_completed_at,
     d.observed_started_at,d.observed_completed_at
 FROM stock.source_raw_daily d
 JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
+LEFT JOIN stock.source_captures raw_capture
+  ON raw_capture.capture_id=d.raw_source_capture_id
+LEFT JOIN stock.source_captures qfq_capture
+  ON qfq_capture.capture_id=d.qfq_source_capture_id
 JOIN stock.source_baostock_unit_contracts u
   ON u.unit_contract_version=d.unit_contract_version
-JOIN stock.source_capture_requests raw_request
-  ON raw_request.capture_id=d.source_capture_id
+LEFT JOIN stock.source_capture_requests raw_request
+  ON raw_request.capture_id=d.raw_source_capture_id
  AND raw_request.source_code=d.source_code AND raw_request.adjustment_flag='3'
-JOIN stock.source_capture_requests qfq_request
-  ON qfq_request.capture_id=d.source_capture_id
+LEFT JOIN stock.source_capture_requests qfq_request
+  ON qfq_request.capture_id=d.qfq_source_capture_id
  AND qfq_request.source_code=d.source_code AND qfq_request.adjustment_flag='2'
 WHERE c.provider='BAOSTOCK'
   AND c.range_end_session<=%s
@@ -2674,6 +2799,22 @@ def _price_row_payload(row: Mapping[str, Any], price_coordinate: str) -> dict[st
     raw_selected = price_coordinate == RAW_COORDINATE
     prefix = "raw" if raw_selected else "qfq"
     result = dict(row)
+    coordinate_capture_id = row.get(f"{prefix}_source_capture_id")
+    result.update(
+        {
+            "source_capture_id": coordinate_capture_id,
+            "capture_uuid": row.get(f"{prefix}_capture_uuid"),
+            "range_start_session": row.get(f"{prefix}_capture_range_start_session"),
+            "range_end_session": row.get(f"{prefix}_capture_range_end_session"),
+            "capture_read_started_at": row.get(f"{prefix}_capture_read_started_at"),
+            "capture_validated_at": row.get(f"{prefix}_capture_validated_at"),
+            "source_time_quality": row.get(f"{prefix}_capture_time_quality"),
+            "capture_clock_role": row.get(f"{prefix}_capture_clock_role"),
+            "capture_available_at": row.get(f"{prefix}_capture_available_at"),
+            "observed_started_at": row.get(f"{prefix}_observed_started_at"),
+            "observed_completed_at": row.get(f"{prefix}_observed_completed_at"),
+        }
+    )
     result.update(
         {
             "price_coordinate": price_coordinate,
@@ -2727,15 +2868,41 @@ def _price_row_payload(row: Mapping[str, Any], price_coordinate: str) -> dict[st
     return result
 
 
-def _price_facts_changed(inserted_rows: int, updated_rows: int) -> bool:
-    return inserted_rows > 0 or updated_rows > 0
+def _coordinate_capture_column(price_coordinate: str) -> str:
+    if price_coordinate == RAW_COORDINATE:
+        return "raw_source_capture_id"
+    if price_coordinate == QFQ_COORDINATE:
+        return "qfq_source_capture_id"
+    raise BaoStockPriceFactsError(
+        "PRICE_COORDINATE_INVALID", "价格坐标必须为RAW或FORWARD_ADJUSTED"
+    )
+
+
+def _coordinate_capture_alias(price_coordinate: str) -> str:
+    if price_coordinate == RAW_COORDINATE:
+        return "raw_capture"
+    if price_coordinate == QFQ_COORDINATE:
+        return "qfq_capture"
+    raise BaoStockPriceFactsError(
+        "PRICE_COORDINATE_INVALID", "价格坐标必须为RAW或FORWARD_ADJUSTED"
+    )
+
+
+def _price_row_business_changed(
+    existing: Mapping[str, Any] | None, desired: Mapping[str, Any]
+) -> bool:
+    """判断单行价格/质量事实是否变化，排除捕获与观察时钟等纯溯源列。"""
+    return existing is None or any(
+        not _same_row_value(existing.get(name), desired.get(name))
+        for name in _PRICE_BUSINESS_COLUMNS
+    )
 
 
 def _read_price_rows(
     config: Mapping[str, Any],
     *,
     source_symbol: str,
-    source_capture_id: int,
+    source_capture_id: int | None,
     sessions: Sequence[date],
     cutoff: date,
     price_coordinate: str,
@@ -2766,6 +2933,7 @@ def read_baostock_price_history_rows_cursor(
 ) -> list[dict[str, Any]]:
     """在调用方同一只读快照内读取RAW或QFQ typed日线（可选兼容source_capture_id过滤）。"""
     _require_price_field_quality_migration(cursor)
+    _require_coordinate_capture_migration(cursor)
     if (
         (
             source_capture_id is not None
@@ -2793,18 +2961,35 @@ def read_baostock_price_history_rows_cursor(
             "PRICE_SYMBOL_SCOPE_INVALID", "同事务历史价格读取证券为空或重复"
         )
     chunk_size = max(1, min(100, 1500 // len(sessions)))
-    capture_filter = "" if source_capture_id is None else " AND d.source_capture_id=%s"
+    coordinate_capture_column = _coordinate_capture_column(price_coordinate)
+    coordinate_capture_alias = _coordinate_capture_alias(price_coordinate)
+    capture_filter = (
+        "" if source_capture_id is None else f" AND d.{coordinate_capture_column}=%s"
+    )
+    coordinate_capture_scope = (
+        f" AND {coordinate_capture_alias}.range_end_session<=%s"
+        f" AND {coordinate_capture_alias}.price_coordinates @> ARRAY[%s]::text[]"
+    )
     result = []
     for start in range(0, len(normalized_symbols), chunk_size):
         params: list[Any] = [cutoff, cutoff]
         if source_capture_id is not None:
             params.append(source_capture_id)
         params.extend(
+            [
+                cutoff,
+                RAW_COORDINATE
+                if price_coordinate == RAW_COORDINATE
+                else QFQ_COORDINATE,
+            ]
+        )
+        params.extend(
             [list(normalized_symbols[start : start + chunk_size]), list(sessions)]
         )
         cursor.execute(
             _PRICE_READ_SELECT
             + capture_filter
+            + coordinate_capture_scope
             + " AND d.source_symbol=ANY(%s::text[])"
             + " AND d.session_date=ANY(%s::date[])"
             + " ORDER BY d.session_date,d.source_symbol",
@@ -2824,19 +3009,21 @@ def read_baostock_price_history(
     source_symbol: str,
     target_session: date,
     sessions: Sequence[date],
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     price_coordinate: str,
     cutoff: date,
     starts_at_target: bool = False,
 ) -> dict[str, Any]:
-    """按显式捕获、坐标、官方会话和截止日分页前的历史价格事实。"""
+    """按坐标、证券、官方会话和截止日读取单一有效历史事实；捕获筛选可选。"""
     _source_code_value, normalized_symbol = _normalized_code(source_symbol)
     if (
         type(target_session) is not date
         or type(cutoff) is not date
         or target_session > cutoff
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
+        or (
+            source_capture_id is not None
+            and (type(source_capture_id) is not int or source_capture_id <= 0)
+        )
     ):
         raise BaoStockPriceFactsError(
             "PRICE_READ_SCOPE_INVALID", "历史读取键或截止日无效"
@@ -2943,6 +3130,9 @@ def read_baostock_price_history_batch(
             "PRICE_SYMBOL_SCOPE_INVALID", "证券范围为空或包含重复代码"
         )
     source_codes = tuple(symbol.lower() for symbol in symbols)
+    coordinate_capture_column = _coordinate_capture_column(price_coordinate)
+    coordinate_capture_alias = _coordinate_capture_alias(price_coordinate)
+    coordinate_flag = _COORDINATE_FLAGS[price_coordinate]
     target_sessions = _date_list(sessions, label="批量历史官方会话")
     if any(session > cutoff for session in target_sessions):
         raise BaoStockPriceFactsError(
@@ -2954,6 +3144,7 @@ def read_baostock_price_history_batch(
         _scope,
     ):
         _require_price_field_quality_migration(cursor)
+        _require_coordinate_capture_migration(cursor)
         if source_capture_id is not None:
             cursor.execute(
                 """SELECT requested_symbol_count
@@ -2999,39 +3190,45 @@ def read_baostock_price_history_batch(
                     "source_io_attempted": False,
                 }
         capture_filter = (
-            "d.source_capture_id=%s AND " if source_capture_id is not None else ""
+            f"d.{coordinate_capture_column}=%s AND "
+            if source_capture_id is not None
+            else ""
         )
         capture_args = (source_capture_id,) if source_capture_id is not None else ()
         cursor.execute(
             f"""SELECT count(*)::bigint
                FROM stock.source_raw_daily d
-               JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
+               JOIN stock.source_captures c ON c.capture_id=d.{coordinate_capture_column}
                JOIN stock.source_baostock_unit_contracts u
                  ON u.unit_contract_version=d.unit_contract_version
-               JOIN stock.source_capture_requests rr
-                 ON rr.capture_id=d.source_capture_id AND rr.source_code=d.source_code
-                AND rr.adjustment_flag='3'
-               JOIN stock.source_capture_requests qr
-                 ON qr.capture_id=d.source_capture_id AND qr.source_code=d.source_code
-                AND qr.adjustment_flag='2'
+               JOIN stock.source_capture_requests request
+                 ON request.capture_id=d.{coordinate_capture_column}
+                AND request.source_code=d.source_code
+                AND request.adjustment_flag=%s
                WHERE {capture_filter}d.source_symbol=ANY(%s::text[])
                  AND d.session_date=ANY(%s::date[]) AND d.session_date<=%s
                  AND c.provider='BAOSTOCK' AND c.range_end_session<=%s
-                 AND c.price_coordinates @> ARRAY[
-                     'RAW_UNADJUSTED','FORWARD_ADJUSTED'
-                 ]::text[]""",
+                 AND c.price_coordinates @> ARRAY[%s]::text[]""",
             (
+                coordinate_flag,
                 *capture_args,
                 list(symbols),
                 list(target_sessions),
                 cutoff,
                 cutoff,
+                price_coordinate,
             ),
         )
         total = int(cursor.fetchone()[0])
         cursor.execute(
             _PRICE_READ_SELECT
-            + (" AND d.source_capture_id=%s" if source_capture_id is not None else "")
+            + (
+                f" AND d.{coordinate_capture_column}=%s"
+                if source_capture_id is not None
+                else ""
+            )
+            + f" AND {coordinate_capture_alias}.range_end_session<=%s"
+            + f" AND {coordinate_capture_alias}.price_coordinates @> ARRAY[%s]::text[]"
             + " AND d.source_symbol=ANY(%s::text[])"
             + " AND d.session_date=ANY(%s::date[])"
             + " ORDER BY d.session_date,d.source_symbol OFFSET %s LIMIT %s",
@@ -3039,6 +3236,8 @@ def read_baostock_price_history_batch(
                 cutoff,
                 cutoff,
                 *capture_args,
+                cutoff,
+                price_coordinate,
                 list(symbols),
                 list(target_sessions),
                 offset,
@@ -3052,8 +3251,8 @@ def read_baostock_price_history_batch(
         ]
         if source_capture_id is not None:
             cursor.execute(
-                """WITH request_codes AS (
-                       SELECT requested.source_code,
+                f"""WITH request_codes AS (
+                   SELECT requested.source_code,
                               count(request.capture_id)::bigint AS request_count,
                               count(DISTINCT request.adjustment_flag)::bigint
                                   AS coordinate_count,
@@ -3072,23 +3271,24 @@ def read_baostock_price_history_batch(
                        LEFT JOIN stock.source_capture_requests request
                          ON request.capture_id=%s
                         AND request.source_code=requested.source_code
+                        AND request.adjustment_flag=%s
                         AND request.range_end_session<=%s
                        GROUP BY requested.source_code
                    ), eligible AS (
                        SELECT d.session_date,
                               count(*) FILTER (
-                                  WHERE r.request_count=2 AND r.coordinate_count=2
+                                  WHERE r.request_count=1 AND r.coordinate_count=1
                                     AND r.start_count=1 AND r.end_count=1
                                     AND d.session_date BETWEEN r.eligible_start AND r.eligible_end
                               )::bigint AS expected_symbols,
                               count(*) FILTER (
-                                  WHERE r.request_count=2 AND r.coordinate_count=2
+                                  WHERE r.request_count=1 AND r.coordinate_count=1
                                     AND r.start_count=1 AND r.end_count=1
                                     AND d.session_date BETWEEN r.eligible_start AND r.eligible_end
                                     AND r.complete
                               )::bigint AS completed_requests,
                               count(*) FILTER (
-                                  WHERE r.request_count<>2 OR r.coordinate_count<>2
+                                  WHERE r.request_count<>1 OR r.coordinate_count<>1
                                     OR r.start_count<>1 OR r.end_count<>1
                               )::bigint AS unregistered_symbols
                        FROM (SELECT unnest(%s::date[]) AS session_date) d
@@ -3102,7 +3302,7 @@ def read_baostock_price_history_batch(
                               count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint AS qfq_quality_rows,
                               count(*) FILTER (WHERE qfq_price_quality='OBSERVED')::bigint AS qfq_observed_rows
                        FROM stock.source_raw_daily
-                       WHERE source_capture_id=%s AND source_symbol=ANY(%s::text[])
+                       WHERE {coordinate_capture_column}=%s AND source_symbol=ANY(%s::text[])
                          AND session_date=ANY(%s::date[]) AND session_date<=%s
                        GROUP BY session_date
                    )
@@ -3116,6 +3316,7 @@ def read_baostock_price_history_batch(
                 (
                     list(source_codes),
                     source_capture_id,
+                    coordinate_flag,
                     cutoff,
                     list(target_sessions),
                     source_capture_id,
@@ -3126,10 +3327,10 @@ def read_baostock_price_history_batch(
             )
         else:
             cursor.execute(
-                """WITH session_codes AS (
+                f"""WITH session_codes AS (
                        SELECT d.session_date,
                               requested.source_code,
-                              rd.source_capture_id
+                              rd.{coordinate_capture_column} AS source_capture_id
                        FROM (SELECT unnest(%s::date[]) AS session_date) d
                        CROSS JOIN unnest(%s::text[]) AS requested(source_code)
                        LEFT JOIN stock.source_raw_daily rd
@@ -3157,23 +3358,24 @@ def read_baostock_price_history_batch(
                        LEFT JOIN stock.source_capture_requests request
                          ON request.capture_id=sc.source_capture_id
                         AND request.source_code=sc.source_code
+                        AND request.adjustment_flag=%s
                         AND request.range_end_session<=%s
                        GROUP BY sc.session_date, sc.source_code
                    ), eligible AS (
                        SELECT r.session_date,
                               count(*) FILTER (
-                                  WHERE r.request_count=2 AND r.coordinate_count=2
+                                  WHERE r.request_count=1 AND r.coordinate_count=1
                                     AND r.start_count=1 AND r.end_count=1
                                     AND r.session_date BETWEEN r.eligible_start AND r.eligible_end
                               )::bigint AS expected_symbols,
                               count(*) FILTER (
-                                  WHERE r.request_count=2 AND r.coordinate_count=2
+                                  WHERE r.request_count=1 AND r.coordinate_count=1
                                     AND r.start_count=1 AND r.end_count=1
                                     AND r.session_date BETWEEN r.eligible_start AND r.eligible_end
                                     AND r.complete
                               )::bigint AS completed_requests,
                               count(*) FILTER (
-                                  WHERE r.request_count<>2 OR r.coordinate_count<>2
+                                  WHERE r.request_count<>1 OR r.coordinate_count<>1
                                     OR r.start_count<>1 OR r.end_count<>1
                               )::bigint AS unregistered_symbols
                        FROM request_codes r
@@ -3186,7 +3388,8 @@ def read_baostock_price_history_batch(
                               count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint AS qfq_quality_rows,
                               count(*) FILTER (WHERE qfq_price_quality='OBSERVED')::bigint AS qfq_observed_rows
                        FROM stock.source_raw_daily
-                       WHERE source_symbol=ANY(%s::text[])
+                       WHERE {coordinate_capture_column} IS NOT NULL
+                         AND source_symbol=ANY(%s::text[])
                          AND session_date=ANY(%s::date[]) AND session_date<=%s
                        GROUP BY session_date
                    )
@@ -3200,6 +3403,7 @@ def read_baostock_price_history_batch(
                 (
                     list(target_sessions),
                     list(source_codes),
+                    coordinate_flag,
                     cutoff,
                     cutoff,
                     list(symbols),
@@ -3336,52 +3540,61 @@ def read_baostock_price_page(
             "rows": [],
         }
     capture_ids = {item["source_capture_id"] for item in versions}
-    if len(capture_ids) != 1:
-        return {
-            "status": "AMBIGUOUS_CAPTURE",
-            "target_session": target_session.isoformat(),
-            "candidate_source_capture_ids": sorted(capture_ids),
-            "price_coordinate": price_coordinate,
-            "version_status": "AMBIGUOUS",
-            "rows": [],
-        }
-    capture_id = next(iter(capture_ids))
-    version = versions[0]
+    capture_id = next(iter(capture_ids)) if len(capture_ids) == 1 else None
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _connection,
         cursor,
         _scope,
     ):
         _require_price_field_quality_migration(cursor)
+        _require_coordinate_capture_migration(cursor)
         where_market = "(%s='ALL' OR d.market=%s)"
         where_board = "(%s='ALL' OR d.board=%s)"
         status_column = (
             "bar_status" if price_coordinate == RAW_COORDINATE else "qfq_bar_status"
         )
+        capture_column = _coordinate_capture_column(price_coordinate)
+        capture_alias = _coordinate_capture_alias(price_coordinate)
         cursor.execute(
             f"""SELECT d.{status_column},count(*)::bigint
                FROM stock.source_raw_daily d
-               WHERE d.source_capture_id=%s AND d.session_date=%s
+               WHERE d.{capture_column} IS NOT NULL AND d.session_date=%s
+                 AND (%s::bigint IS NULL OR d.{capture_column}=%s)
                  AND (%s='ALL' OR d.market=%s)
                  AND (%s='ALL' OR d.board=%s)
                 GROUP BY d.{status_column} ORDER BY d.{status_column}""",
-            (capture_id, target_session, market, market, board, board),
+            (
+                target_session,
+                source_capture_id,
+                source_capture_id,
+                market,
+                market,
+                board,
+                board,
+            ),
         )
         status_counts = {status: int(count) for status, count in cursor.fetchall()}
         total = sum(status_counts.values())
         cursor.execute(
             _PRICE_READ_SELECT
-            + f" AND d.session_date=%s AND d.source_capture_id=%s AND {where_market} AND {where_board}"
+            + f" AND d.session_date=%s AND d.{capture_column} IS NOT NULL"
+            + f" AND (%s::bigint IS NULL OR d.{capture_column}=%s)"
+            + f" AND {where_market} AND {where_board}"
+            + f" AND {capture_alias}.range_end_session<=%s"
+            + f" AND {capture_alias}.price_coordinates @> ARRAY[%s]::text[]"
             + " ORDER BY d.source_symbol LIMIT %s OFFSET %s",
             (
                 cutoff,
                 cutoff,
                 target_session,
-                capture_id,
+                source_capture_id,
+                source_capture_id,
                 market,
                 market,
                 board,
                 board,
+                cutoff,
+                price_coordinate,
                 limit,
                 offset,
             ),
@@ -3402,12 +3615,14 @@ def read_baostock_price_page(
         if offset + len(selected_rows) < total
         else None,
         "bar_status_counts": status_counts,
-        "partition_closed": version["coverage_status"] == "COMPLETE",
+        "partition_closed": target_session.isoformat() in catalog["closed_sessions"],
         "version_status": "CLOSED"
-        if version["coverage_status"] == "COMPLETE"
+        if all(item["coverage_status"] == "COMPLETE" for item in versions)
         else "INCOMPLETE",
-        "version_row_count": version["row_count"],
-        "version_expected_row_count": version["expected_row_count"],
+        "version_row_count": sum(int(item["row_count"]) for item in versions),
+        "version_expected_row_count": sum(
+            int(item["expected_row_count"]) for item in versions
+        ),
         "market_filter": market,
         "board_filter": board,
         "rows": selected_rows,
@@ -3446,20 +3661,35 @@ def resolve_baostock_stock_code(
         _scope,
     ):
         cursor.execute(
-            """SELECT DISTINCT d.source_symbol,d.source_capture_id
+            """SELECT DISTINCT d.source_symbol,d.source_capture_id,
+                              d.raw_source_capture_id,d.qfq_source_capture_id
                FROM stock.source_raw_daily d
                JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
+               LEFT JOIN stock.source_captures raw_capture
+                 ON raw_capture.capture_id=d.raw_source_capture_id
+               LEFT JOIN stock.source_captures qfq_capture
+                 ON qfq_capture.capture_id=d.qfq_source_capture_id
                WHERE d.session_date=%s AND d.session_date<=%s
-                 AND c.range_end_session<=%s AND c.provider='BAOSTOCK'
-                 AND c.price_coordinates @> ARRAY['RAW_UNADJUSTED','FORWARD_ADJUSTED']::text[]
+                 AND c.provider='BAOSTOCK'
+                 AND (d.raw_source_capture_id IS NULL OR (
+                     raw_capture.range_end_session<=%s
+                     AND raw_capture.price_coordinates @> ARRAY['RAW_UNADJUSTED']::text[]))
+                 AND (d.qfq_source_capture_id IS NULL OR (
+                     qfq_capture.range_end_session<=%s
+                     AND qfq_capture.price_coordinates @> ARRAY['FORWARD_ADJUSTED']::text[]))
+                 AND (d.raw_source_capture_id IS NOT NULL OR d.qfq_source_capture_id IS NOT NULL)
                  AND right(d.source_symbol,6)=%s
-                 AND (%s::bigint IS NULL OR d.source_capture_id=%s)
+                 AND (%s::bigint IS NULL OR d.source_capture_id=%s
+                      OR d.raw_source_capture_id=%s OR d.qfq_source_capture_id=%s)
                ORDER BY d.source_symbol,d.source_capture_id LIMIT 3""",
             (
                 target_session,
                 research_cutoff,
                 research_cutoff,
+                research_cutoff,
                 stock_code,
+                source_capture_id,
+                source_capture_id,
                 source_capture_id,
                 source_capture_id,
             ),
@@ -3470,17 +3700,21 @@ def resolve_baostock_stock_code(
             "STOCK_CODE_NOT_FOUND", "该BaoStock捕获中没有此六位代码"
         )
     symbols = {row[0] for row in matches}
-    capture_ids = {int(row[1]) for row in matches}
-    if len(symbols) != 1 or len(capture_ids) != 1:
+    if len(symbols) != 1 or len(matches) != 1:
         raise BaoStockPriceFactsError(
-            "STOCK_CODE_AMBIGUOUS", "六位代码或价格捕获对应多个真实来源键"
+            "STOCK_CODE_AMBIGUOUS", "六位代码对应多个真实来源证券键"
         )
+    symbol, row_capture_id, raw_capture_id, qfq_capture_id = matches[0]
     return {
         "stock_code": stock_code,
-        "source_symbol": next(iter(symbols)),
-        "source_capture_id": next(iter(capture_ids)),
+        "source_symbol": symbol,
+        "source_capture_id": row_capture_id,
+        "source_capture_ids_by_coordinate": {
+            RAW_COORDINATE: raw_capture_id,
+            QFQ_COORDINATE: qfq_capture_id,
+        },
         "target_session": target_session.isoformat(),
-        "resolution_scope": "EXACT_BAOSTOCK_PAIRED_CAPTURE",
+        "resolution_scope": "SINGLE_EFFECTIVE_BAOSTOCK_FACT",
         "price_coordinates": [RAW_COORDINATE, QFQ_COORDINATE],
         "database_write_attempted": False,
         "source_io_attempted": False,
@@ -3495,7 +3729,7 @@ def read_baostock_price_detail(
     research_cutoff: date,
     source_capture_id: int | None = None,
 ) -> dict[str, Any]:
-    """读取同一真实capture内RAW/QFQ配对的单股日线详情。"""
+    """按单一证券日事实读取RAW/QFQ及各自来源，不要求两坐标同捕获。"""
     _source_code_value, normalized_symbol = _normalized_code(source_symbol)
     if type(target_session) is not date or type(research_cutoff) is not date:
         raise BaoStockPriceFactsError(
@@ -3515,33 +3749,32 @@ def read_baostock_price_detail(
         _scope,
     ):
         _require_price_field_quality_migration(cursor)
+        _require_coordinate_capture_migration(cursor)
         cursor.execute(
-            """SELECT DISTINCT d.source_capture_id
-               FROM stock.source_raw_daily d
-               JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
-               JOIN stock.source_capture_requests rr
-                 ON rr.capture_id=d.source_capture_id AND rr.source_code=d.source_code
-                AND rr.adjustment_flag='3'
-               JOIN stock.source_capture_requests qr
-                 ON qr.capture_id=d.source_capture_id AND qr.source_code=d.source_code
-                AND qr.adjustment_flag='2'
-               WHERE d.source_symbol=%s AND d.session_date=%s
-                 AND d.session_date<=%s AND c.range_end_session<=%s
-                 AND c.provider='BAOSTOCK'
-                 AND c.price_coordinates @> ARRAY['RAW_UNADJUSTED','FORWARD_ADJUSTED']::text[]
-                 AND (%s::bigint IS NULL OR d.source_capture_id=%s)
-               ORDER BY d.source_capture_id""",
+            _PRICE_READ_SELECT
+            + " AND d.source_symbol=%s AND d.session_date=%s"
+            + " AND (d.raw_source_capture_id IS NOT NULL OR d.qfq_source_capture_id IS NOT NULL)"
+            + " AND (d.raw_source_capture_id IS NULL OR raw_capture.range_end_session<=%s)"
+            + " AND (d.qfq_source_capture_id IS NULL OR qfq_capture.range_end_session<=%s)"
+            + " AND (%s::bigint IS NULL OR d.source_capture_id=%s"
+            + " OR d.raw_source_capture_id=%s OR d.qfq_source_capture_id=%s)"
+            + " ORDER BY d.source_symbol LIMIT 2",
             (
+                research_cutoff,
+                research_cutoff,
                 normalized_symbol,
                 target_session,
                 research_cutoff,
                 research_cutoff,
                 source_capture_id,
                 source_capture_id,
+                source_capture_id,
+                source_capture_id,
             ),
         )
-        capture_ids = [int(row[0]) for row in cursor.fetchall()]
-    if not capture_ids:
+        names = [column.name for column in cursor.description]
+        rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+    if not rows:
         return {
             "status": "NOT_COMPUTED",
             "source_symbol": normalized_symbol,
@@ -3552,33 +3785,30 @@ def read_baostock_price_detail(
             "database_write_attempted": False,
             "source_io_attempted": False,
         }
-    if len(capture_ids) != 1:
+    if len(rows) != 1:
         return {
-            "status": "AMBIGUOUS_CAPTURE",
+            "status": "AMBIGUOUS_SOURCE_SYMBOL",
             "source_symbol": normalized_symbol,
             "target_session": target_session.isoformat(),
             "research_cutoff": research_cutoff.isoformat(),
-            "candidate_source_capture_ids": capture_ids,
+            "candidate_source_symbols": [item["source_symbol"] for item in rows],
             "row": None,
             "database_write_attempted": False,
             "source_io_attempted": False,
         }
-    capture_id = capture_ids[0]
-    rows = _read_price_rows(
-        config,
-        source_symbol=normalized_symbol,
-        source_capture_id=capture_id,
-        sessions=(target_session,),
-        cutoff=research_cutoff,
-        price_coordinate=RAW_COORDINATE,
-    )
+    row = _price_row_payload(rows[0], RAW_COORDINATE)
+    capture_ids_by_coordinate = {
+        RAW_COORDINATE: row.get("raw_source_capture_id"),
+        QFQ_COORDINATE: row.get("qfq_source_capture_id"),
+    }
     return {
-        "status": "AVAILABLE" if rows else "NOT_COMPUTED",
+        "status": "AVAILABLE",
         "source_symbol": normalized_symbol,
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_capture_id": capture_id,
-        "row": rows[0] if rows else None,
+        "source_capture_id": row.get("source_capture_id"),
+        "source_capture_ids_by_coordinate": capture_ids_by_coordinate,
+        "row": row,
         "database_write_attempted": False,
         "source_io_attempted": False,
     }
@@ -3925,7 +4155,7 @@ def read_baostock_price_catalog(
     cutoff: date,
     source_capture_id: int | None = None,
 ) -> dict[str, Any]:
-    """按捕获×坐标×会话返回BaoStock价格事实闭合分母与行数。"""
+    """按日期与坐标返回单一有效价格事实覆盖；捕获ID仅作可选来源筛选。"""
     if type(cutoff) is not date:
         raise BaoStockPriceFactsError(
             "CUTOFF_REQUIRED", "价格目录读取必须绑定研究截止日"
@@ -3934,106 +4164,102 @@ def read_baostock_price_catalog(
         type(source_capture_id) is not int or source_capture_id <= 0
     ):
         raise BaoStockPriceFactsError("CAPTURE_ID_INVALID", "来源捕获数字键无效")
-    capture_filter = "" if source_capture_id is None else " AND d.source_capture_id=%s"
-    parameters: tuple[Any, ...] = (cutoff, cutoff, cutoff)
-    if source_capture_id is not None:
-        parameters += (source_capture_id,)
+    raw_filter = "" if source_capture_id is None else " AND d.raw_source_capture_id=%s"
+    qfq_filter = "" if source_capture_id is None else " AND d.qfq_source_capture_id=%s"
+    parameters: tuple[Any, ...] = (
+        cutoff,
+        *((source_capture_id,) if source_capture_id is not None else ()),
+        cutoff,
+        *((source_capture_id,) if source_capture_id is not None else ()),
+        cutoff,
+        cutoff,
+    )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _connection,
         cursor,
         _scope,
     ):
+        _require_price_field_quality_migration(cursor)
+        _require_coordinate_capture_migration(cursor)
         cursor.execute(
-            """WITH request_codes AS (
-                   SELECT capture_id,source_code,
-                          count(*)=2
-                            AND count(DISTINCT adjustment_flag)=2
-                            AND count(DISTINCT eligible_start_session)=1
-                            AND count(DISTINCT eligible_end_session)=1
-                            AND bool_and(
-                                request_status IN ('COMPLETED','NO_DATA')
-                                AND (request_status='NO_DATA'
-                                     OR completed_through_session>=range_end_session)
-                            ) AS code_requests_complete,
-                          min(eligible_start_session) AS eligible_start_session,
-                          max(eligible_end_session) AS eligible_end_session,
-                          coalesce(sum(response_row_count),0)::bigint
-                              AS response_row_count
-                   FROM stock.source_capture_requests
-                   WHERE range_end_session<=%s
-                   GROUP BY capture_id,source_code
-               ), price_sessions AS (
-                SELECT DISTINCT d.session_date,d.source_capture_id,
-                       c.requested_symbol_count
-                   FROM stock.source_raw_daily d
-                   JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
-                   WHERE d.session_date<=%s AND c.range_end_session<=%s
-                     AND c.provider='BAOSTOCK'
-                     AND c.price_coordinates @> ARRAY[
-                         'RAW_UNADJUSTED','FORWARD_ADJUSTED'
-                     ]::text[]
-                     """
-            + capture_filter
-            + """
-               ), request_coverage AS (
-                   SELECT s.session_date,s.source_capture_id,
-                           max(s.requested_symbol_count)::bigint
-                               AS capture_requested_symbol_count,
-                           count(DISTINCT r.source_code)::bigint
-                               AS registered_symbol_count,
-                           count(*) FILTER (
-                              WHERE s.session_date BETWEEN r.eligible_start_session
-                                                       AND r.eligible_end_session
-                          )::bigint AS expected_symbol_count,
-                          coalesce(bool_and(r.code_requests_complete) FILTER (
-                              WHERE s.session_date BETWEEN r.eligible_start_session
-                                                       AND r.eligible_end_session
-                          ),FALSE) AS requests_complete,
-                          coalesce(sum(r.response_row_count) FILTER (
-                              WHERE s.session_date BETWEEN r.eligible_start_session
-                                                       AND r.eligible_end_session
-                          ),0)::bigint AS capture_request_response_row_count
-                   FROM price_sessions s
-                   JOIN request_codes r ON r.capture_id=s.source_capture_id
-                   GROUP BY s.session_date,s.source_capture_id
-               ), raw_rows AS (
-                   SELECT d.session_date,d.source_capture_id,
+            f"""WITH coordinate_rows AS (
+                   SELECT d.session_date,d.raw_source_capture_id AS capture_id,
+                          '{RAW_COORDINATE}'::text AS coordinate,d.source_symbol,
+                          d.price_quality AS field_quality
+                     FROM stock.source_raw_daily d
+                    WHERE d.session_date<=%s AND d.raw_source_capture_id IS NOT NULL
+                      {raw_filter}
+                   UNION ALL
+                   SELECT d.session_date,d.qfq_source_capture_id AS capture_id,
+                          '{QFQ_COORDINATE}'::text AS coordinate,d.source_symbol,
+                          d.qfq_price_quality AS field_quality
+                     FROM stock.source_raw_daily d
+                    WHERE d.session_date<=%s AND d.qfq_source_capture_id IS NOT NULL
+                      {qfq_filter}
+               ), scope_dates AS (
+                   SELECT DISTINCT session_date,coordinate FROM coordinate_rows
+               ), expected AS (
+                   SELECT s.session_date,s.coordinate,
+                          count(DISTINCT r.source_code)::bigint AS expected_symbol_count
+                     FROM scope_dates s
+                     JOIN stock.source_capture_requests r
+                       ON r.adjustment_flag=CASE s.coordinate
+                           WHEN '{RAW_COORDINATE}' THEN '3' ELSE '2' END
+                      AND s.session_date BETWEEN r.eligible_start_session
+                                             AND r.eligible_end_session
+                      AND r.range_end_session<=%s
+                    GROUP BY s.session_date,s.coordinate
+               ), fact_counts AS (
+                   SELECT f.session_date,f.coordinate,
+                          CASE WHEN count(DISTINCT f.capture_id)=1
+                               THEN min(f.capture_id) END AS source_capture_id,
+                          count(DISTINCT f.capture_id)::bigint AS capture_count,
+                          max(c.requested_symbol_count)::bigint
+                              AS capture_requested_symbol_count,
                           count(*)::bigint AS row_count,
-                          count(DISTINCT d.source_symbol)::bigint AS symbol_count,
-                          count(*) FILTER (WHERE d.price_quality IS NOT NULL)::bigint
-                              AS raw_quality_row_count,
-                          count(*) FILTER (WHERE d.price_quality='OBSERVED')::bigint
-                              AS raw_observed_row_count,
-                          count(*) FILTER (WHERE d.qfq_price_quality IS NOT NULL)::bigint
-                              AS qfq_quality_row_count,
-                          count(*) FILTER (WHERE d.qfq_price_quality='OBSERVED')::bigint
-                              AS qfq_observed_row_count
-                   FROM stock.source_raw_daily d
-                   JOIN price_sessions s
-                     ON s.session_date=d.session_date
-                    AND s.source_capture_id=d.source_capture_id
-                   GROUP BY d.session_date,d.source_capture_id
+                          count(DISTINCT f.source_symbol)::bigint AS symbol_count,
+                          count(*) FILTER (WHERE f.field_quality IS NOT NULL)::bigint
+                              AS quality_row_count,
+                          count(*) FILTER (WHERE f.field_quality='OBSERVED')::bigint
+                              AS observed_row_count,
+                          coalesce(bool_and(
+                              r.request_status IN ('COMPLETED','NO_DATA')
+                              AND (r.request_status='NO_DATA'
+                                   OR r.completed_through_session>=r.range_end_session)
+                          ),FALSE) AS requests_complete,
+                          coalesce(sum(r.response_row_count),0)::bigint
+                              AS response_row_count
+                     FROM coordinate_rows f
+                     LEFT JOIN stock.source_capture_requests r
+                       ON r.capture_id=f.capture_id
+                      AND upper(r.source_code)=upper(f.source_symbol)
+                      AND r.adjustment_flag=CASE f.coordinate
+                          WHEN '{RAW_COORDINATE}' THEN '3' ELSE '2' END
+                      AND r.range_end_session<=%s
+                     LEFT JOIN stock.source_captures c ON c.capture_id=f.capture_id
+                    GROUP BY f.session_date,f.coordinate
                )
-                SELECT d.session_date,d.source_capture_id,r.requests_complete,
-                       r.capture_requested_symbol_count,r.registered_symbol_count,
-                       r.expected_symbol_count,r.capture_request_response_row_count,
-                      d.row_count,d.symbol_count,d.raw_quality_row_count,
-                      d.raw_observed_row_count,d.qfq_quality_row_count,
-                      d.qfq_observed_row_count
-               FROM raw_rows d
-               JOIN request_coverage r
-                 ON r.session_date=d.session_date
-                AND r.source_capture_id=d.source_capture_id
-               ORDER BY d.session_date,d.source_capture_id""",
+                SELECT f.session_date,f.coordinate,f.source_capture_id,
+                       f.capture_count,f.requests_complete,
+                       f.capture_requested_symbol_count,
+                       coalesce(e.expected_symbol_count,0),
+                       coalesce(e.expected_symbol_count,0),
+                       f.response_row_count,f.row_count,f.symbol_count,
+                       f.quality_row_count,f.observed_row_count
+                  FROM fact_counts f
+                  LEFT JOIN expected e USING (session_date,coordinate)
+                 ORDER BY f.session_date,f.coordinate""",
             parameters,
         )
         rows = cursor.fetchall()
     coordinate_versions: list[dict[str, Any]] = []
-    capture_ids_by_session: dict[str, set[int]] = {}
+    versions_by_session_coordinate: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for row in rows:
         (
             session,
+            coordinate,
             capture_id,
+            capture_count,
             requests_complete,
             capture_requested,
             registered_symbols,
@@ -4041,65 +4267,66 @@ def read_baostock_price_catalog(
             request_response_rows,
             row_count,
             symbol_count,
-            raw_quality_count,
-            raw_observed_count,
-            qfq_quality_count,
-            qfq_observed_count,
+            quality_count,
+            observed_count,
         ) = row
         session_text = session.isoformat()
-        capture_id = int(capture_id)
+        capture_id = int(capture_id) if capture_id is not None else None
+        capture_count = int(capture_count)
         expected_symbols = int(expected_symbols)
         row_count = int(row_count)
-        capture_requested = int(capture_requested)
+        capture_requested = (
+            int(capture_requested) if capture_requested is not None else None
+        )
         registered_symbols = int(registered_symbols)
-        capture_ids_by_session.setdefault(session_text, set()).add(capture_id)
         rows_closed = (
             bool(requests_complete)
             and expected_symbols > 0
-            and registered_symbols == capture_requested
-            and capture_requested > 0
             and row_count == expected_symbols
             and int(symbol_count) == row_count
         )
-        for coordinate, quality_count, observed_count in (
-            (RAW_COORDINATE, int(raw_quality_count), int(raw_observed_count)),
-            (QFQ_COORDINATE, int(qfq_quality_count), int(qfq_observed_count)),
-        ):
-            coordinate_versions.append(
-                {
-                    "session_date": session_text,
-                    "source_capture_id": capture_id,
-                    "price_coordinate": coordinate,
-                    "coverage_status": (
-                        "COMPLETE"
-                        if rows_closed and quality_count == row_count
-                        else "INCOMPLETE"
-                    ),
-                    "requests_complete": bool(requests_complete),
-                    "capture_requested_symbol_count": capture_requested,
-                    "registered_symbol_count": registered_symbols,
-                    "row_count": row_count,
-                    "expected_row_count": expected_symbols,
-                    "symbol_count": int(symbol_count),
-                    "quality_row_count": quality_count,
-                    "observed_value_row_count": observed_count,
-                    "capture_request_response_row_count": int(request_response_rows),
-                }
-            )
+        version = {
+            "session_date": session_text,
+            "source_capture_id": capture_id,
+            "capture_count": capture_count,
+            "price_coordinate": coordinate,
+            "coverage_status": (
+                "COMPLETE"
+                if rows_closed and int(quality_count) == row_count
+                else "INCOMPLETE"
+            ),
+            "requests_complete": bool(requests_complete),
+            "capture_requested_symbol_count": capture_requested,
+            "registered_symbol_count": registered_symbols,
+            "row_count": row_count,
+            "expected_row_count": expected_symbols,
+            "symbol_count": int(symbol_count),
+            "quality_row_count": int(quality_count),
+            "observed_value_row_count": int(observed_count),
+            "capture_request_response_row_count": int(request_response_rows),
+        }
+        coordinate_versions.append(version)
+        versions_by_session_coordinate.setdefault(session_text, {}).setdefault(
+            coordinate, []
+        ).append(version)
     closed_sessions = sorted(
         session
-        for session, capture_ids in capture_ids_by_session.items()
-        if len(capture_ids) == 1
+        for session, by_coordinate in versions_by_session_coordinate.items()
+        if set(by_coordinate) == {RAW_COORDINATE, QFQ_COORDINATE}
         and all(
-            item["coverage_status"] == "COMPLETE"
-            for item in coordinate_versions
-            if item["session_date"] == session
+            len(by_coordinate[coordinate]) == 1
+            and by_coordinate[coordinate][0]["coverage_status"] == "COMPLETE"
+            for coordinate in (RAW_COORDINATE, QFQ_COORDINATE)
         )
     )
     ambiguous_sessions = sorted(
         session
-        for session, capture_ids in capture_ids_by_session.items()
-        if len(capture_ids) != 1 or session not in closed_sessions
+        for session, by_coordinate in versions_by_session_coordinate.items()
+        if session not in closed_sessions
+        or any(
+            len(by_coordinate.get(coordinate, ())) != 1
+            for coordinate in (RAW_COORDINATE, QFQ_COORDINATE)
+        )
     )
     return {
         "status": "AVAILABLE",

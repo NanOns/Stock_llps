@@ -1042,7 +1042,7 @@ def read_source_pool_seed_forward_scope(
     *,
     target_session: date,
     source_capture_id: int,
-    expected_source_count: int,
+    expected_source_count: int | None,
     profile_revision: str | None = None,
     history_session_count: int | None = None,
     cross_section_universe_capture_id: int | None = None,
@@ -1055,8 +1055,8 @@ def read_source_pool_seed_forward_scope(
         type(target_session) is not date
         or type(source_capture_id) is not int
         or source_capture_id <= 0
-        or type(expected_source_count) is not int
-        or expected_source_count <= 0
+        or expected_source_count is not None
+        and (type(expected_source_count) is not int or expected_source_count <= 0)
         or history_session_count is not None
         and (
             type(history_session_count) is not int
@@ -1079,6 +1079,21 @@ def read_source_pool_seed_forward_scope(
         if history_session_count is not None:
             scope_predicate += " AND history_session_count=%s"
             scope_parameters = (*scope_parameters, history_session_count)
+        if expected_source_count is None:
+            cursor.execute(
+                f"""SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint
+                    FROM {_SEED_TABLE} WHERE {scope_predicate}""",
+                scope_parameters,
+            )
+            total_rows, distinct_symbols = (
+                int(value or 0) for value in cursor.fetchone()
+            )
+            if total_rows <= 0 or total_rows != distinct_symbols:
+                raise StaticResearchPgError(
+                    "STATIC_SEED_SCOPE_INCOMPLETE",
+                    "T0当前Seed总体为空或存在重复证券，不能推定来源分母",
+                )
+            expected_source_count = total_rows
         cursor.execute(
             f"""SELECT DISTINCT ranking_universe_count, evaluation_universe_count
                 FROM {_SEED_TABLE} WHERE {scope_predicate}""",

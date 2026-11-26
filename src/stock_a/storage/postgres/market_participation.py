@@ -334,7 +334,7 @@ def _read_market_participation_core(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    capture_id: int,
+    capture_id: int | None,
     calendar_id: str,
     calendar_revision: str,
     market: Any | None = None,
@@ -396,7 +396,6 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
         cohort = market.cohort
         if (
             day["target_session"] != target_session
-            or day["source_capture_id"] != capture_id
             or day["source_pool_count"] != calculation.n_source
             or day["source_time_quality"] != cohort.source_time_quality
             or _market_clock(day["source_available_at"])
@@ -417,12 +416,11 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
             return {
                 "status": "NOT_COMPARABLE",
                 "classification": "UNKNOWN",
-                "reason": "已保存成交参与结果与当前宽度的来源捕获、日历或质量绑定不一致。",
+                "reason": "已保存成交参与结果与当前宽度的总体、日历或质量绑定不一致。",
             }
     else:
         if (
             day["target_session"] != target_session
-            or day["source_capture_id"] != capture_id
             or day["calendar_id"] != calendar_id
             or day["calendar_revision"] != calendar_revision
             or day["price_coordinate"] != "FORWARD_ADJUSTED"
@@ -431,7 +429,7 @@ WHERE participation_day_id=%s ORDER BY reason_code""",
             return {
                 "status": "NOT_COMPARABLE",
                 "classification": "UNKNOWN",
-                "reason": "已保存成交参与结果与目标日期的来源捕获或日历绑定不一致。",
+                "reason": "已保存成交参与结果与目标日期的日历绑定不一致。",
             }
 
     source_count = int(day["source_pool_count"])
@@ -577,7 +575,7 @@ def read_market_participation_standalone(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_capture_id: int,
+    source_capture_id: int | None,
     calendar_id: str,
     calendar_revision: str,
     profile_revision: str | None = None,

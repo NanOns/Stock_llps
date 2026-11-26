@@ -88,8 +88,8 @@ def prepare_source_s2_t1_cohort_rows(
     target_session: date,
     endpoint_session: date,
     research_cutoff: date,
-    source_capture_id: int,
-    endpoint_source_capture_id: int,
+    source_capture_id: int | None,
+    endpoint_source_capture_id: int | None,
     t0_scope: Mapping[str, Any],
     endpoint_scope: Mapping[str, Any],
     calendar_revision: str,
@@ -103,10 +103,13 @@ def prepare_source_s2_t1_cohort_rows(
         or type(endpoint_session) is not date
         or type(research_cutoff) is not date
         or not target_session < endpoint_session <= research_cutoff
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
-        or type(endpoint_source_capture_id) is not int
-        or endpoint_source_capture_id <= 0
+        or source_capture_id is not None
+        and (type(source_capture_id) is not int or source_capture_id <= 0)
+        or endpoint_source_capture_id is not None
+        and (
+            type(endpoint_source_capture_id) is not int
+            or endpoint_source_capture_id <= 0
+        )
         or type(expected_source_count) is not int
         or expected_source_count <= 0
         or not calendar_revision
@@ -150,8 +153,6 @@ def prepare_source_s2_t1_cohort_rows(
     )
     if (
         any(t0_scope[key] != endpoint_scope[key] for key in shared_keys)
-        or t0_scope["source_capture_id"] != source_capture_id
-        or endpoint_scope["source_capture_id"] != endpoint_source_capture_id
         or t0_scope["research_mode"] != "NON_PIT_RETROSPECTIVE"
         or t0_scope["price_coordinate"] != "FORWARD_ADJUSTED"
         or t0_scope["source_time_quality"] != "NON_PIT_OBSERVED"

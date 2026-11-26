@@ -146,6 +146,9 @@ def compute_source_market_context(
             "目标BaoStock paired捕获目录不可用或为空",
             category="NOT_EVALUABLE",
         )
+    # This paired capture defines only the source-observation cohort for this
+    # source-level metric. It is not the formal historical Research Universe;
+    # R03 resolves that denominator from the date-effective session directory.
     roster_by_symbol = {
         item["source_symbol"]: item for item in roster.get("symbols", [])
     }
@@ -184,7 +187,6 @@ def compute_source_market_context(
                 config,
                 source_symbols=source_symbols,
                 sessions=needed_sessions,
-                source_capture_id=source_capture_id,
                 price_coordinate="FORWARD_ADJUSTED",
                 cutoff=research_cutoff,
                 offset=offset,
@@ -251,12 +253,14 @@ def compute_source_market_context(
                     "UNKNOWN",
                     "TRADE_STATUS_HISTORY_ROW_NOT_STORED",
                 )
+                qfq_capture_id = None
             else:
                 bar_status = row.get("qfq_bar_status") or "READ_FAILED"
                 bar_reason = row.get("qfq_bar_reason")
                 quality = row.get("qfq_price_quality") or "UNKNOWN"
                 price_reason = row.get("qfq_price_reason")
                 close = row.get("qfq_close")
+                qfq_capture_id = row.get("qfq_source_capture_id")
                 if bar_status not in status_counts:
                     bar_status = "READ_FAILED"
                     bar_reason = bar_reason or "PRICE_BAR_STATUS_INVALID"
@@ -272,7 +276,7 @@ def compute_source_market_context(
                 QfqPriceObservation(
                     source_symbol=symbol,
                     session_date=session,
-                    source_capture_id=source_capture_id,
+                    source_capture_id=qfq_capture_id,
                     selected_close=close,
                     price_quality=quality,
                     price_reason=price_reason or bar_reason,
@@ -382,7 +386,7 @@ def read_source_market_context(
     *,
     target_session: date,
     research_cutoff: date,
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     include_symbols: bool = False,
 ) -> SourceMarketContextRead:
     """直接读取已保存的精确市场宽度，不在读取时重算来源池。"""
@@ -398,7 +402,9 @@ def read_source_market_context(
             "目标会话超过研究截止",
             category="ARGUMENT",
         )
-    if type(source_capture_id) is not int or source_capture_id <= 0:
+    if source_capture_id is not None and (
+        type(source_capture_id) is not int or source_capture_id <= 0
+    ):
         raise SourceMarketContextError(
             "MARKET_BREADTH_CAPTURE_ID_INVALID",
             "source_capture_id无效",
@@ -704,9 +710,7 @@ def prepare_source_market_breadth_change(
         before_width = Fraction(before_numerator, before_day["eligible_count"])
     change["breadth_before"] = before_width
 
-    if before_day["source_capture_id"] != source_capture_id:
-        reason = "SOURCE_CAPTURE_MISMATCH"
-    elif (
+    if (
         before_day["price_coordinate"] != market.cohort.price_coordinate
         or market.cohort.price_coordinate != "FORWARD_ADJUSTED"
     ):

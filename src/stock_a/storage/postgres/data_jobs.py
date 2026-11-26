@@ -1126,7 +1126,8 @@ def read_module_completion_watermarks(
                       p.expected_rows,p.verified_rows,p.source_capture_id,
                       p.profile_revision,p.producer_version,p.profile_history_session_count,
                       p.d1_history_session_count,p.calendar_revision,
-                      p.industry_snapshot_id,p.concept_snapshot_id,j.request_key,
+                      p.industry_snapshot_id,p.concept_snapshot_id,
+                      p.rule_ids,p.followup_target_sessions,j.request_key,
                       p.completed_at,j.research_cutoff
                FROM stock.data_job_progress p
                JOIN stock.data_jobs j ON j.job_id=p.job_id
@@ -1151,20 +1152,31 @@ def read_module_completion_watermarks(
             fact_counts_by_table_session[tbl] = {
                 r[0]: int(r[1]) for r in cursor.fetchall() if r[0] is not None
             }
-        fep_counts_by_session_cutoff: dict[tuple[date, date], int] = {}
-        if "stock.source_fep_baseline_facts" in existing_tables:
+        raw_counts_by_capture_session: dict[tuple[int, date], int] = {}
+        if "stock.source_raw_daily" in existing_tables:
             cursor.execute(
-                """SELECT COALESCE(target_session, period_end_session),
-                          research_cutoff, count(*)::bigint
-                   FROM stock.source_fep_baseline_facts
-                   WHERE COALESCE(target_session, period_end_session)<=%s
-                   GROUP BY 1, 2""",
+                """SELECT source_capture_id,session_date,count(*)::bigint
+                   FROM stock.source_raw_daily
+                   WHERE session_date<=%s
+                   GROUP BY source_capture_id,session_date""",
                 (cutoff,),
             )
-            fep_counts_by_session_cutoff = {
-                (r[0], r[1]): int(r[2])
-                for r in cursor.fetchall()
-                if r[0] is not None and r[1] is not None
+            raw_counts_by_capture_session = {
+                (int(capture_id), session): int(count)
+                for capture_id, session, count in cursor.fetchall()
+                if capture_id is not None and session is not None
+            }
+        fep_counts_by_cutoff: dict[date, int] = {}
+        if "stock.source_fep_baseline_facts" in existing_tables:
+            cursor.execute(
+                """SELECT research_cutoff, count(*)::bigint
+                   FROM stock.source_fep_baseline_facts
+                   WHERE COALESCE(target_session, period_end_session)<=%s
+                   GROUP BY research_cutoff""",
+                (cutoff,),
+            )
+            fep_counts_by_cutoff = {
+                r[0]: int(r[1]) for r in cursor.fetchall() if r[0] is not None
             }
         cohort_counts_by_session_cutoff: dict[tuple[date, date], int] = {}
         if "stock.source_cohort_group_stats" in existing_tables:
@@ -1183,13 +1195,34 @@ def read_module_completion_watermarks(
         basic_counts_by_capture: dict[int, int] = {}
         if "stock.source_baostock_stock_basic" in existing_tables:
             cursor.execute(
-                """SELECT source_capture_id, count(*)::bigint
-                   FROM stock.source_baostock_stock_basic
-                   GROUP BY source_capture_id"""
+                """SELECT b.source_capture_id, count(*)::bigint
+                   FROM stock.source_baostock_stock_basic b
+                   JOIN stock.source_captures c ON c.capture_id=b.source_capture_id
+                   WHERE c.range_end_session<=%s
+                   GROUP BY b.source_capture_id""",
+                (cutoff,),
             )
             basic_counts_by_capture = {
                 int(r[0]): int(r[1]) for r in cursor.fetchall() if r[0] is not None
             }
+        cumulative_counts_by_capture: dict[str, dict[int, dict[date, int]]] = {}
+        for table_name in (
+            "source_baostock_session_directory",
+            "source_market_index_daily",
+        ):
+            qualified = f"stock.{table_name}"
+            if qualified not in existing_tables:
+                continue
+            cursor.execute(
+                f"""SELECT source_capture_id,session_date,count(*)::bigint
+                    FROM {qualified} WHERE session_date<=%s
+                    GROUP BY source_capture_id,session_date""",
+                (cutoff,),
+            )
+            capture_map: dict[int, dict[date, int]] = {}
+            for capture_id, session_date, count in cursor.fetchall():
+                capture_map.setdefault(int(capture_id), {})[session_date] = int(count)
+            cumulative_counts_by_capture[qualified] = capture_map
         tdx_snapshot_counts: dict[str, dict[int, int]] = {}
         if "stock.tdx_sector_source_snapshots" in existing_tables:
             cursor.execute(
@@ -1215,6 +1248,76 @@ def read_module_completion_watermarks(
             tdx_snapshot_counts["stock.tdx_sector_members"] = {
                 int(r[0]): int(r[1]) for r in cursor.fetchall() if r[0] is not None
             }
+        scoped_fact_counts: dict[tuple[UUID, str, date], int] = {}
+        for row in rows:
+            (
+                job_id,
+                target_session,
+                business_table,
+                status,
+                _expected_rows,
+                _verified_rows,
+                _capture_id,
+                _profile_revision,
+                _producer_version,
+                _profile_history_session_count,
+                _d1_history_session_count,
+                _calendar_revision,
+                _industry_snapshot_id,
+                _concept_snapshot_id,
+                rule_ids,
+                followup_target_sessions,
+                _request_key,
+                _completed_at,
+                job_research_cutoff,
+            ) = row
+            if status not in _COMPLETE_PROGRESS_STATUSES:
+                continue
+            scope_key = (job_id, str(business_table), target_session)
+            if business_table == "stock.source_rule_evaluations":
+                if rule_ids is None:
+                    scoped_fact_counts[scope_key] = -1
+                    continue
+                cursor.execute(
+                    """SELECT count(*) FROM stock.source_rule_evaluations
+                       WHERE target_session=%s AND rule_id=ANY(%s::text[])""",
+                    (target_session, list(rule_ids)),
+                )
+                scoped_fact_counts[scope_key] = int(cursor.fetchone()[0])
+            elif business_table == "stock.source_research_observation_segment_days":
+                if rule_ids is None:
+                    scoped_fact_counts[scope_key] = -1
+                    continue
+                cursor.execute(
+                    """SELECT count(*)
+                       FROM stock.source_research_observation_segment_days
+                       WHERE t0_session=%s AND observation_session<=%s
+                         AND rule_id=ANY(%s::text[])""",
+                    (
+                        target_session,
+                        job_research_cutoff or cutoff,
+                        list(rule_ids),
+                    ),
+                )
+                scoped_fact_counts[scope_key] = int(cursor.fetchone()[0])
+            elif business_table == "stock.source_sector_pulse_followup_facts":
+                if followup_target_sessions is None:
+                    scoped_fact_counts[scope_key] = -1
+                    continue
+                cursor.execute(
+                    """SELECT count(*)
+                       FROM stock.source_sector_pulse_followup_facts f
+                       JOIN stock.source_sector_cross_period_pulse_facts p
+                         ON p.id=f.pulse_fact_id
+                       WHERE p.target_session=%s AND p.target_session<=%s
+                         AND f.target_session=ANY(%s::date[])""",
+                    (
+                        target_session,
+                        job_research_cutoff or cutoff,
+                        list(followup_target_sessions),
+                    ),
+                )
+                scoped_fact_counts[scope_key] = int(cursor.fetchone()[0])
 
     latest_by_table_session: dict[tuple[str, date], dict[str, Any]] = {}
     for (
@@ -1232,6 +1335,8 @@ def read_module_completion_watermarks(
         calendar_revision,
         industry_snapshot_id,
         concept_snapshot_id,
+        rule_ids,
+        followup_target_sessions,
         request_key,
         completed_at,
         job_research_cutoff,
@@ -1252,6 +1357,12 @@ def read_module_completion_watermarks(
             "calendar_revision": calendar_revision,
             "industry_snapshot_id": industry_snapshot_id,
             "concept_snapshot_id": concept_snapshot_id,
+            "rule_ids": tuple(sorted(rule_ids)) if rule_ids is not None else None,
+            "followup_target_sessions": (
+                tuple(sorted(followup_target_sessions))
+                if followup_target_sessions is not None
+                else None
+            ),
             "request_key": str(request_key) if request_key else None,
             "completed_at": completed_at,
             "job_research_cutoff": job_research_cutoff,
@@ -1338,9 +1449,7 @@ def read_module_completion_watermarks(
                 if tbl == "stock.source_fep_baseline_facts":
                     job_cutoff = rec.get("job_research_cutoff")
                     if job_cutoff is not None:
-                        actual_cnt = fep_counts_by_session_cutoff.get(
-                            (target_session, job_cutoff), 0
-                        )
+                        actual_cnt = fep_counts_by_cutoff.get(job_cutoff, 0)
                 elif tbl == "stock.source_cohort_group_stats":
                     job_cutoff = rec.get("job_research_cutoff")
                     if job_cutoff is not None:
@@ -1351,6 +1460,26 @@ def read_module_completion_watermarks(
                     cap_id = rec.get("source_capture_id")
                     if cap_id is not None:
                         actual_cnt = basic_counts_by_capture.get(int(cap_id), 0)
+                elif tbl == "stock.source_raw_daily":
+                    cap_id = rec.get("source_capture_id")
+                    if cap_id is not None:
+                        actual_cnt = raw_counts_by_capture_session.get(
+                            (int(cap_id), target_session), 0
+                        )
+                elif tbl in {
+                    "stock.source_baostock_session_directory",
+                    "stock.source_market_index_daily",
+                }:
+                    cap_id = rec.get("source_capture_id")
+                    if cap_id is not None:
+                        by_session = cumulative_counts_by_capture.get(tbl, {}).get(
+                            int(cap_id), {}
+                        )
+                        actual_cnt = sum(
+                            count
+                            for session_date, count in by_session.items()
+                            if session_date <= target_session
+                        )
                 elif tbl in tdx_snapshot_counts:
                     snap_ids = {
                         int(s)
@@ -1364,6 +1493,10 @@ def read_module_completion_watermarks(
                         actual_cnt = sum(
                             tdx_snapshot_counts[tbl].get(sid, 0) for sid in snap_ids
                         )
+                elif tbl in _MULTI_SLICE_FACT_TABLES:
+                    actual_cnt = scoped_fact_counts.get(
+                        (rec["job_id"], tbl, target_session)
+                    )
                 elif tbl in fact_counts_by_table_session:
                     actual_cnt = fact_counts_by_table_session[tbl].get(
                         target_session, 0
@@ -1371,14 +1504,9 @@ def read_module_completion_watermarks(
 
                 if actual_cnt is None:
                     continue
-                if tbl in _MULTI_SLICE_FACT_TABLES:
-                    if expected_cnt > 0 and actual_cnt < expected_cnt:
-                        fact_invalidated = True
-                        break
-                else:
-                    if actual_cnt != expected_cnt:
-                        fact_invalidated = True
-                        break
+                if actual_cnt < 0 or actual_cnt != expected_cnt:
+                    fact_invalidated = True
+                    break
             if fact_invalidated:
                 module_session_states[module][target_session.isoformat()] = (
                     "FAILED_OR_INVALIDATED"
@@ -5472,6 +5600,7 @@ def read_progress_unit(
                       deleted_rows,source_capture_id,profile_revision,producer_version,
                       profile_history_session_count,d1_history_session_count,
                       calendar_revision,industry_snapshot_id,concept_snapshot_id,
+                      rule_ids,followup_target_sessions,
                       verified_at,error_code,error_message
                FROM stock.data_job_progress
                WHERE job_id=%s AND stage_code=%s AND target_session=%s
@@ -5615,10 +5744,11 @@ def read_business_table_count(
         "stock.source_raw_daily": (
             """SELECT count(*) FROM stock.source_raw_daily d
                JOIN stock.source_captures c ON c.capture_id=d.source_capture_id
-               WHERE d.session_date=%s
+               WHERE d.session_date=%s AND d.source_capture_id=%s
                  AND d.session_date<=%s AND c.provider='BAOSTOCK'""",
             lambda: (
                 target_session,
+                source_capture_id,
                 effective_cutoff,
             ),
         ),
@@ -5890,6 +6020,7 @@ def read_business_table_count(
     if business_table in {
         "stock.source_captures",
         "stock.source_capture_requests",
+        "stock.source_raw_daily",
     } and (type(source_capture_id) is not int or source_capture_id <= 0):
         raise DataJobPgError(
             "DATA_JOB_READBACK_KEY_REQUIRED", "读回事实缺少真实来源捕获数字键"
@@ -6506,6 +6637,8 @@ def mark_progress_verified(
     calendar_revision: str | None = None,
     industry_snapshot_id: int | None = None,
     concept_snapshot_id: int | None = None,
+    rule_ids: Sequence[str] | None = None,
+    followup_target_sessions: Sequence[date] | None = None,
     no_change: bool = False,
     warning_code: str | None = None,
     warning_message: str | None = None,
@@ -6542,6 +6675,28 @@ def mark_progress_verified(
                 "DATA_JOB_OUTPUT_IDENTITY_INVALID",
                 f"阶段来源身份字段{field_name}必须为正整数或空值",
             )
+    if rule_ids is not None and (
+        not isinstance(rule_ids, Sequence)
+        or isinstance(rule_ids, (str, bytes))
+        or not rule_ids
+        or any(
+            not isinstance(rule_id, str) or not rule_id.strip() for rule_id in rule_ids
+        )
+        or len(set(rule_ids)) != len(rule_ids)
+    ):
+        raise DataJobPgError(
+            "DATA_JOB_OUTPUT_IDENTITY_INVALID", "规则进度范围必须是唯一非空规则ID集合"
+        )
+    if followup_target_sessions is not None and (
+        not isinstance(followup_target_sessions, Sequence)
+        or isinstance(followup_target_sessions, (str, bytes))
+        or not followup_target_sessions
+        or any(type(session) is not date for session in followup_target_sessions)
+        or len(set(followup_target_sessions)) != len(followup_target_sessions)
+    ):
+        raise DataJobPgError(
+            "DATA_JOB_OUTPUT_IDENTITY_INVALID", "后继进度范围必须是唯一交易日集合"
+        )
     for field_name, value in (
         ("profile_history_session_count", profile_history_session_count),
         ("d1_history_session_count", d1_history_session_count),
@@ -6594,6 +6749,7 @@ def mark_progress_verified(
                    profile_revision=%s,producer_version=%s,
                    profile_history_session_count=%s,d1_history_session_count=%s,
                    calendar_revision=%s,industry_snapshot_id=%s,concept_snapshot_id=%s,
+                   rule_ids=%s,followup_target_sessions=%s,
                    quality_status=%s,error_code=%s,error_message=%s,
                    verified_at=clock_timestamp(),
                    completed_at=clock_timestamp(),updated_at=clock_timestamp()
@@ -6613,6 +6769,10 @@ def mark_progress_verified(
                 calendar_revision,
                 industry_snapshot_id,
                 concept_snapshot_id,
+                list(rule_ids) if rule_ids is not None else None,
+                list(followup_target_sessions)
+                if followup_target_sessions is not None
+                else None,
                 quality_status,
                 warning_code,
                 warning_message,

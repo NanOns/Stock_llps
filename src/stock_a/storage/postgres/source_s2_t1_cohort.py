@@ -35,15 +35,18 @@ _SEED_SCOPE_COLUMNS = (
 )
 _SCOPE_SELECT = """SELECT producer_contract, producer_version,
        history_session_count, calendar_id, calendar_revision, research_mode,
-       price_coordinate, source_capture_id, source_time_quality,
+       price_coordinate,
+       CASE WHEN count(DISTINCT source_capture_id)=1
+            THEN min(source_capture_id) ELSE NULL END,
+       source_time_quality,
        source_clock_role, source_available_at, count(*)::bigint,
        count(DISTINCT source_symbol)::bigint
     FROM source_pool_seed_day_facts
-    WHERE target_session=%s AND source_capture_id=%s
+    WHERE target_session=%s
       AND producer_version='SOURCE_POOL_SEED_CORE_PROFILE_R2'
     GROUP BY producer_contract, producer_version,
              history_session_count, calendar_id, calendar_revision,
-             research_mode, price_coordinate, source_capture_id,
+             research_mode, price_coordinate,
              source_time_quality, source_clock_role, source_available_at
     ORDER BY producer_version"""
 
@@ -62,8 +65,8 @@ def _integer_numeric(value: Any) -> int:
     return int(numeric)
 
 
-def _seed_scope(cursor: Any, *, session: date, source_capture_id: int):
-    cursor.execute(_SCOPE_SELECT, (session, source_capture_id))
+def _seed_scope(cursor: Any, *, session: date):
+    cursor.execute(_SCOPE_SELECT, (session,))
     scopes = cursor.fetchall()
     if len(scopes) != 1:
         raise SourceS2T1CohortError("T0或T+1 Seed scope缺失或存在多个有效分区")
@@ -78,8 +81,8 @@ def persist_source_s2_t1_cohort_in_transaction(
     target_session: date,
     endpoint_session: date,
     research_cutoff: date,
-    source_capture_id: int,
-    endpoint_source_capture_id: int,
+    source_capture_id: int | None,
+    endpoint_source_capture_id: int | None,
     source_symbols: Sequence[str],
     path_rule_version: str,
     calendar_revision: str,
@@ -100,12 +103,10 @@ def persist_source_s2_t1_cohort_in_transaction(
     t0_scope = _seed_scope(
         cursor,
         session=target_session,
-        source_capture_id=source_capture_id,
     )
     endpoint_scope = _seed_scope(
         cursor,
         session=endpoint_session,
-        source_capture_id=endpoint_source_capture_id,
     )
     for label, scope in (("T0", t0_scope), ("T+1", endpoint_scope)):
         if (
@@ -128,7 +129,6 @@ def persist_source_s2_t1_cohort_in_transaction(
            JOIN source_pool_seed_day_facts t1
              ON t1.source_symbol=t0.source_symbol
             AND t1.target_session=%s
-            AND t1.source_capture_id=%s
             AND t1.producer_contract=%s
             AND t1.producer_version=%s
             AND t1.history_session_count=%s
@@ -139,7 +139,6 @@ def persist_source_s2_t1_cohort_in_transaction(
            LEFT JOIN source_forward_path_facts p
              ON p.target_session=t0.target_session
             AND p.source_symbol=t0.source_symbol
-            AND p.source_capture_id=t0.source_capture_id
             AND p.endpoint_session=%s
             AND p.horizon=1
             AND p.path_rule_version=%s
@@ -147,7 +146,6 @@ def persist_source_s2_t1_cohort_in_transaction(
             AND p.price_coordinate='FORWARD_ADJUSTED'
             AND p.scope='NON_PIT_EXPLORATORY'
            WHERE t0.target_session=%s
-             AND t0.source_capture_id=%s
              AND t0.producer_contract=%s
              AND t0.producer_version=%s
              AND t0.history_session_count=%s
@@ -158,7 +156,6 @@ def persist_source_s2_t1_cohort_in_transaction(
            ORDER BY t0.source_symbol""",
         (
             endpoint_session,
-            endpoint_source_capture_id,
             endpoint_scope["producer_contract"],
             endpoint_scope["producer_version"],
             endpoint_scope["history_session_count"],
@@ -170,7 +167,6 @@ def persist_source_s2_t1_cohort_in_transaction(
             path_rule_version,
             calendar_revision,
             target_session,
-            source_capture_id,
             t0_scope["producer_contract"],
             t0_scope["producer_version"],
             t0_scope["history_session_count"],
@@ -414,83 +410,17 @@ def _summary_payload(rows: Sequence[tuple[Any, ...]]) -> dict[str, Any]:
     }
 
 
-def _capture_session_count(
-    cursor: Any,
-    *,
-    session: date,
-    source_capture_id: int,
-    research_cutoff: date,
-) -> int | None:
-    """返回仅在捕获请求、日线和双坐标分母都闭合时的逐日证券数。"""
-    cursor.execute(
-        """SELECT provider,range_start_session,range_end_session,
-                  price_coordinates,source_time_quality,source_clock_role,
-                  source_available_at
-           FROM source_captures WHERE capture_id=%s""",
-        (source_capture_id,),
-    )
-    capture = cursor.fetchone()
-    if (
-        capture is None
-        or capture[0] != "BAOSTOCK"
-        or capture[1] is None
-        or capture[2] is None
-        or not capture[1] <= session <= capture[2] <= research_cutoff
-        or set(capture[3] or ()) != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
-        or capture[4] != "NON_PIT_OBSERVED"
-        or capture[5] != "BAOSTOCK_QUERY_CAPTURED_NON_PIT"
-        or capture[6] is not None
-    ):
+def _seed_session_count(cursor: Any, *, session: date) -> int | None:
+    """按目标日唯一有效Seed总体核验分母，不把捕获元数据当范围键。"""
+    try:
+        scope = _seed_scope(cursor, session=session)
+    except SourceS2T1CohortError:
         return None
-    cursor.execute(
-        """WITH request_codes AS (
-               SELECT source_code,
-                      count(*)=2 AND count(DISTINCT adjustment_flag)=2
-                        AND count(DISTINCT eligible_start_session)=1
-                        AND count(DISTINCT eligible_end_session)=1
-                        AND bool_and(
-                            request_status IN ('COMPLETED','NO_DATA')
-                            AND (request_status='NO_DATA' OR
-                                 completed_through_session>=range_end_session)
-                        ) AS complete,
-                      min(eligible_start_session) AS eligible_start,
-                      max(eligible_end_session) AS eligible_end
-               FROM source_capture_requests
-               WHERE capture_id=%s AND range_end_session<=%s
-               GROUP BY source_code
-           )
-           SELECT count(*) FILTER (
-                      WHERE %s BETWEEN eligible_start AND eligible_end
-                  )::bigint,
-                  count(*) FILTER (
-                      WHERE %s BETWEEN eligible_start AND eligible_end AND complete
-                  )::bigint
-           FROM request_codes""",
-        (source_capture_id, research_cutoff, session, session),
-    )
-    expected_count, complete_count = (int(value or 0) for value in cursor.fetchone())
-    cursor.execute(
-        """SELECT count(*)::bigint,count(DISTINCT source_symbol)::bigint,
-                  count(*) FILTER (WHERE price_quality IS NOT NULL)::bigint,
-                  count(*) FILTER (WHERE qfq_price_quality IS NOT NULL)::bigint,
-                  count(*) FILTER (WHERE board IN ('MAIN_BOARD', 'GEM'))::bigint
-           FROM source_raw_daily
-           WHERE session_date=%s AND source_capture_id=%s AND session_date<=%s""",
-        (session, source_capture_id, research_cutoff),
-    )
-    row_count, symbol_count, raw_count, qfq_count, research_count = (
-        int(value or 0) for value in cursor.fetchone()
-    )
-    if (
-        expected_count <= 0
-        or expected_count != complete_count
-        or row_count != expected_count
-        or symbol_count != row_count
-        or raw_count != row_count
-        or qfq_count != row_count
-    ):
+    count = scope.get("source_count")
+    distinct_count = scope.get("distinct_source_count")
+    if type(count) is not int or count <= 0 or count != distinct_count:
         return None
-    return research_count
+    return count
 
 
 def _read_exact_scope(
@@ -508,50 +438,17 @@ def _read_exact_scope(
         cursor,
         _,
     ):
-        target_capture_count = _capture_session_count(
-            cursor,
-            session=target_session,
-            source_capture_id=source_capture_id,
-            research_cutoff=research_cutoff,
-        )
+        target_capture_count = _seed_session_count(cursor, session=target_session)
         if target_capture_count is None:
             return {
                 "status": "INCOMPLETE",
-                "reason_codes": ["T0_CAPTURE_PARTITION_NOT_CLOSED"],
+                "reason_codes": ["T0_SESSION_UNIVERSE_NOT_CLOSED"],
             }
-        if endpoint_source_capture_id is None:
-            cursor.execute(
-                """SELECT DISTINCT c.capture_id
-                   FROM source_raw_daily r
-                   JOIN source_captures c ON c.capture_id=r.source_capture_id
-                   WHERE r.session_date=%s AND c.provider='BAOSTOCK'
-                     AND c.range_start_session<=%s AND c.range_end_session<=%s
-                     AND c.price_coordinates @> ARRAY[
-                         'RAW_UNADJUSTED','FORWARD_ADJUSTED'
-                     ]::text[]
-                   ORDER BY c.capture_id""",
-                (endpoint_session, endpoint_session, research_cutoff),
-            )
-            endpoint_ids = [int(row[0]) for row in cursor.fetchall()]
-            if len(endpoint_ids) != 1:
-                return {
-                    "status": "NOT_COMPUTED" if not endpoint_ids else "AMBIGUOUS",
-                    "target_session": target_session.isoformat(),
-                    "endpoint_session": endpoint_session.isoformat(),
-                    "research_cutoff": research_cutoff.isoformat(),
-                    "reason_codes": ["T1_CAPTURE_NOT_UNIQUE"],
-                }
-            endpoint_source_capture_id = endpoint_ids[0]
-        endpoint_capture_count = _capture_session_count(
-            cursor,
-            session=endpoint_session,
-            source_capture_id=endpoint_source_capture_id,
-            research_cutoff=research_cutoff,
-        )
+        endpoint_capture_count = _seed_session_count(cursor, session=endpoint_session)
         if endpoint_capture_count is None:
             return {
                 "status": "INCOMPLETE",
-                "reason_codes": ["T1_CAPTURE_PARTITION_NOT_CLOSED"],
+                "reason_codes": ["T1_SESSION_UNIVERSE_NOT_CLOSED"],
             }
         columns = ", ".join(f'"{column}"' for column in COHORT_COLUMNS)
         cursor.execute(
@@ -590,18 +487,28 @@ def _read_exact_scope(
             "research_cutoff": research_cutoff.isoformat(),
             "reason_codes": ["S2_T1_COHORT_STATS_NOT_SAVED"],
         }
-    if (
-        expected_rows is not None
-        and tuple(
-            sorted(
-                expected_rows,
-                key=lambda row: (
-                    row[COHORT_COLUMNS.index("t0_s2_state")],
-                    row[COHORT_COLUMNS.index("t1_s2_state")],
+    comparable_columns = tuple(
+        index
+        for index, name in enumerate(COHORT_COLUMNS)
+        if name not in {"source_capture_id", "endpoint_source_capture_id"}
+    )
+    if expected_rows is not None and (
+        len(expected_rows) != len(rows)
+        or any(
+            tuple(value[index] for index in comparable_columns)
+            != tuple(actual[index] for index in comparable_columns)
+            for value, actual in zip(
+                sorted(
+                    expected_rows,
+                    key=lambda row: (
+                        row[COHORT_COLUMNS.index("t0_s2_state")],
+                        row[COHORT_COLUMNS.index("t1_s2_state")],
+                    ),
                 ),
+                rows,
+                strict=True,
             )
         )
-        != rows
     ):
         raise SourceS2T1CohortReadError("S2/T+1统计提交后异事务读回与事务输入不一致")
     payload = _summary_payload(rows)
@@ -618,7 +525,7 @@ def _read_exact_scope(
         ):
             return {
                 "status": "INCOMPLETE",
-                "reason_codes": ["CAPTURE_AND_STATS_DENOMINATOR_MISMATCH"],
+                "reason_codes": ["SESSION_AND_STATS_DENOMINATOR_MISMATCH"],
             }
         for key, value in (
             ("target_session", target_session.isoformat()),
@@ -637,8 +544,8 @@ def read_source_s2_t1_cohort_scope(
     target_session: date,
     endpoint_session: date,
     research_cutoff: date,
-    source_capture_id: int,
-    endpoint_source_capture_id: int,
+    source_capture_id: int | None,
+    endpoint_source_capture_id: int | None,
     expected_rows: Sequence[tuple[Any, ...]] | None = None,
 ) -> dict[str, Any]:
     """在新只读事务中读取已提交的S2统计并核验可比较分母闭合。"""
@@ -659,7 +566,7 @@ def read_source_s2_t1_cohort_for_focus(
     target_session: date,
     endpoint_session: date | None,
     research_cutoff: date,
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     endpoint_source_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """Focus只读精确T0/T+1摘要；未到期或缺少数据时保留状态。"""
@@ -675,8 +582,6 @@ def read_source_s2_t1_cohort_for_focus(
         or type(endpoint_session) is not date
         or type(research_cutoff) is not date
         or not target_session < endpoint_session <= research_cutoff
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
     ):
         raise SourceS2T1CohortReadError("Focus S2/T+1读取键无效")
     result = _read_exact_scope(

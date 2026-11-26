@@ -101,7 +101,7 @@ def exploratory_raw_path(
     price_coordinate: str | None = None,
     saved_through: date | None = None,
 ) -> dict[str, Any]:
-    """以paired capture的QFQ T0收盘计算后验路径，RAW日线仅作原始报价披露。"""
+    """以QFQ T0收盘计算后验路径；捕获身份仅作溯源，不承担坐标可比性判定。"""
     session_vector = tuple(sessions)
     if not session_vector or type(horizon) is not int or horizon < 1:
         raise ValueError("路径须包含T0且期限为正整数")
@@ -171,13 +171,6 @@ def exploratory_raw_path(
         ):
             raise ValueError("价格行重复、非法或越界")
         by_date[session] = row
-    if any(
-        row.get("source_capture_id") != source_capture_id for row in by_date.values()
-    ):
-        return not_computed(
-            "SOURCE_CAPTURE_MISMATCH",
-            "价格路径行没有绑定同一个paired source_capture_id。",
-        )
     symbols = [
         normalize_baostock_symbol(row.get("source_symbol")) for row in by_date.values()
     ]
@@ -204,16 +197,7 @@ def exploratory_raw_path(
             "QFQ_T0_CLOSE_UNAVAILABLE",
             "路径T0没有可观察QFQ收盘价；不回退未复权收盘。",
         )
-    safe_rows = [
-        row
-        if row.get("source_capture_id") == source_capture_id
-        else {
-            "session_date": row["session_date"],
-            "bar_status": "SOURCE_CAPTURE_MISMATCH",
-        }
-        for row in rows
-    ]
-    facts = post_signal_price_facts(session_vector, safe_rows, horizon)
+    facts = post_signal_price_facts(session_vector, rows, horizon)
     endpoint = facts["points"][horizon - 1]
     if target_session is None:
         maturity = "RIGHT_CENSORED"

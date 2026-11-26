@@ -238,6 +238,15 @@ def persist_baostock_stock_basic(
         if existing_rows:
             existing = {row[0]: tuple(row[1:]) for row in existing_rows}
             if existing == expected:
+                cursor.executemany(
+                    """UPDATE stock.source_baostock_stock_basic
+                          SET source_capture_id=%s, captured_at=%s
+                        WHERE source_symbol=%s""",
+                    [
+                        (source_capture_id, item["captured_at"], item["source_symbol"])
+                        for item in normalized
+                    ],
+                )
                 return {
                     "status": "NO_CHANGE",
                     "source_capture_id": source_capture_id,
@@ -358,11 +367,24 @@ def persist_baostock_session_directory(
     source_capture_id: int,
     session_date: date,
     rows: Iterable[Mapping[str, Any]],
+    complete_response: bool,
     captured_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """单事务幂等写入 stock.source_baostock_session_directory；同键异内容拒绝回滚。"""
+    """以完整的逐日供应方响应原子替换名录；不完整响应不触碰既有集合。"""
     if type(source_capture_id) is not int or source_capture_id <= 0:
         raise ValueError("INVALID_SOURCE_CAPTURE_ID")
+    if type(complete_response) is not bool:
+        raise ValueError("INVALID_SESSION_DIRECTORY_COMPLETENESS")
+    if not complete_response:
+        return {
+            "status": "INCOMPLETE",
+            "source_capture_id": source_capture_id,
+            "session_date": session_date.isoformat()
+            if type(session_date) is date
+            else None,
+            "row_count": 0,
+            "database_write_attempted": False,
+        }
     effective_captured_at = captured_at or datetime.now(timezone.utc)
     normalized = normalize_baostock_session_directory_rows(
         rows,
@@ -392,12 +414,33 @@ def persist_baostock_session_directory(
         if existing_rows:
             existing = {row[0]: tuple(row[1:]) for row in existing_rows}
             if existing == expected:
+                cursor.executemany(
+                    """UPDATE stock.source_baostock_session_directory
+                          SET source_capture_id=%s, captured_at=%s
+                        WHERE session_date=%s AND source_symbol=%s""",
+                    [
+                        (
+                            source_capture_id,
+                            item["captured_at"],
+                            item["session_date"],
+                            item["source_symbol"],
+                        )
+                        for item in normalized
+                    ],
+                )
                 return {
                     "status": "NO_CHANGE",
                     "source_capture_id": source_capture_id,
                     "session_date": session_date.isoformat(),
                     "row_count": len(normalized),
                 }
+
+        incoming_symbols = [item["source_symbol"] for item in normalized]
+        cursor.execute(
+            """DELETE FROM stock.source_baostock_session_directory
+                WHERE session_date=%s AND NOT (source_symbol=ANY(%s::text[]))""",
+            (session_date, incoming_symbols),
+        )
 
         cursor.executemany(
             """INSERT INTO stock.source_baostock_session_directory (

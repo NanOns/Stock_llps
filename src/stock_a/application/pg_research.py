@@ -78,7 +78,7 @@ def read_source_version_context(
     expected_raw_row_count: int | None = None,
     price_coordinate: str | None = None,
 ) -> dict[str, Any]:
-    """读取唯一paired BaoStock捕获上下文，不从TDX包或文件回退。"""
+    """读取所需BaoStock坐标上下文；捕获身份只用于溯源，不替代事实键。"""
     if type(target_session) is not date:
         raise PgResearchBindingError(
             "PG_RESEARCH_TARGET_SESSION_INVALID", "研究来源上下文必须绑定官方交易日"
@@ -95,10 +95,13 @@ def read_source_version_context(
             "PG_RESEARCH_CAPTURE_ID_INVALID", "source_capture_id必须为正整数或空值"
         )
     try:
+        coordinate_scoped = price_coordinate is not None
         catalog = read_baostock_price_catalog(
             config,
             cutoff=cutoff,
-            source_capture_id=source_capture_id,
+            # 指定坐标时先读该坐标的完整当前有效事实总体，不能用任务捕获
+            # 截掉由其它合法请求捕获写入的证券行。
+            source_capture_id=None if coordinate_scoped else source_capture_id,
         )
     except BaoStockPriceFactsError as error:
         raise PgResearchBindingError(error.code, str(error)) from error
@@ -107,8 +110,11 @@ def read_source_version_context(
         for item in catalog.get("price_coordinate_versions", [])
         if item.get("session_date") == target_session.isoformat()
         and (
-            source_capture_id is None
+            (coordinate_scoped or source_capture_id is None)
             or item.get("source_capture_id") == source_capture_id
+        )
+        and (
+            price_coordinate is None or item.get("price_coordinate") == price_coordinate
         )
     ]
     capture_ids = {item.get("source_capture_id") for item in versions}
@@ -117,21 +123,30 @@ def read_source_version_context(
             "PG_RESEARCH_SOURCE_VERSION_UNAVAILABLE",
             "该日期没有可读的paired BaoStock价格捕获。",
         )
-    if len(capture_ids) != 1 or None in capture_ids:
+    if not coordinate_scoped and (len(capture_ids) != 1 or None in capture_ids):
         raise PgResearchBindingError(
             "PG_RESEARCH_SOURCE_VERSION_AMBIGUOUS",
             "该目标日对应多个BaoStock捕获，必须明确指定source_capture_id。",
         )
-    capture_id = next(iter(capture_ids))
-    try:
-        roster = read_baostock_capture_roster(
-            config,
-            source_capture_id=int(capture_id),
-            cutoff=cutoff,
-        )
-    except BaoStockPriceFactsError as error:
-        raise PgResearchBindingError(error.code, str(error)) from error
-    if (
+    capture_id = next(iter(capture_ids)) if len(capture_ids) == 1 else None
+    if coordinate_scoped and source_capture_id is not None and capture_id is not None:
+        if source_capture_id != capture_id:
+            raise PgResearchBindingError(
+                "PG_RESEARCH_COORDINATE_CAPTURE_MISMATCH",
+                "指定捕获与目标价格坐标的唯一真实来源捕获不一致。",
+            )
+    roster = None
+    if capture_id is not None:
+        try:
+            roster = read_baostock_capture_roster(
+                config,
+                source_capture_id=int(capture_id),
+                cutoff=cutoff,
+            )
+        except BaoStockPriceFactsError as error:
+            if not coordinate_scoped:
+                raise PgResearchBindingError(error.code, str(error)) from error
+    if not coordinate_scoped and (
         not isinstance(roster, Mapping)
         or roster.get("status") != "AVAILABLE"
         or roster.get("source_capture_id") != capture_id
@@ -143,15 +158,23 @@ def read_source_version_context(
     by_coordinate = {item.get("price_coordinate"): item for item in versions}
     raw = by_coordinate.get("RAW_UNADJUSTED")
     qfq = by_coordinate.get("FORWARD_ADJUSTED")
-    if raw is None or qfq is None:
+    if (not coordinate_scoped and (raw is None or qfq is None)) or (
+        coordinate_scoped and price_coordinate not in by_coordinate
+    ):
         raise PgResearchBindingError(
             "PG_RESEARCH_PAIRED_COORDINATE_MISSING",
             "目标日paired捕获缺少RAW_UNADJUSTED或FORWARD_ADJUSTED目录事实。",
         )
-    raw_rows = raw.get("row_count")
-    expected_rows = raw.get("expected_row_count")
-    if expected_raw_row_count is not None and (
-        type(expected_raw_row_count) is not int or expected_raw_row_count != raw_rows
+    selected = by_coordinate.get(price_coordinate) if coordinate_scoped else raw
+    raw_rows = selected.get("row_count") if selected is not None else None
+    expected_rows = selected.get("expected_row_count") if selected is not None else None
+    if (
+        expected_raw_row_count is not None
+        and price_coordinate in (None, "RAW_UNADJUSTED")
+        and (
+            type(expected_raw_row_count) is not int
+            or expected_raw_row_count != raw_rows
+        )
     ):
         raise PgResearchBindingError(
             "PG_RESEARCH_RAW_COUNT_MISMATCH",
@@ -164,7 +187,7 @@ def read_source_version_context(
         raise PgResearchBindingError(
             "PG_RESEARCH_PRICE_COORDINATE_INVALID", "价格坐标不在固定BaoStock坐标枚举中"
         )
-    if target_raw_rows:
+    if target_raw_rows and capture_id is not None:
         target_rows = [
             row
             for row in target_raw_rows
@@ -180,38 +203,52 @@ def read_source_version_context(
     from stock_a.sources.baostock.identity import eligible_research_board
 
     target_iso = target_session.isoformat()
-    research_expected_rows = sum(
-        1
-        for item in roster.get("symbols", [])
-        if eligible_research_board(item.get("source_symbol")) is not None
-        and item.get("eligible_start_session")
-        and item.get("eligible_end_session")
-        and item["eligible_start_session"] <= target_iso <= item["eligible_end_session"]
+    research_expected_rows = (
+        sum(
+            1
+            for item in roster.get("symbols", [])
+            if eligible_research_board(item.get("source_symbol")) is not None
+            and item.get("eligible_start_session")
+            and item.get("eligible_end_session")
+            and item["eligible_start_session"]
+            <= target_iso
+            <= item["eligible_end_session"]
+        )
+        if roster is not None
+        else None
     )
     complete = (
-        raw.get("coverage_status") == "COMPLETE"
+        selected.get("coverage_status") == "COMPLETE"
+        if coordinate_scoped and selected is not None
+        else raw is not None
+        and qfq is not None
+        and raw.get("coverage_status") == "COMPLETE"
         and qfq.get("coverage_status") == "COMPLETE"
     )
     return {
         "status": "AVAILABLE",
         "target_session": target_session.isoformat(),
         "source_capture_id": capture_id,
-        "capture_read_started_at": roster.get("captured_at_start"),
-        "capture_validated_at": roster.get("captured_at_validated"),
-        "capture_started_at": roster.get("captured_at_start"),
-        "capture_verified_at": roster.get("captured_at_validated"),
+        "capture_read_started_at": (roster or {}).get("captured_at_start"),
+        "capture_validated_at": (roster or {}).get("captured_at_validated"),
+        "capture_started_at": (roster or {}).get("captured_at_start"),
+        "capture_verified_at": (roster or {}).get("captured_at_validated"),
         "provider": "BAOSTOCK",
-        "source_time_quality": roster.get("source_time_quality"),
-        "source_clock_role": roster.get("source_clock_role"),
+        "source_time_quality": (roster or {}).get("source_time_quality") or "UNKNOWN",
+        "source_clock_role": (roster or {}).get("source_clock_role") or "UNKNOWN",
         "source_available_at": None,
         "price_coordinate": price_coordinate,
         "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
-        "raw_row_count": raw_rows,
-        "qfq_row_count": qfq.get("row_count"),
+        "raw_row_count": raw.get("row_count") if raw is not None else None,
+        "qfq_row_count": qfq.get("row_count") if qfq is not None else None,
         "capture_expected_row_count": expected_rows,
         "research_expected_row_count": research_expected_rows,
-        "raw_coverage_status": raw.get("coverage_status"),
-        "qfq_coverage_status": qfq.get("coverage_status"),
+        "raw_coverage_status": raw.get("coverage_status")
+        if raw is not None
+        else "NOT_REQUESTED",
+        "qfq_coverage_status": qfq.get("coverage_status")
+        if qfq is not None
+        else "NOT_REQUESTED",
         "version_status": "COMPLETE" if complete else "INCOMPLETE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",

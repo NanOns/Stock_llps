@@ -42,12 +42,15 @@ _KEY = (
     "target_session",
     "contract_version",
     "calendar_revision",
-    "source_capture_id",
     "price_coordinate",
 )
 _SYMBOL_COLUMNS = (
     "breadth_day_id",
-    *_KEY,
+    "target_session",
+    "contract_version",
+    "calendar_revision",
+    "source_capture_id",
+    "price_coordinate",
     "source_symbol",
     "ret_t_numerator",
     "ret_t_denominator",
@@ -261,6 +264,7 @@ def _persist_market_breadth_once(
         rows = [
             (
                 *key,
+                capture_id,
                 item.source_symbol,
                 *_fraction(item.ret1_t),
                 *_fraction(item.ret1_t_minus_3),
@@ -274,26 +278,31 @@ def _persist_market_breadth_once(
             for item in sorted(result.symbols, key=lambda value: value.source_symbol)
         ]
         cursor.execute(
-            """SELECT source_symbol,source_capture_id FROM stock.source_raw_daily
-               WHERE session_date=%s AND source_capture_id=%s
+            """SELECT source_symbol,qfq_source_capture_id FROM stock.source_raw_daily
+               WHERE session_date=%s
                  AND board IN ('MAIN_BOARD', 'GEM')
-                 AND price_quality IS NOT NULL AND qfq_price_quality IS NOT NULL
+                 AND qfq_bar_status='TARGET_PRESENT'
+                 AND qfq_price_quality='OBSERVED'
                ORDER BY source_symbol""",
-            (target_session, capture_id),
+            (target_session,),
         )
         raw_rows = [
-            {"source_symbol": row[0], "source_capture_id": row[1]}
+            {"source_symbol": row[0], "qfq_source_capture_id": row[1]}
             for row in cursor.fetchall()
         ]
         if (
             len(raw_rows) != result.n_source
             or {row["source_symbol"] for row in raw_rows}
             != {item.source_symbol for item in result.symbols}
-            or {row["source_capture_id"] for row in raw_rows} != {capture_id}
+            or any(
+                type(row["qfq_source_capture_id"]) is not int
+                or row["qfq_source_capture_id"] <= 0
+                for row in raw_rows
+            )
         ):
             raise MarketBreadthPgError(
                 "MARKET_BREADTH_RAW_MISMATCH",
-                "宽度事实与唯一BaoStock捕获、证券集合或完整分母不一致",
+                "宽度事实与QFQ有效证券集合或完整分母不一致",
             )
         cursor.execute(
             f"SELECT id,{', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE target_session=%s",
@@ -477,12 +486,11 @@ def _persist_market_breadth_change(
         )
     cursor.execute(
         """SELECT count(*) FROM source_market_breadth_days
-           WHERE target_session=%s AND source_capture_id=%s AND calendar_id=%s
+           WHERE target_session=%s AND calendar_id=%s
              AND calendar_revision=%s AND contract_version=%s
              AND price_coordinate=%s""",
         (
             breadth_change.get("target_session"),
-            breadth_change.get("target_source_capture_id"),
             breadth_change.get("target_calendar_id"),
             breadth_change.get("target_calendar_revision"),
             breadth_change.get("target_contract_version"),
@@ -497,12 +505,10 @@ def _persist_market_breadth_change(
     if breadth_change.get("comparison_status") == "COMPARABLE":
         cursor.execute(
             """SELECT count(*) FROM source_market_breadth_days
-               WHERE target_session=%s AND source_capture_id=%s
-                 AND calendar_id=%s AND calendar_revision=%s
+               WHERE target_session=%s AND calendar_id=%s AND calendar_revision=%s
                  AND contract_version=%s AND price_coordinate=%s""",
             (
                 breadth_change["before_session"],
-                breadth_change["before_source_capture_id"],
                 breadth_change["before_calendar_id"],
                 breadth_change.get("before_calendar_revision"),
                 breadth_change.get("before_contract_version"),
@@ -555,7 +561,7 @@ def read_market_breadth(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_capture_id: int,
+    source_capture_id: int | None,
     calendar_revision: str,
     contract_version: str,
     include_symbols: bool = False,
@@ -563,14 +569,14 @@ def read_market_breadth(
     """只读完整持久化范围；不按其他版本回退或重算。"""
     if (
         type(target_session) is not date
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
+        or source_capture_id is not None
+        and (type(source_capture_id) is not int or source_capture_id <= 0)
         or not calendar_revision
         or not contract_version
     ):
         raise MarketBreadthPgError(
             "MARKET_BREADTH_READ_ARGUMENT_INVALID",
-            "市场宽度读取需要日期、来源捕获ID和显式算法修订",
+            "市场宽度读取需要日期与显式算法修订",
         )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
@@ -588,9 +594,8 @@ def read_market_breadth(
             }
         cursor.execute(
             f"SELECT {', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} "
-            "WHERE target_session=%s AND source_capture_id=%s "
-            "AND calendar_revision=%s AND contract_version=%s ORDER BY source_capture_id",
-            (target_session, source_capture_id, calendar_revision, contract_version),
+            "WHERE target_session=%s AND calendar_revision=%s AND contract_version=%s",
+            (target_session, calendar_revision, contract_version),
         )
         days = cursor.fetchall()
         if not days:
@@ -601,7 +606,7 @@ def read_market_breadth(
         if len(days) != 1:
             return {
                 "storage_status": "INCOMPLETE",
-                "reason": "市场宽度对应多个来源捕获或算法版本",
+                "reason": "同一市场业务日期出现多个当前事实行",
             }
         day = dict(zip(_DAY_COLUMNS, days[0], strict=True))
         key = _scope(day)
@@ -663,15 +668,15 @@ def read_market_breadth_change(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_capture_id: int,
+    source_capture_id: int | None,
     calendar_revision: str,
     contract_version: str,
 ) -> dict[str, Any]:
     """只读目标会话已持久化的相邻宽度比较；不计算或回退其他版本。"""
     if (
         type(target_session) is not date
-        or type(source_capture_id) is not int
-        or source_capture_id <= 0
+        or source_capture_id is not None
+        and (type(source_capture_id) is not int or source_capture_id <= 0)
         or not isinstance(calendar_revision, str)
         or not calendar_revision
         or not isinstance(contract_version, str)
@@ -679,7 +684,7 @@ def read_market_breadth_change(
     ):
         raise MarketBreadthPgError(
             "MARKET_BREADTH_CHANGE_READ_ARGUMENT_INVALID",
-            "宽度变化读取需要目标日、捕获、日历修订和算法合同",
+            "宽度变化读取需要目标日、日历修订和算法合同",
         )
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
@@ -694,10 +699,9 @@ def read_market_breadth_change(
             }
         cursor.execute(
             f"SELECT {', '.join(_CHANGE_COLUMNS)} FROM {_CHANGE_TABLE} "
-            "WHERE target_session=%s AND target_source_capture_id=%s "
-            "AND target_calendar_revision=%s AND target_contract_version=%s "
-            "ORDER BY before_session",
-            (target_session, source_capture_id, calendar_revision, contract_version),
+            "WHERE target_session=%s AND target_calendar_revision=%s "
+            "AND target_contract_version=%s ORDER BY before_session",
+            (target_session, calendar_revision, contract_version),
         )
         rows = cursor.fetchall()
         parent_scopes_complete = None
@@ -705,13 +709,11 @@ def read_market_breadth_change(
             change_row = dict(zip(_CHANGE_COLUMNS, rows[0], strict=True))
             cursor.execute(
                 """SELECT count(*) FROM source_market_breadth_days
-                   WHERE target_session=%s AND source_capture_id=%s
-                     AND calendar_id=%s AND calendar_revision=%s
+                   WHERE target_session=%s AND calendar_id=%s AND calendar_revision=%s
                      AND contract_version=%s AND price_coordinate='FORWARD_ADJUSTED'
                      AND source_count=%s AND eligible_count=%s""",
                 (
                     target_session,
-                    source_capture_id,
                     change_row["target_calendar_id"],
                     change_row["target_calendar_revision"],
                     change_row["target_contract_version"],
@@ -724,13 +726,11 @@ def read_market_breadth_change(
             if change_row["comparison_status"] == "COMPARABLE":
                 cursor.execute(
                     """SELECT count(*) FROM source_market_breadth_days
-                       WHERE target_session=%s AND source_capture_id=%s
-                         AND calendar_id=%s AND calendar_revision=%s
+                       WHERE target_session=%s AND calendar_id=%s AND calendar_revision=%s
                          AND contract_version=%s AND price_coordinate='FORWARD_ADJUSTED'
                          AND source_count=%s AND eligible_count=%s""",
                     (
                         change_row["before_session"],
-                        change_row["before_source_capture_id"],
                         change_row["before_calendar_id"],
                         change_row["before_calendar_revision"],
                         change_row["before_contract_version"],
@@ -753,7 +753,6 @@ def read_market_breadth_change(
     change = dict(zip(_CHANGE_COLUMNS, rows[0], strict=True))
     if (
         change["target_session"] != target_session
-        or change["target_source_capture_id"] != source_capture_id
         or change["target_calendar_revision"] != calendar_revision
         or change["target_contract_version"] != contract_version
     ):

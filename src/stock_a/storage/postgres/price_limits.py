@@ -75,14 +75,23 @@ def persist_source_price_limits_for_session(
             """WITH target_symbols AS (
                    SELECT d.source_symbol
                    FROM stock.source_raw_daily d
-                   JOIN stock.source_captures c ON c.capture_id = d.source_capture_id
+                   JOIN stock.source_captures c
+                     ON c.capture_id = d.raw_source_capture_id
+                   JOIN stock.source_capture_requests raw_request
+                     ON raw_request.capture_id = d.raw_source_capture_id
+                    AND raw_request.source_code = d.source_code
+                    AND raw_request.adjustment_flag = '3'
                    WHERE d.session_date = %s
+                     AND d.raw_source_capture_id IS NOT NULL
                      AND c.provider = 'BAOSTOCK'
                      AND c.range_end_session <= %s
+                     AND raw_request.request_status IN ('COMPLETED','NO_DATA')
+                     AND (raw_request.request_status = 'NO_DATA'
+                          OR raw_request.completed_through_session >= raw_request.range_end_session)
                ),
                hist AS (
                    SELECT d.source_symbol, d.session_date, d.market, d.board,
-                          d.source_capture_id AS row_source_capture_id,
+                          d.raw_source_capture_id AS row_source_capture_id,
                           d.bar_status, d.raw_tradestatus_value, d.raw_is_st_value,
                           d.raw_preclose, d.raw_open, d.raw_high, d.raw_low, d.raw_close,
                           d.raw_preclose_quality, d.raw_open_quality, d.raw_high_quality,
@@ -99,11 +108,20 @@ def persist_source_price_limits_for_session(
                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                           ) AS hist_present_cnt
                    FROM stock.source_raw_daily d
-                   JOIN stock.source_captures c ON c.capture_id = d.source_capture_id
+                   JOIN stock.source_captures c
+                     ON c.capture_id = d.raw_source_capture_id
+                   JOIN stock.source_capture_requests raw_request
+                     ON raw_request.capture_id = d.raw_source_capture_id
+                    AND raw_request.source_code = d.source_code
+                    AND raw_request.adjustment_flag = '3'
                    JOIN target_symbols ts ON ts.source_symbol = d.source_symbol
                    WHERE d.session_date <= %s
+                     AND d.raw_source_capture_id IS NOT NULL
                      AND c.provider = 'BAOSTOCK'
                      AND c.range_end_session <= %s
+                     AND raw_request.request_status IN ('COMPLETED','NO_DATA')
+                     AND (raw_request.request_status = 'NO_DATA'
+                          OR raw_request.completed_through_session >= raw_request.range_end_session)
                )
                SELECT source_symbol, market, board, row_source_capture_id, bar_status,
                       raw_tradestatus_value, raw_is_st_value,
@@ -319,10 +337,13 @@ def persist_source_price_limits_for_session(
                )""",
             records,
         )
+    raw_capture_ids = sorted({int(row[3]) for row in raw_rows})
     return {
         "status": "PERSISTED",
         "target_session": target_session.isoformat(),
-        "source_capture_id": source_capture_id,
+        "source_capture_id": raw_capture_ids[0] if len(raw_capture_ids) == 1 else None,
+        "raw_source_capture_ids": raw_capture_ids,
+        "requested_source_capture_id": source_capture_id,
         "calendar_revision": calendar_revision,
         "contract_version": PRICE_LIMIT_CONTRACT_VERSION,
         "row_count": len(records),

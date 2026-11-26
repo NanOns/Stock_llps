@@ -37,9 +37,9 @@ from stock_a.storage.postgres.source_raw import (
 )
 from stock_a.storage.postgres.baostock_price_facts import (
     BaoStockPriceFactsError,
-    read_baostock_capture_roster,
     read_baostock_price_history_batch,
 )
+from stock_a.storage.postgres.baostock_universe import resolve_date_effective_universe
 
 
 SOURCE_SYMBOL_PROFILE_SCOPE = "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
@@ -371,7 +371,9 @@ def _read_baostock_profile_page(
             config,
             source_symbols=source_symbols,
             sessions=sessions,
-            source_capture_id=source_capture_id,
+            # 短业务键下历史行按证券/日期读取；source_capture_id仅作溯源，
+            # 不能截断实际窗口。Reader逐行返回各自QFQ来源身份。
+            source_capture_id=None,
             price_coordinate="FORWARD_ADJUSTED",
             cutoff=cutoff,
             offset=offset,
@@ -425,6 +427,44 @@ def _read_baostock_profile_page(
     target_status_counts: Counter[str] = Counter()
     for symbol in source_symbols:
         rows = sorted(histories[symbol], key=lambda item: item["session_date"])
+        qfq_captures = {
+            int(item["source_capture_id"])
+            for item in rows
+            if item.get("bar_status") == "TARGET_PRESENT"
+            and item.get("source_capture_id") is not None
+        }
+        if len(qfq_captures) > 1 or any(
+            item.get("bar_status") == "TARGET_PRESENT"
+            and item.get("source_capture_id") is None
+            for item in rows
+        ):
+            # BaoStock QFQ为后验坐标；不同请求捕获间没有可用的换基连续性证明。
+            # 只将本画像窗口的QFQ输入降为未知，RAW/量额/限价事实不受影响。
+            for item in rows:
+                if item.get("bar_status") == "TARGET_PRESENT":
+                    item["bar_status"] = "UNKNOWN"
+                    item["qfq_bar_status"] = "UNKNOWN"
+                    item["qfq_close_quality"] = "UNKNOWN"
+                    item["qfq_close_reason"] = "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
+                    for field in ("open", "high", "low", "close"):
+                        item[f"qfq_{field}_quality"] = "UNKNOWN"
+                        item[f"qfq_{field}_reason"] = (
+                            "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
+                        )
+                    for field in (
+                        "selected_open",
+                        "selected_high",
+                        "selected_low",
+                        "selected_close",
+                    ):
+                        item[field] = None
+                    for field in (
+                        "selected_open_quality",
+                        "selected_high_quality",
+                        "selected_low_quality",
+                        "selected_close_quality",
+                    ):
+                        item[field] = "UNKNOWN"
         row_dates = {item["session_date"] for item in rows}
         target_row = next(
             (item for item in rows if item["session_date"] == target_session), None
@@ -533,42 +573,29 @@ def run_source_symbol_price_profile(
         source_context = read_source_version_context(
             config,
             target_session=target_session,
-            source_capture_id=source_capture_id,
+            # 画像按QFQ字段真实来源读取；任务级capture仅作溯源，不能替代
+            # 同一业务日期现存价格事实的逐坐标来源身份。
+            source_capture_id=None,
             research_cutoff=research_cutoff,
             price_coordinate="FORWARD_ADJUSTED",
         )
-        roster = read_baostock_capture_roster(
+        target_universe = resolve_date_effective_universe(
             config,
-            source_capture_id=source_capture_id,
-            cutoff=research_cutoff,
+            session_date=target_session,
+            directory_capture_id=cross_section_universe_capture_id,
+            research_eligible_only=True,
         )
-        if roster.get("status") != "AVAILABLE":
+        if target_universe.get("status") != "AVAILABLE":
             raise PgPriceProfileError(
-                "PROFILE_CAPTURE_ROSTER_UNAVAILABLE",
-                "paired BaoStock捕获代码目录不可读",
+                "PROFILE_TARGET_UNIVERSE_UNAVAILABLE",
+                "目标日有效名录不可读，不能以来源捕获代码池代替研究总体",
             )
-        source_symbols = tuple(
-            sorted(
-                item["source_symbol"]
-                for item in roster.get("symbols", ())
-                if item.get("source_symbol")
-                and item.get("eligible_start_session")
-                <= target_session.isoformat()
-                <= item.get("eligible_end_session")
-                and item.get("request_complete") is True
-            )
-        )
-        raw_total = int(source_context["raw_row_count"])
-        if (
-            source_context.get("version_status") != "COMPLETE"
-            or source_context.get("raw_coverage_status") != "COMPLETE"
-            or source_context.get("qfq_coverage_status") != "COMPLETE"
-            or raw_total <= 0
-            or len(source_symbols) != raw_total
-        ):
+        source_symbols = tuple(sorted(target_universe.get("members", ())))
+        raw_total = len(source_symbols)
+        if raw_total <= 0:
             raise PgPriceProfileError(
-                "PROFILE_SOURCE_PARTITION_OPEN",
-                "paired BaoStock价格目录或来源代码总体未闭合",
+                "PROFILE_TARGET_UNIVERSE_EMPTY",
+                "目标日有效研究总体为空",
             )
         from stock_a.storage.postgres.cross_section import (
             read_cross_section_day_bundle,
@@ -577,7 +604,7 @@ def run_source_symbol_price_profile(
         cross_section_bundle = read_cross_section_day_bundle(
             config,
             target_session=target_session,
-            price_capture_id=source_capture_id,
+            price_capture_id=None,
             universe_capture_id=cross_section_universe_capture_id,
             calendar_revision=calendar_revision,
         )
@@ -606,7 +633,7 @@ def run_source_symbol_price_profile(
             page = _read_baostock_profile_page(
                 config,
                 source_symbols=symbols_page,
-                source_capture_id=source_capture_id,
+                source_capture_id=None,
                 sessions=tuple(session_dates),
                 cutoff=research_cutoff,
             )

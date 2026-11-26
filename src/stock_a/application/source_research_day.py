@@ -175,36 +175,34 @@ def persist_source_t1_forward_from_saved(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_capture_id=source_capture_id,
+        source_capture_id=None,
         price_coordinate="FORWARD_ADJUSTED",
     )
     endpoint_source = read_source_version_context(
         config,
         target_session=endpoint_session,
         research_cutoff=research_cutoff,
-        source_capture_id=source_capture_id,
+        source_capture_id=None,
         price_coordinate="FORWARD_ADJUSTED",
     )
     for label, item in (("T0", source), ("T+1", endpoint_source)):
         if (
             item.get("status") != "AVAILABLE"
             or item.get("version_status") != "COMPLETE"
-            or item.get("source_capture_id") != source_capture_id
-            or item.get("source_time_quality") != "NON_PIT_OBSERVED"
             or item.get("time_role") != "NON_PIT_RETROSPECTIVE"
             or item.get("source_available_at") is not None
             or item.get("price_coordinate") != "FORWARD_ADJUSTED"
         ):
             raise SourceResearchDayError(
                 "T1_FORWARD_SOURCE_SCOPE_INVALID",
-                f"{label}BaoStock QFQ paired capture或NON_PIT身份不符合后验同源生产范围",
+                f"{label}BaoStock QFQ坐标或NON_PIT身份不符合后验生产范围",
             )
 
     seed_scope = read_source_pool_seed_forward_scope(
         config,
         target_session=target_session,
-        source_capture_id=source["source_capture_id"],
-        expected_source_count=source["research_expected_row_count"],
+        source_capture_id=source_capture_id,
+        expected_source_count=source.get("research_expected_row_count"),
         profile_revision=profile_revision,
         history_session_count=history_session_count,
     )
@@ -240,19 +238,16 @@ def persist_source_t1_forward_from_saved(
                 config,
                 source_symbols=symbol_batch,
                 sessions=sessions,
-                source_capture_id=source_capture_id,
+                source_capture_id=None,
                 price_coordinate="FORWARD_ADJUSTED",
                 cutoff=research_cutoff,
                 offset=offset,
                 limit=1000,
             )
-            if (
-                page.get("source_capture_id") != source_capture_id
-                or page.get("price_coordinate") != "FORWARD_ADJUSTED"
-            ):
+            if page.get("price_coordinate") != "FORWARD_ADJUSTED":
                 raise SourceResearchDayError(
                     "T1_FORWARD_QFQ_IDENTITY_INVALID",
-                    "T0/T+1 QFQ历史没有绑定同一paired capture。",
+                    "T0/T+1历史Reader没有返回所需QFQ价格坐标。",
                 )
             page_info = page["page"]
             if total is None:
@@ -298,7 +293,66 @@ def persist_source_t1_forward_from_saved(
         )
 
     outcomes = {}
+    target_capture_ids_by_symbol: dict[str, int] = {}
+    endpoint_capture_ids_by_symbol: dict[str, int | None] = {}
     for symbol in symbols:
+        target_row = next(
+            (
+                row
+                for row in rows_by_symbol[symbol]
+                if row["session_date"] == target_session
+            ),
+            None,
+        )
+        endpoint_row = next(
+            (
+                row
+                for row in rows_by_symbol[symbol]
+                if row["session_date"] == endpoint_session
+            ),
+            None,
+        )
+        target_capture_id = (
+            target_row.get("source_capture_id")
+            if isinstance(target_row, Mapping)
+            else None
+        )
+        endpoint_capture_id = (
+            endpoint_row.get("source_capture_id")
+            if isinstance(endpoint_row, Mapping)
+            else None
+        )
+        if type(target_capture_id) is not int or target_capture_id <= 0:
+            raise SourceResearchDayError(
+                "T0_QFQ_CAPTURE_ID_MISSING",
+                f"T0证券{symbol}缺少所用QFQ坐标的真实来源捕获身份；保留未计算。",
+            )
+        target_capture_ids_by_symbol[symbol] = target_capture_id
+        endpoint_capture_ids_by_symbol[symbol] = (
+            endpoint_capture_id
+            if type(endpoint_capture_id) is int and endpoint_capture_id > 0
+            else None
+        )
+        qfq_capture_ids = {
+            row.get("source_capture_id")
+            for row in rows_by_symbol[symbol]
+            if row.get("qfq_price_quality") == "OBSERVED"
+        }
+        if len(qfq_capture_ids) != 1 or None in qfq_capture_ids:
+            for row in rows_by_symbol[symbol]:
+                row["bar_status"] = "UNKNOWN"
+                row["qfq_bar_status"] = "UNKNOWN"
+                row["qfq_price_quality"] = "UNKNOWN"
+                row["qfq_price_reason"] = "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
+                for field in ("open", "high", "low", "close"):
+                    row[f"qfq_{field}"] = None
+                    row[f"qfq_{field}_quality"] = "UNKNOWN"
+                    row[f"qfq_{field}_reason"] = "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
+                    row[f"selected_{field}"] = None
+                    row[f"selected_{field}_quality"] = "UNKNOWN"
+                    row[f"selected_{field}_reason"] = (
+                        "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
+                    )
         outcomes[symbol] = exploratory_raw_path(
             sessions,
             rows_by_symbol[symbol],
@@ -316,13 +370,23 @@ def persist_source_t1_forward_from_saved(
         outcomes=outcomes,
         source_capture_id=source_capture_id,
         horizon=horizon,
+        source_capture_ids_by_symbol=target_capture_ids_by_symbol,
+    )
+    endpoint_capture_values = set(endpoint_capture_ids_by_symbol.values())
+    endpoint_capture_values.discard(None)
+    uniform_endpoint_capture_id = (
+        next(iter(endpoint_capture_values))
+        if len(endpoint_capture_values) == 1
+        and None not in endpoint_capture_ids_by_symbol.values()
+        else None
     )
     write_result = write_forward_path_rows(
         config,
         paths=paths,
         source_symbols=symbols,
-        endpoint_source_capture_id=source_capture_id,
+        endpoint_source_capture_id=uniform_endpoint_capture_id,
         research_cutoff=research_cutoff,
+        endpoint_source_capture_ids_by_symbol=endpoint_capture_ids_by_symbol,
     )
     expected_cohort_rows = write_result.pop("_s2_t1_cohort_expected_rows")
     try:
@@ -337,7 +401,11 @@ def persist_source_t1_forward_from_saved(
             "T+1写入事务已提交，但独立PG读回未通过；请核对精确T0范围后恢复",
             database_write_attempted=True,
         ) from error
-    if horizon == 1:
+    cohort_readback = {
+        "status": "NOT_COMPUTED_ENDPOINT_CAPTURE_NOT_UNIQUE",
+        "rows_read_back": 0,
+    }
+    if horizon == 1 and write_result.get("s2_t1_cohort_version") is not None:
         try:
             from stock_a.storage.postgres.source_s2_t1_cohort import (
                 read_source_s2_t1_cohort_scope,
@@ -348,8 +416,8 @@ def persist_source_t1_forward_from_saved(
                 target_session=target_session,
                 endpoint_session=endpoint_session,
                 research_cutoff=research_cutoff,
-                source_capture_id=source_capture_id,
-                endpoint_source_capture_id=source_capture_id,
+                source_capture_id=write_result["source_capture_id"],
+                endpoint_source_capture_id=write_result["endpoint_source_capture_id"],
                 expected_rows=expected_cohort_rows,
             )
             if (
@@ -371,13 +439,16 @@ def persist_source_t1_forward_from_saved(
         "target_session": target_session.isoformat(),
         "endpoint_session": endpoint_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "source_capture_id": source_capture_id,
-        "endpoint_source_capture_id": endpoint_source["source_capture_id"],
+        "source_capture_id": write_result.get("source_capture_id"),
+        "endpoint_source_capture_id": write_result.get("endpoint_source_capture_id"),
         "profile_revision": seed_scope.get("profile_revision"),
         "producer_contract": seed_scope["producer_contract"],
         "producer_version": seed_scope["producer_version"],
         "history_session_count": seed_scope["history_session_count"],
         "s2_state_counts_t0": seed_scope["s2_state_counts"],
+        "s2_t1_cohort_status": (
+            cohort_readback.get("status") if horizon == 1 else "NOT_APPLICABLE"
+        ),
         "calendar_revision": seed_scope["calendar_revision"],
         "source_count": len(symbols),
         "expected_paths": len(paths),

@@ -50,6 +50,11 @@ def _compute_return_fraction(
     return FieldValue(Fraction(close_end) / Fraction(close_start) - Fraction(1))
 
 
+def _qfq_coordinate_window_closed(capture_ids: set[int | None]) -> bool:
+    """仅认可窗口内均由同一QFQ请求产生的价格；跨捕获不推断换基连续。"""
+    return len(capture_ids) == 1 and None not in capture_ids
+
+
 def persist_source_cross_section_for_session(
     config: Mapping[str, Any],
     *,
@@ -135,6 +140,9 @@ def persist_source_cross_section_for_session(
     qfq_close_by_session: dict[date, dict[str, Decimal]] = {
         sess: {} for sess in price_sessions
     }
+    qfq_capture_by_session: dict[date, dict[str, int]] = {
+        sess: {} for sess in price_sessions
+    }
     session_status_by_session: dict[date, dict[str, str]] = {
         sess: {} for sess in price_sessions
     }
@@ -144,25 +152,24 @@ def persist_source_cross_section_for_session(
     directory_status_by_session: dict[date, dict[str, str]] = {
         sess: {} for sess in price_sessions
     }
-    effective_dir_capture_id = directory_capture_id or universe_capture_id
     with _transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
         _,
     ):
         cursor.execute(
-            """SELECT session_date, source_symbol,
+            """SELECT session_date, source_symbol, qfq_source_capture_id,
                       qfq_close, qfq_bar_status, qfq_close_quality,
                       raw_tradestatus_value, raw_tradestatus_quality
                FROM stock.source_raw_daily
-               WHERE source_capture_id = %s
-                 AND session_date = ANY(%s)
+               WHERE session_date = ANY(%s)
                  AND source_symbol = ANY(%s)""",
-            (source_capture_id, price_sessions, sorted(all_symbols)),
+            (price_sessions, sorted(all_symbols)),
         )
         for (
             sess,
             sym,
+            qfq_capture_id,
             qfq_close,
             qfq_status,
             qfq_quality,
@@ -170,6 +177,11 @@ def persist_source_cross_section_for_session(
             raw_ts_qual,
         ) in cursor.fetchall():
             symbol = str(sym)
+            # QFQ值来自逐坐标来源请求。捕获不同本身不证明换基，也不证明连续；
+            # 下方仅允许同一坐标请求覆盖的完整窗口参加跨日收益/RPS。
+            # capture id只用于阻断未经证明的拼接，不作为结果事实的业务键。
+            if qfq_capture_id is not None:
+                qfq_capture_by_session[sess][symbol] = int(qfq_capture_id)
             # C02/R04：严格区分 ACTUAL / CONFIRMED_SUSPENSION / UNKNOWN，保留 RAW tradestatus 证据供冲突检测
             if raw_ts_qual == "OBSERVED" and raw_ts_val == "0":
                 raw_tradestatus_by_session[sess][symbol] = "SUSPENDED"
@@ -192,17 +204,16 @@ def persist_source_cross_section_for_session(
                 session_status_by_session[sess][symbol] = "UNKNOWN"
 
         # R04：一次性加载整个窗口全部官方会话的逐日名录交易状态（覆盖 T-2 等非五端点内部会话）
-        if effective_dir_capture_id is not None:
-            cursor.execute(
-                """SELECT session_date, source_symbol, trade_status
-                   FROM stock.source_baostock_session_directory
-                   WHERE source_capture_id = %s
-                     AND session_date = ANY(%s)
-                     AND source_symbol = ANY(%s)""",
-                (effective_dir_capture_id, price_sessions, sorted(all_symbols)),
-            )
-            for sess, sym, dir_ts in cursor.fetchall():
-                directory_status_by_session[sess][str(sym)] = str(dir_ts)
+        cursor.execute(
+            """SELECT DISTINCT ON (session_date, source_symbol)
+                      session_date, source_symbol, trade_status
+               FROM stock.source_baostock_session_directory
+               WHERE session_date = ANY(%s) AND source_symbol = ANY(%s)
+               ORDER BY session_date, source_symbol, source_capture_id DESC""",
+            (price_sessions, sorted(all_symbols)),
+        )
+        for sess, sym, dir_ts in cursor.fetchall():
+            directory_status_by_session[sess][str(sym)] = str(dir_ts)
 
     # 同时合并端点已解析名录（兼容未入库的 Mock/单测场景）
     for u_date, u_info in universe_info_by_date.items():
@@ -242,13 +253,20 @@ def persist_source_cross_section_for_session(
                 day_status[sym] = "CONFIRMED_SUSPENSION"
 
     # 3. 构造共同目标坐标身份与各 ReturnEndpoint（每个端点只算一次）
-    coord_rev = f"BAOSTOCK_CAPTURE:{source_capture_id}:FORWARD_ADJUSTED"
     target_coordinates: dict[str, PriceCoordinate] = {
         sym: PriceCoordinate(
             entity_id=sym,
             target_date=target_session,
-            coordinate_id=f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{sym}",
-            revision=coord_rev,
+            coordinate_id=(
+                f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{qfq_capture_by_session[target_session][sym]}:{sym}"
+                if sym in qfq_capture_by_session[target_session]
+                else f"FORWARD_ADJUSTED:BAOSTOCK_COORDINATE_UNKNOWN:{sym}"
+            ),
+            revision=(
+                f"BAOSTOCK_QFQ_CAPTURE:{qfq_capture_by_session[target_session][sym]}"
+                if sym in qfq_capture_by_session[target_session]
+                else "BAOSTOCK_QFQ_COORDINATE_UNKNOWN"
+            ),
         )
         for sym in sorted(all_symbols)
     }
@@ -286,6 +304,14 @@ def persist_source_cross_section_for_session(
                 for d in window_days
             )
             win_statuses[sym] = statuses
+            symbol_capture_ids = {
+                qfq_capture_by_session.get(day, {}).get(sym)
+                for day in window_days
+                if session_status_by_session.get(day, {}).get(sym) == "ACTUAL"
+            }
+            # 来源捕获按证券溯源；证券间捕获不同不影响本证券的窗口。
+            # 仅该证券窗口跨捕获或缺少来源身份时，阻断其跨日收益。
+            window_coordinate_closed = _qfq_coordinate_window_closed(symbol_capture_ids)
             # C01：先校验逐日窗口状态（两端必须 ACTUAL，内部仅允许 ACTUAL/CONFIRMED_SUSPENSION），
             # 缺口局部降级为 UNKNOWN，绝不向纯核传入非法已知收益导致整批失败
             endpoints_actual = (
@@ -296,12 +322,14 @@ def persist_source_cross_section_for_session(
             interior_valid = all(
                 s in {"ACTUAL", "CONFIRMED_SUSPENSION"} for s in statuses[1:-1]
             )
-            if endpoints_actual and interior_valid:
+            if endpoints_actual and interior_valid and window_coordinate_closed:
                 returns_map[sym] = _compute_return_fraction(
                     ep_close_map.get(sym), start_close_map.get(sym)
                 )
             elif not endpoints_actual:
                 returns_map[sym] = unknown("CROSS_ENDPOINT_NOT_ACTUAL")
+            elif not window_coordinate_closed:
+                returns_map[sym] = unknown("QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN")
             else:
                 returns_map[sym] = unknown("CROSS_INTERIOR_SESSION_UNKNOWN")
             coords_map[sym] = target_coordinates[sym]

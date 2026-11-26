@@ -807,6 +807,10 @@ def _raw_public_fields(
         if price_coordinate == "RAW_UNADJUSTED"
         else "qfq_request_completed_at"
     )
+    coordinate_capture_ids = {
+        "RAW_UNADJUSTED": row.get("raw_source_capture_id"),
+        "FORWARD_ADJUSTED": row.get("qfq_source_capture_id"),
+    }
     return {
         "session_date": row["session_date"].isoformat(),
         "source_symbol": row["source_symbol"],
@@ -840,7 +844,8 @@ def _raw_public_fields(
         },
         "source": {
             "provider": "BAOSTOCK",
-            "source_capture_id": row.get("source_capture_id"),
+            "source_capture_id": coordinate_capture_ids[price_coordinate],
+            "source_capture_ids_by_coordinate": coordinate_capture_ids,
             "captured_at": _json_value(coordinate_request_completed_at),
             "coordinate_request_completed_at": _json_value(
                 coordinate_request_completed_at
@@ -873,7 +878,8 @@ def _raw_public_fields(
         "official_listing_universe_status": "UNKNOWN",
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "price_coordinate": price_coordinate,
-        "source_capture_id": row.get("source_capture_id"),
+        "source_capture_id": coordinate_capture_ids[price_coordinate],
+        "source_capture_ids_by_coordinate": coordinate_capture_ids,
     }
 
 
@@ -1117,26 +1123,6 @@ def _read_baostock_history(
     source_capture_id: int | None,
     starts_at_target: bool = False,
 ) -> dict[str, Any]:
-    if source_capture_id is None:
-        detail = read_baostock_price_detail(
-            config,
-            source_symbol=source_symbol,
-            target_session=target_session,
-            research_cutoff=cutoff,
-        )
-        if detail.get("status") == "AMBIGUOUS_CAPTURE":
-            raise PreviewHttpError(
-                409,
-                "PRICE_CAPTURE_ID_REQUIRED",
-                "目标日存在多个BaoStock捕获；请求必须指定source_capture_id",
-            )
-        if detail.get("status") != "AVAILABLE":
-            raise PreviewHttpError(
-                404,
-                "PG_SOURCE_NO_MATCH",
-                "PG中没有所选目标日与来源代码的BaoStock价格事实",
-            )
-        source_capture_id = _capture_id(detail.get("source_capture_id"))
     history = read_baostock_price_history(
         config,
         source_symbol=source_symbol,
@@ -2970,7 +2956,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target_session=target_session,
                 endpoint_session=successor_sessions[0] if successor_sessions else None,
                 research_cutoff=research_cutoff,
-                source_capture_id=after_source["source_capture_id"],
             )
         except SourceS2T1CohortReadError as error:
             raise PreviewHttpError(
@@ -4659,10 +4644,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/product/market":
                 values = _query(
                     self.path,
-                    {
-                        "target_session",
-                        "source_capture_id",
-                    },
+                    {"target_session"},
                 )
                 if "target_session" not in values:
                     raise PreviewHttpError(
@@ -4671,15 +4653,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target = _iso_date(values["target_session"])
                 cutoff = self.preview_server.state.research_cutoff
                 _require_research_cutoff(target, cutoff)
-                capture_id_val = (
-                    _capture_id(values["source_capture_id"])
-                    if "source_capture_id" in values
-                    else _resolve_default_source_capture_id(
-                        self.preview_server.state.config,
-                        target_session=target,
-                        research_cutoff=cutoff,
-                    )
-                )
+                capture_id_val = None
                 breadth_error_payload: dict[str, Any] | None = None
                 try:
                     market = read_source_market_context(
@@ -4688,6 +4662,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         research_cutoff=cutoff,
                         source_capture_id=capture_id_val,
                     )
+                    capture_id_val = market.cohort.source_capture_id
                 except SourceMarketContextError as error:
                     if error.code not in {
                         "MARKET_BREADTH_NOT_COMPUTED",
@@ -5721,7 +5696,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "QUERY_REQUIRED",
-                        "须提供目标交易日、来源捕获和六位股票代码",
+                        "须提供目标交易日和六位股票代码",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
@@ -7102,12 +7077,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     research_cutoff=self.preview_server.state.research_cutoff,
                     source_capture_id=requested_capture_id,
                 )
-                if detail.get("status") == "AMBIGUOUS_CAPTURE":
-                    raise PreviewHttpError(
-                        409,
-                        "PRICE_CAPTURE_ID_REQUIRED",
-                        "目标日存在多个BaoStock捕获；请求必须明确指定source_capture_id",
-                    )
                 row = detail.get("row")
                 if detail.get("status") != "AVAILABLE" or row is None:
                     raise PreviewHttpError(
@@ -7115,7 +7084,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PG_SOURCE_NO_MATCH",
                         "PG中没有该明确日期、来源捕获ID与来源代码的BaoStock双坐标价格事实",
                     )
-                source_capture_id = _capture_id(row.get("source_capture_id"))
+                raw_capture_id = row.get("raw_source_capture_id")
+                if raw_capture_id is None:
+                    raise PreviewHttpError(
+                        404,
+                        "RAW_COORDINATE_NOT_AVAILABLE",
+                        "该证券日事实没有已完成的BaoStock未复权坐标。",
+                    )
+                source_capture_id = _capture_id(raw_capture_id)
                 if (
                     requested_capture_id is not None
                     and source_capture_id != requested_capture_id

@@ -89,111 +89,72 @@ def _is_valid_ohlc(o: Any, h: Any, l: Any, c: Any) -> bool:
     return fh >= fo and fh >= fc and fl <= fo and fl <= fc and fh >= fl
 
 
-def _check_capture_dual_coordinates(cur: Any, source_capture_id: int) -> bool:
-    """校验来源捕获是否具备双价格坐标且处于已验证闭合完成态（无未完成请求或运行中/失败进度）。"""
-    cur.execute(
-        """
-        SELECT price_coordinates, validated_at, normalized_count, provider
-        FROM stock.source_captures
-        WHERE capture_id=%s
-        """,
-        (source_capture_id,),
-    )
-    row = cur.fetchone()
-    if row is None or row[0] is None:
-        return False
-    coords = {str(x) for x in row[0]}
-    if not {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}.issubset(coords):
-        return False
-    if row[1] is None:
-        return False
-    if row[2] is None or int(row[2]) <= 0:
-        return False
-    if row[3] is not None and str(row[3]) != "BAOSTOCK":
-        return False
-    cur.execute(
-        """
-        SELECT EXISTS (
-            SELECT 1
-            FROM stock.source_capture_requests
-            WHERE capture_id=%s
-              AND request_status NOT IN ('COMPLETED', 'NO_DATA')
-        )
-        """,
-        (source_capture_id,),
-    )
-    if bool(cur.fetchone()[0]):
-        return False
-    cur.execute(
-        """
-        SELECT EXISTS (
-            SELECT 1
-            FROM stock.data_job_progress
-            WHERE source_capture_id=%s
-              AND business_table='stock.source_raw_daily'
-              AND status IN ('FAILED', 'INCOMPLETE', 'RUNNING')
-        )
-        """,
-        (source_capture_id,),
-    )
-    if bool(cur.fetchone()[0]):
-        return False
-    return True
-
-
 def _check_captures_qfq_comparable(
     cur: Any,
-    cap_a: int,
-    cap_b: int,
     *,
-    overlap_session: date | None,
+    session_a: date | None,
+    session_b: date | None,
     symbols: Sequence[str] | None = None,
-) -> bool:
-    """检查两个捕获的前复权坐标在共同端点会话与必要证券集合上是否价格重基一致（同捕获直接返回True）。"""
-    if cap_a == cap_b:
-        return True
-    if overlap_session is None:
-        return False
-    sql = """
-        SELECT a.source_symbol, a.qfq_close, b.qfq_close
-        FROM stock.source_raw_daily a
-        JOIN stock.source_raw_daily b
-          ON b.source_symbol = a.source_symbol
-         AND b.session_date = a.session_date
-        WHERE a.source_capture_id = %s
-          AND b.source_capture_id = %s
-          AND a.session_date = %s
-          AND a.qfq_bar_status = 'TARGET_PRESENT'
-          AND b.qfq_bar_status = 'TARGET_PRESENT'
-          AND a.qfq_price_quality = 'OBSERVED'
-          AND b.qfq_price_quality = 'OBSERVED'
-          AND a.qfq_close > 0
-          AND b.qfq_close > 0
-    """
-    params: list[Any] = [cap_a, cap_b, overlap_session]
-    required: set[str] | None = None
-    if symbols is not None:
-        required = {str(s) for s in symbols if s}
-        if not required:
-            return False
-        sql += " AND a.source_symbol = ANY(%s)"
-        params.append(sorted(required))
-    cur.execute(sql, tuple(params))
-    rows = cur.fetchall()
-    if not rows:
-        return False
-    if required is not None:
-        present = {str(r[0]) for r in rows}
-        if present != required:
-            return False
-    return all(Fraction(str(r[1])) == Fraction(str(r[2])) for r in rows)
+) -> set[str]:
+    """按证券核实两端实际QFQ来源；不同来源只把该证券的跨日指标降为未知。"""
+    if session_a is None or session_b is None or not symbols:
+        return set()
+    required = {str(symbol) for symbol in symbols if symbol}
+    if not required:
+        return set()
+    cur.execute(
+        """
+        SELECT source_symbol,session_date,qfq_source_capture_id,
+               qfq_bar_status,qfq_price_quality,qfq_close
+        FROM stock.source_raw_daily
+        WHERE session_date=ANY(%s) AND source_symbol=ANY(%s)
+        ORDER BY source_symbol,session_date
+        """,
+        ([session_a, session_b], sorted(required)),
+    )
+    by_symbol: dict[str, dict[date, tuple[Any, ...]]] = {}
+    for symbol, session, capture_id, bar_status, quality, close in cur.fetchall():
+        by_symbol.setdefault(str(symbol), {})[session] = (
+            capture_id,
+            bar_status,
+            quality,
+            close,
+        )
+    if set(by_symbol) != required:
+        required.intersection_update(by_symbol)
+    comparable: set[str] = set()
+    for symbol in required:
+        captures = by_symbol[symbol]
+        rec_a = captures.get(session_a)
+        rec_b = captures.get(session_b)
+        if rec_a is None or rec_b is None:
+            continue
+        cap_a, bar_a, quality_a, close_a = rec_a
+        cap_b, bar_b, quality_b, close_b = rec_b
+        if (
+            type(cap_a) is not int
+            or cap_a <= 0
+            or type(cap_b) is not int
+            or cap_b <= 0
+            or cap_a != cap_b
+            or bar_a != "TARGET_PRESENT"
+            or bar_b != "TARGET_PRESENT"
+            or quality_a != "OBSERVED"
+            or quality_b != "OBSERVED"
+            or close_a is None
+            or close_b is None
+            or Fraction(str(close_a)) <= 0
+            or Fraction(str(close_b)) <= 0
+        ):
+            continue
+        comparable.add(symbol)
+    return comparable
 
 
 def _load_endpoint_observations(
     cur: Any,
     *,
     session: date,
-    source_capture_id: int,
     symbols: Sequence[str],
     price_coordinate: str = "FORWARD_ADJUSTED",
 ) -> dict[str, dict[str, Any]]:
@@ -205,7 +166,8 @@ def _load_endpoint_observations(
         SELECT source_symbol, bar_status, raw_open, raw_high, raw_low, raw_close,
                raw_amount, raw_amount_quality, amount_quality,
                raw_tradestatus_value, raw_tradestatus_quality,
-               qfq_bar_status, qfq_open, qfq_high, qfq_low, qfq_close, qfq_price_quality
+               qfq_bar_status, qfq_open, qfq_high, qfq_low, qfq_close, qfq_price_quality,
+               raw_source_capture_id, qfq_source_capture_id
         FROM stock.source_raw_daily
         WHERE session_date=%s AND source_symbol=ANY(%s)
         """,
@@ -277,6 +239,8 @@ def _load_endpoint_observations(
                 q_low,
                 q_close,
                 q_pq,
+                raw_source_capture_id,
+                qfq_source_capture_id,
             ) = raw[1:]
             raw_ohlc_ok = _is_valid_ohlc(r_open, r_high, r_low, r_close)
             qfq_ohlc_ok = _is_valid_ohlc(q_open, q_high, q_low, q_close)
@@ -285,9 +249,6 @@ def _load_endpoint_observations(
                 and r_ts_q == "OBSERVED"
                 and str(r_ts) == "1"
                 and raw_ohlc_ok
-                and qfq_bs == "TARGET_PRESENT"
-                and q_pq == "OBSERVED"
-                and qfq_ohlc_ok
             ):
                 q_state = "TRUE"
                 raw_close = Fraction(str(r_close))
@@ -346,6 +307,8 @@ def _load_endpoint_observations(
         )
         obs[sym] = {
             "actual_quote_state": q_state,
+            "raw_source_capture_id": raw_source_capture_id if raw else None,
+            "qfq_source_capture_id": qfq_source_capture_id if raw else None,
             "raw_close": raw_close,
             "qfq_close": qfq_close,
             "last_actual_qfq_close": None,
@@ -376,14 +339,13 @@ def _load_endpoint_observations(
                 """
                 SELECT source_symbol, session_date, bar_status, raw_tradestatus_value,
                        raw_tradestatus_quality, qfq_bar_status, qfq_open, qfq_high,
-                       qfq_low, qfq_close, qfq_price_quality
+                       qfq_low, qfq_close, qfq_price_quality,qfq_source_capture_id
                 FROM stock.source_raw_daily
-                WHERE source_capture_id=%s
-                  AND source_symbol=ANY(%s)
+                WHERE source_symbol=ANY(%s)
                   AND session_date >= %s
                   AND session_date < %s
                 """,
-                (source_capture_id, suspended_syms, expected_desc[-1], session),
+                (suspended_syms, expected_desc[-1], session),
             )
             hist_by_sym_day = {(str(r[0]), r[1]): r for r in cur.fetchall()}
             for sym in suspended_syms:
@@ -404,6 +366,7 @@ def _load_endpoint_observations(
                         h_ql,
                         h_qc,
                         h_qpq,
+                        h_qfq_capture_id,
                     ) = h_row
                     if (
                         h_bs == "TARGET_PRESENT"
@@ -412,6 +375,7 @@ def _load_endpoint_observations(
                         and h_qbs == "TARGET_PRESENT"
                         and h_qpq == "OBSERVED"
                         and _is_valid_ohlc(h_qo, h_qh, h_ql, h_qc)
+                        and h_qfq_capture_id == obs[sym].get("qfq_source_capture_id")
                     ):
                         obs[sym]["last_actual_qfq_close"] = Fraction(str(h_qc))
                         obs[sym]["quote_age"] = idx_age
@@ -422,14 +386,12 @@ def _load_endpoint_observations(
     return obs
 
 
-def _load_known_basic_symbols(cur: Any, source_capture_id: int) -> set[str]:
+def _load_known_basic_symbols(cur: Any) -> set[str]:
     cur.execute(
         """
-        SELECT source_symbol
+        SELECT DISTINCT source_symbol
         FROM stock.source_baostock_stock_basic
-        WHERE source_capture_id=%s
         """,
-        (int(source_capture_id),),
     )
     return {str(r[0]) for r in cur.fetchall() if r[0]}
 
@@ -663,7 +625,6 @@ def _resolve_session_universe_members(
     *,
     config: Mapping[str, Any] | None = None,
     session: date,
-    price_capture_id: int,
     universe_capture_id: int | None = None,
 ) -> tuple[bool, set[str]]:
     """解析日期有效 Research Universe 成员（含无归属股票）；返回 (是否就绪, 成员集合)。"""
@@ -684,16 +645,19 @@ def _resolve_session_universe_members(
                 (session,),
             )
             dir_caps = [int(r[0]) for r in cur.fetchall() if r[0] is not None]
-            if int(price_capture_id) in dir_caps:
-                dir_cap = int(price_capture_id)
-            elif dir_caps:
+            # Price captures and daily directory observations are independent
+            # sources.  Pick the current directory fact for this date; never
+            # treat a matching capture number as evidence of identity.
+            if dir_caps:
                 dir_cap = dir_caps[0]
         if dir_cap is not None:
             resolved_u = resolve_date_effective_universe(
                 config,
                 session_date=session,
                 directory_capture_id=dir_cap,
-                stock_basic_capture_id=dir_cap,
+                # Stock basics describe security identity and have their own
+                # capture lifecycle; a daily directory capture is not their key.
+                stock_basic_capture_id=None,
                 research_eligible_only=True,
             )
             if resolved_u.get("status") == "AVAILABLE":
@@ -722,18 +686,6 @@ def assemble_r03_session_inputs(
     extra_entities_by_board: Mapping[tuple[str, str], Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """从现役 PG 表组装 R03 板块三端独立输入、成员槽位、日期有效 Universe 与 LOO 目标列表（只读事务）。"""
-    cap_t = int(source_capture_id)
-    cap_t1 = (
-        int(source_capture_id_t1)
-        if source_capture_id_t1 is not None
-        else (None if strict_endpoints else cap_t)
-    )
-    cap_t3 = (
-        int(source_capture_id_t3)
-        if source_capture_id_t3 is not None
-        else (None if strict_endpoints else cap_t)
-    )
-
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _conn,
         cur,
@@ -763,17 +715,10 @@ def assemble_r03_session_inputs(
             else None
         )
 
-        known_t = _load_known_basic_symbols(cur, cap_t)
-        known_t1 = (
-            _load_known_basic_symbols(cur, cap_t1)
-            if t1_session is not None and cap_t1 is not None
-            else set()
-        )
-        known_t3 = (
-            _load_known_basic_symbols(cur, cap_t3)
-            if t3_session is not None and cap_t3 is not None
-            else set()
-        )
+        # 主资料是证券身份事实，与逐日价格捕获、目录观察互相独立。
+        known_t = _load_known_basic_symbols(cur)
+        known_t1 = known_t if t1_session is not None else set()
+        known_t3 = known_t if t3_session is not None else set()
 
         meta_t, syms_t, primary_industry = _load_snapshot_boards(
             cur, snaps_t, known_symbols=known_t
@@ -789,7 +734,6 @@ def assemble_r03_session_inputs(
             cur,
             config=config,
             session=target_session,
-            price_capture_id=cap_t,
             universe_capture_id=universe_capture_id,
         )
         eff_u_cap_t1 = (
@@ -807,10 +751,9 @@ def assemble_r03_session_inputs(
                 cur,
                 config=config,
                 session=t1_session,
-                price_capture_id=cap_t1,
                 universe_capture_id=eff_u_cap_t1,
             )
-            if t1_session is not None and cap_t1 is not None
+            if t1_session is not None
             else (False, set())
         )
         u_ready_t3, u_syms_t3 = (
@@ -818,10 +761,9 @@ def assemble_r03_session_inputs(
                 cur,
                 config=config,
                 session=t3_session,
-                price_capture_id=cap_t3,
                 universe_capture_id=eff_u_cap_t3,
             )
-            if t3_session is not None and cap_t3 is not None
+            if t3_session is not None
             else (False, set())
         )
 
@@ -837,27 +779,22 @@ def assemble_r03_session_inputs(
             all_entities.update(str(e) for e in extra_research_entities if e)
         sym_list = sorted(all_entities)
 
-        coord_t = _check_capture_dual_coordinates(cur, cap_t)
-        coord_t1 = (
-            _check_capture_dual_coordinates(cur, cap_t1)
-            if t1_session is not None and cap_t1 is not None
-            else False
-        )
-        coord_t3 = (
-            _check_capture_dual_coordinates(cur, cap_t3)
-            if t3_session is not None and cap_t3 is not None
-            else False
-        )
-        qfq_comparable_t1 = (
+        # Capture is provenance only; each RAW/QFQ endpoint below carries its
+        # own field quality and must not be globally rejected as an unpaired run.
+        coord_t = True
+        coord_t1 = t1_session is not None
+        coord_t3 = t3_session is not None
+        qfq_comparable_symbols_t1 = (
             _check_captures_qfq_comparable(
                 cur,
-                cap_t,
-                cap_t1,
-                overlap_session=t1_session,
+                session_a=target_session,
+                session_b=t1_session,
                 symbols=sym_list,
             )
-            if t1_session is not None and cap_t1 is not None and sym_list
-            else (False if t1_session is not None else True)
+            if t1_session is not None and sym_list
+            else set(sym_list)
+            if t1_session is None
+            else set()
         )
         t1_slots_by_board = {
             (str(kind), str(bid)): [
@@ -871,63 +808,64 @@ def assemble_r03_session_inputs(
             if t1_session is None:
                 qfq_comparable_t1_by_board[bk_key] = True
                 continue
-            if cap_t1 is None:
-                qfq_comparable_t1_by_board[bk_key] = False
-                continue
-            if cap_t == cap_t1:
-                qfq_comparable_t1_by_board[bk_key] = True
-                continue
             req_syms = set(t1_slots_by_board.get(bk_key, ()))
             if extra_entities_by_board and bk_key in extra_entities_by_board:
                 req_syms.update(str(e) for e in extra_entities_by_board[bk_key] if e)
             if not req_syms:
                 qfq_comparable_t1_by_board[bk_key] = True
             else:
-                qfq_comparable_t1_by_board[bk_key] = _check_captures_qfq_comparable(
-                    cur,
-                    cap_t,
-                    cap_t1,
-                    overlap_session=t1_session,
-                    symbols=sorted(req_syms),
+                qfq_comparable_t1_by_board[bk_key] = req_syms.issubset(
+                    qfq_comparable_symbols_t1
                 )
-        qfq_comparable_t3 = (
+        qfq_comparable_symbols_t3 = (
             _check_captures_qfq_comparable(
                 cur,
-                cap_t,
-                cap_t3,
-                overlap_session=t3_session,
+                session_a=target_session,
+                session_b=t3_session,
                 symbols=sym_list,
             )
-            if t3_session is not None and cap_t3 is not None and sym_list
-            else (False if t3_session is not None else True)
+            if t3_session is not None and sym_list
+            else set(sym_list)
+            if t3_session is None
+            else set()
         )
+        qfq_comparable_t1 = set(sym_list).issubset(qfq_comparable_symbols_t1)
+        qfq_comparable_t3 = set(sym_list).issubset(qfq_comparable_symbols_t3)
 
         obs_t = _load_endpoint_observations(
             cur,
             session=target_session,
-            source_capture_id=cap_t,
             symbols=sym_list,
         )
         obs_t1 = (
             _load_endpoint_observations(
                 cur,
                 session=t1_session,
-                source_capture_id=cap_t1,
                 symbols=sym_list,
             )
-            if t1_session is not None and cap_t1 is not None
+            if t1_session is not None
             else {}
         )
         obs_t3 = (
             _load_endpoint_observations(
                 cur,
                 session=t3_session,
-                source_capture_id=cap_t3,
                 symbols=sym_list,
             )
-            if t3_session is not None and cap_t3 is not None
+            if t3_session is not None
             else {}
         )
+        for symbol in sym_list:
+            if symbol not in qfq_comparable_symbols_t1:
+                if symbol in obs_t:
+                    obs_t[symbol]["ret1"] = None
+                if symbol in obs_t1:
+                    obs_t1[symbol]["ret1"] = None
+            if symbol not in qfq_comparable_symbols_t3:
+                if symbol in obs_t:
+                    obs_t[symbol]["ret1"] = None
+                if symbol in obs_t3:
+                    obs_t3[symbol]["ret1"] = None
 
         boards_t = [
             {
@@ -1658,7 +1596,6 @@ def _load_qfq_ret1_from_raw(
     *,
     session: date,
     prev_session: date | None,
-    source_capture_id: int,
     symbols: Sequence[str],
 ) -> dict[str, Fraction | None]:
     """当 Profile 缺失时，直接从现役 source_raw_daily 的合法 QFQ 收盘价计算相邻官方会话 ret1。"""
@@ -1669,11 +1606,12 @@ def _load_qfq_ret1_from_raw(
         """
         SELECT source_symbol, session_date, bar_status, qfq_bar_status,
                qfq_open, qfq_high, qfq_low, qfq_close, qfq_price_quality,
-               raw_tradestatus_value, raw_tradestatus_quality
+               raw_tradestatus_value, raw_tradestatus_quality,
+               qfq_source_capture_id
         FROM stock.source_raw_daily
-        WHERE source_capture_id=%s AND session_date=ANY(%s) AND source_symbol=ANY(%s)
+        WHERE session_date=ANY(%s) AND source_symbol=ANY(%s)
         """,
-        (source_capture_id, [prev_session, session], sym_list),
+        ([prev_session, session], sym_list),
     )
     by_sym_day: dict[tuple[str, date], tuple[Any, ...]] = {}
     for row in cur.fetchall():
@@ -1682,7 +1620,7 @@ def _load_qfq_ret1_from_raw(
     def _endpoint_valid_close(rec: tuple[Any, ...] | None) -> Fraction | None:
         if rec is None:
             return None
-        bs, q_bs, q_o, q_h, q_l, q_c, q_pq, r_ts, r_ts_q = rec
+        bs, q_bs, q_o, q_h, q_l, q_c, q_pq, r_ts, r_ts_q, qfq_capture_id = rec
         if (
             bs == "TARGET_PRESENT"
             and q_bs == "TARGET_PRESENT"
@@ -1696,9 +1634,19 @@ def _load_qfq_ret1_from_raw(
 
     out: dict[str, Fraction | None] = {}
     for sym in sym_list:
-        c_val = _endpoint_valid_close(by_sym_day.get((sym, session)))
-        p_val = _endpoint_valid_close(by_sym_day.get((sym, prev_session)))
-        if c_val is not None and p_val is not None and p_val > 0:
+        current = by_sym_day.get((sym, session))
+        previous = by_sym_day.get((sym, prev_session))
+        c_val = _endpoint_valid_close(current)
+        p_val = _endpoint_valid_close(previous)
+        if (
+            current is not None
+            and previous is not None
+            and current[-1] is not None
+            and current[-1] == previous[-1]
+            and c_val is not None
+            and p_val is not None
+            and p_val > 0
+        ):
             out[sym] = (c_val - p_val) / p_val
         else:
             out[sym] = None
@@ -1719,7 +1667,6 @@ def produce_formal_market_breadth_for_session(
     allow_revision: bool = False,
 ) -> dict[str, Any]:
     """独立生产并幂等持久化 R03 正式市场宽度（不依赖板块研究模块；缺 Profile 时复用合法 QFQ ret1，缺端点时诚实保存 UNKNOWN）。"""
-    cap_t = int(source_capture_id)
     eff_u_cap_t3 = (
         universe_capture_id_t3
         if universe_capture_id_t3 is not None
@@ -1734,7 +1681,6 @@ def produce_formal_market_breadth_for_session(
             cur,
             config=config,
             session=target_session,
-            price_capture_id=cap_t,
             universe_capture_id=universe_capture_id,
         )
         if t3_session is None:
@@ -1749,25 +1695,11 @@ def produce_formal_market_breadth_for_session(
                 "exact": None,
                 "breadth_value": None,
             }
-        elif source_capture_id_t3 is None:
-            res = {
-                "status": "UNKNOWN",
-                "reason": "MISSING_T3_CAPTURE",
-                "n_t": len(u_syms_t),
-                "n_t3": 0,
-                "n_common": 0,
-                "n_eligible": 0,
-                "unknown_count": 0,
-                "exact": None,
-                "breadth_value": None,
-            }
         else:
-            cap_t3 = int(source_capture_id_t3)
             u_ready_t3, u_syms_t3 = _resolve_session_universe_members(
                 cur,
                 config=config,
                 session=t3_session,
-                price_capture_id=cap_t3,
                 universe_capture_id=eff_u_cap_t3,
             )
             if not u_ready_t or not u_ready_t3:
@@ -1787,49 +1719,25 @@ def produce_formal_market_breadth_for_session(
                 obs_t = _load_endpoint_observations(
                     cur,
                     session=target_session,
-                    source_capture_id=cap_t,
                     symbols=sym_list,
                 )
                 obs_t3 = _load_endpoint_observations(
                     cur,
                     session=t3_session,
-                    source_capture_id=cap_t3,
                     symbols=sym_list,
                 )
-                ret1_t = {
-                    eid: obs_t.get(eid, {}).get("ret1") for eid in sorted(u_syms_t)
-                }
-                ret1_t3 = {
-                    eid: obs_t3.get(eid, {}).get("ret1") for eid in sorted(u_syms_t3)
-                }
-                if (
-                    any(v is None for v in ret1_t.values())
-                    and prev_session_t is not None
-                ):
-                    raw_ret1_t = _load_qfq_ret1_from_raw(
-                        cur,
-                        session=target_session,
-                        prev_session=prev_session_t,
-                        source_capture_id=cap_t,
-                        symbols=sorted(u_syms_t),
-                    )
-                    for eid, val in raw_ret1_t.items():
-                        if ret1_t.get(eid) is None and val is not None:
-                            ret1_t[eid] = val
-                if (
-                    any(v is None for v in ret1_t3.values())
-                    and prev_session_t3 is not None
-                ):
-                    raw_ret1_t3 = _load_qfq_ret1_from_raw(
-                        cur,
-                        session=t3_session,
-                        prev_session=prev_session_t3,
-                        source_capture_id=cap_t3,
-                        symbols=sorted(u_syms_t3),
-                    )
-                    for eid, val in raw_ret1_t3.items():
-                        if ret1_t3.get(eid) is None and val is not None:
-                            ret1_t3[eid] = val
+                ret1_t = _load_qfq_ret1_from_raw(
+                    cur,
+                    session=target_session,
+                    prev_session=prev_session_t,
+                    symbols=sorted(u_syms_t),
+                )
+                ret1_t3 = _load_qfq_ret1_from_raw(
+                    cur,
+                    session=t3_session,
+                    prev_session=prev_session_t3,
+                    symbols=sorted(u_syms_t3),
+                )
                 res = compute_formal_market_breadth_from_universes(
                     universe_t=ret1_t,
                     universe_t3=ret1_t3,
@@ -1883,25 +1791,14 @@ def run_r03_formal_sector_for_session(
                 if _bask is None:
                     continue
                 _t0_d = date.fromisoformat(_bask.t0_session)
-                _cur_chk.execute(
-                    "SELECT source_capture_id FROM stock.source_raw_daily WHERE session_date=%s LIMIT 1",
-                    (_t0_d,),
-                )
-                _cap_row = _cur_chk.fetchone()
-                _ep_cap = (
-                    int(_cap_row[0])
-                    if _cap_row is not None and _cap_row[0] is not None
-                    else None
-                )
-                if _ep_cap is not None and _ep_cap != int(source_capture_id):
-                    _comp = _check_captures_qfq_comparable(
+                _rec["origin_coordinate_comparable"] = set(_bask.members).issubset(
+                    _check_captures_qfq_comparable(
                         _cur_chk,
-                        _ep_cap,
-                        int(source_capture_id),
-                        overlap_session=_t0_d,
+                        session_a=_t0_d,
+                        session_b=target_session,
                         symbols=list(_bask.members),
                     )
-                    _rec["origin_coordinate_comparable"] = _comp
+                )
 
     extra_entities_by_board = {
         _bk_k: tuple(_rec["basket"].members)
