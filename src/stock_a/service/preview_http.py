@@ -675,8 +675,6 @@ def _selected_profile_history_session_count(
         or not 1 <= requested_min <= 250
         or requested_history_session_count is not None
         and requested_min != requested_history_session_count
-        or requested_profile_revision is not None
-        and selected.get("profile_revision") != requested_profile_revision
     ):
         return None
     return requested_min
@@ -3991,7 +3989,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     for item in profile_catalog["snapshots"]
                     if item.get("target_session") == target.isoformat()
                     and item.get("source_capture_id") == source_capture_id
-                    and item.get("profile_revision") == profile_revision
                     and item.get("complete") is True
                 ]
                 if len(exact_profiles) != 1:

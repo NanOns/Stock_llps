@@ -937,7 +937,8 @@ def insert_rule_enrollments(
              ON p.target_session=%s AND p.source_capture_id=r.source_capture_id
             AND p.source_symbol=r.source_symbol AND p.rule_id=r.rule_id
             AND p.source_capture_id=%s AND %s::boolean
-            AND p.rule_version=r.rule_version AND p.profile_revision=%s
+            AND p.rule_version=r.rule_version
+            AND (%s::text IS NULL OR p.profile_revision=%s)
             AND p.history_session_count=%s
             AND p.d1_history_session_count=r.d1_history_session_count
             AND p.event_window_start=%s AND r.event_window_start=%s
@@ -959,6 +960,7 @@ def insert_rule_enrollments(
             before,
             previous_capture_id,
             previous_is_comparable,
+            previous_profile_revision,
             previous_profile_revision,
             previous_history_count,
             previous_event_window_start,

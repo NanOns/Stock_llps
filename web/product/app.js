@@ -2263,7 +2263,6 @@ async function resolveProfileForDate(
         p.complete &&
         p.target_session === c.target_session &&
         p.source_capture_id === c.source_capture_id &&
-        p.profile_revision === revision &&
         p.history_calendar_revision === detail.official_calendar_revision &&
         p.price_coordinate === "FORWARD_ADJUSTED",
     );

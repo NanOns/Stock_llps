@@ -105,11 +105,8 @@ RULE_KEY = (
 )
 PATH_KEY = (
     "target_session",
-    "source_capture_id",
     "source_symbol",
     "horizon",
-    "path_rule_version",
-    "calendar_revision",
 )
 
 
@@ -612,7 +609,11 @@ def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, ar
     if not rows:
         return 0
     indexes = tuple(columns.index(name) for name in key_columns)
-    if table == "source_rule_evaluations":
+    if table in (
+        "source_rule_evaluations",
+        "source_forward_path_facts",
+        "source_s2_t1_cohort_stats",
+    ):
         update_cols = [col for col in columns if col not in key_columns]
         statement = sql.SQL(
             "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"

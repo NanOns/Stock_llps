@@ -128,9 +128,7 @@ def persist_cohort_stats(config, *, target, research_cutoff, source_capture_id):
                            ) VALUES (
                             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT (target_session,research_cutoff,source_capture_id,
-                            rule_id,rule_version,profile_revision,history_session_count,d1_history_session_count,
-                            event_window_start,calendar_revision,path_rule_version,horizon,state,weighting)
+                           ON CONFLICT (target_session,research_cutoff,rule_id,horizon,state,weighting)
                            DO UPDATE SET source_pool_count=EXCLUDED.source_pool_count,
                             member_count=EXCLUDED.member_count,evaluable_count=EXCLUDED.evaluable_count,
                             positive_count=EXCLUDED.positive_count,median_numerator=EXCLUDED.median_numerator,
