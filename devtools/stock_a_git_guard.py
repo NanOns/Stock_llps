@@ -22,6 +22,7 @@ ROOT_FILES = {
     ".gitignore",
     ".gitattributes",
     "AGENTS.md",
+    "GEMINI.md",
     "PROJECT_SPEC.md",
     "README.md",
     "pyproject.toml",
