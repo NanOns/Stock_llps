@@ -182,7 +182,12 @@ def _records_for_page(
         )
         if len(profile_components) != 11:
             raise PgPriceProfileError(
-                "PROFILE_COMPONENT_COUNT_INVALID", "现役Profile11分项没有完整返回"
+                "PROFILE_COMPONENT_COUNT_INVALID",
+                "现役Profile11分项没有完整返回："
+                f"actual={len(profile_components)}，"
+                f"preview_profile_rule_count={result.get('profile_rule_count')!r}，"
+                f"window={window.get('requested_sessions')!r}，"
+                f"fields={[item.get('field_id') for item in profile_components]!r}。",
             )
         source_time_quality = target_row.get("source_time_quality") or "UNKNOWN"
         source_available_at = target_row.get("capture_available_at")
@@ -642,14 +647,36 @@ def run_source_symbol_price_profile(
                     "PROFILE_SOURCE_PARTITION_CHANGED", "BaoStock QFQ来源分母发生变化"
                 )
             source_status_counts.update(page["bar_status_counts"])
-            preview = research_universe_pg_history_preview(
-                target_session=target_session.isoformat(),
-                source_capture_id=source_capture_id,
-                session_dates=session_dates,
-                page=page,
-                profile_contract=profile_contract,
-                cross_section_bundle=cross_section_bundle,
-            )
+            candidates_by_capture: dict[int | None, list[dict[str, Any]]] = {}
+            for candidate in page.get("candidates", ()):
+                target = next(
+                    (
+                        row
+                        for row in candidate.get("history_rows", ())
+                        if row.get("session_date") == target_session
+                    ),
+                    None,
+                )
+                capture_id = (
+                    target.get("source_capture_id")
+                    if isinstance(target, Mapping)
+                    and type(target.get("source_capture_id")) is int
+                    else None
+                )
+                candidates_by_capture.setdefault(capture_id, []).append(candidate)
+            preview_results = []
+            for capture_id, capture_candidates in candidates_by_capture.items():
+                capture_page = {**page, "candidates": capture_candidates}
+                capture_preview = research_universe_pg_history_preview(
+                    target_session=target_session.isoformat(),
+                    source_capture_id=capture_id,
+                    session_dates=session_dates,
+                    page=capture_page,
+                    profile_contract=profile_contract,
+                    cross_section_bundle=cross_section_bundle,
+                )
+                preview_results.extend(capture_preview.get("results", ()))
+            preview = {"results": preview_results}
             page_records = _records_for_page(
                 page=page,
                 preview=preview,
