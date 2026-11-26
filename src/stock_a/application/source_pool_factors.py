@@ -54,6 +54,29 @@ def read_source_pool_rps(
     endpoint_members: dict[int, tuple[str, ...]] = {}
     for offset in (0, 3):
         endpoint = sessions[-1 - offset]
+        if offset == 3:
+            from stock_a.storage.postgres.baostock_universe import (
+                resolve_date_effective_universe,
+            )
+
+            endpoint_universe = resolve_date_effective_universe(
+                config,
+                session_date=endpoint,
+                research_eligible_only=True,
+            )
+            historical_symbols = tuple(
+                sorted(set(endpoint_universe.get("members", ())))
+            )
+            if (
+                endpoint_universe.get("status") != "AVAILABLE"
+                or not historical_symbols
+                or len(historical_symbols) != endpoint_universe.get("member_count")
+            ):
+                raise ValueError(
+                    "RPS历史端点没有唯一完整的日期有效MAIN_BOARD/GEM证券总体"
+                )
+            endpoint_members[offset] = historical_symbols
+            continue
         symbols: list[str] = []
         page_offset = 0
         total = None
@@ -77,7 +100,14 @@ def read_source_pool_rps(
                 page.get("version_status") != "CLOSED"
                 or page.get("partition_closed") is not True
             ):
-                raise ValueError("RPS端点QFQ分区或证券总体未闭合")
+                raise ValueError(
+                    "RPS端点QFQ分区或证券总体未闭合："
+                    f"endpoint={endpoint.isoformat()} offset={offset} "
+                    f"status={page.get('status')!r} "
+                    f"version_status={page.get('version_status')!r} "
+                    f"partition_closed={page.get('partition_closed')!r} "
+                    f"total={page.get('total_count')!r}"
+                )
             if total is None:
                 total = int(page["total_count"])
             elif int(page["total_count"]) != total:
