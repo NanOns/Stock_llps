@@ -7867,6 +7867,9 @@ def _execute_shared_production_chain_impl(
     )
     if d0_days or d1_days:
         from stock_a.application.source_research_day import run_source_research_day
+        from stock_a.application.pg_price_profiles import (
+            source_symbol_price_profile_snapshots,
+        )
 
         d0_history_windows = plan.get(
             "d0_profile_history_session_counts_by_session", {}
@@ -7876,6 +7879,33 @@ def _execute_shared_production_chain_impl(
             day = date.fromisoformat(day_text)
             include_d0 = day_text in d0_days
             include_d1 = day_text in d1_days
+            day_source_capture_id = source_capture_id
+            if day_source_capture_id is None and include_d0:
+                day_profile_window = d0_history_windows.get(
+                    day_text,
+                    profile_windows.get(
+                        day_text, plan.get("profile_history_session_count") or 1
+                    ),
+                )
+                profile_snapshots = source_symbol_price_profile_snapshots(
+                    config, max_target_session=day
+                )
+                exact_profiles = [
+                    item
+                    for item in profile_snapshots.get("snapshots", ())
+                    if item.get("target_session") == day_text
+                    and item.get("history_session_count") == day_profile_window
+                    and item.get("complete") is True
+                    and type(item.get("source_capture_id")) is int
+                ]
+                profile_capture_ids = {
+                    item["source_capture_id"] for item in exact_profiles
+                }
+                if len(profile_capture_ids) == 1:
+                    # Recover the real target-day provenance from the already
+                    # produced, complete Profile scope; never use another date's
+                    # capture or an arbitrary maximum ID.
+                    day_source_capture_id = next(iter(profile_capture_ids))
             day_units = [
                 unit
                 for unit in plan.get("stage_units", ())
@@ -7929,7 +7959,7 @@ def _execute_shared_production_chain_impl(
                     config,
                     target_session=day,
                     research_cutoff=cutoff,
-                    source_capture_id=source_capture_id,
+                    source_capture_id=day_source_capture_id,
                     d1_history_session_count=d1_history_count,
                     persist=True,
                     history_session_count=(
