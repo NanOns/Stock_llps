@@ -7207,7 +7207,7 @@ def _execute_shared_production_chain_impl(
                         business_table=table,
                         target_session=day,
                         research_cutoff=cutoff,
-                        source_capture_id=source_capture_id,
+                        source_capture_id=None,
                         calendar_revision=report["calendar_revision"],
                         producer_version=CROSS_SECTION_CONTRACT_VERSION,
                     )
@@ -8071,7 +8071,7 @@ def _execute_shared_production_chain_impl(
                         raise DataJobError(
                             "SOURCE_RESEARCH_DAY_ROW_COUNT_MISMATCH",
                             f"{table_name}独立PG行数{actual_rows}不等于单日typed预期{expected_rows}。"
-                            f" capture={source_capture_id}"
+                            f" capture={day_source_capture_id}"
                             f" producer_version={producer_version!r}"
                             f" calendar_revision={unit_calendar_revision!r}",
                             status=409,
@@ -8081,7 +8081,7 @@ def _execute_shared_production_chain_impl(
                         stage_code=unit["stage_code"],
                         target_session=day,
                         business_table=table,
-                        source_capture_id=source_capture_id,
+                        source_capture_id=day_source_capture_id,
                         profile_history_session_count=(
                             profile_history_count
                             if table_name

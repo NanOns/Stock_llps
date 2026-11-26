@@ -3510,7 +3510,9 @@ def read_baostock_price_page(
             "PRICE_PAGE_SCOPE_INVALID",
             "价格候选分页参数无效；普通页最多100行，全池页须绑定捕获并读取全部市场与板别",
         )
-    catalog = read_baostock_price_catalog(config, cutoff=cutoff)
+    catalog = read_baostock_price_catalog(
+        config, cutoff=cutoff, source_capture_id=source_capture_id
+    )
     versions = [
         item
         for item in catalog["price_coordinate_versions"]
