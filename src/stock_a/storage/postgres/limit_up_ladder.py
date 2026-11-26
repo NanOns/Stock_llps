@@ -23,7 +23,7 @@ def persist_limit_up_streaks_for_session(
     *,
     target_session: date,
     research_cutoff: date,
-    source_capture_id: int,
+    source_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """在单事务内基于已存相邻官方会话限价事实计算并幂等写入目标日连板事实。"""
     if target_session > research_cutoff:
@@ -37,16 +37,14 @@ def persist_limit_up_streaks_for_session(
     target_idx = calendar_sessions.index(target_session)
 
     with _transaction(config, write=True, statement_timeout_ms=30000) as (_, cursor, _):
-        # 查找同一捕获下 <= target_session 已存限价事实的会话集合，并向前回溯连续相邻官方会话段
+        # 跨捕获查找 <= target_session 已存限价事实的会话集合，并向前回溯连续相邻官方会话段
         cursor.execute(
             """SELECT DISTINCT target_session
                FROM stock.source_price_limit_day_facts
-               WHERE source_capture_id = %s
-                 AND contract_version = %s
+               WHERE contract_version = %s
                  AND calendar_revision = %s
                  AND target_session <= %s""",
             (
-                source_capture_id,
                 PRICE_LIMIT_CONTRACT_VERSION,
                 calendar_revision,
                 target_session,
@@ -66,21 +64,20 @@ def persist_limit_up_streaks_for_session(
 
         cursor.execute(
             """SELECT target_session, source_symbol, market, board, research_eligible,
-                      limit_status, close_limit_up, touched_limit_up, one_word_limit_up, rule_id
+                      source_capture_id, limit_status, close_limit_up, touched_limit_up,
+                      one_word_limit_up, rule_id
                FROM stock.source_price_limit_day_facts
-               WHERE source_capture_id = %s
-                 AND contract_version = %s
+               WHERE contract_version = %s
                  AND calendar_revision = %s
                  AND target_session = ANY(%s)""",
             (
-                source_capture_id,
                 PRICE_LIMIT_CONTRACT_VERSION,
                 calendar_revision,
                 list(window_sessions),
             ),
         )
         obs_by_symbol: dict[str, dict[date, DailyLimitObservation]] = defaultdict(dict)
-        meta_at_target: dict[str, tuple[str, str, bool]] = {}
+        meta_at_target: dict[str, tuple[str, str, bool, int]] = {}
         for row in cursor.fetchall():
             (
                 sess,
@@ -88,6 +85,7 @@ def persist_limit_up_streaks_for_session(
                 market,
                 board,
                 eligible,
+                row_capture_id,
                 limit_status,
                 close_up,
                 touched_up,
@@ -103,14 +101,19 @@ def persist_limit_up_streaks_for_session(
                 rule_id=rule_id,
             )
             if sess == target_session:
-                meta_at_target[sym] = (market, board, bool(eligible))
+                meta_at_target[sym] = (
+                    market,
+                    board,
+                    bool(eligible),
+                    int(row_capture_id),
+                )
 
         if not meta_at_target:
             raise ValueError("目标交易日限价事实为空")
 
         records: list[tuple[Any, ...]] = []
         for sym in sorted(meta_at_target):
-            market, board, eligible = meta_at_target[sym]
+            market, board, eligible, row_capture_id = meta_at_target[sym]
             series = evaluate_limit_up_streak_series(
                 official_sessions=window_sessions,
                 observations_by_session=obs_by_symbol[sym],
@@ -123,7 +126,7 @@ def persist_limit_up_streaks_for_session(
                     market,
                     board,
                     eligible,
-                    source_capture_id,
+                    row_capture_id,
                     "RAW_UNADJUSTED",
                     LIMIT_UP_LADDER_CONTRACT_VERSION,
                     calendar_id,

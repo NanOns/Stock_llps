@@ -1064,6 +1064,45 @@ def read_fep_baseline(
     index = {name: _COLUMNS.index(name) for name in _COLUMNS}
     t0_rows = [row for row in stored_rows if row[index["summary_scope"]] == "T0"]
     target_sessions = {row[index["target_session"]] for row in t0_rows}
+    if target_sessions:
+        with _transaction(config, write=False, statement_timeout_ms=10000) as (
+            _,
+            chk_cursor,
+            _,
+        ):
+            chk_cursor.execute(
+                """SELECT target_session, path_rule_version, count(DISTINCT source_symbol)
+                   FROM source_forward_path_facts
+                   WHERE target_session=ANY(%s) AND horizon=%s
+                   GROUP BY target_session, path_rule_version""",
+                (list(sorted(target_sessions)), horizon),
+            )
+            forward_counts = {
+                (row[0], str(row[1])): int(row[2]) for row in chk_cursor.fetchall()
+            }
+        invalid_t0_sessions = {
+            row[index["target_session"]]
+            for row in t0_rows
+            if (
+                int(row[index["not_due_count"]] or 0)
+                < int(row[index["member_count"]] or 0)
+                and forward_counts.get(
+                    (
+                        row[index["target_session"]],
+                        str(row[index["path_rule_version"]]),
+                    ),
+                    0,
+                )
+                < int(row[index["source_pool_count"]] or 0)
+            )
+        }
+        if invalid_t0_sessions:
+            t0_rows = [
+                row
+                for row in t0_rows
+                if row[index["target_session"]] not in invalid_t0_sessions
+            ]
+            target_sessions = {row[index["target_session"]] for row in t0_rows}
     equal_rows = []
     if target_sessions:
         period_start = min(target_sessions)

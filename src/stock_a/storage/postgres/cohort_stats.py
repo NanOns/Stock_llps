@@ -78,6 +78,19 @@ def read_cohort_page(
         total = next(iter(counts))
         if sum(row[4] for row in stored if row[2] == "stock") != total:
             raise ResearchFactConflict("Cohort三态代码分母不一致")
+        has_due_maturity = any(
+            code != "NOT_DUE" for row in stored for code in (row[9] or ())
+        )
+        if has_due_maturity:
+            cursor.execute(
+                """SELECT count(DISTINCT source_symbol)
+                   FROM source_forward_path_facts
+                   WHERE target_session=%s AND horizon=%s AND path_rule_version=%s""",
+                (target, horizon, PATH_VERSION),
+            )
+            forward_count = int(cursor.fetchone()[0])
+            if forward_count != total:
+                raise ResearchFactNotFound("对应Forward路径事实已清理或不完整")
         groups = []
         for row in stored:
             (
@@ -417,6 +430,36 @@ def read_cohort_date_comparison(
         )
         stored = cursor.fetchall()
         dates, due_date_count = _cohort_date_comparison_payload(stored)
+        available_targets = [
+            date.fromisoformat(item["target_session"])
+            for item in dates
+            if item.get("status") == "AVAILABLE"
+        ]
+        if available_targets:
+            cursor.execute(
+                """SELECT target_session, count(DISTINCT source_symbol)
+                   FROM source_forward_path_facts
+                   WHERE target_session=ANY(%s)
+                     AND horizon=%s
+                     AND path_rule_version=%s
+                   GROUP BY target_session""",
+                (available_targets, horizon, PATH_VERSION),
+            )
+            forward_counts = {row[0]: int(row[1]) for row in cursor.fetchall()}
+            for item in dates:
+                if item.get("status") != "AVAILABLE":
+                    continue
+                t_sess = date.fromisoformat(item["target_session"])
+                expected_pool = item.get("source_pool_count")
+                if expected_pool is None or forward_counts.get(t_sess, 0) != int(
+                    expected_pool
+                ):
+                    item["status"] = "INCOMPLETE"
+                    item["reason_codes"] = ["FORWARD_PATH_FACT_MISSING_OR_INCOMPLETE"]
+                    item["groups"] = []
+            due_date_count = sum(
+                1 for item in dates if item.get("status") == "AVAILABLE"
+            )
         from stock_a.storage.postgres.cohort_enrollment import (
             read_cohort_enrollment_datewise_comparison,
         )

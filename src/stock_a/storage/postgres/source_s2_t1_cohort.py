@@ -566,6 +566,22 @@ def _read_exact_scope(
             ),
         )
         rows = tuple(cursor.fetchall())
+        forward_distinct_symbols: int | None = None
+        if rows:
+            cursor.execute(
+                """SELECT count(DISTINCT source_symbol)
+                   FROM source_forward_path_facts
+                   WHERE target_session=%s
+                     AND horizon=1
+                     AND path_rule_version=%s
+                     AND calendar_revision=%s""",
+                (
+                    target_session,
+                    rows[0][COHORT_COLUMNS.index("path_rule_version")],
+                    rows[0][COHORT_COLUMNS.index("calendar_revision")],
+                ),
+            )
+            forward_distinct_symbols = int(cursor.fetchone()[0])
     if not rows:
         return {
             "status": "NOT_COMPUTED",
@@ -590,6 +606,13 @@ def _read_exact_scope(
         raise SourceS2T1CohortReadError("S2/T+1统计提交后异事务读回与事务输入不一致")
     payload = _summary_payload(rows)
     if payload.get("status") == "AVAILABLE":
+        if forward_distinct_symbols is None or forward_distinct_symbols != payload.get(
+            "source_pool_count"
+        ):
+            return {
+                "status": "INCOMPLETE",
+                "reason_codes": ["T1_FORWARD_PATH_MISSING_OR_INCOMPLETE"],
+            }
         if payload.get("source_pool_count") != endpoint_capture_count or (
             payload.get("source_pool_count") != target_capture_count
         ):

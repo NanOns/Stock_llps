@@ -305,6 +305,139 @@ def prepare_forward_path_rows(
     return rows
 
 
+def _invalidate_downstream_stats_in_cursor(
+    cursor: Any,
+    *,
+    target_session: date,
+    horizon: int | None = None,
+    rule_ids: Sequence[str] | None = None,
+    invalidate_s2_t1: bool = False,
+) -> None:
+    """在当前写事务内清除受影响Cohort/S2-T1/FEP统计并失效对应任务完成进度。"""
+    affected_cutoffs: set[date] = set()
+    if rule_ids:
+        cursor.execute(
+            """DELETE FROM source_cohort_group_stats
+               WHERE target_session=%s AND rule_id=ANY(%s)""",
+            (target_session, list(rule_ids)),
+        )
+    elif horizon is not None:
+        cursor.execute(
+            """DELETE FROM source_cohort_group_stats
+               WHERE target_session=%s AND horizon=%s""",
+            (target_session, horizon),
+        )
+    else:
+        cursor.execute(
+            """DELETE FROM source_cohort_group_stats
+               WHERE target_session=%s""",
+            (target_session,),
+        )
+
+    if invalidate_s2_t1:
+        cursor.execute(
+            """DELETE FROM source_s2_t1_cohort_stats
+               WHERE target_session=%s""",
+            (target_session,),
+        )
+
+    fep_filters = ["summary_scope='T0'", "target_session=%s"]
+    fep_params: list[Any] = [target_session]
+    if horizon is not None:
+        fep_filters.append("horizon=%s")
+        fep_params.append(horizon)
+    if rule_ids:
+        fep_filters.append("rule_id=ANY(%s)")
+        fep_params.append(list(rule_ids))
+    where_fep = " AND ".join(fep_filters)
+    cursor.execute(
+        f"""WITH affected_t0 AS (
+                SELECT id, research_cutoff, rule_id, rule_version, profile_family,
+                       calendar_revision, path_rule_version, source_time_quality,
+                       parser_contract, lane, horizon, group_code, metric_code, condition_code
+                FROM source_fep_baseline_facts
+                WHERE {where_fep}
+            ), affected_all AS (
+                SELECT id, research_cutoff FROM affected_t0
+                UNION
+                SELECT f.id, f.research_cutoff
+                FROM source_fep_baseline_facts f
+                JOIN affected_t0 t0
+                  ON f.research_cutoff=t0.research_cutoff
+                 AND f.rule_id=t0.rule_id AND f.rule_version=t0.rule_version
+                 AND f.profile_family=t0.profile_family
+                 AND f.calendar_revision=t0.calendar_revision
+                 AND f.path_rule_version=t0.path_rule_version
+                 AND f.source_time_quality=t0.source_time_quality
+                 AND f.parser_contract=t0.parser_contract
+                 AND f.lane=t0.lane AND f.horizon=t0.horizon
+                 AND f.group_code=t0.group_code
+                 AND f.metric_code=t0.metric_code
+                 AND f.condition_code=t0.condition_code
+                WHERE f.summary_scope='EQUAL_DATE'
+                  AND f.source_capture_id IS NULL
+                  AND f.period_start_session<=%s
+                  AND %s<=f.period_end_session
+            )
+            DELETE FROM source_fep_baseline_facts f
+            USING affected_all a
+            WHERE f.id=a.id
+            RETURNING a.research_cutoff""",
+        (*fep_params, target_session, target_session),
+    )
+    affected_cutoffs.update(row[0] for row in cursor.fetchall() if row[0] is not None)
+
+    invalidated_job_ids: set[Any] = set()
+    cursor.execute(
+        """UPDATE stock.data_job_progress
+           SET status='NOT_COMPUTED', completed_units=0, expected_rows=NULL,
+               verified_rows=NULL, inserted_rows=0, updated_rows=0,
+               quality_status=NULL, error_code='DERIVED_RESULT_CLEARED',
+               error_message='上游Forward或规则事实已修订，对应Cohort统计失效。',
+               updated_at=clock_timestamp(), completed_at=NULL, verified_at=NULL
+           WHERE target_session=%s
+             AND business_table='stock.source_cohort_group_stats'
+             AND status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
+           RETURNING job_id""",
+        (target_session,),
+    )
+    invalidated_job_ids.update(row[0] for row in cursor.fetchall())
+
+    if affected_cutoffs:
+        cursor.execute(
+            """UPDATE stock.data_job_progress p
+               SET status='NOT_COMPUTED', completed_units=0, expected_rows=NULL,
+                   verified_rows=NULL, inserted_rows=0, updated_rows=0,
+                   quality_status=NULL, error_code='DERIVED_RESULT_CLEARED',
+                   error_message='上游Forward或规则事实已修订，对应FEP统计失效。',
+                   updated_at=clock_timestamp(), completed_at=NULL, verified_at=NULL
+               FROM stock.data_jobs j
+               WHERE p.job_id=j.job_id
+                 AND p.business_table='stock.source_fep_baseline_facts'
+                 AND j.research_cutoff=ANY(%s)
+                 AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
+               RETURNING p.job_id""",
+            (list(sorted(affected_cutoffs)),),
+        )
+        invalidated_job_ids.update(row[0] for row in cursor.fetchall())
+
+    for jid in invalidated_job_ids:
+        cursor.execute(
+            """UPDATE stock.data_jobs j
+               SET status='INCOMPLETE',
+                   completed_units=(
+                       SELECT coalesce(sum(p.completed_units),0)
+                       FROM stock.data_job_progress p
+                       WHERE p.job_id=j.job_id
+                   ),
+                   last_error_code='DERIVED_RESULT_CLEARED',
+                   last_error_message='上游Forward或规则事实已修订，下游统计进度失效。',
+                   updated_at=clock_timestamp(), completed_at=clock_timestamp()
+               WHERE job_id=%s AND status IN ('COMPLETED','NO_CHANGE')""",
+            (jid,),
+        )
+
+
 def write_forward_path_rows(
     config,
     *,
@@ -517,9 +650,11 @@ def write_forward_path_rows(
         else:
             cohort_result = {"inserted": 0, "expected_rows": 0}
         if inserted:
-            cursor.execute(
-                "DELETE FROM source_cohort_group_stats WHERE target_session=%s AND horizon=%s",
-                (target, horizon),
+            _invalidate_downstream_stats_in_cursor(
+                cursor,
+                target_session=target,
+                horizon=horizon,
+                invalidate_s2_t1=False,
             )
     return {
         "target_session": target.isoformat(),
@@ -798,9 +933,11 @@ def write_computed_rule_rows(
             (target, source_capture_id),
         )
         if inserted:
-            cursor.execute(
-                "DELETE FROM source_cohort_group_stats WHERE target_session=%s AND rule_id=ANY(%s)",
-                (target, list(selected_rules)),
+            _invalidate_downstream_stats_in_cursor(
+                cursor,
+                target_session=target,
+                rule_ids=list(selected_rules),
+                invalidate_s2_t1=False,
             )
         from stock_a.storage.postgres.research_enrollment import (
             insert_rule_enrollments,
@@ -1069,18 +1206,12 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
             "target_session=%s AND source_capture_id=%s",
             (target, source_capture_id),
         )
-        if count_rules:
-            # 新捕获也会改变同一规则键的歧义，旧捕获的摘要不能继续使用。
-            cursor.execute(
-                """DELETE FROM source_cohort_group_stats
-                   WHERE target_session=%s""",
-                (target,),
-            )
-        elif count_paths:
-            cursor.execute(
-                """DELETE FROM source_cohort_group_stats
-                   WHERE target_session=%s""",
-                (target,),
+        if count_rules or count_paths:
+            # 新捕获或路径重算会使旧统计失效，同事务清除下游统计与完成进度。
+            _invalidate_downstream_stats_in_cursor(
+                cursor,
+                target_session=target,
+                invalidate_s2_t1=bool(count_paths),
             )
         event_result = None
         if events is not None:

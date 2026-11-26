@@ -57,7 +57,7 @@ def persist_source_price_limits_for_session(
     *,
     target_session: date,
     research_cutoff: date,
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     stock_basic_capture_id: int | None = None,
 ) -> dict[str, Any]:
     """在单事务内计算并幂等写入目标交易日的日线涨跌停限价事实。"""
@@ -72,28 +72,40 @@ def persist_source_price_limits_for_session(
 
     with _transaction(config, write=True, statement_timeout_ms=30000) as (_, cursor, _):
         cursor.execute(
-            """WITH hist AS (
-                   SELECT source_symbol, session_date, market, board,
-                          bar_status, raw_tradestatus_value, raw_is_st_value,
-                          raw_preclose, raw_open, raw_high, raw_low, raw_close,
-                          raw_preclose_quality, raw_open_quality, raw_high_quality,
-                          raw_low_quality, raw_close_quality,
-                          raw_tradestatus_quality, raw_is_st_quality,
-                          LAG(raw_close) OVER (
-                              PARTITION BY source_symbol ORDER BY session_date
+            """WITH target_symbols AS (
+                   SELECT d.source_symbol
+                   FROM stock.source_raw_daily d
+                   JOIN stock.source_captures c ON c.capture_id = d.source_capture_id
+                   WHERE d.session_date = %s
+                     AND c.provider = 'BAOSTOCK'
+                     AND c.range_end_session <= %s
+               ),
+               hist AS (
+                   SELECT d.source_symbol, d.session_date, d.market, d.board,
+                          d.source_capture_id AS row_source_capture_id,
+                          d.bar_status, d.raw_tradestatus_value, d.raw_is_st_value,
+                          d.raw_preclose, d.raw_open, d.raw_high, d.raw_low, d.raw_close,
+                          d.raw_preclose_quality, d.raw_open_quality, d.raw_high_quality,
+                          d.raw_low_quality, d.raw_close_quality,
+                          d.raw_tradestatus_quality, d.raw_is_st_quality,
+                          LAG(d.raw_close) OVER (
+                              PARTITION BY d.source_symbol ORDER BY d.session_date
                           ) AS prev_raw_close,
                           COUNT(*) FILTER (
-                              WHERE bar_status = 'TARGET_PRESENT'
+                              WHERE d.bar_status = 'TARGET_PRESENT'
                           ) OVER (
-                              PARTITION BY source_symbol
-                              ORDER BY session_date
+                              PARTITION BY d.source_symbol
+                              ORDER BY d.session_date
                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                           ) AS hist_present_cnt
-                   FROM stock.source_raw_daily
-                   WHERE source_capture_id = %s
-                     AND session_date <= %s
+                   FROM stock.source_raw_daily d
+                   JOIN stock.source_captures c ON c.capture_id = d.source_capture_id
+                   JOIN target_symbols ts ON ts.source_symbol = d.source_symbol
+                   WHERE d.session_date <= %s
+                     AND c.provider = 'BAOSTOCK'
+                     AND c.range_end_session <= %s
                )
-               SELECT source_symbol, market, board, bar_status,
+               SELECT source_symbol, market, board, row_source_capture_id, bar_status,
                       raw_tradestatus_value, raw_is_st_value,
                       raw_preclose, prev_raw_close, hist_present_cnt,
                       raw_open, raw_high, raw_low, raw_close,
@@ -103,33 +115,36 @@ def persist_source_price_limits_for_session(
                FROM hist
                WHERE session_date = %s
                ORDER BY source_symbol""",
-            (source_capture_id, target_session, target_session),
+            (
+                target_session,
+                research_cutoff,
+                target_session,
+                research_cutoff,
+                target_session,
+            ),
         )
         raw_rows = cursor.fetchall()
         if not raw_rows:
             raise ValueError("目标会话没有可用的BaoStock RAW来源行")
 
-        selected_basic_capture_id = stock_basic_capture_id
-        if selected_basic_capture_id is None:
-            cursor.execute(
-                """SELECT MAX(source_capture_id)
-                   FROM stock.source_baostock_stock_basic"""
-            )
-            basic_row = cursor.fetchone()
-            selected_basic_capture_id = (
-                int(basic_row[0]) if basic_row and basic_row[0] is not None else None
-            )
         ipo_date_by_symbol: dict[str, date] = {}
-        if selected_basic_capture_id is not None:
+        if stock_basic_capture_id is not None:
             cursor.execute(
                 """SELECT source_symbol, ipo_date
                    FROM stock.source_baostock_stock_basic
                    WHERE source_capture_id = %s
                      AND field_quality <> 'CONFLICT_QUARANTINED'
                      AND ipo_date IS NOT NULL""",
-                (selected_basic_capture_id,),
+                (stock_basic_capture_id,),
             )
-            ipo_date_by_symbol = {str(sym): ipo for sym, ipo in cursor.fetchall()}
+        else:
+            cursor.execute(
+                """SELECT source_symbol, ipo_date
+                   FROM stock.source_baostock_stock_basic
+                   WHERE field_quality <> 'CONFLICT_QUARANTINED'
+                     AND ipo_date IS NOT NULL"""
+            )
+        ipo_date_by_symbol = {str(sym): ipo for sym, ipo in cursor.fetchall()}
 
         records = []
         status_counts: dict[str, int] = {
@@ -142,6 +157,7 @@ def persist_source_price_limits_for_session(
             symbol,
             market,
             board,
+            row_source_capture_id,
             bar_status,
             tradestatus,
             is_st,
@@ -202,7 +218,7 @@ def persist_source_price_limits_for_session(
                     fact["market"],
                     fact["board"],
                     fact["research_eligible"],
-                    source_capture_id,
+                    int(row_source_capture_id),
                     fact["price_coordinate"],
                     calendar_id,
                     calendar_revision,
@@ -436,7 +452,7 @@ def read_stock_price_limit_fact(
     *,
     target_session: date,
     source_symbol: str,
-    source_capture_id: int,
+    source_capture_id: int | None = None,
     calendar_revision: str,
 ) -> dict[str, Any]:
     """读取单只股票在目标交易日的已保存涨跌停限价事实。"""
@@ -455,13 +471,11 @@ def read_stock_price_limit_fact(
                FROM stock.source_price_limit_day_facts
                WHERE target_session = %s
                  AND source_symbol = %s
-                 AND source_capture_id = %s
                  AND contract_version = %s
                  AND calendar_revision = %s""",
             (
                 target_session,
                 source_symbol,
-                source_capture_id,
                 PRICE_LIMIT_CONTRACT_VERSION,
                 calendar_revision,
             ),

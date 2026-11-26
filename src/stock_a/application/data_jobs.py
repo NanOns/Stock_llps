@@ -2315,12 +2315,38 @@ def _blocked_plan(
     }
 
 
+def _canonical_observation_rule_ids(plan: Mapping[str, Any]) -> list[str] | None:
+    if "OBSERVATION_SEGMENTS" not in plan.get("selected_modules", ()):
+        return None
+    from stock_a.storage.postgres.research_facts import RULES
+
+    raw = plan.get("observation_rule_ids")
+    if raw is None:
+        return sorted(RULES)
+    normalized = sorted({str(item) for item in raw})
+    if set(normalized) == set(RULES):
+        return sorted(RULES)
+    return normalized
+
+
 def _job_request_key(plan: Mapping[str, Any]) -> str:
+    raw_snapshots = plan.get("sector_snapshot_ids_by_session")
+    canonical_snapshots = (
+        {
+            str(sess): {str(k): v for k, v in sorted(val.items())}
+            if isinstance(val, Mapping)
+            else val
+            for sess, val in sorted(raw_snapshots.items())
+        }
+        if isinstance(raw_snapshots, Mapping)
+        else None
+    )
     identity = {
         "mode": plan["mode"],
         "target_session": plan["target_session"],
         "history_session_count": plan["history_session_count"],
         "profile_history_session_count": plan.get("profile_history_session_count"),
+        "d1_calculation_session_count": plan.get("d1_calculation_session_count"),
         "d0_output_session_count": plan["d0_output_session_count"],
         "d1_output_session_count": plan["d1_output_session_count"],
         "calendar_id": plan["calendar_id"],
@@ -2328,11 +2354,16 @@ def _job_request_key(plan: Mapping[str, Any]) -> str:
         "research_cutoff": plan["research_cutoff"],
         "selected_modules": plan.get("selected_modules", []),
         "module_output_session_counts": plan.get("module_output_session_counts", {}),
+        "observation_rule_ids": _canonical_observation_rule_ids(plan),
+        "replace_known_incomplete_observation_successors": bool(
+            plan.get("replace_known_incomplete_observation_successors", False)
+        ),
         "operation": plan.get("operation", "FILL_MISSING"),
         "initialization_mode": plan.get("initialization_mode", "REUSE_RAW"),
         "daily_mode": plan.get("daily_mode", "CUSTOM"),
         "reset_preview_fingerprint": plan.get("reset_preview_fingerprint"),
         "sector_snapshot_ids": plan.get("sector_snapshot_ids"),
+        "sector_snapshot_ids_by_session": canonical_snapshots,
         "cleanup_preview_key": plan.get("cleanup_preview", {}).get("preview_key"),
     }
     canonical = json.dumps(
@@ -3341,8 +3372,32 @@ class DataJobCoordinator:
                 "calendar_revision": plan["calendar_revision"],
                 "planned_units": plan["planned_unit_count"],
             }
+            can_reuse_completed = plan["operation"] == "FILL_MISSING" and not bool(
+                plan.get("replace_known_incomplete_observation_successors")
+            )
+            incomplete_unit_keys: set[tuple[str, date, str]] = set()
+            if can_reuse_completed:
+                watermarks = data_job_pg.read_module_completion_watermarks(
+                    self.config, cutoff=self.research_cutoff
+                )
+                session_states = watermarks.get("module_session_states", {})
+                for unit in plan.get("stage_units", ()):
+                    if unit.get("status") != "NOT_STARTED":
+                        continue
+                    stage = str(unit["stage_code"])
+                    sess = unit["target_session"]
+                    tbl = str(unit["business_table"])
+                    state = session_states.get(stage, {}).get(sess.isoformat())
+                    if state not in {"COMPLETED_WITH_ROWS", "COMPLETED_EMPTY"}:
+                        incomplete_unit_keys.add((stage, sess, tbl))
+                if incomplete_unit_keys:
+                    can_reuse_completed = False
             result = data_job_pg.create_or_resume_job(
-                self.config, job=job, progress=plan["stage_units"]
+                self.config,
+                job=job,
+                progress=plan["stage_units"],
+                can_reuse_completed=can_reuse_completed,
+                incomplete_unit_keys=incomplete_unit_keys,
             )
             if result["status"] == "ALREADY_COMPLETE":
                 return {"accepted": True, **result}
@@ -6753,6 +6808,7 @@ def _execute_shared_production_chain_impl(
     assert source_capture_id is not None
 
     cutoff = date.fromisoformat(plan["research_cutoff"])
+    ep_caps = plan.get("endpoint_capture_ids_by_session")
     if "PRICE_LIMITS" in base_modules:
         from stock_a.research.price_limits import PRICE_LIMIT_CONTRACT_VERSION
         from stock_a.storage.postgres.price_limits import (
@@ -6773,20 +6829,26 @@ def _execute_shared_production_chain_impl(
             ]
             if not day_units:
                 continue
+            day_capture_id = (
+                int(ep_caps[day.isoformat()])
+                if isinstance(ep_caps, Mapping)
+                and type(ep_caps.get(day.isoformat())) is int
+                else source_capture_id
+            )
             begin_callback(job_id=job_id, units=day_units)
             try:
                 report = persist_source_price_limits_for_session(
                     config,
                     target_session=day,
                     research_cutoff=cutoff,
-                    source_capture_id=source_capture_id,
+                    source_capture_id=day_capture_id,
                 )
                 for unit in day_units:
                     actual_rows = data_job_pg.read_business_table_count(
                         config,
                         business_table=unit["business_table"],
                         target_session=day,
-                        source_capture_id=source_capture_id,
+                        source_capture_id=day_capture_id,
                         calendar_revision=report["calendar_revision"],
                         producer_version=PRICE_LIMIT_CONTRACT_VERSION,
                         research_cutoff=cutoff,
@@ -6802,7 +6864,7 @@ def _execute_shared_production_chain_impl(
                         stage_code="PRICE_LIMITS",
                         target_session=day,
                         business_table=unit["business_table"],
-                        source_capture_id=source_capture_id,
+                        source_capture_id=day_capture_id,
                         profile_history_session_count=None,
                         d1_history_session_count=None,
                         expected_rows=report["row_count"],
@@ -6846,20 +6908,26 @@ def _execute_shared_production_chain_impl(
             ]
             if not day_units:
                 continue
+            day_capture_id = (
+                int(ep_caps[day.isoformat()])
+                if isinstance(ep_caps, Mapping)
+                and type(ep_caps.get(day.isoformat())) is int
+                else source_capture_id
+            )
             begin_callback(job_id=job_id, units=day_units)
             try:
                 report = persist_limit_up_streaks_for_session(
                     config,
                     target_session=day,
                     research_cutoff=cutoff,
-                    source_capture_id=source_capture_id,
+                    source_capture_id=day_capture_id,
                 )
                 for unit in day_units:
                     actual_rows = data_job_pg.read_business_table_count(
                         config,
                         business_table=unit["business_table"],
                         target_session=day,
-                        source_capture_id=source_capture_id,
+                        source_capture_id=day_capture_id,
                         calendar_revision=report["calendar_revision"],
                         producer_version=LIMIT_UP_LADDER_CONTRACT_VERSION,
                         research_cutoff=cutoff,
@@ -6875,7 +6943,7 @@ def _execute_shared_production_chain_impl(
                         stage_code="LIMIT_UP_LADDER",
                         target_session=day,
                         business_table=unit["business_table"],
-                        source_capture_id=source_capture_id,
+                        source_capture_id=day_capture_id,
                         profile_history_session_count=None,
                         d1_history_session_count=None,
                         expected_rows=report["row_count"],

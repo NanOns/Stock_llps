@@ -17,9 +17,9 @@
 ## A04 单一生产实现与源码准入
 - 按来源→规范事实→计算→持久化→读取/页面分层，代码按职责放入 `src/stock_a/` 子包（`application/`、`storage/`、`service/`、`domain/`、`contracts/`、`sources/`、`canonical/`、`research/` 等）；包根仅留初始化、正式入口及有退出条件的精简兼容导出。每域唯一实现，不设平行 Reader/Builder/Runner 或全局封口/Manifest/Head 等无消费者治理。
 - 算法接收规范数据和显式参数，不在导入期或计算中隐式读盘/网络 I/O；I/O 集中于来源、存储与应用边界。唯一正式 CLI 归 `src/`，禁根 `scripts/`、反向导入仓外测试工具、运行时覆盖源码或 SQL 正则改写兜底。
-- 前后端拆分：HTML/CSS/JS 位于 `web/`，Python `service/` 不嵌前端源码，前端不复制正式算法且 `web/` 不引外部 HTTP(S) 链接（标准 XML/SVG 命名空间除外）。现有入口与已批准“数据初始化/数据日更”菜单可修复；其它新增前端暂停直至用户另行授权。
+- 前后端拆分：HTML/CSS/JS 位于 `web/`，唯一正式前端为 `web/product/`，旧 `web/preview/` 已退出开发、维护、兼容、测试与验收范围（`service/preview_http.py` 与 `/api/preview/*` 按正式页面及后端真实消费者保留，禁凭名称误删）。Python `service/` 不嵌前端源码，前端不复制正式算法且 `web/` 不引外部 HTTP(S) 链接（标准 XML/SVG 命名空间除外）。现有入口与已批准“数据初始化/数据日更”菜单可修复；其它新增前端暂停直至用户另行授权。
 - 现役源码、配置、页面禁硬编码固定交易日、固定证券样例、固定板别分支及旁路结果文件；仅官方日历、法规有效期与正式指数目录等合同常量按实际消费者核验保留（不整文件豁免）。
-- 统一 UTF-8 与中文优先（文档、注释、数据库注释、UI、CLI 帮助及错误提示用中文，协议键/枚举/标识保留原生写法并附中文说明）。提交前 Python 通过 `ruff format --check src/stock_a` 与 `ruff check --select E701,E702 src/stock_a`，Web 改动通过 `prettier --check web/preview/index.html web/preview/app.css web/preview/app.js`；避免无关大面积改格式，必要协议/SQL 字面量例外须说明。
+- 统一 UTF-8 与中文优先（文档、注释、数据库注释、UI、CLI 帮助及错误提示用中文，协议键/枚举/标识保留原生写法并附中文说明）。提交前 Python 通过 `ruff format --check src/stock_a` 与 `ruff check --select E701,E702 src/stock_a`，Web 改动仅对本轮实际改动的 `web/product/` 正式前端文件执行 `prettier --check`（不再维护或检查旧 `web/preview/`）；避免无关大面积改格式，必要协议/SQL 字面量例外须说明。
 
 ## A05 来源分工与双价格坐标
 - BaoStock 为股票 OHLC 唯一正式主源：`adjustflag=3` 未复权用于真实交易价、涨跌停制度、原始量额/换手；`adjustflag=2` 前复权用于跨日连续收益、MA/ATR、趋势、突破回踩及日周月结构。双坐标独立采集保存，禁混用、合并或由复权价反推原始成交额；后验前复权标 `NON_PIT`。
