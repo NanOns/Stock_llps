@@ -95,6 +95,7 @@ _MIGRATION_FILES = (
     "0081_r03_formal_market_breadth_and_rotation_board_days.sql",
     "0082_r03_rotation_valuation_and_overlap_pairs.sql",
     "0083_r03_rotation_episode_member_version_key.sql",
+    "0084_r03_exact_lineage_and_market_progress_keys.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -167,6 +168,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_PRICE_LIMIT_NA_NO_LIMIT_CHECK_R1": frozenset({75}),
     "R02_D1_IMPULSE_STRUCTURE_TYPES_R1": frozenset({76}),
     "R03_ROTATION_EPISODE_MEMBER_VERSION_KEY_0083": frozenset({83}),
+    "R03_EXACT_LINEAGE_AND_MARKET_PROGRESS_KEYS_0084": frozenset({84}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -413,6 +415,7 @@ _RELATIONS_BY_MIGRATION_COUNT[82] = _RELATIONS_BY_MIGRATION_COUNT[81] | {
     "r03_sector_overlap_pair_facts",
 }
 _RELATIONS_BY_MIGRATION_COUNT[83] = _RELATIONS_BY_MIGRATION_COUNT[82]
+_RELATIONS_BY_MIGRATION_COUNT[84] = _RELATIONS_BY_MIGRATION_COUNT[83]
 
 
 class BindingRefused(Exception):

@@ -3773,6 +3773,15 @@ class DataJobCoordinator:
         cross_section_universe_version: str | None = None,
         cross_section_contract_version: str | None = None,
         universe_match_status: str | None = None,
+        universe_version_t: str | None = None,
+        universe_version_t1: str | None = None,
+        universe_version_t3: str | None = None,
+        source_capture_id_t1: int | None = None,
+        source_capture_id_t3: int | None = None,
+        profile_revision_t1: str | None = None,
+        profile_revision_t3: str | None = None,
+        prev_scope_key: str | None = None,
+        prev_member_version: str | None = None,
         warning_code: str | None = None,
         warning_message: str | None = None,
     ) -> None:
@@ -3796,6 +3805,16 @@ class DataJobCoordinator:
             sector_snapshot_ids=sector_snapshot_ids,
             followup_target_sessions=followup_target_sessions,
             rule_ids=rule_ids,
+            universe_version=(
+                universe_version_t
+                if business_table == "stock.r03_formal_market_breadth_facts"
+                else None
+            ),
+            universe_version_t3=(
+                universe_version_t3
+                if business_table == "stock.r03_formal_market_breadth_facts"
+                else None
+            ),
             universe_capture_id=universe_capture_id,
             cross_section_universe_capture_id=cross_section_universe_capture_id,
             cross_section_universe_version=cross_section_universe_version,
@@ -3834,6 +3853,15 @@ class DataJobCoordinator:
                     if isinstance(sector_snapshot_ids, Mapping)
                     else None
                 ),
+                "universe_version_t": universe_version_t,
+                "universe_version_t1": universe_version_t1,
+                "universe_version_t3": universe_version_t3,
+                "source_capture_id_t1": source_capture_id_t1,
+                "source_capture_id_t3": source_capture_id_t3,
+                "profile_revision_t1": profile_revision_t1,
+                "profile_revision_t3": profile_revision_t3,
+                "prev_scope_key": prev_scope_key,
+                "prev_member_version": prev_member_version,
             }
             identity_matches = previous is not None and all(
                 previous.get(key) == value for key, value in expected_identity.items()
@@ -3890,6 +3918,15 @@ class DataJobCoordinator:
                 if isinstance(sector_snapshot_ids, Mapping)
                 else None
             ),
+            universe_version_t=universe_version_t,
+            universe_version_t1=universe_version_t1,
+            universe_version_t3=universe_version_t3,
+            source_capture_id_t1=source_capture_id_t1,
+            source_capture_id_t3=source_capture_id_t3,
+            profile_revision_t1=profile_revision_t1,
+            profile_revision_t3=profile_revision_t3,
+            prev_scope_key=prev_scope_key,
+            prev_member_version=prev_member_version,
             no_change=no_change,
             warning_code=warning_code,
             warning_message=warning_message,
@@ -6733,6 +6770,15 @@ def _execute_shared_production_chain_impl(
         producer_version: str | None = None,
         industry_snapshot_id: int | None = None,
         concept_snapshot_id: int | None = None,
+        universe_version_t: str | None = None,
+        universe_version_t1: str | None = None,
+        universe_version_t3: str | None = None,
+        source_capture_id_t1: int | None = None,
+        source_capture_id_t3: int | None = None,
+        profile_revision_t1: str | None = None,
+        profile_revision_t3: str | None = None,
+        prev_scope_key: str | None = None,
+        prev_member_version: str | None = None,
     ) -> None:
         error_code = str(getattr(error, "code", type(error).__name__))
         for unit in units:
@@ -6768,6 +6814,15 @@ def _execute_shared_production_chain_impl(
                 producer_version=producer_version,
                 industry_snapshot_id=industry_snapshot_id,
                 concept_snapshot_id=concept_snapshot_id,
+                universe_version_t=universe_version_t,
+                universe_version_t1=universe_version_t1,
+                universe_version_t3=universe_version_t3,
+                source_capture_id_t1=source_capture_id_t1,
+                source_capture_id_t3=source_capture_id_t3,
+                profile_revision_t1=profile_revision_t1,
+                profile_revision_t3=profile_revision_t3,
+                prev_scope_key=prev_scope_key,
+                prev_member_version=prev_member_version,
             )
             resolved_unit_keys.add(unit_key(unit))
 
@@ -7279,6 +7334,12 @@ def _execute_shared_production_chain_impl(
             if not day_units:
                 continue
             begin_callback(job_id=job_id, units=day_units)
+            cap_mkt_t = source_capture_id
+            cap_mkt_t3 = source_capture_id
+            formal_prof_t: str | None = None
+            formal_prof_t3: str | None = None
+            mkt_u_ver_t: str | None = None
+            mkt_u_ver_t3: str | None = None
             try:
                 market = compute_source_market_context(
                     config,
@@ -7367,6 +7428,16 @@ def _execute_shared_production_chain_impl(
                     and isinstance(plan.get("_cross_section_scope_by_day"), Mapping)
                     else None
                 )
+                mkt_u_ver_t = (
+                    str(cs_t["universe_version"])
+                    if isinstance(cs_t, Mapping) and cs_t.get("universe_version")
+                    else None
+                )
+                mkt_u_ver_t3 = (
+                    str(cs_t3["universe_version"])
+                    if isinstance(cs_t3, Mapping) and cs_t3.get("universe_version")
+                    else None
+                )
                 formal_breadth_res = produce_formal_market_breadth_for_session(
                     config,
                     target_session=day,
@@ -7377,12 +7448,8 @@ def _execute_shared_production_chain_impl(
                     profile_revision_t3=formal_prof_t3,
                     prev_session_t=mkt_prev_t,
                     prev_session_t3=mkt_prev_t3,
-                    universe_version_t=cs_t.get("universe_version")
-                    if isinstance(cs_t, Mapping)
-                    else None,
-                    universe_version_t3=cs_t3.get("universe_version")
-                    if isinstance(cs_t3, Mapping)
-                    else None,
+                    universe_version_t=mkt_u_ver_t,
+                    universe_version_t3=mkt_u_ver_t3,
                     universe_capture_id=plan.get("_universe_source_capture_id"),
                     allow_revision=bool(plan.get("allow_revision", False)),
                 )
@@ -7513,6 +7580,14 @@ def _execute_shared_production_chain_impl(
                             profile_revision=formal_prof_t,
                             calendar_revision=market.calendar["calendar_revision"],
                             producer_version=R03_CONTRACT_VERSION,
+                            universe_version_t=str(
+                                formal_breadth_res["universe_version_t"]
+                            ),
+                            universe_version_t3=str(
+                                formal_breadth_res["universe_version_t3"]
+                            ),
+                            source_capture_id_t3=cap_mkt_t3,
+                            profile_revision_t3=formal_prof_t3,
                         )
                         resolved_unit_keys.add(unit_key(unit))
                         continue
@@ -7578,12 +7653,35 @@ def _execute_shared_production_chain_impl(
                     )
                     resolved_unit_keys.add(unit_key(unit))
             except Exception as error:  # noqa: BLE001 - 派生域保留确切失败原因。
-                mark_units_incomplete(
-                    day_units,
-                    stage_code="MARKET_BREADTH",
-                    error=error,
-                    message_prefix="市场宽度QFQ生产或独立读回未闭合",
+                from stock_a.application.r03_formal_sector import (
+                    R03_CONTRACT_VERSION,
                 )
+
+                for failed_mkt_unit in day_units:
+                    if (
+                        failed_mkt_unit.get("business_table")
+                        == "stock.r03_formal_market_breadth_facts"
+                    ):
+                        mark_units_incomplete(
+                            [failed_mkt_unit],
+                            stage_code="MARKET_BREADTH",
+                            error=error,
+                            message_prefix="正式市场宽度QFQ生产或独立读回未闭合",
+                            unit_source_capture_id=cap_mkt_t,
+                            profile_revision=formal_prof_t,
+                            producer_version=R03_CONTRACT_VERSION,
+                            universe_version_t=mkt_u_ver_t,
+                            universe_version_t3=mkt_u_ver_t3,
+                            source_capture_id_t3=cap_mkt_t3,
+                            profile_revision_t3=formal_prof_t3,
+                        )
+                    else:
+                        mark_units_incomplete(
+                            [failed_mkt_unit],
+                            stage_code="MARKET_BREADTH",
+                            error=error,
+                            message_prefix="市场宽度QFQ生产或独立读回未闭合",
+                        )
                 incomplete_stage_errors.append(
                     (
                         str(getattr(error, "code", type(error).__name__)),
@@ -9211,7 +9309,14 @@ def _execute_shared_production_chain_impl(
             if not day_units:
                 continue
             cap_t = source_capture_id
+            cap_t1: int | None = None
+            cap_t3: int | None = None
             profile_revision = None
+            prof_rev_t1: str | None = None
+            prof_rev_t3: str | None = None
+            u_ver_t: str | None = None
+            u_ver_t1: str | None = None
+            u_ver_t3: str | None = None
             resolved_snapshots: dict[str, int] | None = None
             try:
                 cap_by_day = plan.get("endpoint_capture_ids_by_session")
@@ -9344,6 +9449,41 @@ def _execute_shared_production_chain_impl(
                         "t1": resolved_snapshots,
                         "t3": resolved_snapshots,
                     }
+                prior_version_chain: list[tuple[date, str, str]] = []
+                if idx_day > 0:
+                    for p_day in reversed(ordered_days[:idx_day]):
+                        p_text = p_day.isoformat()
+                        p_cap = (
+                            int(cap_by_day[p_text])
+                            if isinstance(cap_by_day, Mapping) and p_text in cap_by_day
+                            else (
+                                None
+                                if isinstance(cap_by_day, Mapping) and cap_by_day
+                                else cap_t
+                            )
+                        )
+                        p_prof = _safe_endpoint_profile_rev(p_day, ep_cap=p_cap)
+                        p_snaps = (
+                            snap_by_day.get(p_text)
+                            if isinstance(snap_by_day, Mapping)
+                            and p_text in snap_by_day
+                            else (
+                                None
+                                if isinstance(snap_by_day, Mapping)
+                                else resolved_snapshots
+                            )
+                        )
+                        if (
+                            p_cap is not None
+                            and p_prof is not None
+                            and isinstance(p_snaps, Mapping)
+                        ):
+                            p_sk = f"BAOSTOCK_CAP_{p_cap}:PROF_{p_prof}:NON_PIT"
+                            p_mv = (
+                                f"IND_{p_snaps.get('INDUSTRY', 0)}:"
+                                f"CON_{p_snaps.get('CONCEPT', 0)}"
+                            )
+                            prior_version_chain.append((p_day, p_sk, p_mv))
                 r03_res = run_r03_formal_sector_for_session(
                     config,
                     target_session=day,
@@ -9364,6 +9504,7 @@ def _execute_shared_production_chain_impl(
                     snapshot_ids_by_session=snaps_for_endpoints,
                     modules=day_modules,
                     allow_revision=bool(plan.get("allow_revision", False)),
+                    prior_version_chain=prior_version_chain,
                 )
                 expected_map = r03_res.get("expected_rows")
                 if not isinstance(expected_map, Mapping):
@@ -9456,6 +9597,15 @@ def _execute_shared_production_chain_impl(
                         producer_version=R03_CONTRACT_VERSION,
                         calendar_revision=plan.get("calendar_revision"),
                         sector_snapshot_ids=resolved_snapshots,
+                        universe_version_t=r03_res.get("universe_version_t"),
+                        universe_version_t1=r03_res.get("universe_version_t1"),
+                        universe_version_t3=r03_res.get("universe_version_t3"),
+                        source_capture_id_t1=cap_t1,
+                        source_capture_id_t3=cap_t3,
+                        profile_revision_t1=prof_rev_t1,
+                        profile_revision_t3=prof_rev_t3,
+                        prev_scope_key=r03_res.get("prev_scope_key"),
+                        prev_member_version=r03_res.get("prev_member_version"),
                     )
                     resolved_unit_keys.add(unit_key(unit))
             except Exception as error:  # noqa: BLE001

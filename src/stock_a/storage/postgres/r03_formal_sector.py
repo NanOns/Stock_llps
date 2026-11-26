@@ -266,6 +266,8 @@ def _read_r03_partition_progress_state(
     scope_key: str,
     member_version: str | None,
     contract_version: str,
+    universe_version_t: str | None = None,
+    universe_version_t3: str | None = None,
 ) -> tuple[str | None, int | None]:
     """精确查询 R03 业务分区在 data_job_progress 的最新状态，绝不跨独立版本串扰或通配缺失键。"""
     cap_id, prof_rev, ind_id, con_id = _parse_r03_partition_progress_filters(
@@ -275,6 +277,8 @@ def _read_r03_partition_progress_state(
     if cap_id is None:
         return None, None
     if is_sector_table and (prof_rev is None or ind_id is None or con_id is None):
+        return None, None
+    if not is_sector_table and (not universe_version_t or not universe_version_t3):
         return None, None
     sql = """
         SELECT status, expected_rows
@@ -292,6 +296,9 @@ def _read_r03_partition_progress_state(
     if is_sector_table:
         sql += " AND industry_snapshot_id=%s AND concept_snapshot_id=%s"
         params.extend([ind_id, con_id])
+    else:
+        sql += " AND universe_version_t=%s AND universe_version_t3=%s"
+        params.extend([str(universe_version_t), str(universe_version_t3)])
     sql += " ORDER BY updated_at DESC LIMIT 1"
     cur.execute(sql, tuple(params))
     row = cur.fetchone()
@@ -759,6 +766,7 @@ def read_r03_rotation_recovery_states(
     previous_scope_key: str | None = None,
     member_version: str | None = None,
     previous_member_version: str | None = None,
+    prior_version_chain: Sequence[tuple[date, str, str]] | None = None,
     allow_cross_version_recovery: bool = False,
 ) -> dict[tuple[str, str], dict[str, Any]]:
     """跨重启从 PG 恢复各板块精确上一官方会话或历史最新 Rotation Episode、冻结篮子与最近日状态前态（严格校验已完成进度）。"""
@@ -958,44 +966,64 @@ def read_r03_rotation_recovery_states(
                         },
                     }
 
-            # 缺中间日或跨版本前态恢复：先查同 prev_scope，若 allow_cross_version_recovery 则允许沿同 contract_version 最近已完成日接续
-            miss_cond = (
-                "b.contract_version=%s AND b.trade_date <= %s"
-                if allow_cross_version_recovery
-                else "b.scope_key=%s AND b.contract_version=%s AND b.trade_date < %s"
-            )
-            miss_params: list[Any] = (
-                [contract_version, previous_trade_date]
-                if allow_cross_version_recovery
-                else [prev_scope or scope_key, contract_version, previous_trade_date]
-            )
-            miss_mem = (
-                ""
-                if (allow_cross_version_recovery or prev_mem is None)
-                else " AND b.member_version=%s"
-            )
-            if miss_mem:
-                miss_params.append(prev_mem)
-            cur.execute(
-                f"""
-                SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
-                       e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
-                       s.trade_date, s.rotation_state, s.last_known_state, s.stale,
-                       s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
-                       s.prev_mature_true, s.dq5, e.frozen_member_count,
-                       b.scope_key, b.member_version, e.scope_key
-                FROM stock.r03_sector_rotation_board_day_facts b
-                JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
-                JOIN stock.r03_sector_rotation_day_states s
-                  ON s.episode_id = e.id AND s.trade_date = b.trade_date
-                WHERE {miss_cond} {miss_mem}
-                ORDER BY b.board_kind, b.board_id, b.trade_date DESC,
-                         (b.scope_key = %s) DESC,
-                         (b.member_version = %s) DESC,
-                         e.id DESC
-                """,
-                tuple(miss_params) + (prev_scope or scope_key, prev_mem or ""),
-            )
+            # 缺中间日或跨版本前态恢复：仅允许沿显式合法业务连续链（prior_version_chain）或同版本前史回查，绝不全局跨版猜测
+            chain_items = [
+                (d, str(sk), str(mv))
+                for d, sk, mv in (prior_version_chain or ())
+                if d <= previous_trade_date
+            ]
+            if chain_items:
+                c_dates = [x[0] for x in chain_items]
+                c_scopes = [x[1] for x in chain_items]
+                c_mems = [x[2] for x in chain_items]
+                cur.execute(
+                    """
+                    SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+                           e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
+                           s.trade_date, s.rotation_state, s.last_known_state, s.stale,
+                           s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
+                           s.prev_mature_true, s.dq5, e.frozen_member_count,
+                           b.scope_key, b.member_version, e.scope_key
+                    FROM stock.r03_sector_rotation_board_day_facts b
+                    JOIN unnest(%s::date[], %s::text[], %s::text[]) AS vc(td, sk, mv)
+                      ON b.trade_date = vc.td AND b.scope_key = vc.sk AND b.member_version = vc.mv
+                    JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
+                    JOIN stock.r03_sector_rotation_day_states s
+                      ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                    WHERE b.contract_version=%s AND b.trade_date <= %s
+                    ORDER BY b.board_kind, b.board_id, b.trade_date DESC, e.id DESC
+                    """,
+                    (c_dates, c_scopes, c_mems, contract_version, previous_trade_date),
+                )
+            else:
+                miss_cond = (
+                    "b.scope_key=%s AND b.contract_version=%s AND b.trade_date < %s"
+                )
+                miss_params: list[Any] = [
+                    prev_scope or scope_key,
+                    contract_version,
+                    previous_trade_date,
+                ]
+                miss_mem = " AND b.member_version=%s" if prev_mem is not None else ""
+                if miss_mem:
+                    miss_params.append(prev_mem)
+                cur.execute(
+                    f"""
+                    SELECT e.id, e.episode_key, e.board_kind, e.board_id, e.t0_session,
+                           e.parent_episode_id, e.s0_known, e.u0_known, e.h0_known, e.left_censored,
+                           s.trade_date, s.rotation_state, s.last_known_state, s.stale,
+                           s.market_age, s.eval_age, s.accepted_once, s.armed, s.out_neg_streak,
+                           s.prev_mature_true, s.dq5, e.frozen_member_count,
+                           b.scope_key, b.member_version, e.scope_key
+                    FROM stock.r03_sector_rotation_board_day_facts b
+                    JOIN stock.r03_sector_rotation_episodes e ON e.id = b.episode_id
+                    JOIN stock.r03_sector_rotation_day_states s
+                      ON s.episode_id = e.id AND s.trade_date = b.trade_date
+                    WHERE {miss_cond} {miss_mem}
+                    ORDER BY b.board_kind, b.board_id, b.trade_date DESC, e.id DESC
+                    """,
+                    tuple(miss_params),
+                )
             for mr_row in cur.fetchall():
                 key = (str(mr_row[2]), str(mr_row[3]))
                 if key in out:
@@ -2291,7 +2319,7 @@ def write_r03_formal_market_breadth(
         else None
     )
     val = (
-        _num(Fraction(num, den))
+        (Decimal(num) / Decimal(den)).quantize(Decimal("0.0000000001"))
         if num is not None and den is not None and den > 0
         else None
     )
@@ -2336,7 +2364,7 @@ def write_r03_formal_market_breadth(
             if not allow_revision:
                 raise R03FormalSectorPgError(
                     "R03_FORMAL_MARKET_BREADTH_CONFLICT",
-                    f"正式市场宽度({trade_date}, {scope_key}, {u_t}, {u_t3})已存在不同内容且未授权修订。",
+                    f"正式市场宽度({trade_date})内容冲突：new={vals}, existing={existing}。",
                 )
             cur.execute(
                 """
@@ -2418,6 +2446,8 @@ def read_r03_formal_market_breadth(
             scope_key=str(r[0]),
             member_version=None,
             contract_version=contract_version,
+            universe_version_t=str(r[1]),
+            universe_version_t3=str(r[2]),
         )
         if mkt_status not in {"COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"}:
             return {

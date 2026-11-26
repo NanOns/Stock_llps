@@ -135,13 +135,21 @@ def _check_captures_qfq_comparable(
           AND b.qfq_close > 0
     """
     params: list[Any] = [cap_a, cap_b, overlap_session]
-    if symbols:
+    required: set[str] | None = None
+    if symbols is not None:
+        required = {str(s) for s in symbols if s}
+        if not required:
+            return False
         sql += " AND a.source_symbol = ANY(%s)"
-        params.append(sorted(set(symbols)))
+        params.append(sorted(required))
     cur.execute(sql, tuple(params))
     rows = cur.fetchall()
     if not rows:
         return False
+    if required is not None:
+        present = {str(r[0]) for r in rows}
+        if present != required:
+            return False
     return all(Fraction(str(r[1])) == Fraction(str(r[2])) for r in rows)
 
 
@@ -594,6 +602,7 @@ def assemble_r03_session_inputs(
     universe_capture_id_t3: int | None = None,
     strict_endpoints: bool = False,
     extra_research_entities: Sequence[str] | None = None,
+    extra_entities_by_board: Mapping[tuple[str, str], Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """从现役 PG 表组装 R03 板块三端独立输入、成员槽位、日期有效 Universe 与 LOO 目标列表（只读事务）。"""
     cap_t = int(source_capture_id)
@@ -726,9 +735,40 @@ def assemble_r03_session_inputs(
                 overlap_session=t1_session,
                 symbols=sym_list,
             )
-            if t1_session is not None and cap_t1 is not None
+            if t1_session is not None and cap_t1 is not None and sym_list
             else (False if t1_session is not None else True)
         )
+        t1_slots_by_board = {
+            (str(kind), str(bid)): [
+                s.entity_id for s in slots if s.entity_id is not None
+            ]
+            for kind, bid, slots, _mc in meta_t1
+        }
+        qfq_comparable_t1_by_board: dict[tuple[str, str], bool] = {}
+        for kind, bid, _slots, _mc in meta_t:
+            bk_key = (str(kind), str(bid))
+            if t1_session is None:
+                qfq_comparable_t1_by_board[bk_key] = True
+                continue
+            if cap_t1 is None:
+                qfq_comparable_t1_by_board[bk_key] = False
+                continue
+            if cap_t == cap_t1:
+                qfq_comparable_t1_by_board[bk_key] = True
+                continue
+            req_syms = set(t1_slots_by_board.get(bk_key, ()))
+            if extra_entities_by_board and bk_key in extra_entities_by_board:
+                req_syms.update(str(e) for e in extra_entities_by_board[bk_key] if e)
+            if not req_syms:
+                qfq_comparable_t1_by_board[bk_key] = True
+            else:
+                qfq_comparable_t1_by_board[bk_key] = _check_captures_qfq_comparable(
+                    cur,
+                    cap_t,
+                    cap_t1,
+                    overlap_session=t1_session,
+                    symbols=sorted(req_syms),
+                )
         qfq_comparable_t3 = (
             _check_captures_qfq_comparable(
                 cur,
@@ -737,7 +777,7 @@ def assemble_r03_session_inputs(
                 overlap_session=t3_session,
                 symbols=sym_list,
             )
-            if t3_session is not None and cap_t3 is not None
+            if t3_session is not None and cap_t3 is not None and sym_list
             else (False if t3_session is not None else True)
         )
 
@@ -840,10 +880,12 @@ def assemble_r03_session_inputs(
             "loo_targets": loo_targets,
             "universe_ready_t": u_ver_t is not None,
             "universe_version_t": u_ver_t,
+            "universe_version_t1": u_ver_t1,
             "universe_version_t3": u_ver_t3,
             "universe_ret1_t": universe_ret1_t,
             "universe_ret1_t3": universe_ret1_t3,
             "qfq_comparable_t1": qfq_comparable_t1,
+            "qfq_comparable_t1_by_board": qfq_comparable_t1_by_board,
             "qfq_comparable_t3": qfq_comparable_t3,
         }
 
@@ -933,6 +975,7 @@ def run_r03_formal_sector_day(
     modules: set[str] | None = None,
     allow_revision: bool = False,
     coordinate_comparable_t1: bool = True,
+    coordinate_comparable_t1_by_board: Mapping[tuple[str, str], bool] | None = None,
 ) -> dict[str, Any]:
     """执行单日 R03 正式 Native、资格、前态、Rotation、Overlap 与 LOO 离线生产并幂等落库。"""
     active_modules = modules or {
@@ -1011,9 +1054,15 @@ def run_r03_formal_sector_day(
                 if rec_prev
                 else True
             )
+            board_comp_t1 = (
+                bool(coordinate_comparable_t1_by_board[bkey])
+                if coordinate_comparable_t1_by_board is not None
+                and bkey in coordinate_comparable_t1_by_board
+                else bool(coordinate_comparable_t1)
+            )
             contract_ok = (
                 bool(bt.get("coordinate_ready", True))
-                and bool(coordinate_comparable_t1)
+                and board_comp_t1
                 and origin_comparable
             )
             if (
@@ -1060,6 +1109,28 @@ def run_r03_formal_sector_day(
                 )
             if not origin_comparable and st_res.get("state") == "REJECTED":
                 st_res = {**st_res, "reason": "ROTATION_COORDINATE_INCOMPARABLE"}
+            if (
+                st_res.get("state") == "REJECTED"
+                and st_res.get("preserve_prior")
+                and prev_state_dict is not None
+            ):
+                prev_lk = prev_state_dict.get(
+                    "last_known_state"
+                ) or prev_state_dict.get("state")
+                st_res = {
+                    **st_res,
+                    "last_known_state": prev_lk,
+                    "stale": True,
+                    "market_age": int(prev_state_dict.get("market_age", 0)),
+                    "eval_age": int(prev_state_dict.get("eval_age", 0)),
+                    "accepted_once": bool(prev_state_dict.get("accepted_once", False)),
+                    "armed": bool(prev_state_dict.get("armed", False)),
+                    "out_neg_streak": int(prev_state_dict.get("out_neg_streak", 0)),
+                    "prev_mature_true": bool(
+                        prev_state_dict.get("prev_mature_true", False)
+                    ),
+                    "dq5": prev_state_dict.get("dq5"),
+                }
 
             new_basket = None
             parent_ep_id = None
@@ -1090,7 +1161,7 @@ def run_r03_formal_sector_day(
                         "last_known_state": prev_lk,
                         "reason": "BIRTH_UNMAPPED_MEMBER",
                     }
-                elif not coordinate_comparable_t1:
+                elif not board_comp_t1:
                     st_res = {
                         **st_res,
                         "state": "UNKNOWN",
@@ -1576,6 +1647,7 @@ def run_r03_formal_sector_for_session(
     scope_key: str | None = None,
     modules: set[str] | None = None,
     allow_revision: bool = False,
+    prior_version_chain: Sequence[tuple[date, str, str]] | None = None,
 ) -> dict[str, Any]:
     """正常业务入口：从 PG 读取组装全部上游三端独立输入并恢复前态后执行 R03 正式生产。"""
     resolved_scope = scope_key or (
@@ -1614,7 +1686,8 @@ def run_r03_formal_sector_for_session(
             previous_scope_key=prev_scope_key,
             member_version=member_ver,
             previous_member_version=prev_member_ver,
-            allow_cross_version_recovery=True,
+            prior_version_chain=prior_version_chain,
+            allow_cross_version_recovery=False,
         )
         if t1_session is not None
         else {}
@@ -1649,16 +1722,13 @@ def run_r03_formal_sector_for_session(
                         overlap_session=_t0_d,
                         symbols=list(_bask.members),
                     )
-                    if not _comp and t1_session is not None and t1_session != _t0_d:
-                        _comp = _check_captures_qfq_comparable(
-                            _cur_chk,
-                            _ep_cap,
-                            int(source_capture_id),
-                            overlap_session=t1_session,
-                            symbols=list(_bask.members),
-                        )
                     _rec["origin_coordinate_comparable"] = _comp
 
+    extra_entities_by_board = {
+        _bk_k: tuple(_rec["basket"].members)
+        for _bk_k, _rec in rot_recovery.items()
+        if _rec.get("basket") is not None
+    }
     active_frozen_entities = sorted(
         {
             eid
@@ -1688,6 +1758,7 @@ def run_r03_formal_sector_for_session(
         universe_capture_id_t3=universe_capture_id_t3,
         strict_endpoints=strict_endpoints,
         extra_research_entities=active_frozen_entities,
+        extra_entities_by_board=extra_entities_by_board,
     )
     active_mods = modules or {
         "R03_SECTOR_NATIVE",
@@ -1744,6 +1815,12 @@ def run_r03_formal_sector_for_session(
         modules=modules,
         allow_revision=allow_revision,
         coordinate_comparable_t1=bool(assembled.get("qfq_comparable_t1", True)),
+        coordinate_comparable_t1_by_board=assembled.get("qfq_comparable_t1_by_board"),
     )
     day_res["formal_market_breadth"] = None
+    day_res["universe_version_t"] = assembled.get("universe_version_t")
+    day_res["universe_version_t1"] = assembled.get("universe_version_t1")
+    day_res["universe_version_t3"] = assembled.get("universe_version_t3")
+    day_res["prev_scope_key"] = prev_scope_key
+    day_res["prev_member_version"] = prev_member_ver
     return day_res

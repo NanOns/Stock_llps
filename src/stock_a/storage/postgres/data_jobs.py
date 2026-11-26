@@ -3108,6 +3108,103 @@ def _resolve_r03_upstream_cascade_plan(
     rotation_episode_cutoffs: dict[int, date] = {}
     market_partitions: set[tuple[date, str, str, str, str]] = set()
 
+    r03_sector_prog_tables = [
+        "stock.r03_sector_native_day_facts",
+        "stock.r03_sector_rotation_board_day_facts",
+        "stock.r03_sector_overlap_clusters",
+        "stock.r03_sector_loo_support_facts",
+    ]
+
+    def _add_sector_prog_rows(rows: Sequence[tuple[Any, ...]]) -> None:
+        for td, cap, prof, ind_id, con_id, pver in rows:
+            if (
+                cap is None
+                or prof is None
+                or ind_id is None
+                or con_id is None
+                or not pver
+            ):
+                continue
+            sk = f"BAOSTOCK_CAP_{int(cap)}:PROF_{prof}:NON_PIT"
+            mv = f"IND_{int(ind_id)}:CON_{int(con_id)}"
+            sector_partitions.add((td, sk, mv, str(pver)))
+
+    def _collect_core_profile_deps(cap_id: int, prof_rev: str, p_day: date) -> None:
+        p_idx = sess_index.get(p_day)
+        p_next_1 = (
+            official_sessions[p_idx + 1]
+            if p_idx is not None and p_idx + 1 < len(official_sessions)
+            else None
+        )
+        p_next_3 = (
+            official_sessions[p_idx + 3]
+            if p_idx is not None and p_idx + 3 < len(official_sessions)
+            else None
+        )
+        exact_scope = f"BAOSTOCK_CAP_{cap_id}:PROF_{prof_rev}:NON_PIT"
+        cursor.execute(
+            """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
+               FROM stock.r03_formal_market_breadth_facts
+               WHERE trade_date = %s AND scope_key = %s""",
+            (p_day, exact_scope),
+        )
+        for td, sk, ut, ut3, cv in cursor.fetchall():
+            market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
+        if p_next_3 is not None and p_next_3 <= cutoff:
+            cursor.execute(
+                """SELECT target_session, source_capture_id, profile_revision,
+                          universe_version_t, universe_version_t3, producer_version
+                   FROM stock.data_job_progress
+                   WHERE target_session = %s
+                     AND business_table = 'stock.r03_formal_market_breadth_facts'
+                     AND (
+                         (source_capture_id_t3 = %s AND profile_revision_t3 = %s)
+                         OR (source_capture_id_t3 IS NULL AND source_capture_id = %s AND profile_revision = %s)
+                     )""",
+                (p_next_3, cap_id, prof_rev, cap_id, prof_rev),
+            )
+            for td, m_cap, m_prof, ut, ut3, pver in cursor.fetchall():
+                if m_cap is not None and m_prof and ut and ut3 and pver:
+                    m_sk = f"BAOSTOCK_CAP_{int(m_cap)}:PROF_{m_prof}:NON_PIT"
+                    market_partitions.add((td, m_sk, str(ut), str(ut3), str(pver)))
+            cursor.execute(
+                """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
+                   FROM stock.r03_formal_market_breadth_facts
+                   WHERE trade_date = %s AND scope_key = %s""",
+                (p_next_3, exact_scope),
+            )
+            for td, sk, ut, ut3, cv in cursor.fetchall():
+                market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
+        for tbl in r03_sector_prog_tables:
+            cursor.execute(
+                f"""SELECT DISTINCT trade_date, scope_key, member_version, contract_version
+                    FROM {tbl}
+                    WHERE trade_date = %s AND scope_key = %s""",
+                (p_day, exact_scope),
+            )
+            for td, sk, mv, cv in cursor.fetchall():
+                sector_partitions.add((td, str(sk), str(mv), str(cv)))
+        if p_next_1 is not None and p_next_1 <= cutoff:
+            cursor.execute(
+                """SELECT DISTINCT target_session, source_capture_id, profile_revision,
+                                  industry_snapshot_id, concept_snapshot_id, producer_version
+                   FROM stock.data_job_progress
+                   WHERE target_session = %s AND business_table = ANY(%s)
+                     AND source_capture_id_t1 = %s AND profile_revision_t1 = %s""",
+                (p_next_1, r03_sector_prog_tables, cap_id, prof_rev),
+            )
+            _add_sector_prog_rows(cursor.fetchall())
+        if p_next_3 is not None and p_next_3 <= cutoff:
+            cursor.execute(
+                """SELECT DISTINCT target_session, source_capture_id, profile_revision,
+                                  industry_snapshot_id, concept_snapshot_id, producer_version
+                   FROM stock.data_job_progress
+                   WHERE target_session = %s AND business_table = ANY(%s)
+                     AND source_capture_id_t3 = %s AND profile_revision_t3 = %s""",
+                (p_next_3, r03_sector_prog_tables, cap_id, prof_rev),
+            )
+            _add_sector_prog_rows(cursor.fetchall())
+
     for v in versions:
         v_day = (
             v["target_session"]
@@ -3126,26 +3223,14 @@ def _resolve_r03_upstream_cascade_plan(
             if idx_v is not None and idx_v + 3 < len(official_sessions)
             else None
         )
-        endpoint_dep_days = [
-            d for d in (v_day, next_1, next_3) if d is not None and d <= cutoff
-        ]
 
         if module_code == "CORE_PROFILE":
             cap_id = int(v_key["source_capture_id"])
             prof_rev = str(v_key["profile_revision"])
-            exact_scope = f"BAOSTOCK_CAP_{cap_id}:PROF_{prof_rev}:NON_PIT"
-            scope_cond = "scope_key = %s"
-            scope_arg = exact_scope
-            mkt_end = next_3 if (next_3 is not None and next_3 <= cutoff) else cutoff
-            cursor.execute(
-                """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
-                   FROM stock.r03_formal_market_breadth_facts
-                   WHERE trade_date >= %s AND trade_date <= %s AND scope_key = %s""",
-                (v_day, mkt_end, exact_scope),
-            )
-            for td, sk, ut, ut3, cv in cursor.fetchall():
-                market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
+            _collect_core_profile_deps(cap_id, prof_rev, v_day)
+
         elif module_code == "D0":
+            # 纯 Seed 不清正式市场宽度；仅按实际消费的 t / t-1 / t-3 引用清理 R03 板块分区
             cap_id = int(v_key["source_capture_id"])
             prof_rev = v_key.get("profile_revision")
             if prof_rev:
@@ -3154,59 +3239,197 @@ def _resolve_r03_upstream_cascade_plan(
             else:
                 scope_cond = "scope_key LIKE %s ESCAPE '\\'"
                 scope_arg = _escape_like_literal(f"BAOSTOCK_CAP_{cap_id}:") + "%"
-        else:
-            cap_id = int(v_key["price_capture_id"])
-            u_ver = v_key.get("universe_version")
-            scope_cond = "scope_key LIKE %s ESCAPE '\\'"
-            scope_arg = _escape_like_literal(f"BAOSTOCK_CAP_{cap_id}:") + "%"
-            if u_ver:
-                cursor.execute(
-                    """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
-                       FROM stock.r03_formal_market_breadth_facts
-                       WHERE trade_date >= %s AND trade_date <= %s
-                         AND (universe_version_t = %s OR universe_version_t3 = %s)""",
-                    (v_day, cutoff, str(u_ver), str(u_ver)),
-                )
-                for td, sk, ut, ut3, cv in cursor.fetchall():
-                    market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
-
-        # 1. 扫描四张 R03 板块主表（含无 Episode 的 Overlap / LOO 独立分区）
-        for tbl in (
-            "stock.r03_sector_native_day_facts",
-            "stock.r03_sector_rotation_board_day_facts",
-            "stock.r03_sector_overlap_clusters",
-            "stock.r03_sector_loo_support_facts",
-        ):
-            cursor.execute(
-                f"""SELECT DISTINCT trade_date, scope_key, member_version, contract_version
-                    FROM {tbl}
-                    WHERE trade_date >= %s AND trade_date <= %s AND {scope_cond}""",
-                (v_day, cutoff, scope_arg),
-            )
-            for td, sk, mv, cv in cursor.fetchall():
-                sector_partitions.add((td, str(sk), str(mv), str(cv)))
-
-            # 2. 跨版 t+1 / t+3 端点依赖：若后续版本（换了 capture/profile/member）在 next_1/next_3 使用了前态，同样纳入（即使无 episode）
-            if len(endpoint_dep_days) > 1:
+            for tbl in r03_sector_prog_tables:
                 cursor.execute(
                     f"""SELECT DISTINCT trade_date, scope_key, member_version, contract_version
                         FROM {tbl}
-                        WHERE trade_date = ANY(%s)""",
-                    (endpoint_dep_days[1:],),
+                        WHERE trade_date = %s AND {scope_cond}""",
+                    (v_day, scope_arg),
                 )
                 for td, sk, mv, cv in cursor.fetchall():
-                    # 若同 scope_key 或同 capture 或同日依赖，均受 v_day 变更影响（排除明确无关的其他 capture 且非跨版接续需谨慎：若为 t+1/t+3 官方端点，仅当同 capture 或存在跨版任务覆盖该端点时）
-                    if (
-                        str(sk).startswith(f"BAOSTOCK_CAP_{cap_id}:")
-                        or module_code == "CROSS_SECTION"
-                    ):
-                        sector_partitions.add((td, str(sk), str(mv), str(cv)))
+                    sector_partitions.add((td, str(sk), str(mv), str(cv)))
+            for dep_day, cap_col, prof_col in (
+                (next_1, "source_capture_id_t1", "profile_revision_t1"),
+                (next_3, "source_capture_id_t3", "profile_revision_t3"),
+            ):
+                if dep_day is not None and dep_day <= cutoff:
+                    sql_d0 = f"""SELECT DISTINCT target_session, source_capture_id, profile_revision,
+                                                industry_snapshot_id, concept_snapshot_id, producer_version
+                                 FROM stock.data_job_progress
+                                 WHERE target_session = %s AND business_table = ANY(%s)
+                                   AND {cap_col} = %s"""
+                    args_d0: list[Any] = [dep_day, r03_sector_prog_tables, cap_id]
+                    if prof_rev:
+                        sql_d0 += f" AND {prof_col} = %s"
+                        args_d0.append(str(prof_rev))
+                    cursor.execute(sql_d0, tuple(args_d0))
+                    _add_sector_prog_rows(cursor.fetchall())
 
+        else:
+            # CROSS_SECTION：精确匹配实际消费该 (price_capture_id, universe_version) 的市场与 R03 板块分区
+            cap_id = int(v_key["price_capture_id"])
+            u_ver = v_key.get("universe_version")
+            cap_like = _escape_like_literal(f"BAOSTOCK_CAP_{cap_id}:") + "%"
+            if u_ver:
+                u_str = str(u_ver)
+                cursor.execute(
+                    """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
+                       FROM stock.r03_formal_market_breadth_facts
+                       WHERE trade_date = %s AND scope_key LIKE %s ESCAPE '\\'
+                         AND universe_version_t = %s""",
+                    (v_day, cap_like, u_str),
+                )
+                for td, sk, ut, ut3, cv in cursor.fetchall():
+                    market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
+                if next_3 is not None and next_3 <= cutoff:
+                    cursor.execute(
+                        """SELECT target_session, source_capture_id, profile_revision,
+                                  universe_version_t, universe_version_t3, producer_version
+                           FROM stock.data_job_progress
+                           WHERE target_session = %s
+                             AND business_table = 'stock.r03_formal_market_breadth_facts'
+                             AND universe_version_t3 = %s
+                             AND (source_capture_id_t3 = %s OR (source_capture_id_t3 IS NULL AND source_capture_id = %s))""",
+                        (next_3, u_str, cap_id, cap_id),
+                    )
+                    for td, m_cap, m_prof, ut, ut3, pver in cursor.fetchall():
+                        if m_cap is not None and ut and ut3 and pver:
+                            m_sk = (
+                                f"BAOSTOCK_CAP_{int(m_cap)}:PROF_{m_prof}:NON_PIT"
+                                if m_prof
+                                else f"BAOSTOCK_CAP_{int(m_cap)}:MARKET_QFQ:NON_PIT"
+                            )
+                            market_partitions.add(
+                                (td, m_sk, str(ut), str(ut3), str(pver))
+                            )
+                    cursor.execute(
+                        """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
+                           FROM stock.r03_formal_market_breadth_facts
+                           WHERE trade_date = %s AND scope_key LIKE %s ESCAPE '\\'
+                             AND universe_version_t3 = %s""",
+                        (next_3, cap_like, u_str),
+                    )
+                    for td, sk, ut, ut3, cv in cursor.fetchall():
+                        market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
+
+                # R03 板块：仅选择在 data_job_progress 中实际引用了 (cap_id, u_str) 作为 t / t-1 / t-3 的分区
+                for dep_day, cap_col, u_col in (
+                    (v_day, "source_capture_id", "universe_version_t"),
+                    (next_1, "source_capture_id_t1", "universe_version_t1"),
+                    (next_3, "source_capture_id_t3", "universe_version_t3"),
+                ):
+                    if dep_day is not None and dep_day <= cutoff:
+                        cursor.execute(
+                            f"""SELECT DISTINCT target_session, source_capture_id, profile_revision,
+                                                industry_snapshot_id, concept_snapshot_id, producer_version
+                                FROM stock.data_job_progress
+                                WHERE target_session = %s AND business_table = ANY(%s)
+                                  AND {cap_col} = %s AND {u_col} = %s""",
+                            (dep_day, r03_sector_prog_tables, cap_id, u_str),
+                        )
+                        _add_sector_prog_rows(cursor.fetchall())
+            # 若 CROSS_SECTION 清理同时连带清理了下游 CORE_PROFILE，则同步纳入这些被清理 Profile 的精确 R03 依赖
+            dep_ids = v.get("dependent_ids")
+            if isinstance(dep_ids, Mapping):
+                dep_p_sessions = [
+                    d if isinstance(d, date) else date.fromisoformat(str(d))
+                    for d in (dep_ids.get("profile_sessions") or ())
+                ]
+                dep_p_revs = [
+                    str(r) for r in (dep_ids.get("profile_revisions") or ()) if r
+                ]
+                for dp_day in dep_p_sessions:
+                    for dp_rev in dep_p_revs:
+                        _collect_core_profile_deps(cap_id, dp_rev, dp_day)
+            else:
+                cursor.execute(
+                    """SELECT trade_date, scope_key, universe_version_t, universe_version_t3, contract_version
+                       FROM stock.r03_formal_market_breadth_facts
+                       WHERE trade_date = %s AND scope_key LIKE %s ESCAPE '\\'""",
+                    (v_day, cap_like),
+                )
+                for td, sk, ut, ut3, cv in cursor.fetchall():
+                    market_partitions.add((td, str(sk), str(ut), str(ut3), str(cv)))
+                for dep_day, cap_col in (
+                    (v_day, "source_capture_id"),
+                    (next_1, "source_capture_id_t1"),
+                    (next_3, "source_capture_id_t3"),
+                ):
+                    if dep_day is not None and dep_day <= cutoff:
+                        cursor.execute(
+                            f"""SELECT DISTINCT target_session, source_capture_id, profile_revision,
+                                                industry_snapshot_id, concept_snapshot_id, producer_version
+                                FROM stock.data_job_progress
+                                WHERE target_session = %s AND business_table = ANY(%s)
+                                  AND {cap_col} = %s""",
+                            (dep_day, r03_sector_prog_tables, cap_id),
+                        )
+                        _add_sector_prog_rows(cursor.fetchall())
+            # 若 CROSS_SECTION 清理同时连带清理了下游 CORE_PROFILE，则同步纳入这些被清理 Profile 的精确 R03 依赖
+            dep_ids = v.get("dependent_ids")
+            if isinstance(dep_ids, Mapping):
+                dep_p_sessions = [
+                    d if isinstance(d, date) else date.fromisoformat(str(d))
+                    for d in (dep_ids.get("profile_sessions") or ())
+                ]
+                dep_p_revs = [
+                    str(r) for r in (dep_ids.get("profile_revisions") or ()) if r
+                ]
+                for dp_day in dep_p_sessions:
+                    for dp_rev in dep_p_revs:
+                        _collect_core_profile_deps(cap_id, dp_rev, dp_day)
+
+    # 3) 沿着真实前态链 (prev_scope_key, prev_member_version) 传递追踪无 Episode（Native/Overlap/LOO）与跨版后继分区
+    if sector_partitions:
+        part_frontier = list(sector_partitions)
+        while part_frontier:
+            next_frontier: list[tuple[date, str, str, str]] = []
+            for p_td, p_sk, p_mv, p_cv in part_frontier:
+                cursor.execute(
+                    """SELECT DISTINCT target_session, source_capture_id, profile_revision,
+                                      industry_snapshot_id, concept_snapshot_id, producer_version
+                       FROM stock.data_job_progress
+                       WHERE target_session > %s AND target_session <= %s
+                         AND business_table = ANY(%s)
+                         AND prev_scope_key = %s AND prev_member_version = %s
+                         AND producer_version = %s""",
+                    (p_td, cutoff, r03_sector_prog_tables, p_sk, p_mv, p_cv),
+                )
+                for td, cap, prof, ind_id, con_id, pver in cursor.fetchall():
+                    if (
+                        cap is None
+                        or prof is None
+                        or ind_id is None
+                        or con_id is None
+                        or not pver
+                    ):
+                        continue
+                    nxt = (
+                        td,
+                        f"BAOSTOCK_CAP_{int(cap)}:PROF_{prof}:NON_PIT",
+                        f"IND_{int(ind_id)}:CON_{int(con_id)}",
+                        str(pver),
+                    )
+                    if nxt not in sector_partitions:
+                        sector_partitions.add(nxt)
+                        next_frontier.append(nxt)
+            part_frontier = next_frontier
+
+        # 4) 从已受影响分区收集对应的 Rotation Episode 及其截断日
+        p_list_ep = sorted(sector_partitions)
         cursor.execute(
-            f"""SELECT DISTINCT episode_id, trade_date
-                FROM stock.r03_sector_rotation_board_day_facts
-                WHERE episode_id IS NOT NULL AND trade_date >= %s AND trade_date <= %s AND {scope_cond}""",
-            (v_day, cutoff, scope_arg),
+            """SELECT DISTINCT b.episode_id, b.trade_date
+               FROM stock.r03_sector_rotation_board_day_facts b
+               JOIN unnest(%s::date[], %s::text[], %s::text[], %s::text[]) AS p(td, sk, mv, cv)
+                 ON b.trade_date = p.td AND b.scope_key = p.sk
+                AND b.member_version = p.mv AND b.contract_version = p.cv
+               WHERE b.episode_id IS NOT NULL""",
+            (
+                [p[0] for p in p_list_ep],
+                [p[1] for p in p_list_ep],
+                [p[2] for p in p_list_ep],
+                [p[3] for p in p_list_ep],
+            ),
         )
         for ep_id, td in cursor.fetchall():
             ep_i = int(ep_id)
@@ -3500,7 +3723,7 @@ def apply_r03_upstream_cascade_invalidation(
             "stock.r03_sector_loo_support_facts",
             "stock.r03_sector_loo_candidate_facts",
         ]
-        for td, sk, mv, _cv in sorted(r03_plan["sector_partitions"]):
+        for td, sk, mv, cv in sorted(r03_plan["sector_partitions"]):
             c_id, p_rev, i_id, co_id = _parse_r03_scope_and_member(sk, mv)
             p_conds = ["p.target_session=%s", "p.business_table=ANY(%s)"]
             p_args: list[Any] = [td, r03_sector_prog_tables]
@@ -3516,6 +3739,9 @@ def apply_r03_upstream_cascade_invalidation(
             if co_id is not None:
                 p_conds.append("p.concept_snapshot_id=%s")
                 p_args.append(co_id)
+            if cv:
+                p_conds.append("p.producer_version=%s")
+                p_args.append(str(cv))
             p_args.extend([current_job_id, current_job_id])
             cursor.execute(
                 f"""UPDATE stock.data_job_progress AS p
@@ -3533,13 +3759,16 @@ def apply_r03_upstream_cascade_invalidation(
             invalidated_rows.extend(cursor.fetchall())
 
     if r03_plan["market_partitions"]:
-        for td, sk, _ut, _ut3, _cv in sorted(r03_plan["market_partitions"]):
+        for td, sk, ut, ut3, cv in sorted(r03_plan["market_partitions"]):
             c_id, p_rev, _i_id, _co_id = _parse_r03_scope_and_member(sk, None)
             m_conds = [
                 "p.target_session=%s",
                 "p.business_table='stock.r03_formal_market_breadth_facts'",
+                "p.universe_version_t=%s",
+                "p.universe_version_t3=%s",
+                "p.producer_version=%s",
             ]
-            m_args: list[Any] = [td]
+            m_args: list[Any] = [td, str(ut), str(ut3), str(cv)]
             if c_id is not None:
                 m_conds.append("p.source_capture_id=%s")
                 m_args.append(c_id)
@@ -5581,7 +5810,12 @@ def clear_derived_module(
                RETURNING job_id, business_table""",
             (
                 *progress_scope_parameters,
-                list(cleanup_count_tables),
+                [
+                    t
+                    for t in cleanup_count_tables
+                    if module_code == "MARKET_BREADTH"
+                    or t != "stock.r03_formal_market_breadth_facts"
+                ],
                 current_job_id,
                 current_job_id,
             ),
@@ -5713,6 +5947,10 @@ def read_progress_unit(
                       deleted_rows,source_capture_id,profile_revision,producer_version,
                       profile_history_session_count,d1_history_session_count,
                       calendar_revision,industry_snapshot_id,concept_snapshot_id,
+                      universe_version_t,universe_version_t1,universe_version_t3,
+                      source_capture_id_t1,source_capture_id_t3,
+                      profile_revision_t1,profile_revision_t3,
+                      prev_scope_key,prev_member_version,
                       verified_at,error_code,error_message
                FROM stock.data_job_progress
                WHERE job_id=%s AND stage_code=%s AND target_session=%s
@@ -6961,6 +7199,11 @@ def create_or_resume_job(
                            producer_version=NULL,profile_history_session_count=NULL,
                            d1_history_session_count=NULL,calendar_revision=NULL,
                            industry_snapshot_id=NULL,concept_snapshot_id=NULL,
+                           universe_version_t=NULL,universe_version_t1=NULL,
+                           universe_version_t3=NULL,source_capture_id_t1=NULL,
+                           source_capture_id_t3=NULL,profile_revision_t1=NULL,
+                           profile_revision_t3=NULL,prev_scope_key=NULL,
+                           prev_member_version=NULL,
                            quality_status=NULL,error_code=NULL,error_message=NULL,
                            verified_at=NULL,updated_at=clock_timestamp(),completed_at=NULL
                        WHERE job_id=%s
@@ -6975,6 +7218,11 @@ def create_or_resume_job(
                            profile_revision=NULL,producer_version=NULL,
                            profile_history_session_count=NULL,d1_history_session_count=NULL,
                            calendar_revision=NULL,industry_snapshot_id=NULL,concept_snapshot_id=NULL,
+                           universe_version_t=NULL,universe_version_t1=NULL,
+                           universe_version_t3=NULL,source_capture_id_t1=NULL,
+                           source_capture_id_t3=NULL,profile_revision_t1=NULL,
+                           profile_revision_t3=NULL,prev_scope_key=NULL,
+                           prev_member_version=NULL,
                            quality_status=NULL,error_code=NULL,error_message=NULL,
                            verified_at=NULL,updated_at=clock_timestamp(),completed_at=NULL
                        WHERE job_id=%s
@@ -7243,6 +7491,15 @@ def mark_progress_verified(
     calendar_revision: str | None = None,
     industry_snapshot_id: int | None = None,
     concept_snapshot_id: int | None = None,
+    universe_version_t: str | None = None,
+    universe_version_t1: str | None = None,
+    universe_version_t3: str | None = None,
+    source_capture_id_t1: int | None = None,
+    source_capture_id_t3: int | None = None,
+    profile_revision_t1: str | None = None,
+    profile_revision_t3: str | None = None,
+    prev_scope_key: str | None = None,
+    prev_member_version: str | None = None,
     no_change: bool = False,
     warning_code: str | None = None,
     warning_message: str | None = None,
@@ -7331,6 +7588,10 @@ def mark_progress_verified(
                    profile_revision=%s,producer_version=%s,
                    profile_history_session_count=%s,d1_history_session_count=%s,
                    calendar_revision=%s,industry_snapshot_id=%s,concept_snapshot_id=%s,
+                   universe_version_t=%s,universe_version_t1=%s,universe_version_t3=%s,
+                   source_capture_id_t1=%s,source_capture_id_t3=%s,
+                   profile_revision_t1=%s,profile_revision_t3=%s,
+                   prev_scope_key=%s,prev_member_version=%s,
                    quality_status=%s,error_code=%s,error_message=%s,
                    verified_at=clock_timestamp(),
                    completed_at=clock_timestamp(),updated_at=clock_timestamp()
@@ -7350,6 +7611,15 @@ def mark_progress_verified(
                 calendar_revision,
                 industry_snapshot_id,
                 concept_snapshot_id,
+                universe_version_t,
+                universe_version_t1,
+                universe_version_t3,
+                source_capture_id_t1,
+                source_capture_id_t3,
+                profile_revision_t1,
+                profile_revision_t3,
+                prev_scope_key,
+                prev_member_version,
                 quality_status,
                 warning_code,
                 warning_message,
@@ -7608,6 +7878,48 @@ def mark_progress_cleared(
                     ),
                 )
                 rem_count += int(cursor.fetchone()[0])
+        elif business_table == "stock.r03_formal_market_breadth_facts" and version_keys:
+            rem_count = 0
+            for vk in version_keys:
+                f_keys = vk.get("formal_breadth_keys")
+                if f_keys:
+                    for fk in f_keys:
+                        cursor.execute(
+                            """SELECT count(*) FROM stock.r03_formal_market_breadth_facts
+                               WHERE trade_date=%s AND trade_date<=%s
+                                 AND scope_key=%s AND universe_version_t=%s
+                                 AND universe_version_t3=%s AND contract_version=%s""",
+                            (
+                                target_session,
+                                job[1],
+                                fk["scope_key"],
+                                fk["universe_version_t"],
+                                fk["universe_version_t3"],
+                                fk["contract_version"],
+                            ),
+                        )
+                        rem_count += int(cursor.fetchone()[0])
+                elif "universe_version_t" in vk and "universe_version_t3" in vk:
+                    cursor.execute(
+                        """SELECT count(*) FROM stock.r03_formal_market_breadth_facts
+                           WHERE trade_date=%s AND trade_date<=%s
+                             AND scope_key=%s AND universe_version_t=%s
+                             AND universe_version_t3=%s AND contract_version=%s""",
+                        (
+                            target_session,
+                            job[1],
+                            vk["scope_key"],
+                            vk["universe_version_t"],
+                            vk["universe_version_t3"],
+                            vk["contract_version"],
+                        ),
+                    )
+                    rem_count += int(cursor.fetchone()[0])
+                else:
+                    cursor.execute(
+                        count_queries[business_table][0], (target_session, job[1])
+                    )
+                    rem_count += int(cursor.fetchone()[0])
         else:
             cursor.execute(count_queries[business_table][0], (target_session, job[1]))
             rem_count = int(cursor.fetchone()[0])
@@ -7625,6 +7937,11 @@ def mark_progress_cleared(
                    profile_revision=NULL,producer_version=NULL,
                    profile_history_session_count=NULL,d1_history_session_count=NULL,
                    calendar_revision=NULL,industry_snapshot_id=NULL,concept_snapshot_id=NULL,
+                   universe_version_t=NULL,universe_version_t1=NULL,
+                   universe_version_t3=NULL,source_capture_id_t1=NULL,
+                   source_capture_id_t3=NULL,profile_revision_t1=NULL,
+                   profile_revision_t3=NULL,prev_scope_key=NULL,
+                   prev_member_version=NULL,
                    deleted_rows=%s,
                    quality_status=%s,error_code=%s,error_message=%s,
                    verified_at=clock_timestamp(),completed_at=clock_timestamp(),
@@ -7894,6 +8211,15 @@ def mark_progress_unavailable(
     producer_version: str | None = None,
     industry_snapshot_id: int | None = None,
     concept_snapshot_id: int | None = None,
+    universe_version_t: str | None = None,
+    universe_version_t1: str | None = None,
+    universe_version_t3: str | None = None,
+    source_capture_id_t1: int | None = None,
+    source_capture_id_t3: int | None = None,
+    profile_revision_t1: str | None = None,
+    profile_revision_t3: str | None = None,
+    prev_scope_key: str | None = None,
+    prev_member_version: str | None = None,
 ) -> None:
     """将有局部输入缺口的表单元留为未计算，保留精确版本绑定以防被其他版本完成记录遮挡。"""
     if status not in {"NOT_COMPUTED", "NOT_DUE", "BLOCKED", "INCOMPLETE"}:
@@ -7915,6 +8241,15 @@ def mark_progress_unavailable(
                    calendar_revision=NULL,
                    industry_snapshot_id=coalesce(%s,industry_snapshot_id),
                    concept_snapshot_id=coalesce(%s,concept_snapshot_id),
+                   universe_version_t=coalesce(%s,universe_version_t),
+                   universe_version_t1=coalesce(%s,universe_version_t1),
+                   universe_version_t3=coalesce(%s,universe_version_t3),
+                   source_capture_id_t1=coalesce(%s,source_capture_id_t1),
+                   source_capture_id_t3=coalesce(%s,source_capture_id_t3),
+                   profile_revision_t1=coalesce(%s,profile_revision_t1),
+                   profile_revision_t3=coalesce(%s,profile_revision_t3),
+                   prev_scope_key=coalesce(%s,prev_scope_key),
+                   prev_member_version=coalesce(%s,prev_member_version),
                    updated_at=clock_timestamp(),completed_at=NULL
                WHERE job_id=%s AND stage_code=%s AND target_session=%s
                  AND business_table=%s AND status IN ('NOT_STARTED','RUNNING')""",
@@ -7927,6 +8262,15 @@ def mark_progress_unavailable(
                 producer_version,
                 industry_snapshot_id,
                 concept_snapshot_id,
+                universe_version_t,
+                universe_version_t1,
+                universe_version_t3,
+                source_capture_id_t1,
+                source_capture_id_t3,
+                profile_revision_t1,
+                profile_revision_t3,
+                prev_scope_key,
+                prev_member_version,
                 job_id,
                 stage_code,
                 target_session,

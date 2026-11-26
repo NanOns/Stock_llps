@@ -350,7 +350,8 @@ def step_rotation_state_machine(
     )
     effective_prev_state = (
         previous_episode_state.get("last_known_state")
-        if raw_prev_state == "UNKNOWN" and previous_episode_state is not None
+        if raw_prev_state in {"UNKNOWN", "REJECTED"}
+        and previous_episode_state is not None
         else raw_prev_state
     )
     is_active_state = (
@@ -361,7 +362,7 @@ def step_rotation_state_machine(
         if input_missing_reason is not None:
             prev_age = int(previous_episode_state.get("eval_age", 0))
             prev_market_age = int(previous_episode_state.get("market_age", prev_age))
-            prev_was_unknown = raw_prev_state == "UNKNOWN"
+            prev_was_unknown = raw_prev_state in {"UNKNOWN", "REJECTED"}
             prev_mature_true = (
                 False
                 if prev_was_unknown
