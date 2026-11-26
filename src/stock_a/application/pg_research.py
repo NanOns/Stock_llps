@@ -101,7 +101,7 @@ def read_source_version_context(
             cutoff=cutoff,
             # 指定坐标时先读该坐标的完整当前有效事实总体，不能用任务捕获
             # 截掉由其它合法请求捕获写入的证券行。
-            source_capture_id=None if coordinate_scoped else source_capture_id,
+            source_capture_id=source_capture_id,
         )
     except BaoStockPriceFactsError as error:
         raise PgResearchBindingError(error.code, str(error)) from error
@@ -110,7 +110,7 @@ def read_source_version_context(
         for item in catalog.get("price_coordinate_versions", [])
         if item.get("session_date") == target_session.isoformat()
         and (
-            (coordinate_scoped or source_capture_id is None)
+            source_capture_id is None
             or item.get("source_capture_id") == source_capture_id
         )
         and (

@@ -808,7 +808,11 @@ def _persist_static_research_day(
     ):
         raise SourceResearchDayError(
             "STATIC_RESEARCH_SOURCE_DENOMINATOR_MISMATCH",
-            "静态研究必须分别闭合原始捕获分母与主板/创业板评价分母。",
+            "静态研究分母未分别闭合："
+            f"调用捕获总数={expected_capture_source_count!r}，"
+            f"来源捕获总数={data_universe_expected_count!r}，"
+            f"调用研究总体={expected_research_source_count!r}，"
+            f"来源主板/GEM总体={research_universe_expected_count!r}。",
         )
     catalog = source_symbol_price_profile_snapshots(
         config, max_target_session=research_cutoff
