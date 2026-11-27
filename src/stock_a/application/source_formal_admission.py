@@ -155,8 +155,7 @@ def prepare_source_d0_launch_formal_admission(
             if isinstance(reason_contract, Mapping)
             else reason_contract
         )
-        if raw_state != "TRUE":
-            state = "NOT_EVALUATED"
+        if raw_state != "TRUE" and state == "UNKNOWN" and gate_reason is None:
             gate_reason = "RAW_NOT_TRUE"
         gate_result[key] = {"state": state, "reason": gate_reason}
         if raw_state == "TRUE" and state != "TRUE":

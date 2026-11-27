@@ -232,6 +232,8 @@ _REASONS = {
     "OFFICIAL_WINDOW_INVALID": "官方会话窗口缺少目标日或顺序不唯一。",
     "OFFICIAL_WINDOW_LEFT_TRUNCATED": "目标日前不足所需连续官方会话。",
     "SOURCE_CAPTURE_IDENTITY_MISMATCH": "历史行与目标来源代码、日期或paired capture不一致。",
+    "QFQ_SOURCE_CAPTURE_MISSING": "历史行缺少独立QFQ捕获ID，不拿paired捕获掩盖缺失。",
+    "QFQ_TARGET_CAPTURE_MISSING": "目标日行缺少独立QFQ捕获ID，不拿paired捕获掩盖缺失。",
     "PRICE_COORDINATE_MISMATCH": "官方会话窗口内的价格坐标不是QFQ。",
     "MIXED_PRICE_COORDINATE": "严格窗口内QFQ价格来自不同捕获且缺少同basis可比证据。",
     "OFFICIAL_SESSION_BAR_MISSING": "严格官方窗口至少一个会话缺少有效QFQ日线。",
@@ -280,13 +282,8 @@ def _to_fraction(value: Any) -> Fraction | None:
 def _has_qfq_comparable_evidence(
     row: Mapping[str, Any], target_row: Mapping[str, Any] | None
 ) -> bool:
-    """判断跨捕获QFQ行是否携带明确的同basis可比证据。"""
-    if row.get("qfq_basis_comparable") is True or row.get("qfq_comparable") is True:
-        return True
-    for key in ("qfq_basis_id", "qfq_coordinate_basis", "qfq_price_basis"):
-        val = row.get(key)
-        if val is not None and target_row is not None and target_row.get(key) == val:
-            return True
+    """判断跨捕获QFQ行是否携带真实合法同basis可比证据；无证跨捕获返回False。"""
+    del row, target_row
     return False
 
 
@@ -323,14 +320,12 @@ def _extract_strict_qfq_close(
     if row.get("session_date") != session or row.get("source_symbol") != source_symbol:
         return None, "SOURCE_CAPTURE_IDENTITY_MISMATCH"
     row_qfq_cap = row.get("qfq_source_capture_id")
-    if row_qfq_cap is None:
-        row_qfq_cap = row.get("source_capture_id")
     if type(row_qfq_cap) is not int or row_qfq_cap <= 0:
-        return None, "SOURCE_CAPTURE_IDENTITY_MISMATCH"
-    if (
-        target_qfq_capture_id is not None
-        and row_qfq_cap != target_qfq_capture_id
-        and not _has_qfq_comparable_evidence(row, target_row)
+        return None, "QFQ_SOURCE_CAPTURE_MISSING"
+    if target_qfq_capture_id is None:
+        return None, "QFQ_TARGET_CAPTURE_MISSING"
+    if row_qfq_cap != target_qfq_capture_id and not _has_qfq_comparable_evidence(
+        row, target_row
     ):
         return None, "MIXED_PRICE_COORDINATE"
     row_coord = row.get("qfq_price_coordinate", row.get("price_coordinate"))
@@ -409,8 +404,7 @@ def _resolve_target_qfq_capture_id(
 ) -> int | None:
     if isinstance(target_row, Mapping):
         qfq_cap = target_row.get("qfq_source_capture_id")
-        if type(qfq_cap) is int and qfq_cap > 0:
-            return qfq_cap
+        return qfq_cap if type(qfq_cap) is int and qfq_cap > 0 else None
     return explicit_capture_id
 
 

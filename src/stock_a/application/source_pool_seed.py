@@ -44,6 +44,7 @@ from stock_a.storage.postgres.baostock_price_facts import (
 from stock_a.storage.postgres.baostock_universe import resolve_date_effective_universe
 from stock_a.storage.postgres.static_research_facts import (
     StaticResearchPgError,
+    read_price_limit_facts_by_symbol,
     read_source_d0_scenario_day,
     read_source_pool_seed_facts,
     read_seed_profile_returns,
@@ -100,6 +101,7 @@ def source_qualification_explanation(
     formal_candidate_seed: Mapping[str, Any],
     source_seed: Mapping[str, Any],
     prewatch: Mapping[str, Any],
+    formal_prewatch: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """以同一组三态谓词说明来源形态、正式门、排除与缺证。"""
     public_conditions = (
@@ -178,6 +180,11 @@ def source_qualification_explanation(
             for item in public_failures + seed_failures
         )
     )
+    effective_formal_prewatch = (
+        dict(formal_prewatch)
+        if formal_prewatch is not None
+        else _and(public_gate, dict(prewatch))
+    )
     return {
         "contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
         "evidence_scope": "SOURCE_ONLY_NON_PIT",
@@ -195,9 +202,9 @@ def source_qualification_explanation(
         "source_seed_shape": dict(source_seed),
         "source_seed": dict(source_seed),
         "seed_safety": dict(safety),
-        "formal_seed": dict(seed),
+        "formal_seed": dict(formal_candidate_seed),
         "formal_candidate_seed": dict(formal_candidate_seed),
-        "formal_prewatch": dict(prewatch),
+        "formal_prewatch": effective_formal_prewatch,
         "raw_prewatch": dict(prewatch),
         "known_exclusions": [
             {"condition": condition, "reason": reason}
@@ -208,9 +215,9 @@ def source_qualification_explanation(
         "primary_explanation": primary,
         "counts": {
             "ordinary_candidate_public_gate": _state_counts([public_gate]),
-            "formal_seed": _state_counts([seed]),
+            "formal_seed": _state_counts([formal_candidate_seed]),
             "formal_candidate_seed": _state_counts([formal_candidate_seed]),
-            "formal_prewatch": _state_counts([prewatch]),
+            "formal_prewatch": _state_counts([effective_formal_prewatch]),
             "raw_prewatch": _state_counts([prewatch]),
         },
     }
@@ -340,6 +347,153 @@ def unavailable_source_qualification(reason: str) -> dict[str, Any]:
     )
 
 
+def resolve_ordinary_candidate_gates(
+    *,
+    source_symbol: str | None,
+    universe_result: Mapping[str, Any] | None,
+    target_row: Mapping[str, Any] | None = None,
+    price_limit_fact: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """按UNIVERSE_ELIGIBILITY_R1独立判定ResearchUniverse、normal_listing_phase与limited_price_rule。"""
+    if (
+        isinstance(universe_result, Mapping)
+        and universe_result.get("status") == "AVAILABLE"
+        and source_symbol
+    ):
+        missing_basic = set(universe_result.get("missing_basic_symbols", ()))
+        quarantined = set(universe_result.get("quarantined_symbols", ()))
+        partial_unknown = set(universe_result.get("partial_unknown_symbols", ()))
+        members = set(universe_result.get("members", ()))
+        if (
+            source_symbol in missing_basic
+            or source_symbol in quarantined
+            or source_symbol in partial_unknown
+        ):
+            formal_universe = _tri(None, "STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED")
+        elif source_symbol in members:
+            formal_universe = _tri(True)
+        else:
+            formal_universe = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
+    else:
+        missing_reason = (
+            str(universe_result.get("reason"))
+            if isinstance(universe_result, Mapping) and universe_result.get("reason")
+            else "DATE_VALID_IDENTITY_LIFECYCLE_EVIDENCE_MISSING"
+        )
+        formal_universe = _tri(None, missing_reason)
+
+    explicit_phase = (
+        target_row.get("listing_phase") if isinstance(target_row, Mapping) else None
+    )
+    if explicit_phase is None and isinstance(universe_result, Mapping):
+        phase_map = universe_result.get("listing_phase_by_symbol")
+        if isinstance(phase_map, Mapping) and source_symbol:
+            explicit_phase = phase_map.get(source_symbol)
+
+    explicit_limit = (
+        target_row.get("limit_applicability")
+        if isinstance(target_row, Mapping)
+        else None
+    )
+    if explicit_limit is None and isinstance(universe_result, Mapping):
+        limit_map = universe_result.get("limit_applicability_by_symbol")
+        if isinstance(limit_map, Mapping) and source_symbol:
+            explicit_limit = limit_map.get(source_symbol)
+
+    limit_fact = price_limit_fact
+    if limit_fact is None and isinstance(target_row, Mapping):
+        candidate_fact = target_row.get("price_limit_fact")
+        if isinstance(candidate_fact, Mapping):
+            limit_fact = candidate_fact
+    if limit_fact is None and isinstance(universe_result, Mapping) and source_symbol:
+        fact_map = universe_result.get("price_limit_by_symbol")
+        if isinstance(fact_map, Mapping):
+            candidate_fact = fact_map.get(source_symbol)
+            if isinstance(candidate_fact, Mapping):
+                limit_fact = candidate_fact
+
+    if isinstance(explicit_phase, str) and explicit_phase:
+        if explicit_phase == "NORMAL":
+            normal_listing = _tri(True)
+        elif explicit_phase in {
+            "SPECIAL_PHASE",
+            "IPO_SPECIAL_PHASE",
+            "DELISTING_PERIOD",
+            "PRE_LISTING",
+            "DELISTED",
+        }:
+            normal_listing = _tri(
+                False,
+                "SPECIAL_PHASE"
+                if explicit_phase == "IPO_SPECIAL_PHASE"
+                else explicit_phase,
+            )
+        else:
+            normal_listing = _tri(None, "DATE_VALID_LISTING_PHASE_EVIDENCE_MISSING")
+    elif isinstance(limit_fact, Mapping):
+        l_status = limit_fact.get("limit_status")
+        l_reason = str(limit_fact.get("reason") or "")
+        l_rule = str(limit_fact.get("rule_id") or "")
+        if l_status == "ASSESSABLE":
+            normal_listing = _tri(True)
+        elif (
+            l_status == "NA_NO_PRICE_LIMIT"
+            or l_reason == "IPO_FIRST_5_SESSIONS_NO_PRICE_LIMIT"
+            or l_rule == "CN_IPO_FIRST_5_SESSIONS_NO_LIMIT_R1"
+        ):
+            normal_listing = _tri(False, "SPECIAL_PHASE")
+        elif l_reason == "TARGET_SESSION_BEFORE_IPO_DATE":
+            normal_listing = _tri(False, "PRE_LISTING_BEFORE_IPO_DATE")
+        elif l_status == "NA_SUSPENDED":
+            normal_listing = _tri(None, "SUSPENDED_LISTING_PHASE_UNPROVED")
+        else:
+            normal_listing = _tri(
+                None, l_reason or "DATE_VALID_LISTING_PHASE_EVIDENCE_MISSING"
+            )
+    elif formal_universe["state"] == "FALSE":
+        normal_listing = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
+    else:
+        normal_listing = _tri(None, "DATE_VALID_LISTING_PHASE_EVIDENCE_MISSING")
+
+    if isinstance(explicit_limit, str) and explicit_limit:
+        if explicit_limit == "LIMITED":
+            limited_price_rule = _tri(True)
+        elif explicit_limit in {"UNLIMITED", "NO_PRICE_LIMIT", "NA_NO_PRICE_LIMIT"}:
+            limited_price_rule = _tri(False, "UNLIMITED")
+        else:
+            limited_price_rule = _tri(
+                None, "DATE_VALID_LIMIT_APPLICABILITY_EVIDENCE_MISSING"
+            )
+    elif isinstance(limit_fact, Mapping):
+        l_status = limit_fact.get("limit_status")
+        l_reason = str(limit_fact.get("reason") or "")
+        l_rule = str(limit_fact.get("rule_id") or "")
+        if l_status == "ASSESSABLE":
+            limited_price_rule = _tri(True)
+        elif (
+            l_status == "NA_NO_PRICE_LIMIT"
+            or l_reason == "IPO_FIRST_5_SESSIONS_NO_PRICE_LIMIT"
+            or l_rule == "CN_IPO_FIRST_5_SESSIONS_NO_LIMIT_R1"
+        ):
+            limited_price_rule = _tri(False, "UNLIMITED")
+        elif l_reason == "TARGET_SESSION_BEFORE_IPO_DATE":
+            limited_price_rule = _tri(False, "PRE_LISTING_BEFORE_IPO_DATE")
+        elif l_status == "NA_SUSPENDED":
+            limited_price_rule = _tri(None, "SUSPENDED_LIMIT_RULE_UNPROVED")
+        else:
+            limited_price_rule = _tri(
+                None, l_reason or "DATE_VALID_LIMIT_APPLICABILITY_EVIDENCE_MISSING"
+            )
+    elif formal_universe["state"] == "FALSE":
+        limited_price_rule = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
+    else:
+        limited_price_rule = _tri(
+            None, "DATE_VALID_LIMIT_APPLICABILITY_EVIDENCE_MISSING"
+        )
+
+    return formal_universe, normal_listing, limited_price_rule
+
+
 def source_seed_predicates(
     preview: Mapping[str, Any],
     delta,
@@ -348,6 +502,7 @@ def source_seed_predicates(
     source_symbol: str | None = None,
     universe_result: Mapping[str, Any] | None = None,
     target_row: Mapping[str, Any] | None = None,
+    price_limit_fact: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """按ALG-19/20归约实际字段；接入日期有效Research Universe、CNY_VERIFIED流动性、QFQ坐标与PREWATCH。"""
     core = preview["core"]["fields"]
@@ -412,48 +567,22 @@ def source_seed_predicates(
             str(preview.get("actual_quote_reason") or "TARGET_ACTUAL_OR_PRICE_UNKNOWN"),
         )
     )
-    if (
-        isinstance(universe_result, Mapping)
-        and universe_result.get("status") == "AVAILABLE"
-        and source_symbol
-    ):
-        missing_basic = set(universe_result.get("missing_basic_symbols", ()))
-        quarantined = set(universe_result.get("quarantined_symbols", ()))
-        members = set(universe_result.get("members", ()))
-        if source_symbol in missing_basic or source_symbol in quarantined:
-            formal_universe = _tri(None, "STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED")
-            normal_listing = _tri(None, "STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED")
-            limited_price_rule = _tri(
-                None, "STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED"
-            )
-        elif source_symbol in members:
-            formal_universe = _tri(True)
-            normal_listing = _tri(True)
-            limited_price_rule = _tri(True)
-        else:
-            formal_universe = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
-            normal_listing = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
-            limited_price_rule = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
-    else:
-        missing_reason = (
-            str(universe_result.get("reason"))
-            if isinstance(universe_result, Mapping) and universe_result.get("reason")
-            else "DATE_VALID_IDENTITY_LIFECYCLE_EVIDENCE_MISSING"
+    formal_universe, normal_listing, limited_price_rule = (
+        resolve_ordinary_candidate_gates(
+            source_symbol=source_symbol,
+            universe_result=universe_result,
+            target_row=target_row,
+            price_limit_fact=price_limit_fact,
         )
-        formal_universe = _tri(None, missing_reason)
-        normal_listing = _tri(None, "DATE_VALID_LISTING_PHASE_EVIDENCE_MISSING")
-        limited_price_rule = _tri(
-            None, "DATE_VALID_LIMIT_APPLICABILITY_EVIDENCE_MISSING"
-        )
+    )
 
     if (
         isinstance(target_row, Mapping)
         and target_row.get("raw_is_st_quality") == "OBSERVED"
+        and str(target_row.get("raw_is_st_value") or "") in {"0", "1"}
     ):
-        is_st_val = str(target_row.get("raw_is_st_value") or "") == "1"
+        is_st_val = str(target_row.get("raw_is_st_value")) == "1"
         non_st = _tri(not is_st_val, "ST_STATUS_OBSERVED" if is_st_val else None)
-    elif formal_universe["state"] == "TRUE":
-        non_st = _tri(True)
     else:
         non_st = _tri(None, "DATE_VALID_ST_STATUS_EVIDENCE_MISSING")
 
@@ -520,6 +649,7 @@ def source_seed_predicates(
         mandatory_core_ready = _tri(True)
 
     prewatch = _and(seed, mandatory_core_ready)
+    formal_prewatch = _and(formal_candidate_seed, mandatory_core_ready)
     predicates = {
         "research_universe": formal_universe,
         "actual_bar": actual,
@@ -547,6 +677,7 @@ def source_seed_predicates(
         formal_candidate_seed=formal_candidate_seed,
         source_seed=source_seed,
         prewatch=prewatch,
+        formal_prewatch=formal_prewatch,
     )
     return {
         "predicates": predicates,
@@ -555,12 +686,16 @@ def source_seed_predicates(
         "s2": s2,
         "source_seed": source_seed,
         "seed": seed,
-        "formal_seed": seed,
-        "formal_prewatch": prewatch,
+        "formal_seed": formal_candidate_seed,
+        "formal_prewatch": formal_prewatch,
         "raw_prewatch": prewatch,
-        "formal_eligibility": "FORMAL_UNIVERSE_AND_QUALITY_BOUND"
-        if formal_universe["state"] != "UNKNOWN"
-        else "UNKNOWN",
+        "formal_eligibility": (
+            "FORMAL_UNIVERSE_AND_QUALITY_BOUND"
+            if public_gate["state"] == "TRUE"
+            else "EXCLUDED"
+            if public_gate["state"] == "FALSE"
+            else "UNKNOWN"
+        ),
         "qualification": qualification,
     }
 
@@ -752,6 +887,11 @@ def compute_source_pool_seed(
     )
     _, sessions, revision = resolve_pg_history_window(
         target_session.isoformat(), history_session_count
+    )
+    price_limit_by_symbol = read_price_limit_facts_by_symbol(
+        config,
+        target_session=target_session,
+        calendar_revision=revision,
     )
     from stock_a.storage.postgres.cross_section import read_cross_section_day_bundle
 
@@ -1106,6 +1246,7 @@ def compute_source_pool_seed(
                     source_symbol=symbol,
                     universe_result=universe_result,
                     target_row=target_row,
+                    price_limit_fact=price_limit_by_symbol.get(symbol),
                 )
                 seed["core"] = {
                     key: preview["core"]["fields"][key]
@@ -1439,7 +1580,6 @@ def read_source_pool_seed(
                 for key in (
                     "research_universe",
                     "actual_bar",
-                    "non_st",
                     "normal_listing_phase",
                     "limited_price_rule",
                     "coordinate_ready",
@@ -1447,15 +1587,32 @@ def read_source_pool_seed(
             )
         )
         formal_candidate = _and(public_gate, seed)
+        formal_seed = (
+            {
+                "state": row["formal_seed_state"],
+                "reasons": list(row.get("formal_seed_reasons") or ()),
+            }
+            if row.get("formal_seed_state") in {"TRUE", "FALSE", "UNKNOWN"}
+            else formal_candidate
+        )
+        formal_prewatch = (
+            {
+                "state": row["formal_prewatch_state"],
+                "reasons": list(row.get("formal_prewatch_reasons") or ()),
+            }
+            if row.get("formal_prewatch_state") in {"TRUE", "FALSE", "UNKNOWN"}
+            else _and(formal_candidate, raw_prewatch)
+        )
         qualification = source_qualification_explanation(
             predicates,
             s1=s1,
             s2=s2,
             safety=safety,
             seed=seed,
-            formal_candidate_seed=formal_candidate,
+            formal_candidate_seed=formal_seed,
             source_seed=source_seed,
             prewatch=raw_prewatch,
+            formal_prewatch=formal_prewatch,
         )
         core = {}
         for name in core_measures:
@@ -1517,8 +1674,16 @@ def read_source_pool_seed(
             "s2": s2,
             "seed": seed,
             "source_seed": source_seed,
+            "formal_seed": formal_seed,
+            "formal_prewatch": formal_prewatch,
             "raw_prewatch": raw_prewatch,
-            "formal_eligibility": "NOT_AUTHORIZED",
+            "formal_eligibility": (
+                "FORMAL_UNIVERSE_AND_QUALITY_BOUND"
+                if public_gate["state"] == "TRUE"
+                else "EXCLUDED"
+                if public_gate["state"] == "FALSE"
+                else "UNKNOWN"
+            ),
             "qualification": qualification,
             "core": core,
             "native_price": native,

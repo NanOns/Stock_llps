@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
+from fractions import Fraction
 from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
@@ -11,7 +12,7 @@ import json
 def _json_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
-    if isinstance(value, Decimal):
+    if isinstance(value, (Decimal, Fraction)):
         return str(value)
     if isinstance(value, UUID):
         return str(value)

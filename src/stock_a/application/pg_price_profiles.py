@@ -553,7 +553,7 @@ def run_source_symbol_price_profile(
             config,
             session_date=target_session,
             directory_capture_id=cross_section_universe_capture_id,
-            research_eligible_only=True,
+            research_eligible_only=False,
         )
         if target_universe.get("status") != "AVAILABLE":
             raise PgPriceProfileError(

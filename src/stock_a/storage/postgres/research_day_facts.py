@@ -291,6 +291,14 @@ _ANCHOR_COLUMNS = (
     "gap_after_state",
     "gap_after_quality",
     "gap_after_reason",
+    "impulse_retention_1_numerator",
+    "impulse_retention_1_denominator",
+    "impulse_retention_1_quality",
+    "impulse_retention_1_reason",
+    "impulse_retention_3_numerator",
+    "impulse_retention_3_denominator",
+    "impulse_retention_3_quality",
+    "impulse_retention_3_reason",
 )
 _D0_KEY = (
     "target_session",
@@ -461,6 +469,31 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
     return result
 
 
+def _retention_pair(
+    num: Any, den: Any
+) -> tuple[Decimal | int | None, Decimal | int | None]:
+    if num is None and den is None:
+        return None, None
+    if den is None and hasattr(num, "numerator") and hasattr(num, "denominator"):
+        return _ratio_pair(num)
+
+    def _scalar(val: Any) -> Decimal | int | None:
+        if (
+            val is not None
+            and hasattr(val, "numerator")
+            and hasattr(val, "denominator")
+            and not isinstance(val, (int, Decimal))
+        ):
+            return (
+                int(val.numerator)
+                if val.denominator == 1
+                else Decimal(val.numerator) / Decimal(val.denominator)
+            )
+        return val
+
+    return _scalar(num), _scalar(den)
+
+
 def _anchor_rows(
     facts: ResearchDayFacts, structure_ids: Mapping[tuple[str, str], int]
 ) -> list[tuple[Any, ...]]:
@@ -515,6 +548,18 @@ def _anchor_rows(
                 item.gap_after_state,
                 item.gap_after_quality,
                 item.gap_after_reason,
+                *_retention_pair(
+                    item.impulse_retention_1_numerator,
+                    item.impulse_retention_1_denominator,
+                ),
+                item.impulse_retention_1_quality,
+                item.impulse_retention_1_reason,
+                *_retention_pair(
+                    item.impulse_retention_3_numerator,
+                    item.impulse_retention_3_denominator,
+                ),
+                item.impulse_retention_3_quality,
+                item.impulse_retention_3_reason,
             )
         )
     return result
@@ -1722,6 +1767,9 @@ def read_source_research_day(
     structure_type: str | None = None,
     material_change_reason: str | None = None,
     include_all_results: bool = False,
+    priority_page: int = 1,
+    priority_page_size: int = 30,
+    priority_status_filter: str | None = None,
 ) -> dict[str, Any]:
     """只读分页读取PG事实；未迁移或未计算时返回明确状态，不重算回退。"""
     if (
@@ -2379,6 +2427,10 @@ def read_source_research_day(
                 config,
                 target_session=target_session,
                 selected_symbols=page_symbols,
+                priority_page=priority_page,
+                priority_page_size=priority_page_size,
+                priority_status_filter=priority_status_filter,
+                symbol_filter=symbol,
             ),
             "execution": {
                 "database_mode": "READ_ONLY",
@@ -2394,6 +2446,10 @@ def _read_r04_formal_summary_readonly(
     *,
     target_session: date,
     selected_symbols: Sequence[str],
+    priority_page: int = 1,
+    priority_page_size: int = 30,
+    priority_status_filter: str | None = None,
+    symbol_filter: str | None = None,
 ) -> dict[str, Any]:
     """只读读取当日R04正式D2选主、股票风险、Priority、Radar与Near-Miss汇总；缺结果返回NOT_COMPUTED。"""
     from stock_a.research.state import CONTRACT as D2_CONTRACT
@@ -2409,18 +2465,35 @@ def _read_r04_formal_summary_readonly(
     payload, _meta, _chain, _sessions = _load_calendar(target_session)
     calendar_id = str(payload.get("calendar_id") or "CN_A_SHARE_OFFICIAL")
     rule_identity = D2Rules(D2_CONTRACT, 2, 10, 3, 3).identity
+    target_entity = symbol_filter or (
+        selected_symbols[0] if len(selected_symbols) == 1 else None
+    )
     primaries = read_d2_primary_projections(
         config,
         session_date=target_session,
         calendar_id=calendar_id,
         rule_identity=rule_identity,
+        entity_id=target_entity,
     )
-    risk_summary = read_stock_risk_summary_and_rows(config, session_date=target_session)
-    priority_page = read_stock_priority_page(
-        config, session_date=target_session, page=1, page_size=30
+    risk_summary = read_stock_risk_summary_and_rows(
+        config, session_date=target_session, source_symbol=target_entity
     )
-    radar_nm = read_stock_radar_and_near_miss(config, session_date=target_session)
-    if not primaries and risk_summary["total"] == 0 and priority_page["total"] == 0:
+    priority_page_data = read_stock_priority_page(
+        config,
+        session_date=target_session,
+        page=max(1, int(priority_page)),
+        page_size=max(1, min(200, int(priority_page_size))),
+        status_filter=priority_status_filter,
+        source_symbol=target_entity,
+    )
+    radar_nm = read_stock_radar_and_near_miss(
+        config, session_date=target_session, source_symbol=target_entity
+    )
+    if (
+        not primaries
+        and risk_summary["total"] == 0
+        and priority_page_data["total"] == 0
+    ):
         return {
             "status": "NOT_COMPUTED",
             "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
@@ -2446,10 +2519,180 @@ def _read_r04_formal_summary_readonly(
                 if not selected_set or row["source_symbol"] in selected_set
             },
         },
-        "stock_priority": priority_page,
+        "stock_priority": priority_page_data,
         "radar_events": radar_nm["radar_events"],
         "near_miss_items": radar_nm["near_miss_items"],
     }
+
+
+def persist_d1_active_anchors_and_observations_in_cursor(
+    cursor: Any,
+    *,
+    target_session: date,
+    active_anchors: Sequence[Any],
+    active_observations: Sequence[Any],
+) -> dict[str, int]:
+    """在既有写事务cursor内幂等持久化D1稳定出生锚与当日全量支撑观察。"""
+    anchor_id_by_uid: dict[str, int] = {}
+    for anc in active_anchors:
+        l_num, l_den = _ratio_pair(anc.lower)
+        u_num, u_den = _ratio_pair(anc.upper)
+        cursor.execute(
+            """
+            INSERT INTO stock.source_d1_anchors (
+                anchor_uid, source_symbol, structure_type, relation,
+                created_session, available_from_session, test_from_session,
+                coordinate_id, lower_numerator, lower_denominator,
+                upper_numerator, upper_denominator,
+                source_event_id, source_ref, birth_capture_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (anchor_uid) DO UPDATE SET
+                available_from_session = EXCLUDED.available_from_session,
+                test_from_session = EXCLUDED.test_from_session
+            RETURNING id
+            """,
+            (
+                anc.anchor_uid,
+                anc.source_symbol,
+                anc.structure_type,
+                anc.relation,
+                anc.created_session,
+                anc.available_from_session,
+                anc.test_from_session,
+                anc.coordinate_id,
+                l_num,
+                l_den,
+                u_num,
+                u_den,
+                anc.source_event_id,
+                anc.source_ref,
+                anc.birth_capture_id,
+            ),
+        )
+        anchor_id_by_uid[anc.anchor_uid] = int(cursor.fetchone()[0])
+
+    missing_uids = sorted(
+        {
+            obs.anchor_uid
+            for obs in active_observations
+            if obs.anchor_uid not in anchor_id_by_uid
+        }
+    )
+    if missing_uids:
+        cursor.execute(
+            "SELECT anchor_uid, id FROM stock.source_d1_anchors WHERE anchor_uid = ANY(%s::text[])",
+            (missing_uids,),
+        )
+        for uid, aid in cursor.fetchall():
+            anchor_id_by_uid[uid] = int(aid)
+
+    obs_inserted = 0
+    for obs in active_observations:
+        aid = anchor_id_by_uid.get(obs.anchor_uid)
+        if aid is None:
+            continue
+        r1_num, r1_den = _retention_pair(
+            obs.impulse_retention_1_numerator, obs.impulse_retention_1_denominator
+        )
+        r3_num, r3_den = _retention_pair(
+            obs.impulse_retention_3_numerator, obs.impulse_retention_3_denominator
+        )
+        cursor.execute(
+            """
+            INSERT INTO stock.source_d1_anchor_day_observations (
+                anchor_id, anchor_uid, target_session, source_symbol, structure_type,
+                observation_status, state, quality, acceptance, freshness,
+                breach_streak, acceptance_streak, test_count, separated_sessions,
+                retest_qualified, is_active, reason, comparability_status,
+                observation_capture_id,
+                impulse_retention_1_numerator, impulse_retention_1_denominator,
+                impulse_retention_1_quality, impulse_retention_1_reason,
+                impulse_retention_3_numerator, impulse_retention_3_denominator,
+                impulse_retention_3_quality, impulse_retention_3_reason
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (anchor_id, target_session) DO UPDATE SET
+                observation_status = EXCLUDED.observation_status,
+                state = EXCLUDED.state,
+                quality = EXCLUDED.quality,
+                acceptance = EXCLUDED.acceptance,
+                freshness = EXCLUDED.freshness,
+                breach_streak = EXCLUDED.breach_streak,
+                acceptance_streak = EXCLUDED.acceptance_streak,
+                test_count = EXCLUDED.test_count,
+                separated_sessions = EXCLUDED.separated_sessions,
+                retest_qualified = EXCLUDED.retest_qualified,
+                is_active = EXCLUDED.is_active,
+                reason = EXCLUDED.reason,
+                comparability_status = EXCLUDED.comparability_status,
+                observation_capture_id = EXCLUDED.observation_capture_id,
+                impulse_retention_1_numerator = EXCLUDED.impulse_retention_1_numerator,
+                impulse_retention_1_denominator = EXCLUDED.impulse_retention_1_denominator,
+                impulse_retention_1_quality = EXCLUDED.impulse_retention_1_quality,
+                impulse_retention_1_reason = EXCLUDED.impulse_retention_1_reason,
+                impulse_retention_3_numerator = EXCLUDED.impulse_retention_3_numerator,
+                impulse_retention_3_denominator = EXCLUDED.impulse_retention_3_denominator,
+                impulse_retention_3_quality = EXCLUDED.impulse_retention_3_quality,
+                impulse_retention_3_reason = EXCLUDED.impulse_retention_3_reason
+            """,
+            (
+                aid,
+                obs.anchor_uid,
+                target_session,
+                obs.source_symbol,
+                obs.structure_type,
+                obs.observation_status,
+                obs.state,
+                obs.quality,
+                obs.acceptance,
+                obs.freshness,
+                int(obs.breach_streak),
+                int(obs.acceptance_streak),
+                int(obs.test_count),
+                int(obs.separated_sessions),
+                bool(obs.retest_qualified),
+                bool(obs.is_active),
+                obs.reason,
+                obs.comparability_status,
+                obs.observation_capture_id,
+                r1_num,
+                r1_den,
+                obs.impulse_retention_1_quality,
+                obs.impulse_retention_1_reason,
+                r3_num,
+                r3_den,
+                obs.impulse_retention_3_quality,
+                obs.impulse_retention_3_reason,
+            ),
+        )
+        obs_inserted += cursor.rowcount
+    return {
+        "anchors_upserted": len(anchor_id_by_uid),
+        "observations_upserted": obs_inserted,
+    }
+
+
+def persist_d1_active_anchors_and_observations(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    active_anchors: Sequence[Any],
+    active_observations: Sequence[Any],
+) -> dict[str, int]:
+    """在独立事务中持久化D1稳定出生锚与当日全量支撑观察（供动态MA局部补齐调用）。"""
+    with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
+        _conn,
+        cursor,
+        _scope,
+    ):
+        return persist_d1_active_anchors_and_observations_in_cursor(
+            cursor,
+            target_session=target_session,
+            active_anchors=active_anchors,
+            active_observations=active_observations,
+        )
 
 
 def read_d1_active_support_observations(
@@ -2457,31 +2700,49 @@ def read_d1_active_support_observations(
     *,
     target_session: date,
     source_symbol: str | None = None,
+    anchor_uid: str | None = None,
+    include_inactive: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    """只读读取指定交易日已落库的D1活跃支撑锚观察事实，按证券代码分组供D2与风险消费。"""
+    """只读读取指定交易日已落库的D1稳定出生锚全量支撑观察事实，按证券代码分组供D0/D2与风险消费。"""
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
         _,
     ):
-        where = ["s.target_session = %s", "a.relation = 'SUPPORT'"]
+        where = ["o.target_session = %s", "a.relation = 'SUPPORT'"]
         params: list[Any] = [target_session]
         if source_symbol is not None:
-            where.append("s.source_symbol = %s")
+            where.append("o.source_symbol = %s")
             params.append(source_symbol)
+        if anchor_uid is not None:
+            where.append("o.anchor_uid = %s")
+            params.append(anchor_uid)
+        if not include_inactive:
+            where.append("o.is_active = TRUE")
         rows = cursor.execute(
             f"""
-            SELECT s.source_symbol, s.structure_type, s.id AS d1_structure_id,
-                   a.created_session, a.coordinate_id,
-                   a.lower_numerator, a.lower_denominator,
+            SELECT o.anchor_id, o.anchor_uid, o.source_symbol, o.structure_type,
+                   a.created_session, a.available_from_session, a.test_from_session,
+                   a.coordinate_id, a.lower_numerator, a.lower_denominator,
                    a.upper_numerator, a.upper_denominator,
-                   a.after_state, a.after_quality, a.after_acceptance, a.after_freshness,
-                   a.after_breach_streak, a.after_acceptance_streak, a.after_test_count,
-                   a.after_separated_sessions, a.after_retest_qualified
-            FROM stock.source_d1_material_anchor_day_facts a
-            JOIN stock.source_d1_structure_day_facts s ON s.id = a.d1_structure_id
+                   a.source_event_id, a.source_ref,
+                   o.observation_status,
+                   o.state AS after_state, o.quality AS after_quality,
+                   o.acceptance AS after_acceptance, o.freshness AS after_freshness,
+                   o.breach_streak AS after_breach_streak,
+                   o.acceptance_streak AS after_acceptance_streak,
+                   o.test_count AS after_test_count,
+                   o.separated_sessions AS after_separated_sessions,
+                   o.retest_qualified AS after_retest_qualified,
+                   o.is_active, o.reason, o.comparability_status,
+                   o.impulse_retention_1_numerator, o.impulse_retention_1_denominator,
+                   o.impulse_retention_1_quality, o.impulse_retention_1_reason,
+                   o.impulse_retention_3_numerator, o.impulse_retention_3_denominator,
+                   o.impulse_retention_3_quality, o.impulse_retention_3_reason
+            FROM stock.source_d1_anchor_day_observations o
+            JOIN stock.source_d1_anchors a ON a.id = o.anchor_id
             WHERE {" AND ".join(where)}
-            ORDER BY s.source_symbol, a.created_session DESC, s.structure_type
+            ORDER BY o.source_symbol, a.created_session DESC, o.structure_type, o.anchor_id
             """,
             tuple(params),
         ).fetchall()

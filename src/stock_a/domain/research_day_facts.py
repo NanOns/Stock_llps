@@ -120,6 +120,14 @@ class D1MaterialAnchorFact:
     gap_after_state: str | None
     gap_after_quality: str | None
     gap_after_reason: str | None
+    impulse_retention_1_numerator: ExactRational | None = None
+    impulse_retention_1_denominator: ExactRational | None = None
+    impulse_retention_1_quality: str = "UNKNOWN"
+    impulse_retention_1_reason: str | None = None
+    impulse_retention_3_numerator: ExactRational | None = None
+    impulse_retention_3_denominator: ExactRational | None = None
+    impulse_retention_3_quality: str = "UNKNOWN"
+    impulse_retention_3_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

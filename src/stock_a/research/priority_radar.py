@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence, Set as AbstractSet
+from dataclasses import dataclass, replace
 from fractions import Fraction
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 from stock_a.research.admission import SCENARIOS
@@ -129,6 +130,7 @@ class RadarEvent:
     annotations: tuple[str, ...]
     priority_group: int  # 0=RANKABLE, 1=EXCLUDED, 2=UNKNOWN
     priority_sort_key: tuple[Any, ...] | None
+    is_primary_event: bool = False
     contract: str = RADAR_CONTRACT
 
 
@@ -173,6 +175,7 @@ class NearMissPathInput:
     soft_predicates: tuple[SoftPredicateCheck, ...]
     emergence_rank: int | None
     rps5_delta3_pp: FieldValue
+    stable_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +197,9 @@ class NearMissRecord:
     tolerance: Fraction
     normalized_distance: Fraction
     sort_key: tuple[Any, ...]
+    emergence_rank: int = -1
+    delta3_pp: Fraction | None = None
+    stable_id: str = ""
     contract: str = NEAR_MISS_CONTRACT
 
 
@@ -300,6 +306,98 @@ def compute_improvement_age(
             else "NO_PROVEN_IMPROVEMENT_IN_EPISODE",
         )
     return ImprovementAge("UNKNOWN", None, "IMPROVEMENT_HISTORY_INCOMPLETE")
+
+
+def detect_existing_anchor_rank_improvement(
+    prior_observations: Sequence[SupportObservation],
+    current_observations: Sequence[SupportObservation],
+    *,
+    expired_anchor_ids: AbstractSet[str] = frozenset(),
+) -> bool:
+    """判断同一 episode 已存在的关联合法锚当日是否发生结构 rank 上升（新锚不触发）。"""
+    prior_by_id = {obs.anchor_id: obs for obs in prior_observations}
+    for curr_obs in current_observations:
+        if curr_obs.anchor_id in expired_anchor_ids:
+            continue
+        prior_obs = prior_by_id.get(curr_obs.anchor_id)
+        if prior_obs is None:
+            continue
+        if prior_obs.state == "BROKEN" or curr_obs.state == "BROKEN":
+            continue
+        prior_rank = support_observation_to_structure_rank(prior_obs)
+        curr_rank = support_observation_to_structure_rank(curr_obs)
+        if (
+            prior_rank is not None
+            and curr_rank is not None
+            and prior_rank.quality == "OBSERVED"
+            and curr_rank.quality == "OBSERVED"
+            and int(curr_rank.value) > int(prior_rank.value)
+        ):
+            return True
+    return False
+
+
+def resolve_episode_improvement_age(
+    *,
+    current_ordinal: int,
+    episode_id: str | None,
+    primary_selection_quality: str,
+    current_state: State | None,
+    prior_last_improvement_ordinal: int | None,
+    prior_history_complete: bool,
+    prior_mode: str = "PREVIOUS_ACCEPTED",
+    existing_anchor_rank_improved: bool = False,
+) -> ImprovementAge:
+    """基于同一 episode 真实历史改善事件按官方会话计算改善年龄。
+
+    改善事件仅包括：同一 episode 的 UPGRADED、IMPROVEMENT_RESET，
+    或已存在关联锚的 structure_rank 上升。新载入、换主或新锚出生不重置。
+    """
+    if type(current_ordinal) is not int or current_ordinal < 0:
+        raise ValueError("current_ordinal必须为非负整数")
+    if type(prior_history_complete) is not bool:
+        raise ValueError("prior_history_complete必须为bool")
+    if primary_selection_quality == "NOT_APPLICABLE":
+        return ImprovementAge("NO_PROVEN_IMPROVEMENT", None, "NO_APPLICABLE_EPISODE")
+    if (
+        primary_selection_quality != "OBSERVED"
+        or current_state is None
+        or episode_id is None
+    ):
+        return ImprovementAge("UNKNOWN", None, "PRIMARY_EPISODE_UNKNOWN")
+    if current_state.episode_id != episode_id:
+        raise ValueError("current_state与episode_id不一致")
+
+    has_d2_improvement = any(
+        tr in {"UPGRADED", "IMPROVEMENT_RESET"} for tr in current_state.transitions
+    )
+    if has_d2_improvement or existing_anchor_rank_improved:
+        return compute_improvement_age(
+            current_ordinal=current_ordinal,
+            last_improvement_ordinal=current_ordinal,
+            has_complete_history=True,
+            is_first_observation=False,
+        )
+
+    is_first_obs = (
+        prior_mode == "FIRST_OBSERVATION"
+        and current_state.birth_ordinal == current_ordinal
+    )
+    if prior_last_improvement_ordinal is not None:
+        if not prior_history_complete:
+            return ImprovementAge("UNKNOWN", None, "IMPROVEMENT_HISTORY_INCOMPLETE")
+        return compute_improvement_age(
+            current_ordinal=current_ordinal,
+            last_improvement_ordinal=prior_last_improvement_ordinal,
+            has_complete_history=True,
+            is_first_observation=False,
+        )
+    return compute_improvement_age(
+        current_ordinal=current_ordinal,
+        last_improvement_ordinal=None,
+        has_complete_history=prior_history_complete,
+        is_first_observation=is_first_obs,
+    )
 
 
 def evaluate_stock_priority(
@@ -534,6 +632,8 @@ def generate_stock_radar_events(
     prior_mode: str = "PREVIOUS_ACCEPTED",
     predicate_evidence: Mapping[str, Any] | None = None,
     capability_state: str = "READY",
+    all_current_states: Sequence[State] = (),
+    all_prior_states: Sequence[State] = (),
 ) -> RadarEventBatch:
     """对比 t-1 与 t 的 D2 State、主选择、风险与规则版本，生成真实 Radar 事件差。"""
     capability(capability_state)
@@ -603,18 +703,50 @@ def generate_stock_radar_events(
     )
     p_sort_key = priority_result.sort_key if priority_result is not None else None
 
-    event_types: list[str] = []
-    if current_state is not None:
-        for tr in current_state.transitions:
-            if tr in RADAR_PRIMARY_PRIORITY:
-                # 首次左截尾加载不伪装自然启动；仅当非 FIRST_OBSERVATION 或确为合法新事件出生时保留
-                if (
-                    tr == "FIRST_ENROLLED"
-                    and "FIRST_OBSERVED" in annotation_tuple
-                    and current_state.kind != "FORMAL"
-                ):
-                    continue
-                event_types.append(tr)
+    states_for_transitions: tuple[State, ...] = (
+        tuple(all_current_states)
+        if all_current_states
+        else ((current_state,) if current_state is not None else ())
+    )
+    events: list[RadarEvent] = []
+    seen_ep_tr: set[tuple[str | None, str]] = set()
+    for st in states_for_transitions:
+        for tr in st.transitions:
+            if tr not in RADAR_PRIMARY_PRIORITY:
+                continue
+            # 首次左截尾加载不伪装自然启动；仅当非 FIRST_OBSERVATION 或确为合法新事件出生时保留
+            if (
+                tr == "FIRST_ENROLLED"
+                and "FIRST_OBSERVED" in annotation_tuple
+                and st.kind != "FORMAL"
+            ):
+                continue
+            key = (st.episode_id, tr)
+            if key in seen_ep_tr:
+                continue
+            seen_ep_tr.add(key)
+            why_now, waiting_for, invalid_if = _describe_radar_texts(
+                tr,
+                current_state=st,
+                current_risk=current_risk,
+                prior_risk=prior_risk,
+            )
+            events.append(
+                RadarEvent(
+                    event_type=tr,
+                    entity_id=entity_id,
+                    session_ordinal=session_ordinal,
+                    episode_id=st.episode_id,
+                    event_id=st.event_id,
+                    why_now=why_now,
+                    waiting_for=waiting_for,
+                    invalid_if=invalid_if,
+                    predicate_evidence=evidence_tuple,
+                    annotations=annotation_tuple,
+                    priority_group=p_group,
+                    priority_sort_key=p_sort_key,
+                )
+            )
 
     # 风险变化仅在同规则、非首观测、非换主且可比适用性下比较
     risk_comparable = (
@@ -632,41 +764,50 @@ def generate_stock_radar_events(
         assert prior_risk is not None and current_risk is not None
         prev_rank = RISK_RANKS[str(prior_risk.level.value)]
         curr_rank = RISK_RANKS[str(current_risk.level.value)]
+        risk_ev_type: str | None = None
         if curr_rank > prev_rank:
-            event_types.append("RISK_WORSENED")
+            risk_ev_type = "RISK_WORSENED"
         elif curr_rank < prev_rank:
-            event_types.append("RISK_IMPROVED")
+            risk_ev_type = "RISK_IMPROVED"
+        if risk_ev_type is not None:
+            key = (curr_ep, risk_ev_type)
+            if key not in seen_ep_tr:
+                seen_ep_tr.add(key)
+                why_now, waiting_for, invalid_if = _describe_radar_texts(
+                    risk_ev_type,
+                    current_state=current_state,
+                    current_risk=current_risk,
+                    prior_risk=prior_risk,
+                )
+                events.append(
+                    RadarEvent(
+                        event_type=risk_ev_type,
+                        entity_id=entity_id,
+                        session_ordinal=session_ordinal,
+                        episode_id=current_state.episode_id
+                        if current_state
+                        else curr_ep,
+                        event_id=current_state.event_id if current_state else None,
+                        why_now=why_now,
+                        waiting_for=waiting_for,
+                        invalid_if=invalid_if,
+                        predicate_evidence=evidence_tuple,
+                        annotations=annotation_tuple,
+                        priority_group=p_group,
+                        priority_sort_key=p_sort_key,
+                    )
+                )
 
-    events: list[RadarEvent] = []
-    for ev_type in dict.fromkeys(event_types):
-        why_now, waiting_for, invalid_if = _describe_radar_texts(
-            ev_type,
-            current_state=current_state,
-            current_risk=current_risk,
-            prior_risk=prior_risk,
-        )
-        events.append(
-            RadarEvent(
-                event_type=ev_type,
-                entity_id=entity_id,
-                session_ordinal=session_ordinal,
-                episode_id=current_state.episode_id if current_state else curr_ep,
-                event_id=current_state.event_id if current_state else None,
-                why_now=why_now,
-                waiting_for=waiting_for,
-                invalid_if=invalid_if,
-                predicate_evidence=evidence_tuple,
-                annotations=annotation_tuple,
-                priority_group=p_group,
-                priority_sort_key=p_sort_key,
-            )
-        )
+    sorted_events = sort_radar_events(events)
+    marked_events = tuple(
+        replace(ev, is_primary_event=(idx == 0)) for idx, ev in enumerate(sorted_events)
+    )
 
     primary_display_unknown = current_primary.quality == "UNKNOWN_DATA"
     return RadarEventBatch(
         entity_id=entity_id,
         session_ordinal=session_ordinal,
-        events=sort_radar_events(events),
+        events=marked_events,
         annotations=annotation_tuple,
         primary_display_unknown=primary_display_unknown,
         primary_display_reason=current_primary.reason
@@ -802,6 +943,9 @@ def evaluate_stock_near_miss(
                 tolerance=tol,
                 normalized_distance=norm_dist,
                 sort_key=sort_key,
+                emergence_rank=emerg_rank,
+                delta3_pp=delta3_val,
+                stable_id=path.stable_id or path.entity_id,
             )
         )
 

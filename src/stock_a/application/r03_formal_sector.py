@@ -191,13 +191,13 @@ def _load_endpoint_observations(
 
     cur.execute(
         """
-        SELECT source_symbol, source_seed_state
+        SELECT source_symbol, formal_seed_state, source_seed_state
         FROM stock.source_pool_seed_day_facts
         WHERE target_session=%s AND price_coordinate=%s AND source_symbol=ANY(%s)
         """,
         (session, price_coordinate, sym_list),
     )
-    seed_by_sym = {sym: s_state for sym, s_state in cur.fetchall()}
+    seed_by_sym = {sym: (f_state, s_state) for sym, f_state, s_state in cur.fetchall()}
 
     cur.execute(
         """
@@ -214,7 +214,9 @@ def _load_endpoint_observations(
         raw = raw_by_sym.get(sym)
         prof = prof_by_sym.get(sym)
         cs = cs_by_sym.get(sym)
-        seed_state = seed_by_sym.get(sym, "UNKNOWN")
+        seed_pair = seed_by_sym.get(sym)
+        seed_state = seed_pair[0] if seed_pair is not None else "UNKNOWN"
+        source_seed_shape_state = seed_pair[1] if seed_pair is not None else "UNKNOWN"
 
         if raw is None:
             q_state = "UNKNOWN"
@@ -320,6 +322,11 @@ def _load_endpoint_observations(
             "above_ma20": above_ma20,
             "amr20": amr20,
             "seed_state": seed_state if seed_state in {"TRUE", "FALSE"} else "UNKNOWN",
+            "source_seed_shape_state": (
+                source_seed_shape_state
+                if source_seed_shape_state in {"TRUE", "FALSE"}
+                else "UNKNOWN"
+            ),
             "rps20": rps20,
         }
 

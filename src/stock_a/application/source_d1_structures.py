@@ -294,27 +294,179 @@ def _actual_bars_window(
     return tuple(collected)
 
 
+def _is_valid_coordinate_id(coordinate_id: str | None) -> bool:
+    return (
+        isinstance(coordinate_id, str)
+        and bool(coordinate_id)
+        and "COORDINATE_UNKNOWN" not in coordinate_id
+    )
+
+
+def _window_coordinates_comparable(
+    observations: Sequence[CoreObservation],
+    window_bars: Sequence[Bar],
+    target_coordinate_id: str | None,
+) -> bool:
+    if not _is_valid_coordinate_id(target_coordinate_id):
+        return False
+    return all(
+        observations[bar.ordinal].coordinate_id == target_coordinate_id
+        for bar in window_bars
+    )
+
+
+def _official_session_ordinals(sessions: Sequence[date]) -> tuple[int, ...] | None:
+    if not sessions:
+        return ()
+    try:
+        _, _, _, all_sessions = _load_calendar(sessions[-1])
+        index_by_day = {day: idx for idx, day in enumerate(all_sessions)}
+        if all(day in index_by_day for day in sessions):
+            return tuple(index_by_day[day] for day in sessions)
+    except Exception:
+        return None
+    return None
+
+
+def _normalize_dynamic_ma_source_ref(source_ref: str | None) -> str | None:
+    if source_ref == "R5_MA5":
+        return "T0_MA5"
+    if source_ref == "R20_MA20":
+        return "T0_MA20"
+    return source_ref
+
+
 def _match_dynamic_ma_event(
     *,
-    events_by_symbol: Mapping[str, Sequence[Event]] | None,
+    events_by_symbol: Mapping[str, Sequence[Any]] | None,
     symbol: str,
     entity_id: str,
     ordinal: int,
+    official_ordinal: int | None = None,
+    target_session: date | None = None,
     coordinate_id: str,
+    source_capture_id: int | None = None,
     allowed_refs: set[str],
-) -> Event | None:
+) -> tuple[Event | None, str | None]:
+    """匹配真实获准的动态MA事件，对齐证券身份、官方会话与QFQ经济坐标。"""
+    from stock_a.research.admission import FrozenLine
+
     if not isinstance(events_by_symbol, Mapping):
-        return None
-    for event in events_by_symbol.get(symbol, ()):
-        if (
-            isinstance(event, Event)
-            and event.entity_id == entity_id
-            and event.session_ordinal == ordinal
-            and event.failure_line.coordinate_id == coordinate_id
-            and event.failure_line.source_ref in allowed_refs
-        ):
-            return event
-    return None
+        return None, None
+    accepted_entities = {symbol, entity_id}
+    for raw_event in events_by_symbol.get(symbol, ()):
+        if isinstance(raw_event, Event):
+            if raw_event.entity_id not in accepted_entities:
+                continue
+            session_matches = (
+                raw_event.session_ordinal == official_ordinal
+                if official_ordinal is not None
+                else False
+            ) or raw_event.session_ordinal == ordinal
+            if not session_matches:
+                continue
+            original_ref = raw_event.failure_line.source_ref
+            normalized_ref = _normalize_dynamic_ma_source_ref(original_ref)
+            if normalized_ref not in allowed_refs:
+                continue
+            event_coord = raw_event.failure_line.coordinate_id
+            if not _is_valid_coordinate_id(coordinate_id):
+                continue
+            if event_coord == "FORWARD_ADJUSTED":
+                # 仅当外部未提供捕获级坐标且明确为当前捕获角色时不可凭空放行，需有capture证据
+                continue
+            if event_coord != coordinate_id:
+                continue
+            adapted = Event(
+                event_id=raw_event.event_id,
+                entity_id=entity_id,
+                session_ordinal=ordinal,
+                scenario=raw_event.scenario,
+                failure_line=FrozenLine(
+                    value=raw_event.failure_line.value,
+                    coordinate_id=coordinate_id,
+                    source_ref=normalized_ref,
+                    source_window=raw_event.failure_line.source_window,
+                    effective_ordinal=ordinal + 1,
+                ),
+                linked_anchor_id=raw_event.linked_anchor_id,
+                prior_episode_id=raw_event.prior_episode_id,
+                evidence_ref=raw_event.evidence_ref,
+            )
+            return adapted, original_ref
+        if isinstance(raw_event, Mapping):
+            if raw_event.get("admission_status") not in (None, "READY"):
+                continue
+            ev_symbol = raw_event.get("source_symbol") or raw_event.get("entity_id")
+            if ev_symbol not in accepted_entities:
+                continue
+            ev_session = raw_event.get("target_session") or raw_event.get(
+                "session_date"
+            )
+            if isinstance(ev_session, str):
+                ev_session = date.fromisoformat(ev_session)
+            if target_session is not None and ev_session is not None:
+                if ev_session != target_session:
+                    continue
+            elif official_ordinal is not None:
+                if raw_event.get("session_ordinal") != official_ordinal:
+                    continue
+            elif raw_event.get("session_ordinal") != ordinal:
+                continue
+            original_ref = raw_event.get("failure_source") or raw_event.get(
+                "source_ref"
+            )
+            normalized_ref = _normalize_dynamic_ma_source_ref(original_ref)
+            if normalized_ref not in allowed_refs:
+                continue
+            if not _is_valid_coordinate_id(coordinate_id):
+                continue
+            ev_coord = raw_event.get("coordinate_id") or raw_event.get(
+                "failure_coordinate"
+            )
+            ev_cap = raw_event.get("source_capture_id")
+            if _is_valid_coordinate_id(ev_coord) and ev_coord != "FORWARD_ADJUSTED":
+                if ev_coord != coordinate_id:
+                    continue
+            elif ev_coord == "FORWARD_ADJUSTED":
+                if (
+                    source_capture_id is None
+                    or type(ev_cap) is not int
+                    or ev_cap != source_capture_id
+                ):
+                    continue
+            else:
+                continue
+            event_id = raw_event.get("event_id")
+            if not isinstance(event_id, str) or not event_id:
+                continue
+            raw_val = raw_event.get("failure_line_value")
+            if raw_val is None:
+                num = raw_event.get("failure_level_numerator")
+                den = raw_event.get("failure_level_denominator")
+                if num is None or den is None:
+                    continue
+                raw_val = exact_number(num) / exact_number(den)
+            else:
+                raw_val = exact_number(raw_val)
+            adapted = Event(
+                event_id=event_id,
+                entity_id=entity_id,
+                session_ordinal=ordinal,
+                scenario=str(raw_event.get("scenario") or "RECOVERY_TURN"),
+                failure_line=FrozenLine(
+                    value=raw_val,
+                    coordinate_id=coordinate_id,
+                    source_ref=normalized_ref,
+                    source_window=str(raw_event.get("failure_window_start") or ""),
+                    effective_ordinal=ordinal + 1,
+                ),
+                linked_anchor_id=raw_event.get("linked_anchor_id"),
+                prior_episode_id=raw_event.get("prior_episode_id"),
+                evidence_ref=str(raw_event.get("failure_source_event_ref") or event_id),
+            )
+            return adapted, str(original_ref)
+    return None, None
 
 
 def _source_row_identity(row: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -541,15 +693,19 @@ def _generate_day(
     core_today: Mapping[str, FieldValue] | None = None,
     rel_market_1: FieldValue | None = None,
     include_impulse: bool = False,
-    dynamic_ma_events_by_symbol: Mapping[str, Sequence[Event]] | None = None,
+    dynamic_ma_events_by_symbol: Mapping[str, Sequence[Any]] | None = None,
+    official_ordinals: Sequence[int] | None = None,
     prior_range_results: Mapping[str, dict[str, Any]] | None = None,
     prior_range_states: Mapping[str, FieldValue] | None = None,
     prior_range_anchors: Mapping[str, Anchor | None] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Anchor]]:
     day = sessions[target_index]
-    coordinate_id = observations[target_index].coordinate_id or (
+    target_obs = observations[target_index]
+    target_coord = target_obs.coordinate_id
+    coordinate_id = target_coord or (
         f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
     )
+    target_coord_valid = _is_valid_coordinate_id(target_coord)
     window_ref = (
         f"{source_capture_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
     )
@@ -573,13 +729,59 @@ def _generate_day(
             "core.ma_slope20_atr", unknown("PREVIOUS_CORE_UNAVAILABLE")
         ),
     }
-    actual = _actual_field(observations[target_index])
+    actual = _actual_field(target_obs)
+    today_is_actual = actual.quality == "OBSERVED" and actual.value is True
+    prev_obs = observations[target_index - 1] if target_index > 0 else None
+    prev_actual_same_coord = (
+        prev_obs is None
+        or prev_obs.state != "ACTUAL"
+        or (target_coord_valid and prev_obs.coordinate_id == target_coord)
+    )
     previous_values = prior_range_results or {}
     previous_states = prior_range_states or {}
     previous_anchors = prior_range_anchors or {}
     results: dict[str, dict[str, Any]] = {}
     anchor_models: dict[str, Anchor] = {}
     for kind in STRUCTURE_TYPES:
+        coord_block_reason: str | None = None
+        if today_is_actual:
+            if not target_coord_valid:
+                coord_block_reason = "TARGET_COORDINATE_UNKNOWN"
+            elif kind.startswith("PIVOT_") and len(pivot5) == 5:
+                if not _window_coordinates_comparable(
+                    observations, pivot5, target_coord
+                ):
+                    coord_block_reason = "PIVOT_COORDINATE_NOT_COMPARABLE"
+            elif kind in _RANGE_TYPES and (
+                (
+                    len(prior20) == 20
+                    and not _window_coordinates_comparable(
+                        observations, prior20, target_coord
+                    )
+                )
+                or not prev_actual_same_coord
+            ):
+                coord_block_reason = "RANGE_COORDINATE_NOT_COMPARABLE"
+            elif kind == "GAP_ZONE" and len(immediate_prior) == 1:
+                if not _window_coordinates_comparable(
+                    observations, immediate_prior, target_coord
+                ):
+                    coord_block_reason = "GAP_COORDINATE_NOT_COMPARABLE"
+        if coord_block_reason is not None:
+            results[kind] = {
+                "state": "UNKNOWN",
+                "reason": coord_block_reason,
+                "anchor": None,
+                "generation_evidence": _generation_evidence(
+                    kind=kind,
+                    index=target_index,
+                    sessions=sessions,
+                    bars=bars,
+                    row_map=row_map,
+                    core_previous=core_previous,
+                ),
+            }
+            continue
         if kind == "GAP_ZONE" and (target_index == 0 or len(immediate_prior) != 1):
             results[kind] = {
                 "state": "NOT_GENERATED"
@@ -672,6 +874,10 @@ def _generate_day(
         today_fields = core_today or {}
         entity_id = f"SOURCE_SYMBOL_ONLY:{symbol}"
         atr20_prev = core_fields.get("core.atr20", unknown("PREVIOUS_CORE_UNAVAILABLE"))
+        if today_is_actual and not target_coord_valid:
+            atr20_prev = unknown("TARGET_COORDINATE_UNKNOWN")
+        elif today_is_actual and not prev_actual_same_coord:
+            atr20_prev = unknown("IMPULSE_PREVIOUS_ATR_COORDINATE_NOT_COMPARABLE")
         clv_today = today_fields.get("core.clv", unknown("TODAY_CLV_UNAVAILABLE"))
         amount_ratio_today = today_fields.get(
             "core.amount_ratio20", unknown("TODAY_AMOUNT_RATIO20_UNAVAILABLE")
@@ -725,46 +931,82 @@ def _generate_day(
             "core.prior_high20", unknown("TODAY_PRIOR_HIGH20_UNAVAILABLE")
         )
         atr20_today = today_fields.get("core.atr20", unknown("TODAY_ATR20_UNAVAILABLE"))
-        bp_value = generate(
-            "BREAKOUT_PLATFORM",
-            entity_id=entity_id,
-            ordinal=target_index,
-            coordinate_id=coordinate_id,
-            source_ref=source_ref,
-            window_ref=window_ref,
-            actual=actual,
-            today=bars[target_index],
-            inputs={
-                "prior_high20": prior_high20_today,
-                "atr_today": atr20_today,
-                "clv": clv_today,
-            },
-            capability_state="READY",
-        )
-        bp_classified = _evaluate_generated(
-            bp_value,
-            kind="BREAKOUT_PLATFORM",
-            prior_range_state=None,
-            prior_range_anchor=None,
-        )
-        bp_anchor = bp_classified["anchor"]
-        if isinstance(bp_anchor, Anchor):
-            anchor_models["BREAKOUT_PLATFORM"] = bp_anchor
-        results["BREAKOUT_PLATFORM"] = {
-            **{
-                key: item
-                for key, item in bp_classified.items()
-                if key != "carry_anchor"
-            },
-            "anchor": _anchor_payload(bp_anchor, sessions) if bp_anchor else None,
-            "generation_evidence": {
-                "target_session": day.isoformat(),
-                "prior_high20": _render_field(prior_high20_today),
-                "atr_today": _render_field(atr20_today),
-                "clv": _render_field(clv_today),
-            },
-        }
+        if today_is_actual and (
+            not target_coord_valid
+            or (
+                len(prior20) == 20
+                and not _window_coordinates_comparable(
+                    observations, prior20, target_coord
+                )
+            )
+        ):
+            results["BREAKOUT_PLATFORM"] = {
+                "state": "UNKNOWN",
+                "reason": (
+                    "TARGET_COORDINATE_UNKNOWN"
+                    if not target_coord_valid
+                    else "BREAKOUT_COORDINATE_NOT_COMPARABLE"
+                ),
+                "anchor": None,
+                "generation_evidence": {
+                    "target_session": day.isoformat(),
+                    "prior_high20": _render_field(prior_high20_today),
+                    "atr_today": _render_field(atr20_today),
+                    "clv": _render_field(clv_today),
+                },
+            }
+        else:
+            bp_value = generate(
+                "BREAKOUT_PLATFORM",
+                entity_id=entity_id,
+                ordinal=target_index,
+                coordinate_id=coordinate_id,
+                source_ref=source_ref,
+                window_ref=window_ref,
+                actual=actual,
+                today=bars[target_index],
+                inputs={
+                    "prior_high20": prior_high20_today,
+                    "atr_today": atr20_today,
+                    "clv": clv_today,
+                },
+                capability_state="READY",
+            )
+            bp_classified = _evaluate_generated(
+                bp_value,
+                kind="BREAKOUT_PLATFORM",
+                prior_range_state=None,
+                prior_range_anchor=None,
+            )
+            bp_anchor = bp_classified["anchor"]
+            if isinstance(bp_anchor, Anchor):
+                anchor_models["BREAKOUT_PLATFORM"] = bp_anchor
+            results["BREAKOUT_PLATFORM"] = {
+                **{
+                    key: item
+                    for key, item in bp_classified.items()
+                    if key != "carry_anchor"
+                },
+                "anchor": _anchor_payload(bp_anchor, sessions) if bp_anchor else None,
+                "generation_evidence": {
+                    "target_session": day.isoformat(),
+                    "prior_high20": _render_field(prior_high20_today),
+                    "atr_today": _render_field(atr20_today),
+                    "clv": _render_field(clv_today),
+                },
+            }
 
+        target_official_ordinal = (
+            official_ordinals[target_index]
+            if official_ordinals is not None and target_index < len(official_ordinals)
+            else None
+        )
+        target_row = row_map.get(day)
+        qfq_capture_id = (
+            target_row.get("qfq_source_capture_id")
+            if isinstance(target_row, Mapping)
+            else None
+        )
         for kind, ma_key, input_key, allowed_refs in (
             ("DYNAMIC_MA5", "core.ma5", "ma5", {"T0_MA5"}),
             ("DYNAMIC_MA20", "core.ma20", "ma20", {"T0_MA20", "T0_MA20_FALLBACK"}),
@@ -772,19 +1014,23 @@ def _generate_day(
             ma_val = today_fields.get(
                 ma_key, unknown(f"TODAY_{input_key.upper()}_UNAVAILABLE")
             )
-            matched_event = _match_dynamic_ma_event(
+            matched_event, original_ref = _match_dynamic_ma_event(
                 events_by_symbol=dynamic_ma_events_by_symbol,
                 symbol=symbol,
                 entity_id=entity_id,
                 ordinal=target_index,
+                official_ordinal=target_official_ordinal,
+                target_session=day,
                 coordinate_id=coordinate_id,
+                source_capture_id=qfq_capture_id
+                if type(qfq_capture_id) is int
+                else source_capture_id,
                 allowed_refs=allowed_refs,
             )
             if (
                 dynamic_ma_events_by_symbol is not None
                 and matched_event is None
-                and actual.quality == "OBSERVED"
-                and actual.value is True
+                and today_is_actual
             ):
                 results[kind] = {
                     "state": "NOT_GENERATED",
@@ -794,6 +1040,7 @@ def _generate_day(
                         "target_session": day.isoformat(),
                         input_key: _render_field(ma_val),
                         "source_event_id": None,
+                        "source_ref": None,
                     },
                 }
                 continue
@@ -832,6 +1079,7 @@ def _generate_day(
                     "source_event_id": matched_event.event_id
                     if matched_event
                     else None,
+                    "source_ref": original_ref,
                 },
             }
     return (
@@ -842,6 +1090,132 @@ def _generate_day(
         },
         anchor_models,
     )
+
+
+def evaluate_dynamic_ma_for_symbol_day(
+    *,
+    symbol: str,
+    sessions: Sequence[date],
+    target_index: int,
+    history_rows: Sequence[Mapping[str, Any]],
+    source_capture_id: int,
+    core_previews_by_session: Mapping[date, Mapping[str, Any]],
+    events: Sequence[Event | Mapping[str, Any]],
+    official_ordinals: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """同日局部生成/补齐单只股票的DYNAMIC_MA5与DYNAMIC_MA20，不重跑全量D1。"""
+    normalized = symbol.strip().upper()
+    observations, bars, row_map = _history_observations(
+        symbol=normalized,
+        sessions=sessions,
+        history_rows=history_rows,
+        source_capture_id=source_capture_id,
+    )
+    day = sessions[target_index]
+    target_obs = observations[target_index]
+    target_coord = target_obs.coordinate_id
+    coordinate_id = target_coord or (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
+    )
+    entity_id = f"SOURCE_SYMBOL_ONLY:{normalized}"
+    window_ref = (
+        f"{source_capture_id}:{normalized}:{sessions[0].isoformat()}:{day.isoformat()}"
+    )
+    source_ref = f"source_raw_daily:{source_capture_id}:{normalized}"
+    actual = _actual_field(target_obs)
+    today_is_actual = actual.quality == "OBSERVED" and actual.value is True
+    preview = core_previews_by_session.get(day)
+    fields = (
+        preview.get("core", {}).get("fields") if isinstance(preview, Mapping) else None
+    )
+    fields = fields if isinstance(fields, Mapping) else {}
+    target_official_ordinal = (
+        official_ordinals[target_index]
+        if official_ordinals is not None and target_index < len(official_ordinals)
+        else _official_session_ordinals(sessions)[target_index]
+        if _official_session_ordinals(sessions)
+        else None
+    )
+    target_row = row_map.get(day)
+    qfq_capture_id = (
+        target_row.get("qfq_source_capture_id")
+        if isinstance(target_row, Mapping)
+        else None
+    )
+    events_by_symbol = {normalized: tuple(events)}
+    results: dict[str, dict[str, Any]] = {}
+    anchor_models: dict[str, Anchor] = {}
+    for kind, ma_key, input_key, allowed_refs in (
+        ("DYNAMIC_MA5", "core.ma5", "ma5", {"T0_MA5"}),
+        ("DYNAMIC_MA20", "core.ma20", "ma20", {"T0_MA20", "T0_MA20_FALLBACK"}),
+    ):
+        ma_val = _field_from_rendered(fields.get(ma_key), ma_key)
+        matched_event, original_ref = _match_dynamic_ma_event(
+            events_by_symbol=events_by_symbol,
+            symbol=normalized,
+            entity_id=entity_id,
+            ordinal=target_index,
+            official_ordinal=target_official_ordinal,
+            target_session=day,
+            coordinate_id=coordinate_id,
+            source_capture_id=qfq_capture_id
+            if type(qfq_capture_id) is int
+            else source_capture_id,
+            allowed_refs=allowed_refs,
+        )
+        if matched_event is None and today_is_actual:
+            results[kind] = {
+                "state": "NOT_GENERATED",
+                "reason": "NO_REGISTERED_MA_SOURCE_EVENT",
+                "anchor": None,
+                "generation_evidence": {
+                    "target_session": day.isoformat(),
+                    input_key: _render_field(ma_val),
+                    "source_event_id": None,
+                    "source_ref": None,
+                },
+            }
+            continue
+        ma_value = generate(
+            kind,
+            entity_id=entity_id,
+            ordinal=target_index,
+            coordinate_id=coordinate_id,
+            source_ref=source_ref,
+            window_ref=window_ref,
+            actual=actual,
+            today=bars[target_index],
+            inputs={input_key: ma_val},
+            source_event=matched_event,
+            capability_state="READY",
+        )
+        classified = _evaluate_generated(
+            ma_value,
+            kind=kind,
+            prior_range_state=None,
+            prior_range_anchor=None,
+        )
+        ma_anchor = classified["anchor"]
+        if isinstance(ma_anchor, Anchor):
+            anchor_models[kind] = ma_anchor
+        results[kind] = {
+            **{key: item for key, item in classified.items() if key != "carry_anchor"},
+            "anchor": _anchor_payload(ma_anchor, sessions) if ma_anchor else None,
+            "generation_evidence": {
+                "target_session": day.isoformat(),
+                input_key: _render_field(ma_val),
+                "source_event_id": matched_event.event_id if matched_event else None,
+                "source_ref": original_ref,
+            },
+        }
+    return {
+        "source_symbol": normalized,
+        "target_session": day.isoformat(),
+        "target_source": _source_row_identity(target_row),
+        "history_row_count": len(history_rows),
+        "structures": results,
+        "anchors": anchor_models,
+    }
 
 
 def _range_candidates_for_previous_session(
@@ -1175,6 +1549,7 @@ def _pool_candidate_result(
         rel_market_1=rel_market_1 if include_impulse else None,
         include_impulse=include_impulse,
         dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol,
+        official_ordinals=_official_session_ordinals(sessions),
         prior_range_results=prior_range_results,
         prior_range_states=prior_range_states,
         prior_range_anchors=prior_range_anchors,
@@ -1459,6 +1834,8 @@ def _structure_timeline_changes(
                     "independent_of_support_or_formal_invalidation": True,
                 },
                 "generation_evidence": anchor_event.get("generation_evidence"),
+                "impulse_retention": anchor_event.get("impulse_retention"),
+                "source_event_id": anchor_event.get("source_event_id"),
                 "source": {
                     "birth": anchor_event.get("source_row"),
                     "previous": before.get("source") if before else None,
@@ -1871,6 +2248,7 @@ def discover_source_d1_structures(
     material_change_source_symbols: set[str] = set()
     source_symbol_change_summaries: dict[str, dict[str, Any]] = {}
     source_symbol_d1_details: dict[str, list[dict[str, Any]]] = {}
+    source_symbol_active_anchors: dict[str, list[dict[str, Any]]] = {}
     source_symbol_structure_results: dict[str, dict[str, Any]] = {}
     range_history_status_counts = {kind: Counter() for kind in sorted(_RANGE_TYPES)}
     structure_core_preview_count = 0
@@ -2173,6 +2551,9 @@ def discover_source_d1_structures(
                 if include_source_symbol_d1_details:
                     source_symbol_d1_details[candidate["source_symbol"]] = (
                         candidate_changes
+                    )
+                    source_symbol_active_anchors[candidate["source_symbol"]] = list(
+                        timeline.get("events", ())
                     )
                 structure_timeline_candidate_count += 1
                 generation_calls += len(active_structure_types) * len(days)
@@ -2488,6 +2869,11 @@ def discover_source_d1_structures(
             "source_symbol_d1_details": (
                 source_symbol_d1_details if include_source_symbol_d1_details else None
             ),
+            "source_symbol_active_anchors": (
+                source_symbol_active_anchors
+                if include_source_symbol_d1_details
+                else None
+            ),
             "source_symbol_structure_results": (
                 source_symbol_structure_results
                 if include_source_symbol_structure_results
@@ -2594,6 +2980,7 @@ def evaluate_source_d1_structure_timeline(
         or dynamic_ma_events_by_symbol is not None
     )
     active_structure_types = ALL_STRUCTURE_TYPES if enable_impulse else STRUCTURE_TYPES
+    official_ordinals = _official_session_ordinals(sessions)
     range_state = {
         kind: unknown("RANGE_PRIOR_STATE_LEFT_CENSORED") for kind in _RANGE_TYPES
     }
@@ -2661,6 +3048,7 @@ def evaluate_source_d1_structure_timeline(
             rel_market_1=day_rel_market_1,
             include_impulse=enable_impulse,
             dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol,
+            official_ordinals=official_ordinals,
             prior_range_states=range_state,
             prior_range_anchors=range_anchor,
         )
@@ -2772,6 +3160,8 @@ def evaluate_source_d1_structure_timeline(
                 offset_k = index - anchor.created_ordinal
                 if offset_k in (1, 3):
                     t0_obs = observations[anchor.created_ordinal]
+                    ret_num = None
+                    ret_den = None
                     if not coordinate_comparable:
                         ret_val = unknown("NOT_COMPARABLE_PRICE_COORDINATE")
                     elif t0_obs.state != "ACTUAL":
@@ -2784,10 +3174,28 @@ def evaluate_source_d1_structure_timeline(
                             FieldValue(anchor.lower),
                             observations[index].close,
                         )
+                        if (
+                            ret_val.quality == "OBSERVED"
+                            and t0_obs.close.quality == "OBSERVED"
+                            and observations[index].close.quality == "OBSERVED"
+                        ):
+                            ret_den = exact_number(t0_obs.close.value) - exact_number(
+                                anchor.lower
+                            )
+                            ret_num = exact_number(
+                                observations[index].close.value
+                            ) - exact_number(anchor.lower)
+                    rendered_ret = _render_field(ret_val)
+                    rendered_ret["numerator"] = (
+                        _render_value(ret_num) if ret_num is not None else None
+                    )
+                    rendered_ret["denominator"] = (
+                        _render_value(ret_den) if ret_den is not None else None
+                    )
                     observation_payload["impulse_retention_k"] = offset_k
-                    observation_payload["impulse_retention"] = _render_field(ret_val)
+                    observation_payload["impulse_retention"] = rendered_ret
                     item.setdefault("impulse_retention", {})[f"t0_plus_{offset_k}"] = (
-                        _render_field(ret_val)
+                        rendered_ret
                     )
             item["support_observations"].append(observation_payload)
             observed_anchors.append(observation_payload)
@@ -2874,14 +3282,33 @@ def evaluate_source_d1_structure_timeline(
         retention_payload = None
         if anchor.kind in IMPULSE_STRUCTURE_TYPES:
             stored_ret = item.get("impulse_retention", {})
+            not_due_payload = {
+                "quality": "NOT_DUE",
+                "reason": "RETENTION_SESSION_NOT_DUE",
+                "value": None,
+                "numerator": None,
+                "denominator": None,
+            }
             retention_payload = {
                 "t0_plus_1": stored_ret.get(
                     "t0_plus_1",
-                    _render_field(unknown("FUTURE_SESSION_NOT_IN_WINDOW")),
+                    dict(not_due_payload)
+                    if anchor.created_ordinal + 1 >= len(sessions)
+                    else {
+                        **_render_field(unknown("FUTURE_SESSION_NOT_IN_WINDOW")),
+                        "numerator": None,
+                        "denominator": None,
+                    },
                 ),
                 "t0_plus_3": stored_ret.get(
                     "t0_plus_3",
-                    _render_field(unknown("FUTURE_SESSION_NOT_IN_WINDOW")),
+                    dict(not_due_payload)
+                    if anchor.created_ordinal + 3 >= len(sessions)
+                    else {
+                        **_render_field(unknown("FUTURE_SESSION_NOT_IN_WINDOW")),
+                        "numerator": None,
+                        "denominator": None,
+                    },
                 ),
             }
         event_payloads.append(

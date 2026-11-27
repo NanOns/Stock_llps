@@ -160,7 +160,7 @@ def _source_d1_column(
 def _qfq_pair_economically_comparable(
     prev_row: Mapping[str, Any], cur_row: Mapping[str, Any]
 ) -> bool:
-    """核验跨捕获QFQ行是否具有合法可比经济坐标证据。"""
+    """核验跨捕获QFQ行是否具有合法可比经济坐标证据；不以相邻close==preclose推定整窗可比。"""
     prev_explicit = prev_row.get("qfq_coordinate_id")
     cur_explicit = cur_row.get("qfq_coordinate_id")
     if (
@@ -170,21 +170,9 @@ def _qfq_pair_economically_comparable(
         and cur_explicit
     ):
         return prev_explicit == cur_explicit
-    if (
-        prev_row.get("qfq_price_quality") != "OBSERVED"
-        or cur_row.get("qfq_price_quality") != "OBSERVED"
-    ):
-        return False
-    prev_close_q = prev_row.get("qfq_close_quality", prev_row.get("qfq_price_quality"))
-    cur_preclose_q = cur_row.get("qfq_preclose_quality")
-    if prev_close_q != "OBSERVED" or cur_preclose_q != "OBSERVED":
-        return False
-    try:
-        prev_close = exact_number(prev_row.get("qfq_close"))
-        cur_preclose = exact_number(cur_row.get("qfq_preclose"))
-    except (TypeError, ValueError, ZeroDivisionError):
-        return False
-    return prev_close > 0 and cur_preclose > 0 and prev_close == cur_preclose
+    prev_cap = prev_row.get("qfq_source_capture_id")
+    cur_cap = cur_row.get("qfq_source_capture_id")
+    return type(prev_cap) is int and prev_cap > 0 and prev_cap == cur_cap
 
 
 def _resolve_qfq_coordinates(

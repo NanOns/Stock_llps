@@ -28,6 +28,8 @@ _REASON_TEXT = {
     "OFFICIAL_SESSION_BAR_MISSING": "官方会话未取得有效实际Bar；停复牌状态未知，不能补零或跳日。",
     "RAW_SOURCE_IDENTITY_MISMATCH": "价格行与来源代码、日期或paired捕获身份不一致。",
     "RAW_TARGET_CAPTURE_MISMATCH": "历史行与paired BaoStock捕获身份不一致。",
+    "QFQ_SOURCE_CAPTURE_MISSING": "历史行缺少独立QFQ捕获ID，不拿paired捕获掩盖缺失。",
+    "QFQ_TARGET_CAPTURE_MISSING": "目标日行缺少独立QFQ捕获ID，不拿paired捕获掩盖缺失。",
     "RAW_COORDINATE_MISMATCH": "价格坐标不是同一BaoStock QFQ坐标。",
     "MIXED_PRICE_COORDINATE": "严格窗口内QFQ价格来自不同捕获且缺少同basis可比证据。",
     "RAW_PARSER_CONTRACT_MISMATCH": "历史行缺少QFQ价格质量或字段。",
@@ -160,14 +162,12 @@ def _window_source_row(
     target_row = rows.get(target_session) if isinstance(target_session, date) else None
     target_qfq_cap = _resolve_target_qfq_capture_id(target_row, source_capture_id)
     row_qfq_cap = row.get("qfq_source_capture_id")
-    if row_qfq_cap is None:
-        row_qfq_cap = row.get("source_capture_id")
     if type(row_qfq_cap) is not int or row_qfq_cap <= 0:
-        return row, "RAW_TARGET_CAPTURE_MISMATCH"
-    if (
-        target_qfq_cap is not None
-        and row_qfq_cap != target_qfq_cap
-        and not _has_qfq_comparable_evidence(row, target_row)
+        return row, "QFQ_SOURCE_CAPTURE_MISSING"
+    if target_qfq_cap is None:
+        return row, "QFQ_TARGET_CAPTURE_MISSING"
+    if row_qfq_cap != target_qfq_cap and not _has_qfq_comparable_evidence(
+        row, target_row
     ):
         return row, "MIXED_PRICE_COORDINATE"
     row_coord = row.get("qfq_price_coordinate", row.get("price_coordinate"))

@@ -345,7 +345,11 @@ def persist_source_computable_rules_from_saved(
         evidence.get("d1_status") != "AVAILABLE"
         or not isinstance(d1_scope, Mapping)
         or d1_scope.get("producer_version")
-        not in {"STOCK_A_D1_BAOSTOCK_QFQ_R3", "STOCK_A_D1_BAOSTOCK_QFQ_R4"}
+        not in {
+            "STOCK_A_D1_BAOSTOCK_QFQ_R3",
+            "STOCK_A_D1_BAOSTOCK_QFQ_R4",
+            "STOCK_A_D1_BAOSTOCK_QFQ_R5",
+        }
         or d1_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
         or d1_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
         or not isinstance(d1_scope.get("calendar_revision"), str)

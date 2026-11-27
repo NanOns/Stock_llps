@@ -4385,6 +4385,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "board_native_id",
                         "structure_type",
                         "material_change_reason",
+                        "priority_page",
+                        "priority_page_size",
+                        "priority_status",
                     },
                 )
                 required = {
@@ -4478,6 +4481,23 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         board_native_id=values.get("board_native_id"),
                         structure_type=values.get("structure_type"),
                         material_change_reason=values.get("material_change_reason"),
+                        priority_page=_positive_int(
+                            _nonnegative_int(
+                                values.get("priority_page", "1"), "priority_page", 10000
+                            ),
+                            "priority_page",
+                            10000,
+                        ),
+                        priority_page_size=_positive_int(
+                            _nonnegative_int(
+                                values.get("priority_page_size", "30"),
+                                "priority_page_size",
+                                200,
+                            ),
+                            "priority_page_size",
+                            200,
+                        ),
+                        priority_status_filter=values.get("priority_status"),
                     )
                 except ResearchDayPgError as error:
                     raise PreviewHttpError(409, error.code, str(error)) from error

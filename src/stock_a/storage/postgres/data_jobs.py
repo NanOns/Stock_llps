@@ -134,6 +134,8 @@ _MODULE_PROGRESS_TABLES = {
             "stock.d2_primary_episode_day_facts",
             "stock.stock_risk_day_facts",
             "stock.stock_priority_day_facts",
+            "stock.stock_radar_day_events",
+            "stock.stock_near_miss_day_facts",
         }
     ),
     "COHORT_STATS": frozenset({"stock.source_cohort_group_stats"}),
@@ -353,6 +355,30 @@ _CLEANUP_MODULES = {
         ),
         "algorithm_column": None,
         "algorithm_label": "R03正式LOO支持板块合同版本",
+    },
+    "D2_LIFECYCLE": {
+        "parent_table": "stock.d2_episode_day_states",
+        "child_table": None,
+        "cleanup_tables": (
+            "stock.stock_near_miss_day_facts",
+            "stock.stock_radar_day_events",
+            "stock.stock_priority_day_facts",
+            "stock.stock_risk_day_facts",
+            "stock.d2_primary_episode_day_facts",
+            "stock.d2_episode_day_states",
+            "stock.d2_parent_peak_events",
+            "stock.d2_episodes",
+        ),
+        "progress_tables": (
+            "stock.d2_episode_day_states",
+            "stock.d2_primary_episode_day_facts",
+            "stock.stock_risk_day_facts",
+            "stock.stock_priority_day_facts",
+            "stock.stock_radar_day_events",
+            "stock.stock_near_miss_day_facts",
+        ),
+        "algorithm_column": "rule_identity",
+        "algorithm_label": "R04正式D2生命周期与下游投影",
     },
     "PRICE_LIMITS": {
         "parent_table": "stock.source_price_limit_day_facts",
@@ -4765,6 +4791,37 @@ def clear_derived_module(
                 ] += cursor.rowcount
             elif module_code == "R03_SECTOR_NATIVE":
                 pass
+            elif module_code == "D2_LIFECYCLE":
+                for tbl, date_col in (
+                    ("stock.stock_near_miss_day_facts", "target_session"),
+                    ("stock.stock_radar_day_events", "target_session"),
+                    ("stock.stock_priority_day_facts", "target_session"),
+                    ("stock.stock_risk_day_facts", "target_session"),
+                    ("stock.d2_primary_episode_day_facts", "session_date"),
+                    ("stock.d2_episode_day_states", "session_date"),
+                    ("stock.d2_parent_peak_events", "peak_session"),
+                ):
+                    cursor.execute(
+                        f"DELETE FROM {tbl} WHERE {date_col}=%s",
+                        (target_session,),
+                    )
+                    deleted_rows[tbl] += cursor.rowcount
+                    deleted_by_session[target_session.isoformat()][tbl] += (
+                        cursor.rowcount
+                    )
+                cursor.execute(
+                    """DELETE FROM stock.d2_episodes e
+                       WHERE e.birth_session=%s
+                         AND NOT EXISTS (
+                             SELECT 1 FROM stock.d2_episode_day_states s
+                             WHERE s.episode_id = e.episode_id
+                         )""",
+                    (target_session,),
+                )
+                deleted_rows["stock.d2_episodes"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()]["stock.d2_episodes"] += (
+                    cursor.rowcount
+                )
             elif module_code == "R03_SECTOR_ROTATION":
                 cursor.execute(
                     """DELETE FROM stock.r03_sector_rotation_board_day_facts
@@ -6054,6 +6111,26 @@ def read_business_table_count(
         "stock.r03_sector_loo_support_facts": (
             """SELECT count(*) FROM stock.r03_sector_loo_support_facts
                WHERE trade_date=%s""",
+            lambda: (target_session,),
+        ),
+        "stock.d2_episode_day_states": (
+            """SELECT count(*) FROM stock.d2_episode_day_states
+               WHERE session_date=%s""",
+            lambda: (target_session,),
+        ),
+        "stock.d2_primary_episode_day_facts": (
+            """SELECT count(*) FROM stock.d2_primary_episode_day_facts
+               WHERE session_date=%s""",
+            lambda: (target_session,),
+        ),
+        "stock.stock_risk_day_facts": (
+            """SELECT count(*) FROM stock.stock_risk_day_facts
+               WHERE target_session=%s""",
+            lambda: (target_session,),
+        ),
+        "stock.stock_priority_day_facts": (
+            """SELECT count(*) FROM stock.stock_priority_day_facts
+               WHERE target_session=%s""",
             lambda: (target_session,),
         ),
         "stock.source_sector_cross_period_pulse_facts": (
@@ -7862,8 +7939,151 @@ def invalidate_derived_for_raw_price_changes_in_cursor(
                 (d1_list, cs_list, symbol_list or None, symbol_list or None),
             )
             _mark("stock.source_d1_structure_day_facts", d1_sessions, cursor.rowcount)
+            cursor.execute(
+                """DELETE FROM stock.source_d1_anchor_day_observations
+                   WHERE target_session = ANY(%s::date[])
+                     AND (
+                         target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR source_symbol = ANY(%s::text[])
+                     )""",
+                (d1_list, cs_list, symbol_list or None, symbol_list or None),
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_d1_anchors a
+                   WHERE a.created_session = ANY(%s::date[])
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.source_d1_anchor_day_observations o
+                         WHERE o.anchor_id = a.id
+                     )""",
+                (d1_list,),
+            )
+
+        r04_affected = sorted(set(d0_list) | set(d1_list))
+        if r04_affected:
+            r04_min_day = min(r04_affected)
+            cursor.execute(
+                """SELECT DISTINCT session_date FROM stock.d2_episode_day_states
+                   WHERE session_date >= %s AND session_date <= %s""",
+                (r04_min_day, cutoff),
+            )
+            d2_existing_days = {row[0] for row in cursor.fetchall()}
+            d2_del_days = sorted(d2_existing_days | set(r04_affected))
+            for tbl, date_col in (
+                ("stock.stock_near_miss_day_facts", "target_session"),
+                ("stock.stock_radar_day_events", "target_session"),
+                ("stock.stock_priority_day_facts", "target_session"),
+                ("stock.stock_risk_day_facts", "target_session"),
+                ("stock.d2_primary_episode_day_facts", "session_date"),
+                ("stock.d2_episode_day_states", "session_date"),
+                ("stock.d2_parent_peak_events", "peak_session"),
+            ):
+                cursor.execute(
+                    f"DELETE FROM {tbl} WHERE {date_col} >= %s AND {date_col} <= %s",
+                    (r04_min_day, cutoff),
+                )
+                if tbl == "stock.d2_episode_day_states":
+                    _mark(tbl, d2_del_days, cursor.rowcount)
+                elif cursor.rowcount:
+                    deleted_by_table[tbl] = deleted_by_table.get(tbl, 0) + int(
+                        cursor.rowcount
+                    )
+            cursor.execute(
+                """DELETE FROM stock.d2_episodes e
+                   WHERE e.birth_session >= %s AND e.birth_session <= %s
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.d2_episode_day_states s
+                         WHERE s.episode_id = e.episode_id
+                     )""",
+                (r04_min_day, cutoff),
+            )
 
         if d0_list:
+            cursor.execute(
+                """DELETE FROM stock.source_t0_early_observation_facts t
+                   WHERE t.d0_fact_id IN (
+                       SELECT d.id FROM stock.source_d0_launch_day_facts d
+                       WHERE d.target_session = ANY(%s::date[])
+                         AND (
+                             d.target_session = ANY(%s::date[])
+                             OR %s::text[] IS NULL
+                             OR d.source_symbol = ANY(%s::text[])
+                         )
+                   )
+                   OR t.seed_fact_id IN (
+                       SELECT s.id FROM stock.source_pool_seed_day_facts s
+                       WHERE s.target_session = ANY(%s::date[])
+                         AND (
+                             s.target_session = ANY(%s::date[])
+                             OR %s::text[] IS NULL
+                             OR s.source_symbol = ANY(%s::text[])
+                         )
+                   )
+                   OR t.enrollment_id IN (
+                       SELECT e.id FROM stock.source_research_enrollments e
+                       JOIN stock.source_d0_launch_day_facts d
+                         ON (e.d0_fact_id = d.id OR e.adjacent_d0_fact_id = d.id)
+                       WHERE d.target_session = ANY(%s::date[])
+                         AND (
+                             d.target_session = ANY(%s::date[])
+                             OR %s::text[] IS NULL
+                             OR d.source_symbol = ANY(%s::text[])
+                         )
+                   )""",
+                (
+                    d0_list,
+                    cs_list,
+                    symbol_list or None,
+                    symbol_list or None,
+                    d0_list,
+                    cs_list,
+                    symbol_list or None,
+                    symbol_list or None,
+                    d0_list,
+                    cs_list,
+                    symbol_list or None,
+                    symbol_list or None,
+                ),
+            )
+            _mark(
+                "stock.source_t0_early_observation_facts",
+                d0_focus_sessions,
+                cursor.rowcount,
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_research_enrollments e
+                   WHERE e.d0_fact_id IN (
+                       SELECT d.id FROM stock.source_d0_launch_day_facts d
+                       WHERE d.target_session = ANY(%s::date[])
+                         AND (
+                             d.target_session = ANY(%s::date[])
+                             OR %s::text[] IS NULL
+                             OR d.source_symbol = ANY(%s::text[])
+                         )
+                   )
+                   OR e.adjacent_d0_fact_id IN (
+                       SELECT d.id FROM stock.source_d0_launch_day_facts d
+                       WHERE d.target_session = ANY(%s::date[])
+                         AND (
+                             d.target_session = ANY(%s::date[])
+                             OR %s::text[] IS NULL
+                             OR d.source_symbol = ANY(%s::text[])
+                         )
+                   )""",
+                (
+                    d0_list,
+                    cs_list,
+                    symbol_list or None,
+                    symbol_list or None,
+                    d0_list,
+                    cs_list,
+                    symbol_list or None,
+                    symbol_list or None,
+                ),
+            )
+            _mark(
+                "stock.source_research_enrollments", d0_focus_sessions, cursor.rowcount
+            )
             cursor.execute(
                 """DELETE FROM stock.source_d0_launch_day_facts d
                    WHERE d.target_session = ANY(%s::date[])
@@ -7871,14 +8091,6 @@ def invalidate_derived_for_raw_price_changes_in_cursor(
                          d.target_session = ANY(%s::date[])
                          OR %s::text[] IS NULL
                          OR d.source_symbol = ANY(%s::text[])
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1 FROM stock.source_research_enrollments e
-                         WHERE e.d0_fact_id = d.id OR e.adjacent_d0_fact_id = d.id
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1 FROM stock.source_t0_early_observation_facts t
-                         WHERE t.d0_fact_id = d.id
                      )""",
                 (d0_list, cs_list, symbol_list or None, symbol_list or None),
             )
@@ -7886,12 +8098,12 @@ def invalidate_derived_for_raw_price_changes_in_cursor(
                 "stock.source_d0_launch_day_facts", d0_focus_sessions, cursor.rowcount
             )
             cursor.execute(
-                """DELETE FROM stock.source_pool_seed_day_facts
-                   WHERE target_session = ANY(%s::date[])
+                """DELETE FROM stock.source_pool_seed_day_facts s
+                   WHERE s.target_session = ANY(%s::date[])
                      AND (
-                         target_session = ANY(%s::date[])
+                         s.target_session = ANY(%s::date[])
                          OR %s::text[] IS NULL
-                         OR source_symbol = ANY(%s::text[])
+                         OR s.source_symbol = ANY(%s::text[])
                      )""",
                 (d0_list, cs_list, symbol_list or None, symbol_list or None),
             )

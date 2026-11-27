@@ -36,6 +36,11 @@ _D1_STRUCTURE_TYPES_7 = _D1_STRUCTURE_TYPES + (
     "IMPULSE_BODY",
     "IMPULSE_LOW",
 )
+_D1_STRUCTURE_TYPES_10 = _D1_STRUCTURE_TYPES_7 + (
+    "BREAKOUT_PLATFORM",
+    "DYNAMIC_MA5",
+    "DYNAMIC_MA20",
+)
 _VALID_STATES = frozenset({"TRUE", "FALSE", "UNKNOWN"})
 _D0_SCENARIOS = ("LAUNCH_CONFIRM", "RECOVERY_TURN")
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
@@ -43,13 +48,17 @@ _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _D0_RECOVERY_PRODUCER_VERSION = "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R5"
 _D1_STRUCTURE_PRODUCER_VERSION = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
 _D1_STRUCTURE_PRODUCER_VERSION_7 = "STOCK_A_D1_BAOSTOCK_QFQ_R4"
+_D1_STRUCTURE_PRODUCER_VERSION_10 = "STOCK_A_D1_BAOSTOCK_QFQ_R5"
 _D1_SUPPORTED_PRODUCER_VERSIONS = (
     _D1_STRUCTURE_PRODUCER_VERSION,
     _D1_STRUCTURE_PRODUCER_VERSION_7,
+    _D1_STRUCTURE_PRODUCER_VERSION_10,
 )
 
 
 def _expected_d1_types(producer_version: str | None) -> tuple[str, ...]:
+    if producer_version == _D1_STRUCTURE_PRODUCER_VERSION_10:
+        return _D1_STRUCTURE_TYPES_10
     if producer_version == _D1_STRUCTURE_PRODUCER_VERSION_7:
         return _D1_STRUCTURE_TYPES_7
     return _D1_STRUCTURE_TYPES
@@ -405,8 +414,10 @@ def read_source_launch_watch_evidence(
             " material_change_contract, research_mode, price_coordinate,"
             " sum(row_count)::bigint, count(*)::bigint,"
             " count(*) FILTER (WHERE row_count=cardinality(CASE"
+            " WHEN producer_version=%s THEN %s::text[]"
             " WHEN producer_version=%s THEN %s::text[] ELSE %s::text[] END)"
-            " AND types=CASE WHEN producer_version=%s THEN %s::text[] ELSE %s::text[] END)::bigint"
+            " AND types=CASE WHEN producer_version=%s THEN %s::text[]"
+            " WHEN producer_version=%s THEN %s::text[] ELSE %s::text[] END)::bigint"
             " FROM d1_by_symbol"
             " GROUP BY d1_history_session_count, calendar_id, history_window_start,"
             " history_window_end, calendar_revision, producer_contract, producer_version,"
@@ -415,9 +426,13 @@ def read_source_launch_watch_evidence(
             " history_window_end",
             (
                 *d1_scope_params,
+                _D1_STRUCTURE_PRODUCER_VERSION_10,
+                sorted(_D1_STRUCTURE_TYPES_10),
                 _D1_STRUCTURE_PRODUCER_VERSION_7,
                 sorted(_D1_STRUCTURE_TYPES_7),
                 sorted(_D1_STRUCTURE_TYPES),
+                _D1_STRUCTURE_PRODUCER_VERSION_10,
+                sorted(_D1_STRUCTURE_TYPES_10),
                 _D1_STRUCTURE_PRODUCER_VERSION_7,
                 sorted(_D1_STRUCTURE_TYPES_7),
                 sorted(_D1_STRUCTURE_TYPES),
@@ -2324,7 +2339,7 @@ def read_source_launch_watch_page(
       AND d.target_capture_id=p.target_capture_id
       AND (p.d1_history_session_count IS NULL
            OR d.d1_history_session_count=p.d1_history_session_count)
-      AND d.producer_version IN ('STOCK_A_D1_BAOSTOCK_QFQ_R3', 'STOCK_A_D1_BAOSTOCK_QFQ_R4')
+      AND d.producer_version IN ('STOCK_A_D1_BAOSTOCK_QFQ_R3', 'STOCK_A_D1_BAOSTOCK_QFQ_R4', 'STOCK_A_D1_BAOSTOCK_QFQ_R5')
     GROUP BY d.d1_history_session_count, d.calendar_id, d.history_window_start,
              d.history_window_end, d.calendar_revision, d.producer_contract,
              d.producer_version, d.material_change_contract, d.research_mode,
@@ -2337,6 +2352,10 @@ def read_source_launch_watch_page(
            count(*)::bigint AS symbol_count,
            count(*) FILTER (
                WHERE s.fact_count=cardinality(CASE
+                   WHEN s.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R5' THEN
+                       ARRAY['BREAKOUT_PLATFORM','DYNAMIC_MA20','DYNAMIC_MA5','GAP_ZONE',
+                             'IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
+                             'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
                    WHEN s.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN
                        ARRAY['GAP_ZONE','IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
                              'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
@@ -2344,6 +2363,10 @@ def read_source_launch_watch_page(
                               'RANGE_CEILING','RANGE_FLOOR']::text[]
                    END)
                  AND s.structure_types=CASE
+                   WHEN s.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R5' THEN
+                       ARRAY['BREAKOUT_PLATFORM','DYNAMIC_MA20','DYNAMIC_MA5','GAP_ZONE',
+                             'IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
+                             'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
                    WHEN s.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN
                        ARRAY['GAP_ZONE','IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
                              'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
@@ -2358,31 +2381,53 @@ def read_source_launch_watch_page(
              s.price_coordinate
 ), d1_scope_shapes AS MATERIALIZED (
     SELECT c.*,
-           CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN
+           CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R5' THEN
+               ARRAY['BREAKOUT_PLATFORM','DYNAMIC_MA20','DYNAMIC_MA5','GAP_ZONE',
+                     'IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
+                     'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
+           WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN
                ARRAY['GAP_ZONE','IMPULSE_BODY','IMPULSE_LOW','PIVOT_HIGH',
                      'PIVOT_LOW','RANGE_CEILING','RANGE_FLOOR']::text[]
            ELSE ARRAY['GAP_ZONE','PIVOT_HIGH','PIVOT_LOW',
                       'RANGE_CEILING','RANGE_FLOOR']::text[]
            END AS expected_structure_types,
-           CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN 7 ELSE 5 END
+           CASE WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R5' THEN 10
+                WHEN c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4' THEN 7
+                ELSE 5 END
                AS expected_structure_count
     FROM d1_scope_candidates c
 ), d1_scope_preferred AS MATERIALIZED (
     SELECT c.*
     FROM d1_scope_shapes c
-    WHERE c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4'
+    WHERE c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R5'
+       OR (
+           c.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4'
+           AND NOT EXISTS (
+               SELECT 1 FROM d1_scope_shapes r5
+               WHERE r5.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R5'
+                 AND r5.d1_history_session_count=c.d1_history_session_count
+                 AND r5.calendar_id=c.calendar_id
+                 AND r5.history_window_start=c.history_window_start
+                 AND r5.history_window_end=c.history_window_end
+                 AND r5.calendar_revision=c.calendar_revision
+                 AND r5.producer_contract=c.producer_contract
+                 AND r5.material_change_contract=c.material_change_contract
+                 AND r5.research_mode=c.research_mode
+                 AND r5.price_coordinate=c.price_coordinate
+           )
+       )
        OR NOT EXISTS (
-           SELECT 1 FROM d1_scope_shapes r4
-           WHERE r4.producer_version='STOCK_A_D1_BAOSTOCK_QFQ_R4'
-             AND r4.d1_history_session_count=c.d1_history_session_count
-             AND r4.calendar_id=c.calendar_id
-             AND r4.history_window_start=c.history_window_start
-             AND r4.history_window_end=c.history_window_end
-             AND r4.calendar_revision=c.calendar_revision
-             AND r4.producer_contract=c.producer_contract
-             AND r4.material_change_contract=c.material_change_contract
-             AND r4.research_mode=c.research_mode
-             AND r4.price_coordinate=c.price_coordinate
+           SELECT 1 FROM d1_scope_shapes r45
+           WHERE r45.producer_version IN ('STOCK_A_D1_BAOSTOCK_QFQ_R4', 'STOCK_A_D1_BAOSTOCK_QFQ_R5')
+             AND r45.d1_history_session_count=c.d1_history_session_count
+             AND r45.calendar_id=c.calendar_id
+             AND r45.history_window_start=c.history_window_start
+             AND r45.history_window_end=c.history_window_end
+             AND r45.calendar_revision=c.calendar_revision
+             AND r45.producer_contract=c.producer_contract
+             AND r45.material_change_contract=c.material_change_contract
+             AND r45.research_mode=c.research_mode
+             AND r45.price_coordinate=c.price_coordinate
        )
 ), d1_scope_status AS (
     SELECT CASE

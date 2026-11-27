@@ -272,6 +272,7 @@ def _read_history_grid(
     for start in range(0, len(source_symbols), chunk_size):
         cursor.execute(
             """SELECT p.source_symbol,d.session_date,r.source_capture_id,
+                      r.raw_source_capture_id,r.qfq_source_capture_id,
                       r.bar_status,r.bar_reason,r.qfq_bar_status,r.qfq_bar_reason,
                       r.raw_open,r.raw_high,r.raw_low,r.raw_close,
                       r.price_quality,r.price_reason,r.raw_preclose,r.raw_preclose_quality,

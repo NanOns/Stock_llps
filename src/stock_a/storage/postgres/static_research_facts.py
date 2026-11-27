@@ -249,6 +249,61 @@ def _reasons(value: Any) -> list[str]:
     return []
 
 
+def _encode_recovery_trigger_predicate(
+    predicate: Mapping[str, Any],
+    trigger_detail: Mapping[str, Any] | None,
+) -> tuple[str, int | None, int | None]:
+    """将RECOVERY_TURN触发明细(R5/R20与对应冻结MA)无损编码到typed谓词槽位。"""
+    base_reason = str(
+        predicate.get("reason_code")
+        or predicate.get("reason")
+        or "UNKNOWN_REASON_UNAVAILABLE"
+    )
+    numerator, denominator = _fraction_parts(predicate.get("value"))
+    if not isinstance(trigger_detail, Mapping):
+        return base_reason, numerator, denominator
+    r5 = str(trigger_detail.get("r5") or "UNKNOWN")
+    r20 = str(trigger_detail.get("r20") or "UNKNOWN")
+    if r5 not in {"TRUE", "FALSE", "UNKNOWN"}:
+        r5 = "UNKNOWN"
+    if r20 not in {"TRUE", "FALSE", "UNKNOWN"}:
+        r20 = "UNKNOWN"
+    encoded_reason = f"{base_reason.split('__R20_', 1)[0]}__R20_{r20}__R5_{r5}"
+    if r20 == "TRUE":
+        ma_num, ma_den = _fraction_parts(trigger_detail.get("ma20"))
+        return encoded_reason, ma_num, ma_den
+    if r20 == "FALSE" and r5 == "TRUE":
+        ma_num, ma_den = _fraction_parts(trigger_detail.get("ma5"))
+        return encoded_reason, ma_num, ma_den
+    return encoded_reason, None, None
+
+
+_RECOVERY_TRIGGER_REASON_RE = re.compile(
+    r"__R20_(TRUE|FALSE|UNKNOWN)__R5_(TRUE|FALSE|UNKNOWN)$"
+)
+
+
+def _decode_recovery_trigger_detail(
+    trigger_predicate: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """从已存RECOVERY_TURN的trigger typed谓词无损还原R5/R20及对应冻结MA。"""
+    if not isinstance(trigger_predicate, Mapping):
+        return {"r5": "UNKNOWN", "r20": "UNKNOWN", "ma5": None, "ma20": None}
+    reason_code = str(trigger_predicate.get("reason_code") or "")
+    match = _RECOVERY_TRIGGER_REASON_RE.search(reason_code)
+    if match is None:
+        return {"r5": "UNKNOWN", "r20": "UNKNOWN", "ma5": None, "ma20": None}
+    r20, r5 = match.group(1), match.group(2)
+    value = trigger_predicate.get("value")
+    ma20 = value if r20 == "TRUE" and isinstance(value, Mapping) else None
+    ma5 = (
+        value
+        if r20 == "FALSE" and r5 == "TRUE" and isinstance(value, Mapping)
+        else None
+    )
+    return {"r5": r5, "r20": r20, "ma5": ma5, "ma20": ma20}
+
+
 def _d0_rows(
     scenarios: Mapping[str, Mapping[str, Any]], *, require_complete: bool = True
 ) -> list[tuple[Any, ...]]:
@@ -291,16 +346,22 @@ def _d0_rows(
                     raise StaticResearchPgError(
                         "STATIC_D0_PREDICATE_STATE_INVALID", "D0谓词三态或质量无效"
                     )
-                numerator, denominator = _fraction_parts(predicate.get("value"))
-                states.append(state)
-                qualities.append(quality)
-                reasons.append(
-                    str(
+                if scenario == "RECOVERY_TURN" and name == "trigger":
+                    reason_text, numerator, denominator = (
+                        _encode_recovery_trigger_predicate(
+                            predicate, item.get("trigger_detail")
+                        )
+                    )
+                else:
+                    numerator, denominator = _fraction_parts(predicate.get("value"))
+                    reason_text = str(
                         predicate.get("reason_code")
                         or predicate.get("reason")
                         or "UNKNOWN_REASON_UNAVAILABLE"
                     )
-                )
+                states.append(state)
+                qualities.append(quality)
+                reasons.append(reason_text)
                 numerators.append(numerator)
                 denominators.append(denominator)
             symbol = item.get("source_symbol")
@@ -944,20 +1005,23 @@ def read_source_d0_scenario_day(
                 "STATIC_D0_SCENARIO_STATE_CONFLICT",
                 "PG D0场景主状态与具名谓词归约不一致",
             )
-        results.append(
-            {
-                "source_symbol": item["source_symbol"],
-                "target_session": target_session.isoformat(),
-                "scenario": scenario,
-                "price_coordinate": price_coordinate,
-                "scenario_raw": item["scenario_state"],
-                "quality": (
-                    "UNKNOWN" if item["scenario_state"] == "UNKNOWN" else "OBSERVED"
-                ),
-                "main_reason": item["scenario_reason"],
-                "predicates": predicates,
-            }
-        )
+        row_payload = {
+            "source_symbol": item["source_symbol"],
+            "target_session": target_session.isoformat(),
+            "scenario": scenario,
+            "price_coordinate": price_coordinate,
+            "scenario_raw": item["scenario_state"],
+            "quality": (
+                "UNKNOWN" if item["scenario_state"] == "UNKNOWN" else "OBSERVED"
+            ),
+            "main_reason": item["scenario_reason"],
+            "predicates": predicates,
+        }
+        if scenario == "RECOVERY_TURN":
+            row_payload["trigger_detail"] = _decode_recovery_trigger_detail(
+                predicates.get("trigger")
+            )
+        results.append(row_payload)
     calendar = {
         "calendar_id": first["calendar_id"],
         "calendar_revision": first["calendar_revision"],
@@ -1453,9 +1517,97 @@ WHERE s.target_session=%s
     return result
 
 
+def read_price_limit_facts_by_symbol(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    calendar_revision: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """按目标日批量只读涨跌停限价日事实，供Seed与正式准入候选制度门消费。"""
+    if type(target_session) is not date:
+        raise ValueError("INVALID_TARGET_SESSION")
+    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            "SELECT to_regclass('stock.source_price_limit_day_facts') IS NOT NULL"
+        )
+        if cursor.fetchone() != (True,):
+            return {}
+        if calendar_revision is not None:
+            cursor.execute(
+                """SELECT source_symbol, rule_id, limit_status, quality, reason
+                   FROM stock.source_price_limit_day_facts
+                   WHERE target_session = %s
+                     AND contract_version = 'STOCK_A_PRICE_LIMIT_ENGINE_R1'
+                     AND calendar_revision = %s""",
+                (target_session, calendar_revision),
+            )
+        else:
+            cursor.execute(
+                """SELECT source_symbol, rule_id, limit_status, quality, reason
+                   FROM stock.source_price_limit_day_facts
+                   WHERE target_session = %s
+                     AND contract_version = 'STOCK_A_PRICE_LIMIT_ENGINE_R1'""",
+                (target_session,),
+            )
+        rows = cursor.fetchall()
+    return {
+        str(sym): {
+            "rule_id": str(rule_id) if rule_id is not None else None,
+            "limit_status": str(limit_status)
+            if limit_status is not None
+            else "UNKNOWN",
+            "quality": str(quality) if quality is not None else "UNKNOWN",
+            "reason": str(reason) if reason is not None else None,
+        }
+        for sym, rule_id, limit_status, quality, reason in rows
+    }
+
+
+def list_saved_d0_sessions(
+    config: Mapping[str, Any],
+    *,
+    scenario: str,
+    start_session: date,
+    target_session: date,
+    research_cutoff: date,
+    source_capture_id: int,
+) -> tuple[date, ...]:
+    """按场景列出指定范围内PG已闭合到来源分母的D0交易日。"""
+    if scenario not in _D0_PREDICATES:
+        raise ValueError("STATIC_D0_SCENARIO_INVALID")
+    effective_end = min(target_session, research_cutoff)
+    if effective_end < start_session:
+        return ()
+    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            f"""SELECT target_session
+                FROM {_D0_TABLE}
+                WHERE scenario = %s
+                  AND source_capture_id = %s
+                  AND price_coordinate = 'FORWARD_ADJUSTED'
+                  AND target_session >= %s
+                  AND target_session <= %s
+                GROUP BY target_session, source_count
+                HAVING COUNT(DISTINCT source_symbol) = source_count
+                ORDER BY target_session ASC""",
+            (scenario, source_capture_id, start_session, effective_end),
+        )
+        return tuple(row[0] for row in cursor.fetchall())
+
+
 __all__ = [
     "StaticResearchPgError",
+    "list_saved_d0_sessions",
     "persist_static_research_day",
+    "read_price_limit_facts_by_symbol",
     "read_source_d0_scenario_day",
     "read_source_pool_seed_facts",
     "read_seed_profile_returns",

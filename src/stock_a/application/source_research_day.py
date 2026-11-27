@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, fields as dataclass_fields
 from datetime import date
 from fractions import Fraction
 import re
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from stock_a.application.pg_price_profiles import (
     PG_PROFILE_MAX_HISTORY_SESSIONS,
@@ -20,7 +21,13 @@ from stock_a.application.source_d0_raw import (
 )
 from stock_a.application.source_d1_structures import (
     D1_PRODUCER_VERSION_5,
+    IMPULSE_STRUCTURE_TYPES,
+    _structure_history_core_previews,
+    evaluate_dynamic_ma_for_symbol_day,
     expected_d1_structure_types_for_version,
+)
+from stock_a.research.entry_history.history_preview import (
+    prepare_source_d1_preview_context,
 )
 from stock_a.application.source_market_observation import (
     prepare_d1_material_observation,
@@ -1140,9 +1147,12 @@ def _prepare_d1_facts(
                 "D1_TYPE_SUMMARY_INVALID",
                 f"D1结构类型不符合版本 {d1_version} 合同要求（期望{len(expected_d1_types)}类）",
             )
-        detail_rows = symbol_details.get(symbol, [])
-        if not isinstance(detail_rows, list):
-            raise SourceResearchDayError("D1_DETAIL_INVALID", "D1锚明细不是列表")
+        detail_rows = [
+            item
+            for item in symbol_details.get(symbol, [])
+            if item.get("material_change_classification")
+            in {"MATERIAL_CHANGE", "UNKNOWN", "NOT_COMPARABLE", "NOT_EVALUABLE"}
+        ]
         for kind, outcome in type_results.items():
             if not isinstance(outcome, Mapping):
                 raise SourceResearchDayError(
@@ -1164,7 +1174,11 @@ def _prepare_d1_facts(
                     "D1_UNEXPECTED_ANCHOR", "非生成状态携带锚事实"
                 )
             kind_detail_rows = [
-                item for item in detail_rows if item.get("type") == kind
+                item
+                for item in detail_rows
+                if item.get("type") == kind
+                and item.get("material_change_classification")
+                in {"MATERIAL_CHANGE", "UNKNOWN", "NOT_COMPARABLE", "NOT_EVALUABLE"}
             ]
             per_type_statuses = status_counts.get(kind, {})
             if not isinstance(per_type_statuses, Mapping):
@@ -1265,6 +1279,126 @@ def _prepare_d1_facts(
     return tuple(facts), tuple(anchors)
 
 
+def build_stable_d1_anchor_uid(
+    *,
+    source_symbol: str,
+    structure_type: str,
+    created_session: date,
+    source_event_id: str | None = None,
+) -> str:
+    """生成跨日与跨请求窗口稳定的D1锚短业务唯一键。"""
+    event_key = (
+        source_event_id
+        if structure_type in {"DYNAMIC_MA5", "DYNAMIC_MA20"}
+        and isinstance(source_event_id, str)
+        and source_event_id
+        else "STRUCT"
+    )
+    return f"{source_symbol}:{structure_type}:{created_session.isoformat()}:{event_key}"
+
+
+@dataclass(frozen=True, slots=True)
+class D1ActiveAnchorFact:
+    """跨日稳定的D1正式出生锚主档。"""
+
+    anchor_uid: str
+    source_symbol: str
+    structure_type: str
+    relation: str
+    created_session: date
+    available_from_session: date
+    test_from_session: date | None
+    coordinate_id: str
+    lower: ExactRational
+    upper: ExactRational
+    source_event_id: str | None
+    source_ref: str | None
+    birth_capture_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class D1ActiveAnchorObservationFact:
+    """全量D1支撑锚单日观察事实（含出生IDLE、UNCHANGED、COUNT_ONLY及留存）。"""
+
+    anchor_uid: str
+    target_session: date
+    source_symbol: str
+    structure_type: str
+    relation: str
+    created_session: date
+    coordinate_id: str
+    lower: ExactRational
+    upper: ExactRational
+    observation_status: str
+    state: str
+    quality: str
+    acceptance: str
+    freshness: str
+    breach_streak: int
+    acceptance_streak: int
+    test_count: int
+    separated_sessions: int
+    retest_qualified: bool
+    is_active: bool
+    reason: str | None
+    comparability_status: str
+    observation_capture_id: int | None
+    impulse_retention_1_numerator: ExactRational | None = None
+    impulse_retention_1_denominator: ExactRational | None = None
+    impulse_retention_1_quality: str = "NOT_APPLICABLE"
+    impulse_retention_1_reason: str | None = "NOT_AN_IMPULSE_ANCHOR"
+    impulse_retention_3_numerator: ExactRational | None = None
+    impulse_retention_3_denominator: ExactRational | None = None
+    impulse_retention_3_quality: str = "NOT_APPLICABLE"
+    impulse_retention_3_reason: str | None = "NOT_AN_IMPULSE_ANCHOR"
+
+
+def _extract_impulse_retention_fields(
+    structure_type: str, retention_payload: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    if structure_type not in IMPULSE_STRUCTURE_TYPES:
+        return {
+            "impulse_retention_1_numerator": None,
+            "impulse_retention_1_denominator": None,
+            "impulse_retention_1_quality": "NOT_APPLICABLE",
+            "impulse_retention_1_reason": "NOT_AN_IMPULSE_ANCHOR",
+            "impulse_retention_3_numerator": None,
+            "impulse_retention_3_denominator": None,
+            "impulse_retention_3_quality": "NOT_APPLICABLE",
+            "impulse_retention_3_reason": "NOT_AN_IMPULSE_ANCHOR",
+        }
+    payload = retention_payload if isinstance(retention_payload, Mapping) else {}
+    out: dict[str, Any] = {}
+    for k in (1, 3):
+        item = payload.get(f"t0_plus_{k}")
+        item = item if isinstance(item, Mapping) else {}
+        quality = _optional_text(item.get("quality")) or "UNKNOWN"
+        reason = _optional_text(item.get("reason"))
+        if quality == "OBSERVED":
+            num = _exact_rational(item.get("numerator"), f"中阳T+{k}留存分子")
+            den = _exact_rational(item.get("denominator"), f"中阳T+{k}留存分母")
+            if num is None or den is None or den.numerator <= 0:
+                out[f"impulse_retention_{k}_numerator"] = None
+                out[f"impulse_retention_{k}_denominator"] = None
+                out[f"impulse_retention_{k}_quality"] = "UNKNOWN"
+                out[f"impulse_retention_{k}_reason"] = (
+                    reason or "RETENTION_RATIO_COMPONENTS_MISSING"
+                )
+            else:
+                out[f"impulse_retention_{k}_numerator"] = num
+                out[f"impulse_retention_{k}_denominator"] = den
+                out[f"impulse_retention_{k}_quality"] = "OBSERVED"
+                out[f"impulse_retention_{k}_reason"] = None
+        else:
+            if quality not in {"UNKNOWN", "NOT_APPLICABLE", "NOT_DUE"}:
+                quality = "UNKNOWN"
+            out[f"impulse_retention_{k}_numerator"] = None
+            out[f"impulse_retention_{k}_denominator"] = None
+            out[f"impulse_retention_{k}_quality"] = quality
+            out[f"impulse_retention_{k}_reason"] = reason or f"RETENTION_{quality}"
+    return out
+
+
 def _prepare_d1_anchor(symbol: str, row: Mapping[str, Any]) -> D1MaterialAnchorFact:
     source = row.get("source") if isinstance(row.get("source"), Mapping) else {}
     birth = source.get("birth") if isinstance(source.get("birth"), Mapping) else {}
@@ -1308,9 +1442,18 @@ def _prepare_d1_anchor(symbol: str, row: Mapping[str, Any]) -> D1MaterialAnchorF
     state_after = after.get("state")
     gap_before_value = gap_before.get("state")
     gap_after_value = gap_after.get("state")
+    structure_type = _required_text(row.get("type"), "D1材料锚类型")
+    retention_fields = _extract_impulse_retention_fields(
+        structure_type, row.get("impulse_retention")
+    )
+    extra_kwargs = {}
+    supported_fields = {f.name for f in dataclass_fields(D1MaterialAnchorFact)}
+    for key, val in retention_fields.items():
+        if key in supported_fields:
+            extra_kwargs[key] = val
     return D1MaterialAnchorFact(
         source_symbol=symbol,
-        structure_type=_required_text(row.get("type"), "D1材料锚类型"),
+        structure_type=structure_type,
         relation=_required_text(row.get("relation"), "D1材料锚关系"),
         created_session=created,
         previous_session=previous_session,
@@ -1367,7 +1510,338 @@ def _prepare_d1_anchor(symbol: str, row: Mapping[str, Any]) -> D1MaterialAnchorF
         gap_after_state=_optional_text(gap_after_value),
         gap_after_quality=_optional_text(gap_after.get("quality")),
         gap_after_reason=_optional_text(gap_after.get("reason")),
+        **extra_kwargs,
     )
+
+
+def prepare_d1_active_anchor_facts(
+    d1: Mapping[str, Any],
+    *,
+    target_session: date,
+    observation_capture_id: int | None = None,
+) -> tuple[tuple[D1ActiveAnchorFact, ...], tuple[D1ActiveAnchorObservationFact, ...]]:
+    """产出跨日稳定的D1出生锚主档与全量日观察（含出生IDLE、UNCHANGED、COUNT_ONLY及留存）。"""
+    material = d1.get("historical_anchor_changes", {})
+    active_by_symbol = (
+        material.get("source_symbol_active_anchors")
+        if isinstance(material, Mapping)
+        else None
+    )
+    if not isinstance(active_by_symbol, Mapping):
+        return (), ()
+    target_iso = target_session.isoformat()
+    anchor_facts: dict[str, D1ActiveAnchorFact] = {}
+    obs_facts: list[D1ActiveAnchorObservationFact] = []
+    for symbol in sorted(active_by_symbol):
+        events = active_by_symbol.get(symbol) or ()
+        for event in events:
+            if not isinstance(event, Mapping):
+                continue
+            created = _session(event.get("created_session"), "D1锚出生会话")
+            if not isinstance(created, date) or created > target_session:
+                continue
+            structure_type = _required_text(event.get("type"), "D1锚类型")
+            relation = _required_text(event.get("relation"), "D1锚关系")
+            available = _session(event.get("available_from_session"), "D1锚可用会话")
+            test_from = _session(
+                event.get("test_from_session"), "D1锚测试会话", optional=True
+            )
+            coordinate_id = _required_text(event.get("coordinate_id"), "D1锚经济坐标")
+            lower = _exact_rational(event.get("lower"), "D1锚下界")
+            upper = _exact_rational(event.get("upper"), "D1锚上界")
+            if lower is None or upper is None or not isinstance(available, date):
+                raise SourceResearchDayError(
+                    "D1_ACTIVE_ANCHOR_INVALID", "D1稳定锚缺少有效价格或日期"
+                )
+            source_event_id = _optional_text(event.get("source_event_id"))
+            anchor_uid = build_stable_d1_anchor_uid(
+                source_symbol=symbol,
+                structure_type=structure_type,
+                created_session=created,
+                source_event_id=source_event_id,
+            )
+            source_row = (
+                event.get("source_row")
+                if isinstance(event.get("source_row"), Mapping)
+                else {}
+            )
+            birth_cap = _numeric_id(
+                source_row.get("source_capture_id"), "D1锚出生捕获", optional=True
+            )
+            anchor_facts[anchor_uid] = D1ActiveAnchorFact(
+                anchor_uid=anchor_uid,
+                source_symbol=symbol,
+                structure_type=structure_type,
+                relation=relation,
+                created_session=created,
+                available_from_session=available,
+                test_from_session=test_from,
+                coordinate_id=coordinate_id,
+                lower=lower,
+                upper=upper,
+                source_event_id=(
+                    source_event_id
+                    if structure_type in {"DYNAMIC_MA5", "DYNAMIC_MA20"}
+                    else None
+                ),
+                source_ref=_optional_text(event.get("source_ref")),
+                birth_capture_id=birth_cap,
+            )
+            if relation != "SUPPORT":
+                continue
+            retention = _extract_impulse_retention_fields(
+                structure_type, event.get("impulse_retention")
+            )
+            if created == target_session:
+                obs_facts.append(
+                    D1ActiveAnchorObservationFact(
+                        anchor_uid=anchor_uid,
+                        target_session=target_session,
+                        source_symbol=symbol,
+                        structure_type=structure_type,
+                        relation=relation,
+                        created_session=created,
+                        coordinate_id=coordinate_id,
+                        lower=lower,
+                        upper=upper,
+                        observation_status="BIRTH_IDLE",
+                        state="IDLE",
+                        quality="OBSERVED",
+                        acceptance="PENDING",
+                        freshness="FRESH",
+                        breach_streak=0,
+                        acceptance_streak=0,
+                        test_count=0,
+                        separated_sessions=0,
+                        retest_qualified=False,
+                        is_active=True,
+                        reason="BIRTH_DAY_IDLE",
+                        comparability_status="COMPARABLE",
+                        observation_capture_id=observation_capture_id or birth_cap,
+                        **retention,
+                    )
+                )
+                continue
+            obs_today = next(
+                (
+                    item
+                    for item in (event.get("support_observations") or ())
+                    if isinstance(item, Mapping) and item.get("session") == target_iso
+                ),
+                None,
+            )
+            if obs_today is None:
+                continue
+            state = _required_text(obs_today.get("state"), "D1锚日观察状态")
+            comp = _optional_text(obs_today.get("comparability_status")) or (
+                "NOT_COMPARABLE" if state == "UNKNOWN" else "COMPARABLE"
+            )
+            obs_status = (
+                "NOT_COMPARABLE"
+                if comp == "NOT_COMPARABLE"
+                else ("UNKNOWN" if state == "UNKNOWN" else "OBSERVED")
+            )
+            obs_facts.append(
+                D1ActiveAnchorObservationFact(
+                    anchor_uid=anchor_uid,
+                    target_session=target_session,
+                    source_symbol=symbol,
+                    structure_type=structure_type,
+                    relation=relation,
+                    created_session=created,
+                    coordinate_id=coordinate_id,
+                    lower=lower,
+                    upper=upper,
+                    observation_status=obs_status,
+                    state=state,
+                    quality="UNKNOWN" if state == "UNKNOWN" else "OBSERVED",
+                    acceptance=_required_text(
+                        obs_today.get("acceptance"), "D1锚接受状态"
+                    ),
+                    freshness=_required_text(obs_today.get("freshness"), "D1锚新鲜度"),
+                    breach_streak=int(obs_today.get("breach_streak") or 0),
+                    acceptance_streak=int(obs_today.get("acceptance_streak") or 0),
+                    test_count=int(obs_today.get("test_count") or 0),
+                    separated_sessions=int(obs_today.get("separated_sessions") or 0),
+                    retest_qualified=bool(obs_today.get("retest_qualified")),
+                    is_active=state != "BROKEN",
+                    reason=_optional_text(obs_today.get("reason")),
+                    comparability_status=comp,
+                    observation_capture_id=observation_capture_id,
+                    **retention,
+                )
+            )
+    ordered_anchors = tuple(anchor_facts[key] for key in sorted(anchor_facts))
+    return ordered_anchors, tuple(obs_facts)
+
+
+def prepare_dynamic_ma_backfill_facts(
+    config: Mapping[str, Any] | None,
+    *,
+    target_session: date,
+    research_cutoff: date,
+    source_capture_id: int,
+    d1_history_session_count: int,
+    events_by_symbol: Mapping[str, Sequence[Any]],
+    history_rows_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    core_previews_by_symbol: Mapping[str, Mapping[date, Mapping[str, Any]]]
+    | None = None,
+) -> dict[str, Any]:
+    """在FOCUS_FORMAL准入后同日局部补齐DYNAMIC_MA5/20，仅处理有真实事件的标的，不重跑全量D1。"""
+    target_symbols = sorted(sym for sym, evs in events_by_symbol.items() if evs)
+    if not target_symbols:
+        return {
+            "target_session": target_session.isoformat(),
+            "symbol_count": 0,
+            "active_anchors": (),
+            "active_observations": (),
+            "results_by_symbol": {},
+        }
+    _target, sessions, _calendar_revision = resolve_pg_history_window(
+        target_session.isoformat(), d1_history_session_count
+    )
+    if sessions[-1] != target_session:
+        raise SourceResearchDayError(
+            "D1_DYNAMIC_MA_SESSION_MISMATCH", "动态MA补齐目标日与历史窗口末日不一致"
+        )
+    target_index = len(sessions) - 1
+    if history_rows_by_symbol is None:
+        if config is None:
+            raise SourceResearchDayError(
+                "D1_DYNAMIC_MA_HISTORY_REQUIRED",
+                "未提供PG配置或内存历史行情，无法局部补齐动态MA",
+            )
+        history_rows_by_symbol = {symbol: [] for symbol in target_symbols}
+        for start in range(0, len(target_symbols), 100):
+            symbol_batch = target_symbols[start : start + 100]
+            offset = 0
+            while True:
+                page = read_baostock_price_history_batch(
+                    config,
+                    source_symbols=symbol_batch,
+                    sessions=sessions,
+                    source_capture_id=source_capture_id,
+                    price_coordinate="FORWARD_ADJUSTED",
+                    cutoff=target_session,
+                    offset=offset,
+                    limit=1000,
+                )
+                for row in page.get("rows", ()):
+                    history_rows_by_symbol[row["source_symbol"]].append(row)
+                next_offset = page.get("page", {}).get("next_offset")
+                if next_offset is None:
+                    break
+                offset = int(next_offset)
+    preview_context = (
+        prepare_source_d1_preview_context(sessions)
+        if core_previews_by_symbol is None
+        else None
+    )
+    active_anchors: list[D1ActiveAnchorFact] = []
+    active_observations: list[D1ActiveAnchorObservationFact] = []
+    results_by_symbol: dict[str, Any] = {}
+    for symbol in target_symbols:
+        rows = history_rows_by_symbol.get(symbol, ())
+        previews = (
+            core_previews_by_symbol[symbol]
+            if core_previews_by_symbol is not None and symbol in core_previews_by_symbol
+            else _structure_history_core_previews(
+                symbol=symbol,
+                sessions=sessions,
+                history_rows=rows,
+                source_capture_id=source_capture_id,
+                preview_context=preview_context,
+            )
+        )
+        outcome = evaluate_dynamic_ma_for_symbol_day(
+            symbol=symbol,
+            sessions=sessions,
+            target_index=target_index,
+            history_rows=rows,
+            source_capture_id=source_capture_id,
+            core_previews_by_session=previews,
+            events=events_by_symbol.get(symbol, ()),
+        )
+        results_by_symbol[symbol] = outcome
+        for kind in ("DYNAMIC_MA5", "DYNAMIC_MA20"):
+            st = outcome["structures"].get(kind, {})
+            anchor_payload = st.get("anchor")
+            if st.get("state") != "GENERATED" or not isinstance(
+                anchor_payload, Mapping
+            ):
+                continue
+            created = _session(anchor_payload.get("created_session"), "MA锚出生日")
+            available = _session(
+                anchor_payload.get("available_from_session"), "MA锚可用日"
+            )
+            test_from = _session(
+                anchor_payload.get("test_from_session"), "MA锚测试日", optional=True
+            )
+            lower = _exact_rational(anchor_payload.get("lower"), "MA锚下界")
+            upper = _exact_rational(anchor_payload.get("upper"), "MA锚上界")
+            coord_id = _required_text(anchor_payload.get("coordinate_id"), "MA锚坐标")
+            source_event_id = _required_text(
+                anchor_payload.get("source_event_id"), "MA锚来源事件ID"
+            )
+            anchor_uid = build_stable_d1_anchor_uid(
+                source_symbol=symbol,
+                structure_type=kind,
+                created_session=created,
+                source_event_id=source_event_id,
+            )
+            active_anchors.append(
+                D1ActiveAnchorFact(
+                    anchor_uid=anchor_uid,
+                    source_symbol=symbol,
+                    structure_type=kind,
+                    relation="SUPPORT",
+                    created_session=created,
+                    available_from_session=available,
+                    test_from_session=test_from,
+                    coordinate_id=coord_id,
+                    lower=lower,
+                    upper=upper,
+                    source_event_id=source_event_id,
+                    source_ref=_optional_text(anchor_payload.get("source_ref")),
+                    birth_capture_id=source_capture_id,
+                )
+            )
+            active_observations.append(
+                D1ActiveAnchorObservationFact(
+                    anchor_uid=anchor_uid,
+                    target_session=target_session,
+                    source_symbol=symbol,
+                    structure_type=kind,
+                    relation="SUPPORT",
+                    created_session=created,
+                    coordinate_id=coord_id,
+                    lower=lower,
+                    upper=upper,
+                    observation_status="BIRTH_IDLE",
+                    state="IDLE",
+                    quality="OBSERVED",
+                    acceptance="PENDING",
+                    freshness="FRESH",
+                    breach_streak=0,
+                    acceptance_streak=0,
+                    test_count=0,
+                    separated_sessions=0,
+                    retest_qualified=False,
+                    is_active=True,
+                    reason="BIRTH_DAY_IDLE",
+                    comparability_status="COMPARABLE",
+                    observation_capture_id=source_capture_id,
+                    **_extract_impulse_retention_fields(kind, None),
+                )
+            )
+    return {
+        "target_session": target_session.isoformat(),
+        "research_cutoff": research_cutoff.isoformat(),
+        "symbol_count": len(target_symbols),
+        "active_anchors": tuple(active_anchors),
+        "active_observations": tuple(active_observations),
+        "results_by_symbol": results_by_symbol,
+    }
 
 
 def prepare_source_research_day(
@@ -1475,6 +1949,14 @@ def prepare_source_research_day(
         d1_wall_seconds = time.perf_counter() - d1_started
         d1 = prepared["d1"]
         d1_rows, anchor_rows = _prepare_d1_facts(d1)
+        active_anchors, active_observations = prepare_d1_active_anchor_facts(
+            d1,
+            target_session=target_session,
+            observation_capture_id=source_capture_id,
+        )
+    else:
+        active_anchors = ()
+        active_observations = ()
 
     after = d0.get("after", {})
     before = d0.get("before", {})
@@ -1661,6 +2143,11 @@ def prepare_source_research_day(
         include_d1=include_d1,
     )
     report["research_cutoff"] = research_cutoff.isoformat()
+    if include_d1:
+        report["d1"]["active_anchors"] = active_anchors
+        report["d1"]["active_anchor_observations"] = active_observations
+        report["d1"]["typed_active_anchor_count"] = len(active_anchors)
+        report["d1"]["typed_active_observation_count"] = len(active_observations)
     return facts, report
 
 
@@ -1922,6 +2409,20 @@ def run_source_research_day(
             include_d0=include_d0,
             include_d1=include_d1,
         )
+        if include_d1:
+            from stock_a.storage.postgres.research_day_facts import (
+                persist_d1_active_anchors_and_observations,
+            )
+
+            d1_anchor_persist = persist_d1_active_anchors_and_observations(
+                config,
+                target_session=target_session,
+                active_anchors=report.get("d1", {}).get("active_anchors", ()),
+                active_observations=report.get("d1", {}).get(
+                    "active_anchor_observations", ()
+                ),
+            )
+            report.setdefault("d1", {})["active_anchor_persistence"] = d1_anchor_persist
         if include_static:
             static_started = time.perf_counter()
             static_result = _persist_static_research_day(
@@ -1976,7 +2477,12 @@ def run_source_research_day(
 
 
 __all__ = [
+    "D1ActiveAnchorFact",
+    "D1ActiveAnchorObservationFact",
     "SourceResearchDayError",
+    "build_stable_d1_anchor_uid",
+    "prepare_d1_active_anchor_facts",
+    "prepare_dynamic_ma_backfill_facts",
     "prepare_source_research_day",
     "run_source_research_day",
 ]

@@ -170,12 +170,17 @@ def evaluate_new_peak_event(
     close: FieldValue,
     coordinate_id: str,
     source_ref: str,
+    comparable: FieldValue | None = None,
 ) -> PeakEvent | None:
-    """按 D1 实际 high 严格创新高（H > 旧 peak_high，同高取最早）生成新 peak_event。"""
+    """按 D1 实际 high 严格创新高（H > 旧 peak_high，同高取最早，同经济坐标才比较）生成新 peak_event。"""
     if prior_peak.parent_episode_id != parent_episode_id:
         raise ValueError("旧峰值与父 episode 不匹配")
     if ordinal <= prior_peak.peak_ordinal:
         raise ValueError("新峰会话序号必须严格晚于旧峰")
+    if prior_peak.coordinate_id != coordinate_id:
+        return None
+    if comparable is not None and boolean(comparable) is not True:
+        return None
     if boolean(actual) is not True:
         return None
     h_val = number(high, positive=True)

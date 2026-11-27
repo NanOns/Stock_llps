@@ -168,6 +168,7 @@ _STAGE_TABLES = {
         "stock.source_research_enrollments",
     ),
     "FOCUS_FORMAL": ("stock.source_d0_formal_admission_day_facts",),
+    "D2_LIFECYCLE": ("stock.d2_episode_day_states",),
     "FOCUS_RESEARCH_CONTEXT": (
         "stock.source_rule_evaluations",
         "stock.source_t0_early_observation_facts",
@@ -1169,6 +1170,7 @@ def build_data_job_plan(
                     "R03_SECTOR_OVERLAP",
                     "R03_SECTOR_LOO",
                     "FOCUS_FORMAL",
+                    "D2_LIFECYCLE",
                     "D0",
                     "D1",
                     "FORWARD_PATH",
@@ -1344,6 +1346,8 @@ def build_data_job_plan(
         required_raw_sessions.update(module_output_sessions.get("SECTOR_PULSE", ()))
     if "FOCUS_FORMAL" in selected_research_modules:
         required_raw_sessions.update(module_output_sessions.get("FOCUS_FORMAL", ()))
+    if "D2_LIFECYCLE" in selected_research_modules:
+        required_raw_sessions.update(module_output_sessions.get("D2_LIFECYCLE", ()))
     if "SECTOR_TRANSITION" in selected_research_modules:
         for target_text, previous_text in sector_transition_pairs.items():
             required_raw_sessions.add(date.fromisoformat(target_text))
@@ -3153,6 +3157,17 @@ class DataJobCoordinator:
                     stage="COHORT_STATS",
                     target_session=date.fromisoformat(day_text),
                     business_table="stock.source_cohort_group_stats",
+                    status="NOT_STARTED",
+                )
+        if "D2_LIFECYCLE" in request["selected_modules"]:
+            for day_text in plan.get("module_output_sessions", {}).get(
+                "D2_LIFECYCLE", ()
+            ):
+                _unit(
+                    plan["stage_units"],
+                    stage="D2_LIFECYCLE",
+                    target_session=date.fromisoformat(day_text),
+                    business_table="stock.d2_episode_day_states",
                     status="NOT_STARTED",
                 )
         if "FEP_BASELINE" in request["selected_modules"]:
@@ -8555,21 +8570,10 @@ def _execute_shared_production_chain_impl(
                     research_cutoff=cutoff,
                     source_capture_id=source_capture_id,
                     profile_revisions_by_session=None,
+                    scenarios=("LAUNCH_CONFIRM", "RECOVERY_TURN"),
                 )
-                try:
-                    run_source_formal_admission_range_from_saved(
-                        config,
-                        start_session=day,
-                        target_session=day,
-                        research_cutoff=cutoff,
-                        source_capture_id=source_capture_id,
-                        profile_revisions_by_session=None,
-                        scenario="RECOVERY_TURN",
-                    )
-                except Exception:  # noqa: BLE001 - RECOVERY_TURN在已有旧分区缺数据时不阻断LAUNCH
-                    pass
                 reports = report.get("reports", ())
-                if report.get("status") != "PERSISTED" or len(reports) != 1:
+                if report.get("status") != "PERSISTED" or not reports:
                     raise DataJobError(
                         str(report.get("reason_code") or "FOCUS_FORMAL_NOT_PERSISTED"),
                         "Focus正式准入未从精确D0来源事实生成并读回。",
@@ -8579,7 +8583,9 @@ def _execute_shared_production_chain_impl(
                 profile_revision = day_report.get("profile_revision")
                 producer_version = day_report.get("raw_producer_version")
                 calendar_revision = day_report.get("calendar_revision")
-                expected_rows = int(day_report.get("expected_source_count") or 0)
+                expected_rows = sum(
+                    int(r.get("expected_source_count") or 0) for r in reports
+                )
                 actual_rows = data_job_pg.read_business_table_count(
                     config,
                     business_table=unit["business_table"],
@@ -8600,6 +8606,57 @@ def _execute_shared_production_chain_impl(
                         "Focus正式准入读取键或完整来源池行数未闭合。",
                         status=409,
                     )
+                # 同日局部补齐动态MA5/MA20，仅处理当日READY正式事件
+                d1_win_for_ma = int(plan.get("d1_history_session_count") or 20)
+                from stock_a.application.source_research_day import (
+                    prepare_dynamic_ma_backfill_facts,
+                )
+                from stock_a.storage.postgres.research_day_facts import (
+                    persist_d1_active_anchors_and_observations,
+                )
+                from stock_a.storage.postgres import source_raw as _src_raw
+
+                ma_events_by_sym: dict[str, list[dict[str, Any]]] = {}
+                with _src_raw._transaction(config, write=False) as (
+                    _ma_conn,
+                    ma_cur,
+                    _ma_scope,
+                ):
+                    ma_cur.execute(
+                        """SELECT source_symbol, scenario, event_id,
+                                  failure_level_numerator, failure_level_denominator,
+                                  failure_coordinate, failure_source, failure_window_start,
+                                  effective_from_session, admission_status
+                           FROM stock.source_d0_formal_admission_day_facts
+                           WHERE target_session = %s AND admission_status = 'READY'""",
+                        (day,),
+                    )
+                    ma_cols = [d[0] for d in ma_cur.description]
+                    for mrow in ma_cur.fetchall():
+                        md = dict(zip(ma_cols, mrow))
+                        md["target_session"] = day
+                        md["source_capture_id"] = source_capture_id
+                        ma_events_by_sym.setdefault(md["source_symbol"], []).append(md)
+                if ma_events_by_sym:
+                    ma_backfill = prepare_dynamic_ma_backfill_facts(
+                        config,
+                        target_session=day,
+                        research_cutoff=cutoff,
+                        source_capture_id=source_capture_id,
+                        d1_history_session_count=d1_win_for_ma,
+                        events_by_symbol=ma_events_by_sym,
+                    )
+                    if ma_backfill.get("active_anchors") or ma_backfill.get(
+                        "active_observations"
+                    ):
+                        persist_d1_active_anchors_and_observations(
+                            config,
+                            target_session=day,
+                            active_anchors=ma_backfill.get("active_anchors", ()),
+                            active_observations=ma_backfill.get(
+                                "active_observations", ()
+                            ),
+                        )
                 progress_callback(
                     job_id=job_id,
                     stage_code="FOCUS_FORMAL",
@@ -9980,13 +10037,58 @@ def _execute_shared_production_chain_impl(
             plan.get("module_output_sessions", {}).get("D2_LIFECYCLE", ())
         ):
             day = date.fromisoformat(day_text)
+            unit = next(
+                (
+                    item
+                    for item in plan.get("stage_units", ())
+                    if item.get("stage_code") == "D2_LIFECYCLE"
+                    and item.get("target_session") == day
+                    and item.get("business_table") == "stock.d2_episode_day_states"
+                    and item.get("status") == "NOT_STARTED"
+                ),
+                None,
+            )
+            if unit is None:
+                continue
+            begin_callback(job_id=job_id, units=[unit])
             try:
-                run_r04_d2_and_downstream_day(
+                d2_report = run_r04_d2_and_downstream_day(
                     config,
                     target_session=day,
                     source_capture_id=source_capture_id,
                 )
+                actual_rows = data_job_pg.read_business_table_count(
+                    config,
+                    business_table=unit["business_table"],
+                    target_session=day,
+                    research_cutoff=cutoff,
+                )
+                progress_callback(
+                    job_id=job_id,
+                    stage_code="D2_LIFECYCLE",
+                    target_session=day,
+                    business_table=unit["business_table"],
+                    source_capture_id=source_capture_id,
+                    profile_history_session_count=None,
+                    d1_history_session_count=None,
+                    expected_rows=actual_rows,
+                    inserted_rows=actual_rows,
+                    quality_status="COMPLETE_QFQ_NON_PIT_CAPTURE_READBACK",
+                    no_change=False,
+                    profile_revision=None,
+                    producer_version=None,
+                    calendar_revision=str(
+                        d2_report.get("calendar_id") or "CN_A_SHARE_OFFICIAL"
+                    ),
+                )
+                resolved_unit_keys.add(unit_key(unit))
             except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    [unit],
+                    stage_code="D2_LIFECYCLE",
+                    error=error,
+                    message_prefix="D2生命周期与风险排序未闭合",
+                )
                 incomplete_stage_errors.append(
                     (
                         str(getattr(error, "code", type(error).__name__)),

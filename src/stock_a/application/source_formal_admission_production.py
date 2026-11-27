@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
@@ -13,6 +13,10 @@ from typing import Any
 from stock_a.application.source_d0_raw import _official_calendar
 from stock_a.application.source_formal_admission import (
     prepare_source_d0_launch_formal_admission,
+)
+from stock_a.application.source_pool_seed import (
+    resolve_ordinary_candidate_gates,
+    resolve_pg_history_window,
 )
 from stock_a.domain import FieldValue, unknown
 from stock_a.research.d0_price_facts import (
@@ -34,6 +38,8 @@ from stock_a.storage.postgres.formal_admission import (
     read_source_formal_admission_day,
 )
 from stock_a.storage.postgres.static_research_facts import (
+    list_saved_d0_sessions,
+    read_price_limit_facts_by_symbol,
     read_source_d0_scenario_day,
     read_source_pool_seed_facts,
     read_source_pool_seed_forward_scope,
@@ -93,15 +99,13 @@ def _qfq_window_row_state(
     ):
         return "FALSE", "QFQ_HISTORY_SOURCE_IDENTITY_MISMATCH"
     row_qfq_cap = row.get("qfq_source_capture_id")
-    if row_qfq_cap is None:
-        row_qfq_cap = row.get("source_capture_id")
     if type(row_qfq_cap) is not int or row_qfq_cap <= 0:
-        return "FALSE", "QFQ_HISTORY_SOURCE_IDENTITY_MISMATCH"
+        return "UNKNOWN", "QFQ_SOURCE_CAPTURE_MISSING"
     target_qfq_cap = _resolve_target_qfq_capture_id(target_row, source_capture_id)
-    if (
-        target_qfq_cap is not None
-        and row_qfq_cap != target_qfq_cap
-        and not _has_qfq_comparable_evidence(row, target_row)
+    if target_qfq_cap is None:
+        return "UNKNOWN", "QFQ_TARGET_CAPTURE_MISSING"
+    if row_qfq_cap != target_qfq_cap and not _has_qfq_comparable_evidence(
+        row, target_row
     ):
         return "UNKNOWN", "MIXED_PRICE_COORDINATE"
     if (
@@ -568,27 +572,50 @@ def _line_inputs(
     return close_field, phc_field, damage
 
 
-def _research_universe_gate(
-    symbol: str, universe_info: Mapping[str, Any]
-) -> FieldValue:
-    """按日期有效Research Universe判定F01三态门。"""
-    if universe_info.get("status") != "AVAILABLE":
-        return unknown(
-            str(universe_info.get("reason") or "OFFICIAL_RESEARCH_UNIVERSE_NOT_STORED")
+def _research_universe_gate_with_reason(
+    symbol: str,
+    universe_info: Mapping[str, Any],
+    *,
+    price_limit_fact: Mapping[str, Any] | None = None,
+) -> tuple[FieldValue, str | None]:
+    """按日期有效Research Universe与真实候选制度(NORMAL+LIMITED)判定F01三态门。"""
+    formal_universe, normal_listing, limited_price_rule = (
+        resolve_ordinary_candidate_gates(
+            source_symbol=symbol,
+            universe_result=universe_info,
+            target_row=None,
+            price_limit_fact=price_limit_fact,
         )
-    missing_basic = set(universe_info.get("missing_basic_symbols", ()))
-    quarantined = set(universe_info.get("quarantined_symbols", ()))
-    if symbol in missing_basic or symbol in quarantined:
-        return unknown("STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED")
-    if symbol in set(universe_info.get("members", ())):
-        return FieldValue(True)
-    return FieldValue(False)
+    )
+    for node in (formal_universe, normal_listing, limited_price_rule):
+        if node["state"] == "FALSE":
+            return FieldValue(False), str(
+                node.get("reason") or "OUTSIDE_RESEARCH_UNIVERSE"
+            )
+    for node in (formal_universe, normal_listing, limited_price_rule):
+        if node["state"] == "UNKNOWN":
+            return unknown(
+                str(node.get("reason") or "OFFICIAL_RESEARCH_UNIVERSE_NOT_STORED")
+            ), None
+    return FieldValue(True), None
+
+
+def _research_universe_gate(
+    symbol: str,
+    universe_info: Mapping[str, Any],
+    *,
+    price_limit_fact: Mapping[str, Any] | None = None,
+) -> FieldValue:
+    """按日期有效Research Universe与真实候选制度判定F01三态门。"""
+    return _research_universe_gate_with_reason(
+        symbol, universe_info, price_limit_fact=price_limit_fact
+    )[0]
 
 
 def _recovery_trigger_inputs(
     fact: Mapping[str, Any],
 ) -> tuple[FieldValue, FieldValue, FieldValue, FieldValue]:
-    """从已存RECOVERY_TURN事实提取R5/R20/MA5/MA20。"""
+    """从已存RECOVERY_TURN事实提取R5/R20/MA5/MA20；R20未知时绝不降取MA5。"""
     detail = fact.get("trigger_detail") or {}
     r5_str = detail.get("r5")
     r20_str = detail.get("r20")
@@ -615,9 +642,63 @@ def _recovery_trigger_inputs(
                 return FieldValue(Fraction(int(num), int(den)))
         return unknown(reason)
 
-    ma5_field = _frac_field(detail.get("ma5"), "RECOVERY_MA5_UNKNOWN")
     ma20_field = _frac_field(detail.get("ma20"), "RECOVERY_MA20_UNKNOWN")
+    if r20_str == "UNKNOWN":
+        ma5_field = unknown("RECOVERY_R20_UNKNOWN_NO_MA5_FALLBACK")
+    else:
+        ma5_field = _frac_field(detail.get("ma5"), "RECOVERY_MA5_UNKNOWN")
     return ma5_field, ma20_field, r5_field, r20_field
+
+
+def _lightweight_common_gates(
+    *,
+    symbol: str,
+    universe_info: Mapping[str, Any],
+    price_limit_fact: Mapping[str, Any] | None,
+    seed: Mapping[str, Any] | None,
+    seed_scope_reason: str,
+) -> tuple[dict[str, FieldValue], str | None]:
+    """计算不依赖21日历史窗的共同硬门(research_universe/actual_quote/core_damage/extension)。"""
+    ru_gate, ru_false_reason = _research_universe_gate_with_reason(
+        symbol, universe_info, price_limit_fact=price_limit_fact
+    )
+    if seed is None:
+        actual_gate = unknown(seed_scope_reason)
+        core_gate = unknown(seed_scope_reason)
+        extension_gate = unknown(seed_scope_reason)
+    else:
+        actual_gate = _seed_actual_quote_gate(seed)
+        core_gate = _negated_bool_gate(
+            seed.get("core_price_damage"),
+            seed.get("core_price_damage_quality"),
+            seed.get("core_price_damage_reason"),
+            unknown_reason="CORE_DAMAGE_NOT_COMPUTED",
+        )
+        extension_value = seed.get("profile_extension_value")
+        extension_quality = seed.get("profile_extension_quality")
+        if extension_quality != "OBSERVED" or extension_value not in {
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "EXTREME",
+        }:
+            extension_gate = unknown(
+                str(
+                    seed.get("profile_extension_reason")
+                    or "PROFILE_EXTENSION_NOT_COMPUTED"
+                )
+            )
+        else:
+            extension_gate = FieldValue(extension_value != "EXTREME")
+    return (
+        {
+            "research_universe": ru_gate,
+            "actual_quote": actual_gate,
+            "non_core_damage": core_gate,
+            "non_extreme_extension": extension_gate,
+        },
+        ru_false_reason,
+    )
 
 
 def run_source_formal_admission_from_saved(
@@ -680,15 +761,16 @@ def run_source_formal_admission_from_saved(
         price_coordinate="FORWARD_ADJUSTED",
         research_cutoff=research_cutoff,
     )
+    expected_history_session_count = 25 if scenario == "RECOVERY_TURN" else 21
     if (
         d0["source_pool"]["source_count"] != expected_count
         or d0["source_version"]["source_capture_id"] != source_capture_id
         or d0["session_contract"] != "D0_SESSION_R2"
-        or d0["history_session_count"] != 21
+        or d0["history_session_count"] != expected_history_session_count
     ):
         raise SourceFormalAdmissionProductionError(
             "FORMAL_ADMISSION_D0_SCOPE_MISMATCH",
-            "已存D0原始事实与目标Raw捕获、完整分母或严格21会话窗口不一致",
+            "已存D0原始事实与目标Raw捕获、完整分母或严格会话窗口不一致",
         )
 
     calendar = _official_calendar(target_session)
@@ -699,22 +781,33 @@ def run_source_formal_admission_from_saved(
             "D0目标日期不在现役官方交易日历内",
         )
     target_ordinal = official_sessions.index(target_session)
-    if target_ordinal < 20:
+    if target_ordinal < expected_history_session_count - 1:
         raise SourceFormalAdmissionProductionError(
             "FORMAL_ADMISSION_WINDOW_LEFT_TRUNCATED",
-            "目标日没有20个严格前序官方交易会话",
+            "目标日没有足够的严格前序官方交易会话",
         )
-    sessions = official_sessions[target_ordinal - 20 : target_ordinal + 1]
+    d0_sessions = official_sessions[
+        target_ordinal - (expected_history_session_count - 1) : target_ordinal + 1
+    ]
     if (
-        len(sessions) != 21
-        or sessions[-1] != target_session
-        or sessions[-1] > research_cutoff
-        or sessions[0] != _date(d0["history_window_start"])
+        len(d0_sessions) != expected_history_session_count
+        or d0_sessions[-1] != target_session
+        or d0_sessions[-1] > research_cutoff
+        or d0_sessions[0] != _date(d0["history_window_start"])
     ):
         raise SourceFormalAdmissionProductionError(
             "FORMAL_ADMISSION_WINDOW_MISMATCH",
-            "官方日历与已存D0严格前20会话窗口不匹配",
+            "官方日历与已存D0严格会话窗口不匹配",
         )
+    sessions = d0_sessions[-21:]
+    _, _, price_limit_calendar_revision = resolve_pg_history_window(
+        target_session.isoformat(), expected_history_session_count
+    )
+    price_limit_by_symbol = read_price_limit_facts_by_symbol(
+        config,
+        target_session=target_session,
+        calendar_revision=price_limit_calendar_revision,
+    )
     next_session = (
         official_sessions[target_ordinal + 1]
         if target_ordinal + 1 < len(official_sessions)
@@ -783,26 +876,44 @@ def run_source_formal_admission_from_saved(
             "原始D0事实行编号与已闭合来源代码集合不一致",
         )
 
-    raw_true_symbols = sorted(
-        item["source_symbol"]
-        for item in d0["results"]
-        if item["scenario_raw"] == "TRUE"
-    )
+    lightweight_gates_by_symbol: dict[
+        str, tuple[dict[str, FieldValue], str | None]
+    ] = {}
+    history_candidates: list[str] = []
+    for fact in d0["results"]:
+        sym = fact["source_symbol"]
+        lw_gates, ru_false_reason = _lightweight_common_gates(
+            symbol=sym,
+            universe_info=universe_info,
+            price_limit_fact=price_limit_by_symbol.get(sym),
+            seed=seed_by_symbol.get(sym),
+            seed_scope_reason=seed_scope_reason,
+        )
+        lightweight_gates_by_symbol[sym] = (lw_gates, ru_false_reason)
+        if fact["scenario_raw"] == "TRUE" or (
+            fact["scenario_raw"] == "FALSE"
+            and all(
+                not (g.quality == "OBSERVED" and g.value is False)
+                for g in lw_gates.values()
+            )
+        ):
+            history_candidates.append(sym)
+    history_candidates.sort()
     histories = (
         _raw_history_for_candidates(
             config=config,
             target_session=target_session,
             research_cutoff=research_cutoff,
             source_capture_id=source_capture_id,
-            candidates=raw_true_symbols,
+            candidates=history_candidates,
             sessions=sessions,
         )
-        if raw_true_symbols
+        if history_candidates
         else {}
     )
 
     window_ok = (
-        d0["history_session_count"] == 21
+        d0["history_session_count"] == expected_history_session_count
         and d0["official_calendar"]["calendar_id"] == calendar["calendar_id"]
         and d0["official_calendar"]["calendar_revision"]
         == calendar["calendar_revision"]
@@ -817,9 +928,9 @@ def run_source_formal_admission_from_saved(
         symbol = fact["source_symbol"]
         raw_state = fact["scenario_raw"]
         raw_counts[raw_state] += 1
-        seed = seed_by_symbol.get(symbol)
-        if raw_state == "TRUE":
-            history = histories.get(symbol, {})
+        lw_gates, ru_false_reason = lightweight_gates_by_symbol[symbol]
+        if raw_state in {"TRUE", "FALSE"} and symbol in histories:
+            history = histories[symbol]
             close, phc20, damage = _line_inputs(
                 symbol=symbol,
                 target_session=target_session,
@@ -845,34 +956,6 @@ def run_source_formal_admission_from_saved(
                     sessions=sessions,
                     history=history,
                 )
-            if seed is None:
-                actual_gate = unknown(seed_scope_reason)
-                core_gate = unknown(seed_scope_reason)
-                extension_gate = unknown(seed_scope_reason)
-            else:
-                actual_gate = _seed_actual_quote_gate(seed)
-                core_gate = _negated_bool_gate(
-                    seed.get("core_price_damage"),
-                    seed.get("core_price_damage_quality"),
-                    seed.get("core_price_damage_reason"),
-                    unknown_reason="CORE_DAMAGE_NOT_COMPUTED",
-                )
-                extension_value = seed.get("profile_extension_value")
-                extension_quality = seed.get("profile_extension_quality")
-                if extension_quality != "OBSERVED" or extension_value not in {
-                    "LOW",
-                    "MEDIUM",
-                    "HIGH",
-                    "EXTREME",
-                }:
-                    extension_gate = unknown(
-                        str(
-                            seed.get("profile_extension_reason")
-                            or "PROFILE_EXTENSION_NOT_COMPUTED"
-                        )
-                    )
-                else:
-                    extension_gate = FieldValue(extension_value != "EXTREME")
             if damage.state == "UNKNOWN":
                 first_day_gate = unknown(damage.reason_code)
             else:
@@ -895,35 +978,44 @@ def run_source_formal_admission_from_saved(
             else:
                 non_severe_drop_gate = FieldValue(severe_res.state == "FALSE")
             gates = {
-                "research_universe": _research_universe_gate(symbol, universe_info),
-                "actual_quote": actual_gate,
+                **lw_gates,
                 "coordinate_window": coordinate_gate,
                 "d0_liquidity": liquidity_gate,
-                "non_core_damage": core_gate,
-                "non_extreme_extension": extension_gate,
                 "non_first_day_damage": first_day_gate,
                 "non_severe_drop": non_severe_drop_gate,
+            }
+        elif raw_state == "FALSE":
+            close = unknown("RAW_NOT_TRUE_NO_T0_CLOSE_BINDING")
+            phc20 = unknown("RAW_NOT_TRUE_NO_T0_PHC20_FREEZE")
+            gates = {
+                **lw_gates,
+                "coordinate_window": unknown(
+                    "RAW_AND_LIGHTWEIGHT_GATE_FALSE_HISTORY_SKIPPED"
+                ),
+                "d0_liquidity": unknown(
+                    "RAW_AND_LIGHTWEIGHT_GATE_FALSE_HISTORY_SKIPPED"
+                ),
+                "non_first_day_damage": unknown(
+                    "RAW_AND_LIGHTWEIGHT_GATE_FALSE_HISTORY_SKIPPED"
+                ),
+                "non_severe_drop": unknown(
+                    "RAW_AND_LIGHTWEIGHT_GATE_FALSE_HISTORY_SKIPPED"
+                ),
             }
         else:
             close = unknown("RAW_NOT_TRUE_NO_T0_CLOSE_BINDING")
             phc20 = unknown("RAW_NOT_TRUE_NO_T0_PHC20_FREEZE")
             gates = {
-                name: unknown("RAW_NOT_TRUE_GATES_NOT_EVALUATED")
-                for name in (
-                    "research_universe",
-                    "actual_quote",
-                    "coordinate_window",
-                    "d0_liquidity",
-                    "non_core_damage",
-                    "non_extreme_extension",
-                    "non_first_day_damage",
-                    "non_severe_drop",
-                )
+                **lw_gates,
+                "coordinate_window": unknown("RAW_UNKNOWN_GATES_NOT_EVALUATED"),
+                "d0_liquidity": unknown("RAW_UNKNOWN_GATES_NOT_EVALUATED"),
+                "non_first_day_damage": unknown("RAW_UNKNOWN_GATES_NOT_EVALUATED"),
+                "non_severe_drop": unknown("RAW_UNKNOWN_GATES_NOT_EVALUATED"),
             }
         gate_reason_labels = {
             "research_universe": {
                 "TRUE": "OFFICIAL_RESEARCH_UNIVERSE_PROVED",
-                "FALSE": "OUTSIDE_RESEARCH_UNIVERSE",
+                "FALSE": ru_false_reason or "OUTSIDE_RESEARCH_UNIVERSE",
                 "UNKNOWN": "OFFICIAL_RESEARCH_UNIVERSE_NOT_STORED",
             },
             "actual_quote": {
@@ -990,7 +1082,7 @@ def run_source_formal_admission_from_saved(
             phc20=phc20,
             session_ordinal=target_ordinal,
             next_session=next_session,
-            window_start=sessions[0],
+            window_start=d0_sessions[0],
             evidence_ref=evidence_ref,
             scenario=scenario,
             ma5=ma5_field,
@@ -1017,8 +1109,8 @@ def run_source_formal_admission_from_saved(
             "raw_producer_version": d0["producer_version"],
             "algorithm_contract": d0["algorithm_contract"],
             "session_contract": d0["session_contract"],
-            "history_window_start": sessions[0],
-            "history_session_count": 21,
+            "history_window_start": d0_sessions[0],
+            "history_session_count": expected_history_session_count,
             "source_count": expected_count,
             "calendar_id": d0["official_calendar"]["calendar_id"],
             "calendar_revision": d0["official_calendar"]["calendar_revision"],
@@ -1071,7 +1163,13 @@ def run_source_formal_admission_from_saved(
             "failure_level_denominator": line["denominator"] if line else None,
             "failure_coordinate": line["coordinate"] if line else None,
             "failure_source": line["source"] if line else None,
-            "failure_window_start": sessions[0] if line else None,
+            "failure_window_start": (
+                sessions[-int(line["source_window_session_count"])]
+                if line and int(line.get("source_window_session_count") or 0) in (5, 20)
+                else sessions[0]
+                if line
+                else None
+            ),
             "failure_window_session_count": line["source_window_session_count"]
             if line
             else None,
@@ -1144,7 +1242,7 @@ def run_source_formal_admission_from_saved(
             "database_write_attempted": False,
         },
         "raw_history_rows_read": sum(len(rows) for rows in histories.values()),
-        "raw_history_batches": (len(raw_true_symbols) + 99) // 100,
+        "raw_history_batches": (len(history_candidates) + 99) // 100,
         "future_quote_rows_read": 0,
         "research_cutoff": research_cutoff.isoformat(),
     }
@@ -1158,41 +1256,73 @@ def run_source_formal_admission_range_from_saved(
     research_cutoff: date,
     source_capture_id: int,
     profile_revisions_by_session: Mapping[str, str] | None = None,
+    scenario: str | None = None,
+    scenarios: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """仅生产指定范围内PG已经完成的LAUNCH D0分区。"""
-    sessions = list_saved_launch_sessions(
-        config,
-        start_session=start_session,
-        target_session=target_session,
-        research_cutoff=research_cutoff,
-        source_capture_id=source_capture_id,
-    )
-    if not sessions:
+    """生产指定范围内PG已经完成的正式D0场景分区(默认覆盖LAUNCH_CONFIRM与RECOVERY_TURN)。"""
+    valid_scenarios = ("LAUNCH_CONFIRM", "RECOVERY_TURN")
+    if scenarios is not None:
+        selected_scenarios = tuple(scenarios)
+    elif scenario is not None:
+        selected_scenarios = (scenario,)
+    else:
+        selected_scenarios = valid_scenarios
+    if not selected_scenarios or any(
+        sc not in valid_scenarios for sc in selected_scenarios
+    ):
+        raise SourceFormalAdmissionProductionError(
+            "FORMAL_ADMISSION_ARGUMENT_INVALID",
+            "范围正式准入仅支持LAUNCH_CONFIRM与RECOVERY_TURN场景",
+        )
+
+    reports: list[dict[str, Any]] = []
+    sessions_by_scenario: dict[str, list[str]] = {}
+    for sc in selected_scenarios:
+        sc_sessions = list_saved_d0_sessions(
+            config,
+            scenario=sc,
+            start_session=start_session,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            source_capture_id=source_capture_id,
+        )
+        if not sc_sessions and sc == "LAUNCH_CONFIRM":
+            sc_sessions = list_saved_launch_sessions(
+                config,
+                start_session=start_session,
+                target_session=target_session,
+                research_cutoff=research_cutoff,
+                source_capture_id=source_capture_id,
+            )
+        sessions_by_scenario[sc] = [day.isoformat() for day in sc_sessions]
+        for day in sc_sessions:
+            reports.append(
+                run_source_formal_admission_from_saved(
+                    config,
+                    target_session=day,
+                    research_cutoff=research_cutoff,
+                    source_capture_id=source_capture_id,
+                    profile_revision=(
+                        profile_revisions_by_session.get(day.isoformat())
+                        if isinstance(profile_revisions_by_session, Mapping)
+                        else None
+                    ),
+                    persist=True,
+                    scenario=sc,
+                )
+            )
+    if not reports:
         return {
             "status": "NOT_COMPUTED",
-            "reason_code": "SAVED_LAUNCH_D0_NOT_FOUND_FOR_RANGE",
+            "reason_code": "SAVED_D0_NOT_FOUND_FOR_RANGE",
             "start_session": start_session.isoformat(),
             "target_session": target_session.isoformat(),
             "research_cutoff": research_cutoff.isoformat(),
             "source_capture_id": source_capture_id,
+            "scenarios": list(selected_scenarios),
             "completed_day_count": 0,
             "database_write_attempted": False,
         }
-    reports = [
-        run_source_formal_admission_from_saved(
-            config,
-            target_session=day,
-            research_cutoff=research_cutoff,
-            source_capture_id=source_capture_id,
-            profile_revision=(
-                profile_revisions_by_session.get(day.isoformat())
-                if isinstance(profile_revisions_by_session, Mapping)
-                else None
-            ),
-            persist=True,
-        )
-        for day in sessions
-    ]
     return {
         "status": "PERSISTED",
         "contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
@@ -1200,6 +1330,8 @@ def run_source_formal_admission_range_from_saved(
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
         "source_capture_id": source_capture_id,
+        "scenarios": list(selected_scenarios),
+        "sessions_by_scenario": sessions_by_scenario,
         "completed_day_count": len(reports),
         "reports": reports,
         "database_write_attempted": True,
