@@ -1615,6 +1615,7 @@ def prepare_d1_material_observation(
     concept_snapshot_id: str | None,
     include_source_symbol_structure_results: bool = False,
     include_impulse: bool = True,
+    dynamic_ma_events_by_symbol: Mapping[str, Sequence[Any]] | None = None,
 ) -> dict[str, Any]:
     """一次只读准备全池D1与成员事实，供同进程筛选分页复用。"""
     _target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1637,6 +1638,7 @@ def prepare_d1_material_observation(
             include_source_symbol_structure_results
         ),
         include_impulse=include_impulse,
+        dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol,
     )
     snapshots = [
         read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)

@@ -1935,6 +1935,33 @@ def prepare_source_research_day(
                 "D1_ADJACENT_SESSION_MISMATCH", "D1目标与前一官方会话不一致"
             )
         d1_started = time.perf_counter()
+        from stock_a.storage.postgres import source_raw
+
+        dynamic_ma_events_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        with source_raw._transaction(config, write=False) as (_conn, cur, _scope):
+            cur.execute(
+                """
+                SELECT source_symbol, target_session, scenario, event_id, source_capture_id
+                FROM stock.source_d0_formal_admission_day_facts
+                WHERE target_session >= %s AND target_session <= %s
+                  AND admission_status = 'READY'
+                ORDER BY target_session ASC, source_symbol ASC, scenario ASC
+                """,
+                (d1_sessions[0], target_session),
+            )
+            for row_sym, row_sess, row_scen, row_ev_id, row_cap in cur.fetchall():
+                dynamic_ma_events_by_symbol.setdefault(str(row_sym), []).append(
+                    {
+                        "event_id": str(
+                            row_ev_id or f"{row_sym}:{row_sess.isoformat()}:{row_scen}"
+                        ),
+                        "scenario": str(row_scen),
+                        "birth_session": row_sess,
+                        "coordinate_id": f"BAOSTOCK_QFQ:{int(row_cap)}"
+                        if row_cap is not None
+                        else None,
+                    }
+                )
         prepared = prepare_d1_material_observation(
             config,
             target_session=target_session,
@@ -1945,6 +1972,7 @@ def prepare_source_research_day(
             concept_snapshot_id=None,
             include_source_symbol_structure_results=True,
             include_impulse=include_impulse,
+            dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol or None,
         )
         d1_wall_seconds = time.perf_counter() - d1_started
         d1 = prepared["d1"]

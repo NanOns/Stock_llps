@@ -364,7 +364,11 @@ def _support_binding_from_observation(
             support_valid=unknown("PRIOR_SUPPORT_OBSERVATION_MISSING"),
         )
     obs_coord = obs.get("coordinate_id")
-    if obs_coord and obs_coord != target_coordinate_id:
+    if (
+        obs_coord
+        and obs_coord != target_coordinate_id
+        and obs.get("comparability_status") != "COMPARABLE"
+    ):
         return SupportBinding(
             support_anchor_id=anchor_id,
             support_lower=unknown("PRIOR_SUPPORT_COORDINATE_MISMATCH"),
@@ -395,6 +399,8 @@ def _support_binding_from_observation(
     raw_lower = obs.get("support_lower")
     if raw_lower is None:
         raw_lower = obs.get("lower_bound")
+    if raw_lower is None:
+        raw_lower = obs.get("lower")
     if isinstance(raw_lower, FieldValue):
         lower_num = number(raw_lower, positive=True)
         lower_fv = (
@@ -737,8 +743,14 @@ def advance_d2_day(
         frozen_fact, linked_fact = _build_invalidation_facts(prior=prior, inputs=inputs)
         quals = inputs.qualifications
         if inputs.entity_type == "STOCK":
-            if prior.event is None or prior.event_id not in admitted_event_ids:
-                # 旧 CORE 或其他旧 FORMAL episode 不能借今日其它事件升/维持 CONFIRMED
+            confirmed_qual = dict(quals).get("CONFIRMED")
+            if prior.event is None:
+                # 旧 CORE 不能借今日其它事件升/维持 CONFIRMED
+                quals = _with_confirmed_qual(quals, FieldValue(False))
+            elif (
+                confirmed_qual is None or confirmed_qual.quality != "UNKNOWN_DATA"
+            ) and prior.event_id not in admitted_event_ids:
+                # 其他旧 FORMAL episode 不能借今日其它事件升/维持 CONFIRMED；未知则保留 UNKNOWN
                 quals = _with_confirmed_qual(quals, FieldValue(False))
         day = Day(
             entity_id=inputs.entity_id,

@@ -318,6 +318,7 @@ def _build_d0_near_miss_inputs(
             {
                 "clv_at_least_060": ("clv", Fraction(3, 5), ">="),
                 "amr20_mean_prior_at_least_120": ("amr_lower", Fraction(6, 5), ">="),
+                "breakout_price": ("breakout_atr", Fraction(0), ">="),
             },
         ),
         (
@@ -326,6 +327,22 @@ def _build_d0_near_miss_inputs(
                 "clv": ("clv", Fraction(55, 100), ">="),
                 "rps5_delta3": ("rps_pp", Fraction(0), ">"),
                 "amr": ("amr_lower", Fraction(105, 100), ">="),
+            },
+        ),
+        (
+            "PULLBACK",
+            {
+                "drawdown_min": ("pb_drawdown_lower", Fraction(3, 100), ">="),
+                "drawdown_max": ("pb_drawdown_upper", Fraction(12, 100), "<="),
+                "contraction": ("pb_contraction", Fraction(7, 10), "<="),
+            },
+        ),
+        (
+            "TREND_CONTINUE",
+            {
+                "rps5": ("rps_pp", Fraction(70), ">="),
+                "amr": ("amr_lower", Fraction(105, 100), ">="),
+                "clv": ("clv", Fraction(55, 100), ">="),
             },
         ),
     ):
@@ -462,7 +479,7 @@ def run_r04_d2_and_downstream_day(
     )
 
     # 2. 只读读取当日 Seed、Profile、Raw QFQ、正式准入、D0场景谓词、LOO 及改善历史
-    pb_window_start = max(0, ordinal - 25)
+    pb_window_start = max(0, ordinal - 28)
     pb_sessions = tuple(sessions[pb_window_start : ordinal + 1])
 
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
@@ -595,17 +612,25 @@ def run_r04_d2_and_downstream_day(
 
         loo_rows = cursor.execute(
             """
-            SELECT target_entity_id, support_status, reason_code
-            FROM stock.r03_sector_loo_support_facts
-            WHERE trade_date = %s
-            ORDER BY target_entity_id, board_kind
+            SELECT f.target_entity_id, f.support_status, f.reason_code, c.confirmed_raw_state
+            FROM stock.r03_sector_loo_support_facts f
+            LEFT JOIN stock.r03_sector_loo_candidate_facts c
+              ON c.loo_fact_id = f.id
+             AND (c.is_selected_support = TRUE OR c.board_id = f.algorithm_support_board_id)
+            WHERE f.trade_date = %s
+            ORDER BY f.target_entity_id, f.board_kind
             """,
             (target_session,),
         ).fetchall()
         loo_by_symbol: dict[str, list[FieldValue]] = {}
-        for sym_id, sup_status, rsn in loo_rows:
+        for sym_id, sup_status, rsn, confirmed_raw in loo_rows:
             if sup_status == "SELECTED":
-                fv = FieldValue(True)
+                if confirmed_raw == "TRUE":
+                    fv = FieldValue(True)
+                elif confirmed_raw == "FALSE":
+                    fv = FieldValue(False)
+                else:
+                    fv = unknown(rsn or "LOO_CONFIRMED_RAW_UNKNOWN")
             elif sup_status == "NOT_SELECTED":
                 fv = FieldValue(False)
             else:
@@ -635,26 +660,26 @@ def run_r04_d2_and_downstream_day(
             )
             earlier_symbols = {row[0] for row in cursor.fetchall()}
 
-        # 读取最近一次合法改善 ordinal（按 episode_id）
+        # 读取最近一次合法改善 ordinal（按 episode_id，直接从 D2 状态迁移历史读取）
         last_improvement_by_ep: dict[str, int] = {}
         if prev_session is not None:
             cursor.execute(
                 """
-                SELECT r.episode_id, MAX(s.ordinal)
-                FROM stock.stock_radar_day_events r
-                JOIN stock.d2_episode_day_states s
-                  ON s.episode_id = r.episode_id AND s.session_date = r.target_session
-                WHERE r.target_session <= %s
-                  AND r.event_type IN ('UPGRADED', 'IMPROVEMENT_RESET')
-                GROUP BY r.episode_id
+                SELECT episode_id, MAX(ordinal)
+                FROM stock.d2_episode_day_states
+                WHERE entity_type = 'STOCK'
+                  AND calendar_id = %s
+                  AND session_date <= %s
+                  AND transitions && ARRAY['UPGRADED', 'IMPROVEMENT_RESET']::text[]
+                GROUP BY episode_id
                 """,
-                (prev_session,),
+                (calendar_id, prev_session),
             )
             for ep_id, max_ord in cursor.fetchall():
                 if ep_id and max_ord is not None:
                     last_improvement_by_ep[ep_id] = int(max_ord)
 
-        # 若存在 t-1 合法 FORMAL 父，只为这些证券批量读近 26 个官方会话 Raw 行以生产 PB/CONTINUE
+        # 若存在 t-1 合法 FORMAL 父，只为这些证券批量读近 29 个官方会话 Raw 行以生产 PB/CONTINUE
         parent_symbols = sorted(
             sym
             for sym, sts in prior_states_by_symbol.items()
@@ -666,9 +691,14 @@ def run_r04_d2_and_downstream_day(
                 """
                 SELECT source_symbol, session_date, source_capture_id,
                        raw_source_capture_id, qfq_source_capture_id,
+                       qfq_price_coordinate, qfq_adjustflag,
+                       qfq_response_session_date, qfq_response_source_code,
+                       qfq_response_fields, qfq_bar_status,
+                       qfq_tradestatus_value, qfq_tradestatus_quality,
+                       qfq_price_reason, qfq_close_reason,
                        qfq_open, qfq_high, qfq_low, qfq_close, qfq_price_quality,
                        qfq_open_quality, qfq_high_quality, qfq_low_quality, qfq_close_quality,
-                       raw_amount, raw_amount_quality, amount_unit_status AS raw_amount_unit_status,
+                       raw_amount, raw_amount_quality, amount_unit_status,
                        raw_tradestatus_value, raw_tradestatus_quality
                 FROM stock.source_raw_daily
                 WHERE source_symbol = ANY(%s::text[])
@@ -680,6 +710,7 @@ def run_r04_d2_and_downstream_day(
             pb_cols = [d[0] for d in cursor.description]
             for r in pb_raw_rows:
                 rd = dict(zip(pb_cols, r))
+                rd["_target_session"] = target_session
                 pb_raw_by_sym_session.setdefault(rd["source_symbol"], {})[
                     rd["session_date"]
                 ] = rd
@@ -866,11 +897,33 @@ def run_r04_d2_and_downstream_day(
                     "non_severe_drop_state",
                 )
             )
+            prior_sups_for_sym = prior_d1_supports_by_symbol.get(sym, ())
+            prior_sups_by_uid = {
+                str(r["anchor_uid"]): r
+                for r in prior_sups_for_sym
+                if r.get("anchor_uid")
+            }
+            applicable_prior_anchor_ids = frozenset(
+                str(r["anchor_uid"])
+                for r in prior_sups_for_sym
+                if r.get("anchor_uid")
+                and (
+                    r.get("available_from_session") is None
+                    or (
+                        prev_session is not None
+                        and r["available_from_session"] <= prev_session
+                    )
+                )
+                and r.get("state") not in ("BROKEN", "EXPIRED")
+            )
             prior_bindings = build_support_bindings_for_parents(
                 prior_states=p_states,
-                d1_supports_by_anchor_id=sups_by_uid,
+                d1_supports_by_anchor_id=prior_sups_by_uid,
+                applicable_prior_anchor_ids=applicable_prior_anchor_ids,
                 target_coordinate_id=coord_id,
-                supports_proven_complete=True,
+                supports_proven_complete=(
+                    prev_session is not None and bool(prior_d1_supports_by_symbol)
+                ),
             )
             pb_res = produce_pb_continue_and_peaks_for_stock(
                 entity_id=sym,
@@ -937,11 +990,24 @@ def run_r04_d2_and_downstream_day(
             ma_slope20_atr=slope_fv,
         )
         has_confirmed = bool(ev_list)
+        if has_confirmed:
+            confirmed_fv = FieldValue(True)
+        else:
+            sym_adms = adm_by_symbol_scenario.get(sym, {})
+            sym_scens = scen_by_symbol_scenario.get(sym, {})
+            if not sym_adms and not sym_scens:
+                confirmed_fv = unknown("D0_CONFIRMED_UNKNOWN")
+            elif any(
+                row.get("admission_status") == "UNKNOWN" for row in sym_adms.values()
+            ):
+                confirmed_fv = unknown("D0_CONFIRMED_UNKNOWN")
+            else:
+                confirmed_fv = FieldValue(False)
         quals = (
             ("SEED", seed_fv),
             ("PREWATCH", pw_fv),
             ("WARM", warm_fv),
-            ("CONFIRMED", FieldValue(True) if has_confirmed else FieldValue(False)),
+            ("CONFIRMED", confirmed_fv),
         )
         d2_inp = D2DayInputs(
             entity_id=sym,
@@ -1104,21 +1170,36 @@ def run_r04_d2_and_downstream_day(
             prior_d1_supports_by_symbol.get(sym, ()),
             ordinal=max(0, ordinal - 1),
         )
-        if (
-            sel_state is not None
-            and sel_state.event is not None
-            and sel_state.event.linked_anchor_id
-        ):
-            linked_ids: frozenset[str] | None = frozenset(
-                {sel_state.event.linked_anchor_id}
-            )
-            sup_absent = False
-        elif sel_state is not None:
-            linked_ids = frozenset()
-            sup_absent = True
+        if sel_state is not None:
+            collected_ids: set[str] = set()
+            if sel_state.event is not None and sel_state.event.linked_anchor_id:
+                collected_ids.add(str(sel_state.event.linked_anchor_id))
+            if sel_state.event_id:
+                for sup_row in sym_sups:
+                    if sup_row.get(
+                        "source_event_id"
+                    ) == sel_state.event_id and sup_row.get("anchor_uid"):
+                        collected_ids.add(str(sup_row["anchor_uid"]))
+            if collected_ids:
+                linked_ids: frozenset[str] | None = frozenset(collected_ids)
+                sup_absent = False
+                support_scope_known = True
+            elif sel_state.event is not None and bool(d1_supports_by_symbol):
+                linked_ids = frozenset()
+                sup_absent = True
+                support_scope_known = True
+            else:
+                linked_ids = None
+                sup_absent = False
+                support_scope_known = False
         else:
             linked_ids = None
-            sup_absent = d2_res.primary_selection.quality == "NOT_APPLICABLE"
+            if d2_res.primary_selection.quality == "NOT_APPLICABLE":
+                sup_absent = True
+                support_scope_known = True
+            else:
+                sup_absent = False
+                support_scope_known = False
 
         assembled_risk = assemble_stock_risk_inputs(
             entity_id=sym,
@@ -1130,7 +1211,7 @@ def run_r04_d2_and_downstream_day(
             selected_state=sel_state,
             candidate_supports=cand_obs,
             linked_anchor_ids=linked_ids,
-            support_scope_known=True,
+            support_scope_known=support_scope_known,
             support_applicable_proven_absent=sup_absent,
         )
 
@@ -1185,7 +1266,7 @@ def run_r04_d2_and_downstream_day(
             adm_by_symbol_scenario.get(sym, {}),
             scen_by_symbol_scenario.get(sym, {}),
         )
-        emerg_rank_map = {"STRONG": 2, "MODERATE": 1, "NONE": 0}
+        emerg_rank_map = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
         emerg_lv, _ = classify_emergence(rps_d3_fv)
         nm_paths = (
             assemble_near_miss_paths_from_d0(
@@ -1200,6 +1281,18 @@ def run_r04_d2_and_downstream_day(
             if scen_inputs
             else ()
         )
+
+        sym_pred_evidence: dict[str, tuple[str, ...]] = {}
+        for sc_name, sc_row in scen_by_symbol_scenario.get(sym, {}).items():
+            p_ids = sc_row.get("predicate_ids") or ()
+            p_states = sc_row.get("predicate_states") or ()
+            failed_preds = tuple(
+                f"{pid}:{p_states[idx] if idx < len(p_states) else 'UNKNOWN'}"
+                for idx, pid in enumerate(p_ids)
+                if (p_states[idx] if idx < len(p_states) else "UNKNOWN") != "TRUE"
+            )
+            if failed_preds:
+                sym_pred_evidence[sc_name] = failed_preds
 
         proj_inputs.append(
             StockProjectionInput(
@@ -1226,6 +1319,7 @@ def run_r04_d2_and_downstream_day(
                 current_primary=d2_res.primary_selection.field,
                 prior_risk=prior_risk_by_symbol.get(sym),
                 near_miss_paths=nm_paths,
+                predicate_evidence=sym_pred_evidence or None,
             )
         )
 

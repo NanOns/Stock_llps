@@ -625,8 +625,11 @@ def evaluate_strong_pullback_day(
         birth_age_f = FieldValue(1 <= birth_age <= 20)
         peak_age_f = FieldValue(2 <= peak_age <= 10 and h_ord <= target_ordinal - 2)
 
-        # 3. H_i <= peak_high（严格高于时记 RESET_NEW_HIGH）
-        if cur_vals is None:
+        # 3. H_i <= peak_high（严格高于时记 RESET_NEW_HIGH；需同经济坐标可比）
+        peak_comparable = not peak.coordinate_id or peak.coordinate_id == coordinate_id
+        if not peak_comparable:
+            no_new_high_f = unknown("PEAK_COORDINATE_NOT_COMPARABLE")
+        elif cur_vals is None:
             no_new_high_f = unknown(cur_err or "CURRENT_HIGH_UNKNOWN")
         elif cur_vals["high"] > peak.peak_high:
             no_new_high_f = FieldValue(False)
@@ -634,7 +637,10 @@ def evaluate_strong_pullback_day(
             no_new_high_f = FieldValue(True)
 
         # 4. drawdown in [0.03, 0.12]
-        if cur_vals is None:
+        if not peak_comparable:
+            drawdown_f = unknown("PEAK_COORDINATE_NOT_COMPARABLE")
+            depth = None
+        elif cur_vals is None:
             drawdown_f = unknown(cur_err or "CURRENT_CLOSE_UNKNOWN")
             depth = None
         else:
@@ -642,7 +648,9 @@ def evaluate_strong_pullback_day(
             drawdown_f = FieldValue(_DRAWDOWN_MIN <= depth <= _DRAWDOWN_MAX)
 
         # 5. 昨 C < peak_close
-        if prev_vals is None:
+        if not peak_comparable:
+            prev_below_f = unknown("PEAK_COORDINATE_NOT_COMPARABLE")
+        elif prev_vals is None:
             prev_below_f = unknown(prev_err or "PREV_CLOSE_UNKNOWN")
         else:
             prev_below_f = FieldValue(prev_vals["close"] < peak.peak_close)

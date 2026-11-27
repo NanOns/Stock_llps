@@ -165,6 +165,7 @@ _STAGE_TABLES = {
         "stock.source_d0_launch_day_facts",
         "stock.source_d1_structure_day_facts",
         "stock.source_d1_material_anchor_day_facts",
+        "stock.source_d1_anchor_day_observations",
         "stock.source_research_enrollments",
     ),
     "FOCUS_FORMAL": ("stock.source_d0_formal_admission_day_facts",),
@@ -3163,13 +3164,21 @@ class DataJobCoordinator:
             for day_text in plan.get("module_output_sessions", {}).get(
                 "D2_LIFECYCLE", ()
             ):
-                _unit(
-                    plan["stage_units"],
-                    stage="D2_LIFECYCLE",
-                    target_session=date.fromisoformat(day_text),
-                    business_table="stock.d2_episode_day_states",
-                    status="NOT_STARTED",
-                )
+                for d2_tbl in (
+                    "stock.d2_episode_day_states",
+                    "stock.d2_primary_episode_day_facts",
+                    "stock.stock_risk_day_facts",
+                    "stock.stock_priority_day_facts",
+                    "stock.stock_radar_day_events",
+                    "stock.stock_near_miss_day_facts",
+                ):
+                    _unit(
+                        plan["stage_units"],
+                        stage="D2_LIFECYCLE",
+                        target_session=date.fromisoformat(day_text),
+                        business_table=d2_tbl,
+                        status="NOT_STARTED",
+                    )
         if "FEP_BASELINE" in request["selected_modules"]:
             fep_days = plan.get("module_output_sessions", {}).get("FEP_BASELINE", ())
             if fep_days:
@@ -8656,6 +8665,9 @@ def _execute_shared_production_chain_impl(
                             active_observations=ma_backfill.get(
                                 "active_observations", ()
                             ),
+                            replace_scope="SCOPED",
+                            scoped_symbols=sorted(ma_events_by_sym.keys()),
+                            scoped_structure_types=("DYNAMIC_MA5", "DYNAMIC_MA20"),
                         )
                 progress_callback(
                     job_id=job_id,
@@ -10037,54 +10049,51 @@ def _execute_shared_production_chain_impl(
             plan.get("module_output_sessions", {}).get("D2_LIFECYCLE", ())
         ):
             day = date.fromisoformat(day_text)
-            unit = next(
-                (
-                    item
-                    for item in plan.get("stage_units", ())
-                    if item.get("stage_code") == "D2_LIFECYCLE"
-                    and item.get("target_session") == day
-                    and item.get("business_table") == "stock.d2_episode_day_states"
-                    and item.get("status") == "NOT_STARTED"
-                ),
-                None,
-            )
-            if unit is None:
+            day_units = [
+                item
+                for item in plan.get("stage_units", ())
+                if item.get("stage_code") == "D2_LIFECYCLE"
+                and item.get("target_session") == day
+                and item.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
                 continue
-            begin_callback(job_id=job_id, units=[unit])
+            begin_callback(job_id=job_id, units=day_units)
             try:
                 d2_report = run_r04_d2_and_downstream_day(
                     config,
                     target_session=day,
                     source_capture_id=source_capture_id,
                 )
-                actual_rows = data_job_pg.read_business_table_count(
-                    config,
-                    business_table=unit["business_table"],
-                    target_session=day,
-                    research_cutoff=cutoff,
-                )
-                progress_callback(
-                    job_id=job_id,
-                    stage_code="D2_LIFECYCLE",
-                    target_session=day,
-                    business_table=unit["business_table"],
-                    source_capture_id=source_capture_id,
-                    profile_history_session_count=None,
-                    d1_history_session_count=None,
-                    expected_rows=actual_rows,
-                    inserted_rows=actual_rows,
-                    quality_status="COMPLETE_QFQ_NON_PIT_CAPTURE_READBACK",
-                    no_change=False,
-                    profile_revision=None,
-                    producer_version=None,
-                    calendar_revision=str(
-                        d2_report.get("calendar_id") or "CN_A_SHARE_OFFICIAL"
-                    ),
-                )
-                resolved_unit_keys.add(unit_key(unit))
+                for unit in day_units:
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=day,
+                        research_cutoff=cutoff,
+                    )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="D2_LIFECYCLE",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=actual_rows,
+                        inserted_rows=actual_rows,
+                        quality_status="COMPLETE_QFQ_NON_PIT_CAPTURE_READBACK",
+                        no_change=False,
+                        profile_revision=None,
+                        producer_version=None,
+                        calendar_revision=str(
+                            d2_report.get("calendar_id") or "CN_A_SHARE_OFFICIAL"
+                        ),
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
             except Exception as error:  # noqa: BLE001
                 mark_units_incomplete(
-                    [unit],
+                    day_units,
                     stage_code="D2_LIFECYCLE",
                     error=error,
                     message_prefix="D2生命周期与风险排序未闭合",
