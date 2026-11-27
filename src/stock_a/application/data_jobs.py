@@ -3415,14 +3415,6 @@ class DataJobCoordinator:
                     tbl = str(unit["business_table"])
                     state_key = source_module_by_stage.get(stage, stage)
                     state = session_states.get(state_key, {}).get(sess.isoformat())
-                    if stage in source_module_by_stage and state in {
-                        "COMPLETED_WITH_ROWS",
-                        "COMPLETED_EMPTY",
-                    }:
-                        unit["status"] = "ALREADY_COMPLETE"
-                        unit["completed_units"] = unit.get("planned_units", 1)
-                        unit["verified_rows"] = unit.get("expected_rows")
-                        continue
                     if state not in {"COMPLETED_WITH_ROWS", "COMPLETED_EMPTY"}:
                         incomplete_unit_keys.add((stage, sess, tbl))
                 if incomplete_unit_keys:
@@ -3440,6 +3432,26 @@ class DataJobCoordinator:
                     )
                 }
                 if pending_sources:
+                    # An explicitly selected source stage must resolve its current
+                    # identity roster before any prior date watermark can be reused.
+                    # Reuse is decided by the source capture request roster later in
+                    # the worker, not by date-only business row counts here.
+                    for unit in plan.get("stage_units", ()):
+                        if (
+                            unit.get("stage_code")
+                            in {
+                                source_stage_by_module[module]
+                                for module in pending_sources
+                            }
+                            and unit.get("status") == "NOT_STARTED"
+                        ):
+                            incomplete_unit_keys.add(
+                                (
+                                    str(unit["stage_code"]),
+                                    unit["target_session"],
+                                    str(unit["business_table"]),
+                                )
+                            )
                     derived_stages = set()
                     if pending_sources & {"BAOSTOCK_PRICES", "BAOSTOCK_UNIVERSE"}:
                         derived_stages.update(
