@@ -7303,6 +7303,73 @@ def _execute_shared_production_chain_impl(
                     and day.isoformat() in cap_by_day_mkt
                     else source_capture_id
                 )
+                if cap_mkt_t is None:
+                    from stock_a.storage.postgres.baostock_universe import (
+                        resolve_date_effective_universe,
+                    )
+
+                    target_universe = resolve_date_effective_universe(
+                        config,
+                        session_date=day,
+                        research_eligible_only=True,
+                    )
+                    target_symbols = tuple(
+                        sorted(set(target_universe.get("members", ())))
+                    )
+                    if (
+                        target_universe.get("status") == "AVAILABLE"
+                        and target_symbols
+                        and len(target_symbols) == target_universe.get("member_count")
+                    ):
+                        from stock_a.storage.postgres.source_raw import (
+                            _transaction as _market_capture_tx,
+                        )
+
+                        with _market_capture_tx(
+                            config, write=False, statement_timeout_ms=10000
+                        ) as (_conn, capture_cursor, _):
+                            capture_cursor.execute(
+                                """SELECT count(DISTINCT qfq_source_capture_id),
+                                          min(qfq_source_capture_id),
+                                          count(DISTINCT source_symbol)
+                                   FROM stock.source_raw_daily
+                                   WHERE session_date=%s
+                                     AND source_symbol=ANY(%s::text[])
+                                     AND board IN ('MAIN_BOARD','GEM')
+                                     AND qfq_source_capture_id IS NOT NULL""",
+                                (day, list(target_symbols)),
+                            )
+                            qfq_capture_count, candidate_capture, covered_symbols = (
+                                capture_cursor.fetchone()
+                            )
+                        if (
+                            qfq_capture_count == 1
+                            and type(candidate_capture) is int
+                            and covered_symbols == len(target_symbols)
+                        ):
+                            from stock_a.application.pg_research import (
+                                read_source_version_context,
+                            )
+
+                            candidate_context = read_source_version_context(
+                                config,
+                                target_session=day,
+                                research_cutoff=cutoff,
+                                source_capture_id=candidate_capture,
+                                price_coordinate="FORWARD_ADJUSTED",
+                            )
+                            if (
+                                candidate_context.get("status") == "AVAILABLE"
+                                and candidate_context.get("version_status")
+                                == "COMPLETE"
+                                and candidate_context.get("source_capture_id")
+                                == candidate_capture
+                                and candidate_context.get("capture_expected_row_count")
+                                == len(target_symbols)
+                                and candidate_context.get("research_expected_row_count")
+                                == len(target_symbols)
+                            ):
+                                cap_mkt_t = candidate_capture
                 cap_mkt_t3 = (
                     int(cap_by_day_mkt[mkt_t3_day.isoformat()])
                     if isinstance(cap_by_day_mkt, Mapping)
@@ -8519,9 +8586,13 @@ def _execute_shared_production_chain_impl(
             expected_source_count=source_version["research_expected_row_count"],
             profile_revision=expected_revision,
         )
+        expected_seed_count = source_version.get("research_expected_row_count")
+        seed_source_count = seed_scope.get("source_count")
         if (
-            seed_scope.get("source_count")
-            != source_version["research_expected_row_count"]
+            type(seed_source_count) is not int
+            or seed_source_count <= 0
+            or expected_seed_count is not None
+            and seed_source_count != expected_seed_count
             or seed_scope.get("price_coordinate") != "FORWARD_ADJUSTED"
             or seed_scope.get("research_mode") != "NON_PIT_RETROSPECTIVE"
         ):

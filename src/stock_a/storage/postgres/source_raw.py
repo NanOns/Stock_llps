@@ -198,11 +198,15 @@ def _transaction(
             frame = frames[-1]
             origin = f"，位置={Path(frame.filename).name}:{frame.lineno} {frame.name}"
         detail = ""
-        if sqlstate is None and type(error).__name__ == "ProgrammingError":
+        if (sqlstate is None and type(error).__name__ == "ProgrammingError") or (
+            sqlstate == "22P02"
+        ):
             primary = getattr(getattr(error, "diag", None), "message_primary", None)
             if not isinstance(primary, str) or not primary.strip():
                 primary = str(error).splitlines()[0] if str(error) else ""
             if primary:
+                if sqlstate == "22P02":
+                    primary = re.sub(r'"[^"\r\n]*"', '"<已隐藏值>"', primary)
                 detail = f"，诊断={primary[:180]}"
         raise RawSourcePgError(
             failure_code,

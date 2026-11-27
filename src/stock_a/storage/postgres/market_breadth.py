@@ -280,8 +280,9 @@ def _persist_market_breadth_once(
             """SELECT source_symbol,qfq_source_capture_id FROM stock.source_raw_daily
                WHERE session_date=%s
                  AND board IN ('MAIN_BOARD', 'GEM')
+                 AND source_symbol=ANY(%s::text[])
                ORDER BY source_symbol""",
-            (target_session,),
+            (target_session, sorted(item.source_symbol for item in result.symbols)),
         )
         raw_rows = [
             {"source_symbol": row[0], "qfq_source_capture_id": row[1]}
@@ -299,8 +300,11 @@ def _persist_market_breadth_once(
         }
         rows = [
             (
-                *key,
+                key[0],
+                key[1],
+                key[2],
                 qfq_capture_by_symbol[item.source_symbol],
+                key[3],
                 item.source_symbol,
                 *_fraction(item.ret1_t),
                 *_fraction(item.ret1_t_minus_3),
