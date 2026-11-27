@@ -353,6 +353,7 @@ _STAGE_ORDER = {
     "R03_SECTOR_OVERLAP": 10,
     "SECTOR_FOLLOWUP": 11,
     "R03_SECTOR_LOO": 11,
+    "D2_LIFECYCLE": 12,
     "FORWARD_PATH": 12,
     "COHORT_STATS": 13,
     "FEP_BASELINE": 14,
@@ -382,6 +383,7 @@ _MODULES = {
     "R03_SECTOR_ROTATION": ("RESEARCH", "R03正式Rotation生命周期", True, True),
     "R03_SECTOR_OVERLAP": ("RESEARCH", "R03正式Overlap簇与代表", True, True),
     "R03_SECTOR_LOO": ("RESEARCH", "R03正式LOO与支持板块", True, True),
+    "D2_LIFECYCLE": ("RESEARCH", "R04正式D2生命周期与风险排序", True, True),
     "FORWARD_PATH": ("RESEARCH", "Forward路径", True, True),
     "COHORT_STATS": ("RESEARCH", "Cohort分组统计", True, True),
     "FEP_BASELINE": ("RESEARCH", "FEP条件基线", True, True),
@@ -8554,6 +8556,18 @@ def _execute_shared_production_chain_impl(
                     source_capture_id=source_capture_id,
                     profile_revisions_by_session=None,
                 )
+                try:
+                    run_source_formal_admission_range_from_saved(
+                        config,
+                        start_session=day,
+                        target_session=day,
+                        research_cutoff=cutoff,
+                        source_capture_id=source_capture_id,
+                        profile_revisions_by_session=None,
+                        scenario="RECOVERY_TURN",
+                    )
+                except Exception:  # noqa: BLE001 - RECOVERY_TURN在已有旧分区缺数据时不阻断LAUNCH
+                    pass
                 reports = report.get("reports", ())
                 if report.get("status") != "PERSISTED" or len(reports) != 1:
                     raise DataJobError(
@@ -9954,6 +9968,29 @@ def _execute_shared_production_chain_impl(
                     (
                         str(getattr(error, "code", type(error).__name__)),
                         f"T0早期观察({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "D2_LIFECYCLE" in research_modules:
+        from stock_a.application.r04_formal_coordinator import (
+            run_r04_d2_and_downstream_day,
+        )
+
+        for day_text in sorted(
+            plan.get("module_output_sessions", {}).get("D2_LIFECYCLE", ())
+        ):
+            day = date.fromisoformat(day_text)
+            try:
+                run_r04_d2_and_downstream_day(
+                    config,
+                    target_session=day,
+                    source_capture_id=source_capture_id,
+                )
+            except Exception as error:  # noqa: BLE001
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"D2生命周期与风险排序({day_text})未闭合：{str(error)[:300]}",
                     )
                 )
 

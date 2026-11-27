@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
+import inspect
 from typing import Any
 
 from stock_a.application.source_d0_raw import _official_calendar
@@ -14,12 +15,18 @@ from stock_a.application.source_formal_admission import (
     prepare_source_d0_launch_formal_admission,
 )
 from stock_a.domain import FieldValue, unknown
-from stock_a.research.d0_price_facts import calculate_d0_first_day_damage
+from stock_a.research.d0_price_facts import (
+    _has_qfq_comparable_evidence,
+    _resolve_target_qfq_capture_id,
+    calculate_d0_first_day_damage,
+    calculate_d0_severe_drop,
+)
 from stock_a.research.entry_history.support import trade_status_state_from_pg_row
 from stock_a.application.pg_research import read_source_version_context
 from stock_a.storage.postgres.baostock_price_facts import (
     read_baostock_price_history_batch,
 )
+from stock_a.storage.postgres.baostock_universe import resolve_date_effective_universe
 from stock_a.storage.postgres.formal_admission import (
     list_saved_launch_sessions,
     persist_source_formal_admission_rows,
@@ -76,16 +83,27 @@ def _qfq_window_row_state(
     symbol: str,
     session: date,
     source_capture_id: int,
+    target_row: Mapping[str, Any] | None = None,
 ) -> tuple[str, str | None]:
-    """核对单日QFQ坐标和响应身份；不将后验调整冒充PIT。"""
+    """核对单日QFQ坐标和响应身份；支持同basis跨捕获放行，停牌不误判为未知缺行。"""
     if row is None:
         return "UNKNOWN", "QFQ_HISTORY_ROW_NOT_STORED"
-    if (
-        row.get("source_symbol") != symbol
-        or not _same_session(row.get("session_date"), session)
-        or row.get("source_capture_id") != source_capture_id
+    if row.get("source_symbol") != symbol or not _same_session(
+        row.get("session_date"), session
     ):
         return "FALSE", "QFQ_HISTORY_SOURCE_IDENTITY_MISMATCH"
+    row_qfq_cap = row.get("qfq_source_capture_id")
+    if row_qfq_cap is None:
+        row_qfq_cap = row.get("source_capture_id")
+    if type(row_qfq_cap) is not int or row_qfq_cap <= 0:
+        return "FALSE", "QFQ_HISTORY_SOURCE_IDENTITY_MISMATCH"
+    target_qfq_cap = _resolve_target_qfq_capture_id(target_row, source_capture_id)
+    if (
+        target_qfq_cap is not None
+        and row_qfq_cap != target_qfq_cap
+        and not _has_qfq_comparable_evidence(row, target_row)
+    ):
+        return "UNKNOWN", "MIXED_PRICE_COORDINATE"
     if (
         row.get("price_coordinate") != _QFQ_COORDINATE
         or row.get("qfq_price_coordinate") != _QFQ_COORDINATE
@@ -102,8 +120,15 @@ def _qfq_window_row_state(
         required_fields <= set(response_fields)
     ):
         return "UNKNOWN", "QFQ_RESPONSE_FIELDS_NOT_CLOSED"
+    trade_state, trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate=_QFQ_COORDINATE
+    )
+    if trade_state == "CONFIRMED_SUSPENSION":
+        return "UNKNOWN", "CONFIRMED_SUSPENSION_NO_ACTUAL_BAR"
     if row.get("qfq_bar_status") != "TARGET_PRESENT":
         return "UNKNOWN", str(row.get("qfq_bar_reason") or "QFQ_TARGET_BAR_NOT_PRESENT")
+    if trade_state != "ACTUAL":
+        return "UNKNOWN", trade_reason or "QFQ_TRADE_STATUS_UNKNOWN"
     if row.get("qfq_price_quality") != "OBSERVED":
         return "UNKNOWN", str(
             row.get("qfq_price_reason") or "QFQ_PRICE_QUALITY_NOT_OBSERVED"
@@ -136,15 +161,17 @@ def _coordinate_window_gate(
     sessions: tuple[date, ...],
     history: Mapping[date, Mapping[str, Any]],
 ) -> FieldValue:
-    """要求21个官方会话逐行绑定同一捕获的QFQ坐标，结果仍是NON_PIT。"""
+    """要求21个官方会话逐行绑定合法QFQ坐标，结果仍是NON_PIT。"""
     if len(sessions) != 21 or len(set(sessions)) != len(sessions):
         return unknown("QFQ_WINDOW_SESSION_SET_INVALID")
+    target_row = history.get(sessions[-1])
     states = [
         _qfq_window_row_state(
             history.get(session),
             symbol=symbol,
             session=session,
             source_capture_id=source_capture_id,
+            target_row=target_row,
         )
         for session in sessions
     ]
@@ -166,14 +193,17 @@ def _raw_amount_for_d0_liquidity(
     session: date,
     source_capture_id: int,
 ) -> tuple[Fraction | None, str | None]:
-    """读取RAW金额；仅接受当前BaoStock文档单位合同和实际成交。"""
+    """独立按raw_source_capture_id读取RAW金额；仅接受CNY单位合同与实际成交，不牵连QFQ捕获。"""
     if row is None:
         return None, "RAW_LIQ20_ROW_NOT_STORED"
-    if (
-        row.get("source_symbol") != symbol
-        or not _same_session(row.get("session_date"), session)
-        or row.get("source_capture_id") != source_capture_id
+    if row.get("source_symbol") != symbol or not _same_session(
+        row.get("session_date"), session
     ):
+        return None, "RAW_LIQ20_SOURCE_IDENTITY_MISMATCH"
+    row_raw_cap = row.get("raw_source_capture_id")
+    if row_raw_cap is None:
+        row_raw_cap = row.get("source_capture_id")
+    if type(row_raw_cap) is not int or row_raw_cap <= 0:
         return None, "RAW_LIQ20_SOURCE_IDENTITY_MISMATCH"
     if row.get("raw_adjustflag") not in (3, "3"):
         return None, "RAW_LIQ20_COORDINATE_NOT_UNADJUSTED"
@@ -189,11 +219,13 @@ def _raw_amount_for_d0_liquidity(
         "tradestatus",
     } <= set(response_fields):
         return None, "RAW_AMOUNT_RESPONSE_FIELDS_NOT_CLOSED"
-    if row.get("bar_status") != "TARGET_PRESENT":
-        return None, str(row.get("bar_reason") or "RAW_AMOUNT_BAR_NOT_PRESENT")
     trade_state, trade_reason = trade_status_state_from_pg_row(
         row, price_coordinate=_RAW_COORDINATE
     )
+    if trade_state == "CONFIRMED_SUSPENSION":
+        return None, "CONFIRMED_SUSPENSION_NO_ACTUAL_BAR"
+    if row.get("bar_status") != "TARGET_PRESENT":
+        return None, str(row.get("bar_reason") or "RAW_AMOUNT_BAR_NOT_PRESENT")
     if trade_state != "ACTUAL":
         return None, trade_reason or "RAW_AMOUNT_TRADE_STATUS_NOT_ACTUAL"
     if row.get("raw_amount_quality") != "RAW_SOURCE_VALUE_OBSERVED":
@@ -376,6 +408,13 @@ def _raw_history_for_candidates(
                         "source_symbol",
                         "session_date",
                         "source_capture_id",
+                        "raw_source_capture_id",
+                        "qfq_source_capture_id",
+                        "qfq_basis_comparable",
+                        "qfq_comparable",
+                        "qfq_basis_id",
+                        "qfq_coordinate_basis",
+                        "qfq_price_basis",
                         "price_coordinate",
                         "qfq_price_coordinate",
                         "qfq_response_session_date",
@@ -466,6 +505,7 @@ def _line_inputs(
         symbol=symbol,
         session=target_session,
         source_capture_id=source_capture_id,
+        target_row=current,
     )
     current_trade_state, current_trade_reason = trade_status_state_from_pg_row(
         current, price_coordinate="FORWARD_ADJUSTED"
@@ -491,6 +531,7 @@ def _line_inputs(
             symbol=symbol,
             session=session,
             source_capture_id=source_capture_id,
+            target_row=current,
         )
         trade_state, trade_reason = trade_status_state_from_pg_row(
             row, price_coordinate="FORWARD_ADJUSTED"
@@ -527,6 +568,58 @@ def _line_inputs(
     return close_field, phc_field, damage
 
 
+def _research_universe_gate(
+    symbol: str, universe_info: Mapping[str, Any]
+) -> FieldValue:
+    """按日期有效Research Universe判定F01三态门。"""
+    if universe_info.get("status") != "AVAILABLE":
+        return unknown(
+            str(universe_info.get("reason") or "OFFICIAL_RESEARCH_UNIVERSE_NOT_STORED")
+        )
+    missing_basic = set(universe_info.get("missing_basic_symbols", ()))
+    quarantined = set(universe_info.get("quarantined_symbols", ()))
+    if symbol in missing_basic or symbol in quarantined:
+        return unknown("STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED")
+    if symbol in set(universe_info.get("members", ())):
+        return FieldValue(True)
+    return FieldValue(False)
+
+
+def _recovery_trigger_inputs(
+    fact: Mapping[str, Any],
+) -> tuple[FieldValue, FieldValue, FieldValue, FieldValue]:
+    """从已存RECOVERY_TURN事实提取R5/R20/MA5/MA20。"""
+    detail = fact.get("trigger_detail") or {}
+    r5_str = detail.get("r5")
+    r20_str = detail.get("r20")
+    r5_field = (
+        FieldValue(True)
+        if r5_str == "TRUE"
+        else FieldValue(False)
+        if r5_str == "FALSE"
+        else unknown("RECOVERY_R5_UNKNOWN")
+    )
+    r20_field = (
+        FieldValue(True)
+        if r20_str == "TRUE"
+        else FieldValue(False)
+        if r20_str == "FALSE"
+        else unknown("RECOVERY_R20_UNKNOWN")
+    )
+
+    def _frac_field(payload: object, reason: str) -> FieldValue:
+        if isinstance(payload, Mapping):
+            num = payload.get("numerator")
+            den = payload.get("denominator")
+            if num is not None and den is not None and int(den) > 0:
+                return FieldValue(Fraction(int(num), int(den)))
+        return unknown(reason)
+
+    ma5_field = _frac_field(detail.get("ma5"), "RECOVERY_MA5_UNKNOWN")
+    ma20_field = _frac_field(detail.get("ma20"), "RECOVERY_MA20_UNKNOWN")
+    return ma5_field, ma20_field, r5_field, r20_field
+
+
 def run_source_formal_admission_from_saved(
     config,
     *,
@@ -535,6 +628,12 @@ def run_source_formal_admission_from_saved(
     source_capture_id: int,
     profile_revision: str | None = None,
     persist: bool,
+    scenario: str = "LAUNCH_CONFIRM",
+    prior_episode_id: str | None = None,
+    prior_episode_valid: FieldValue | None = None,
+    support_anchor_id: str | None = None,
+    support_lower: FieldValue | None = None,
+    support_valid: FieldValue | None = None,
 ) -> dict[str, Any]:
     """处理一个目标日；只消费该日已闭合Raw、D0、Core和Profile事实。"""
     if (
@@ -544,10 +643,11 @@ def run_source_formal_admission_from_saved(
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or persist is not True
+        or scenario not in {"LAUNCH_CONFIRM", "RECOVERY_TURN"}
     ):
         raise SourceFormalAdmissionProductionError(
             "FORMAL_ADMISSION_ARGUMENT_INVALID",
-            "准入生产必须显式绑定截止内的paired BaoStock capture并持久化",
+            "准入生产必须显式绑定截止内的paired BaoStock capture、合法场景并持久化",
         )
 
     source = read_source_version_context(
@@ -567,11 +667,16 @@ def run_source_formal_admission_from_saved(
         )
     source_capture_id = source["source_capture_id"]
     expected_count = source["research_expected_row_count"]
+    universe_info = resolve_date_effective_universe(
+        config,
+        session_date=target_session,
+        research_eligible_only=True,
+    )
     d0 = read_source_d0_scenario_day(
         config,
         target_session=target_session,
         source_capture_id=source_capture_id,
-        scenario="LAUNCH_CONFIRM",
+        scenario=scenario,
         price_coordinate="FORWARD_ADJUSTED",
         research_cutoff=research_cutoff,
     )
@@ -658,18 +763,20 @@ def run_source_formal_admission_from_saved(
 
     profile_revision = seed_scope.get("profile_revision") if seed_scope else None
     seed_version = seed_scope["producer_version"] if seed_scope else None
-    input_refs = read_saved_source_fact_ids(
-        config,
-        target_session=target_session,
-        source_capture_id=source_capture_id,
-        producer_version=d0["producer_version"],
-        algorithm_contract=d0["algorithm_contract"],
-        session_contract=d0["session_contract"],
-        calendar_revision=d0["official_calendar"]["calendar_revision"],
-        profile_revision=profile_revision,
-        seed_producer_version=seed_version,
-        expected_source_count=expected_count,
-    )
+    read_ids_kwargs: dict[str, Any] = {
+        "target_session": target_session,
+        "source_capture_id": source_capture_id,
+        "producer_version": d0["producer_version"],
+        "algorithm_contract": d0["algorithm_contract"],
+        "session_contract": d0["session_contract"],
+        "calendar_revision": d0["official_calendar"]["calendar_revision"],
+        "profile_revision": profile_revision,
+        "seed_producer_version": seed_version,
+        "expected_source_count": expected_count,
+    }
+    if "scenario" in inspect.signature(read_saved_source_fact_ids).parameters:
+        read_ids_kwargs["scenario"] = scenario
+    input_refs = read_saved_source_fact_ids(config, **read_ids_kwargs)
     if set(input_refs) != {item["source_symbol"] for item in d0["results"]}:
         raise SourceFormalAdmissionProductionError(
             "FORMAL_ADMISSION_RAW_SYMBOL_SET_MISMATCH",
@@ -770,17 +877,32 @@ def run_source_formal_admission_from_saved(
                 first_day_gate = unknown(damage.reason_code)
             else:
                 first_day_gate = FieldValue(damage.state == "FALSE")
+            severe_sessions = (
+                official_sessions[max(0, target_ordinal - 21) : target_ordinal + 1]
+                if target_ordinal >= 21
+                else sessions
+            )
+            severe_res = calculate_d0_severe_drop(
+                target_session=target_session,
+                official_sessions=severe_sessions,
+                history_rows_by_session=history,
+                source_symbol=symbol,
+                source_capture_id=source_capture_id,
+                price_coordinate="FORWARD_ADJUSTED",
+            )
+            if severe_res.state == "UNKNOWN":
+                non_severe_drop_gate = unknown(severe_res.reason_code)
+            else:
+                non_severe_drop_gate = FieldValue(severe_res.state == "FALSE")
             gates = {
-                "research_universe": unknown("OFFICIAL_RESEARCH_UNIVERSE_NOT_STORED"),
+                "research_universe": _research_universe_gate(symbol, universe_info),
                 "actual_quote": actual_gate,
                 "coordinate_window": coordinate_gate,
                 "d0_liquidity": liquidity_gate,
                 "non_core_damage": core_gate,
                 "non_extreme_extension": extension_gate,
                 "non_first_day_damage": first_day_gate,
-                "non_severe_drop": FieldValue(True)
-                if fact["predicates"]["positive_ret1"]["state"] == "TRUE"
-                else unknown("POSITIVE_RET1_NOT_PROVED_FOR_SEVERE_DROP_GATE"),
+                "non_severe_drop": non_severe_drop_gate,
             }
         else:
             close = unknown("RAW_NOT_TRUE_NO_T0_CLOSE_BINDING")
@@ -851,6 +973,9 @@ def run_source_formal_admission_from_saved(
             f"PG:{target_session.isoformat()}:{source_capture_id}:"
             f"{source_capture_id}:{symbol}:D0_FACT:{refs['raw_fact_id']}"
         )
+        ma5_field = ma20_field = r5_field = r20_field = None
+        if scenario == "RECOVERY_TURN":
+            ma5_field, ma20_field, r5_field, r20_field = _recovery_trigger_inputs(fact)
         prepared = prepare_source_d0_launch_formal_admission(
             entity_id=symbol,
             target_session=target_session,
@@ -867,6 +992,16 @@ def run_source_formal_admission_from_saved(
             next_session=next_session,
             window_start=sessions[0],
             evidence_ref=evidence_ref,
+            scenario=scenario,
+            ma5=ma5_field,
+            ma20=ma20_field,
+            r5=r5_field,
+            r20=r20_field,
+            prior_episode_id=prior_episode_id,
+            prior_episode_valid=prior_episode_valid,
+            support_anchor_id=support_anchor_id,
+            support_lower=support_lower,
+            support_valid=support_valid,
         )
         line = prepared["frozen_line"]
         row = {
@@ -875,7 +1010,7 @@ def run_source_formal_admission_from_saved(
             "source_capture_id": source_capture_id,
             "target_session": target_session,
             "source_symbol": symbol,
-            "scenario": "LAUNCH_CONFIRM",
+            "scenario": scenario,
             "raw_role": prepared["raw_role"],
             "raw_state": prepared["raw_state"],
             "raw_reason": prepared["raw_reason"],
@@ -937,7 +1072,9 @@ def run_source_formal_admission_from_saved(
             "failure_coordinate": line["coordinate"] if line else None,
             "failure_source": line["source"] if line else None,
             "failure_window_start": sessions[0] if line else None,
-            "failure_window_session_count": 20 if line else None,
+            "failure_window_session_count": line["source_window_session_count"]
+            if line
+            else None,
             "failure_source_event_ref": line["source_event_ref"] if line else None,
             "effective_from_session": _date(line["effective_from_session"])
             if line
@@ -952,20 +1089,22 @@ def run_source_formal_admission_from_saved(
         expected_source_count=expected_count,
         rows=rows,
     )
-    readback = read_source_formal_admission_day(
-        config,
-        target_session=target_session,
-        source_capture_id=source_capture_id,
-        expected_source_count=expected_count,
-        algorithm_contract=rows[0]["algorithm_contract"],
-        session_contract=rows[0]["session_contract"],
-        calendar_revision=rows[0]["calendar_revision"],
-        seed_producer_version=rows[0]["seed_producer_version"],
-        profile_history_session_count=(
+    readback_kwargs: dict[str, Any] = {
+        "target_session": target_session,
+        "source_capture_id": source_capture_id,
+        "expected_source_count": expected_count,
+        "algorithm_contract": rows[0]["algorithm_contract"],
+        "session_contract": rows[0]["session_contract"],
+        "calendar_revision": rows[0]["calendar_revision"],
+        "seed_producer_version": rows[0]["seed_producer_version"],
+        "profile_history_session_count": (
             seed_scope["history_session_count"] if seed_scope else None
         ),
-        profile_revision=profile_revision,
-    )
+        "profile_revision": profile_revision,
+    }
+    if "scenario" in inspect.signature(read_source_formal_admission_day).parameters:
+        readback_kwargs["scenario"] = scenario
+    readback = read_source_formal_admission_day(config, **readback_kwargs)
     if readback.get("status") != "AVAILABLE" or readback.get("counts") != {
         "READY": result["ready_count"],
         "BLOCKED": result["blocked_count"],

@@ -430,3 +430,28 @@ def observe_support(
         next_separated,
         next_qualified,
     )
+
+
+def impulse_retention(close_t0, base_level, close_tk) -> FieldValue:
+    """计算中阳线留存率: (C[t0+k] - base) / (C[t0] - base)，不截断 0..1。"""
+    from stock_a.domain import exact_number
+
+    def _extract_positive(val) -> Fraction | None:
+        if val is None:
+            return None
+        if isinstance(val, FieldValue):
+            return number(val, positive=True)
+        parsed = exact_number(val)
+        if parsed <= 0:
+            raise ValueError("价格/基准必须大于0")
+        return parsed
+
+    c0 = _extract_positive(close_t0)
+    base = _extract_positive(base_level)
+    ck = _extract_positive(close_tk)
+    if c0 is None or base is None or ck is None:
+        return unknown("IMPULSE_RETENTION_INPUT_UNKNOWN")
+    denominator = c0 - base
+    if denominator <= 0:
+        return FieldValue(None, "NOT_APPLICABLE", "NONPOSITIVE_RETENTION_DENOMINATOR")
+    return FieldValue((ck - base) / denominator)

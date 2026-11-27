@@ -17,6 +17,7 @@ from stock_a.research.core import (
     _known,
     _known_ohlc_error,
     _number,
+    _numeric_column,
     _validate_history,
     calculate_core,
     calculate_seed_missing_core,
@@ -45,6 +46,7 @@ from stock_a.research.entry_context.source_discovery import _normalize_symbol
 from stock_a.research.entry_history.support import (
     _core_observation_from_pg_price_row,
     _field_from_pg_raw,
+    trade_status_state_from_pg_row,
 )
 
 
@@ -155,13 +157,115 @@ def _source_d1_column(
     return values, None
 
 
+def _qfq_pair_economically_comparable(
+    prev_row: Mapping[str, Any], cur_row: Mapping[str, Any]
+) -> bool:
+    """核验跨捕获QFQ行是否具有合法可比经济坐标证据。"""
+    prev_explicit = prev_row.get("qfq_coordinate_id")
+    cur_explicit = cur_row.get("qfq_coordinate_id")
+    if (
+        isinstance(prev_explicit, str)
+        and prev_explicit
+        and isinstance(cur_explicit, str)
+        and cur_explicit
+    ):
+        return prev_explicit == cur_explicit
+    if (
+        prev_row.get("qfq_price_quality") != "OBSERVED"
+        or cur_row.get("qfq_price_quality") != "OBSERVED"
+    ):
+        return False
+    prev_close_q = prev_row.get("qfq_close_quality", prev_row.get("qfq_price_quality"))
+    cur_preclose_q = cur_row.get("qfq_preclose_quality")
+    if prev_close_q != "OBSERVED" or cur_preclose_q != "OBSERVED":
+        return False
+    try:
+        prev_close = exact_number(prev_row.get("qfq_close"))
+        cur_preclose = exact_number(cur_row.get("qfq_preclose"))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return False
+    return prev_close > 0 and cur_preclose > 0 and prev_close == cur_preclose
+
+
+def _resolve_qfq_coordinates(
+    normalized: str,
+    sessions: Sequence[date],
+    rows_by_session: Mapping[date, Mapping[str, Any]],
+) -> dict[date, str]:
+    """按逐行qfq_source_capture_id与可比经济坐标证据解析QFQ坐标ID。"""
+    coords: dict[date, str] = {}
+    last_actual_row: Mapping[str, Any] | None = None
+    last_actual_coord: str | None = None
+    has_unknown_gap = False
+
+    for day in sessions:
+        row = rows_by_session.get(day)
+        capture_id = (
+            row.get("qfq_source_capture_id") if isinstance(row, Mapping) else None
+        )
+        explicit_coord = (
+            row.get("qfq_coordinate_id")
+            if isinstance(row, Mapping)
+            and isinstance(row.get("qfq_coordinate_id"), str)
+            and row.get("qfq_coordinate_id")
+            else None
+        )
+        raw_coord = explicit_coord or (
+            f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{capture_id}:{normalized}"
+            if type(capture_id) is int and capture_id > 0
+            else f"FORWARD_ADJUSTED:BAOSTOCK_COORDINATE_UNKNOWN:{normalized}"
+        )
+        if row is None or row.get("qfq_bar_status") != "TARGET_PRESENT":
+            trade_state, _ = trade_status_state_from_pg_row(
+                row, price_coordinate="FORWARD_ADJUSTED"
+            )
+            if trade_state != "CONFIRMED_SUSPENSION":
+                has_unknown_gap = True
+            coords[day] = raw_coord
+            continue
+
+        trade_state, _ = trade_status_state_from_pg_row(
+            row, price_coordinate="FORWARD_ADJUSTED"
+        )
+        if trade_state == "CONFIRMED_SUSPENSION":
+            coords[day] = raw_coord
+            continue
+        if trade_state != "ACTUAL":
+            has_unknown_gap = True
+            coords[day] = raw_coord
+            continue
+
+        if type(capture_id) is int and capture_id > 0:
+            if last_actual_row is not None and last_actual_coord is not None:
+                prev_cap_id = last_actual_row.get("qfq_source_capture_id")
+                if prev_cap_id == capture_id or (
+                    not has_unknown_gap
+                    and _qfq_pair_economically_comparable(last_actual_row, row)
+                ):
+                    effective_coord = last_actual_coord
+                else:
+                    effective_coord = raw_coord
+            else:
+                effective_coord = raw_coord
+            coords[day] = effective_coord
+            last_actual_row = row
+            last_actual_coord = effective_coord
+            has_unknown_gap = False
+        else:
+            coords[day] = raw_coord
+            last_actual_row = row
+            last_actual_coord = raw_coord
+            has_unknown_gap = True
+    return coords
+
+
 def _calculate_core_d1_inputs(
     history: Sequence[CoreObservation],
     *,
     official_calendar: MarketSessionCalendar,
     row_facts: Mapping[date, _SourceD1RowFacts] | None = None,
 ) -> dict[str, FieldValue]:
-    """复用现役Core原语，只生成ALG-29消费的三字段。"""
+    """复用现役Core原语，生成D1结构所需的7个Core字段。"""
     if not isinstance(official_calendar, MarketSessionCalendar):
         raise ContractError("Core计算必须传入版本化官方市场会话日历")
     _validate_history(history, official_calendar)
@@ -177,7 +281,10 @@ def _calculate_core_d1_inputs(
         return {
             name: unknown(reason)
             for name in (
+                "core.amount_ratio20",
                 "core.prior_high20",
+                "core.ma5",
+                "core.ma20",
                 "core.atr20",
                 "core.clv",
                 "core.ma_slope20_atr",
@@ -195,6 +302,57 @@ def _calculate_core_d1_inputs(
     prior_high20 = _known(
         max(prior_highs, default=None) if prior_highs else None,
         prior_reason or high_reason,
+    )
+
+    ratio_input = (
+        "native_amount"
+        if any(getattr(row, "native_amount") is not None for row in history)
+        else "amount"
+    )
+    prior_amounts, amount_col_reason = (
+        _numeric_column(prior_rows, ratio_input, nonnegative=True)
+        if not prior_reason
+        else (None, prior_reason)
+    )
+    current_amount, current_amount_reason = _number(
+        getattr(latest, ratio_input), "DATA_INVALID_AMOUNT"
+    )
+    amount_reason = prior_reason or amount_col_reason or current_amount_reason
+    if not amount_reason and current_amount < 0:
+        amount_reason = "DATA_INVALID_AMOUNT"
+    amount_denom = mean(prior_amounts) if prior_amounts else None
+    if not amount_reason and (amount_denom is None or amount_denom <= 0):
+        amount_reason = "NONPOSITIVE_DENOMINATOR"
+    amount_ratio20 = (
+        unknown(amount_reason)
+        if amount_reason
+        else FieldValue(current_amount / amount_denom)
+    )
+
+    ma5_rows, ma5_reason = _actual_window(history, 5)
+    ma5_closes, ma5_val_reason = (
+        (
+            _source_d1_column(ma5_rows, "close", row_facts=row_facts)
+            if row_facts is not None
+            else _column(ma5_rows, "close")
+        )
+        if not ma5_reason
+        else (None, ma5_reason)
+    )
+    ma5 = _known(mean(ma5_closes) if ma5_closes else None, ma5_reason or ma5_val_reason)
+
+    ma20_rows, ma20_reason = _actual_window(history, 20)
+    ma20_closes, ma20_val_reason = (
+        (
+            _source_d1_column(ma20_rows, "close", row_facts=row_facts)
+            if row_facts is not None
+            else _column(ma20_rows, "close")
+        )
+        if not ma20_reason
+        else (None, ma20_reason)
+    )
+    ma20 = _known(
+        mean(ma20_closes) if ma20_closes else None, ma20_reason or ma20_val_reason
     )
 
     rows, atr_reason = _actual_window(history, 21)
@@ -242,7 +400,11 @@ def _calculate_core_d1_inputs(
 
     slope_rows, slope_reason = _actual_window(history, 25)
     slope_values, slope_value_reason = (
-        _source_d1_column(slope_rows, "close", row_facts=row_facts)
+        (
+            _source_d1_column(slope_rows, "close", row_facts=row_facts)
+            if row_facts is not None
+            else _column(slope_rows, "close")
+        )
         if not slope_reason
         else (None, slope_reason)
     )
@@ -277,7 +439,10 @@ def _calculate_core_d1_inputs(
     else:
         clv = unknown(close_reason or high_reason or low_reason)
     return {
+        "core.amount_ratio20": amount_ratio20,
         "core.prior_high20": prior_high20,
+        "core.ma5": ma5,
+        "core.ma20": ma20,
         "core.atr20": atr20,
         "core.clv": clv,
         "core.ma_slope20_atr": slope20,
@@ -421,7 +586,15 @@ def _source_d1_preview_for_target(
         "price_coordinate": price_coordinate,
         "structure_core_fields": {
             name: _render_field(core[name])
-            for name in ("core.atr20", "core.ma_slope20_atr", "core.clv")
+            for name in (
+                "core.amount_ratio20",
+                "core.prior_high20",
+                "core.ma5",
+                "core.ma20",
+                "core.atr20",
+                "core.clv",
+                "core.ma_slope20_atr",
+            )
         },
         "target_bar_status": {
             "TARGET_PRESENT": "BAOSTOCK_TARGET_BAR_PRESENT",
@@ -555,14 +728,7 @@ def research_stock_pg_d1_history_previews(
     coordinate_id = (
         f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
     )
-
-    def _row_qfq_coordinate(row: Mapping[str, Any] | None) -> str:
-        capture_id = (
-            row.get("qfq_source_capture_id") if isinstance(row, Mapping) else None
-        )
-        if type(capture_id) is int and capture_id > 0:
-            return f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{capture_id}:{normalized}"
-        return f"FORWARD_ADJUSTED:BAOSTOCK_COORDINATE_UNKNOWN:{normalized}"
+    coords_by_session = _resolve_qfq_coordinates(normalized, sessions, rows_by_session)
 
     observations_by_session: dict[date, CoreObservation] = {}
     for day in sessions:
@@ -572,7 +738,7 @@ def research_stock_pg_d1_history_previews(
             session=day,
             source_capture_id=source_capture_id if day == sessions[-1] else None,
             price_coordinate=price_coordinate,
-            coordinate_id=_row_qfq_coordinate(row),
+            coordinate_id=coords_by_session[day],
         )
 
     row_facts = {
@@ -744,22 +910,19 @@ def research_stock_pg_history_preview(
             "QFQ历史没有精确目标日行；不回退RAW或最近日期。",
         )
 
-    def _row_qfq_coordinate(row: Mapping[str, Any] | None) -> str:
-        capture_id = (
-            row.get("qfq_source_capture_id") if isinstance(row, Mapping) else None
-        )
-        if type(capture_id) is int and capture_id > 0:
-            return f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{capture_id}:{normalized}"
-        return f"FORWARD_ADJUSTED:BAOSTOCK_COORDINATE_UNKNOWN:{normalized}"
-
-    coordinate_id = _row_qfq_coordinate(target_row)
+    coords_by_session = _resolve_qfq_coordinates(
+        normalized, expected_sessions, rows_by_session
+    )
+    coordinate_id = coords_by_session.get(
+        target, f"FORWARD_ADJUSTED:BAOSTOCK_COORDINATE_UNKNOWN:{normalized}"
+    )
     history = tuple(
         _core_observation_from_pg_price_row(
             rows_by_session.get(session),
             session=session,
             source_capture_id=source_capture_id if session == target else None,
             price_coordinate=price_coordinate,
-            coordinate_id=_row_qfq_coordinate(rows_by_session.get(session)),
+            coordinate_id=coords_by_session[session],
         )
         for session in expected_sessions
     )

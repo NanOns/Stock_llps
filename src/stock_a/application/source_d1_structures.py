@@ -15,6 +15,7 @@ from stock_a.application.pg_research import (
 )
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.domain import FieldValue, exact_number, unknown
+from stock_a.research.admission import Event
 from stock_a.research.core import (
     CoreObservation,
     MarketSessionCalendar,
@@ -24,6 +25,7 @@ from stock_a.research.entry import _load_calendar
 from stock_a.research.entry_core.fields import _render_field, _render_value
 from stock_a.research.entry_history.support import _core_observation_from_pg_price_row
 from stock_a.research.entry_history.history_preview import (
+    _resolve_qfq_coordinates,
     prepare_source_d1_preview_context,
     research_stock_pg_d1_history_previews,
 )
@@ -33,8 +35,10 @@ from stock_a.research.structure import (
     Anchor,
     Bar,
     CONTRACT as STRUCTURE_CONTRACT,
+    SupportObservation,
     gap_fill,
     generate,
+    impulse_retention,
     observe_support,
 )
 from stock_a.storage.postgres.baostock_price_facts import (
@@ -53,18 +57,40 @@ IMPULSE_STRUCTURE_TYPES = (
     "IMPULSE_BODY",
     "IMPULSE_LOW",
 )
-ALL_STRUCTURE_TYPES = STRUCTURE_TYPES + IMPULSE_STRUCTURE_TYPES
+EXTENDED_STRUCTURE_TYPES = (
+    "BREAKOUT_PLATFORM",
+    "DYNAMIC_MA5",
+    "DYNAMIC_MA20",
+)
+SEVEN_STRUCTURE_TYPES = STRUCTURE_TYPES + IMPULSE_STRUCTURE_TYPES
+ALL_STRUCTURE_TYPES = SEVEN_STRUCTURE_TYPES + EXTENDED_STRUCTURE_TYPES
 D1_PRODUCER_VERSION_5 = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
 D1_PRODUCER_VERSION_7 = "STOCK_A_D1_BAOSTOCK_QFQ_R4"
-D1_SUPPORTED_PRODUCER_VERSIONS = (D1_PRODUCER_VERSION_5, D1_PRODUCER_VERSION_7)
+D1_PRODUCER_VERSION_10 = "STOCK_A_D1_BAOSTOCK_QFQ_R5"
+D1_SUPPORTED_PRODUCER_VERSIONS = (
+    D1_PRODUCER_VERSION_5,
+    D1_PRODUCER_VERSION_7,
+    D1_PRODUCER_VERSION_10,
+)
+_STRUCTURE_CORE_FIELD_NAMES = (
+    "core.amount_ratio20",
+    "core.prior_high20",
+    "core.ma5",
+    "core.ma20",
+    "core.atr20",
+    "core.clv",
+    "core.ma_slope20_atr",
+)
 
 
 def expected_d1_structure_types_for_version(
     producer_version: str,
 ) -> tuple[str, ...]:
     """按D1生产者版本返回合同期望结构类型集合，不把缺行的新版降级为旧版。"""
-    if producer_version == D1_PRODUCER_VERSION_7:
+    if producer_version == D1_PRODUCER_VERSION_10:
         return ALL_STRUCTURE_TYPES
+    if producer_version == D1_PRODUCER_VERSION_7:
+        return SEVEN_STRUCTURE_TYPES
     if producer_version == D1_PRODUCER_VERSION_5:
         return STRUCTURE_TYPES
     raise PgResearchBindingError(
@@ -162,9 +188,7 @@ def _history_observations(
             )
         row_map[day] = row
 
-    coordinate_id = (
-        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
-    )
+    coords_by_session = _resolve_qfq_coordinates(normalized, days, row_map)
     observations: list[CoreObservation] = []
     bars: list[Bar] = []
     for ordinal, day in enumerate(days):
@@ -174,7 +198,7 @@ def _history_observations(
             session=day,
             source_capture_id=source_capture_id if day == days[-1] else None,
             price_coordinate="FORWARD_ADJUSTED",
-            coordinate_id=coordinate_id,
+            coordinate_id=coords_by_session[day],
         )
         values = (
             _valid_ohlc(
@@ -224,11 +248,73 @@ def _core_at(
 
 
 def _actual_field(observation: CoreObservation) -> FieldValue:
-    return (
-        FieldValue(True)
-        if observation.state == "ACTUAL"
-        else unknown("UNKNOWN_ACTUAL_BAR_OR_PRICE_QUALITY")
+    if observation.state == "ACTUAL":
+        return FieldValue(True)
+    if observation.state == "CONFIRMED_SUSPENSION":
+        return FieldValue(False)
+    return unknown("UNKNOWN_ACTUAL_BAR_OR_PRICE_QUALITY")
+
+
+def _window_statuses(
+    observations: Sequence[CoreObservation], end_index: int
+) -> tuple[tuple[int, str], ...]:
+    return tuple(
+        (
+            position,
+            item.state
+            if item.state in {"ACTUAL", "CONFIRMED_SUSPENSION"}
+            else "UNKNOWN",
+        )
+        for position, item in enumerate(observations[: end_index + 1])
     )
+
+
+def _actual_bars_window(
+    observations: Sequence[CoreObservation],
+    bars: Sequence[Bar],
+    end_index: int,
+    count: int,
+    *,
+    exclude_current: bool = False,
+) -> tuple[Bar, ...]:
+    """按ACTUAL数量回溯取窗，允许跨越CONFIRMED_SUSPENSION，不可跳过UNKNOWN。"""
+    start = end_index - 1 if exclude_current else end_index
+    collected: list[Bar] = []
+    for pos in range(start, -1, -1):
+        state = observations[pos].state
+        if state == "ACTUAL":
+            collected.append(bars[pos])
+            if len(collected) >= count:
+                break
+        elif state == "CONFIRMED_SUSPENSION":
+            continue
+        else:
+            break
+    collected.reverse()
+    return tuple(collected)
+
+
+def _match_dynamic_ma_event(
+    *,
+    events_by_symbol: Mapping[str, Sequence[Event]] | None,
+    symbol: str,
+    entity_id: str,
+    ordinal: int,
+    coordinate_id: str,
+    allowed_refs: set[str],
+) -> Event | None:
+    if not isinstance(events_by_symbol, Mapping):
+        return None
+    for event in events_by_symbol.get(symbol, ()):
+        if (
+            isinstance(event, Event)
+            and event.entity_id == entity_id
+            and event.session_ordinal == ordinal
+            and event.failure_line.coordinate_id == coordinate_id
+            and event.failure_line.source_ref in allowed_refs
+        ):
+            return event
+    return None
 
 
 def _source_row_identity(row: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -455,25 +541,29 @@ def _generate_day(
     core_today: Mapping[str, FieldValue] | None = None,
     rel_market_1: FieldValue | None = None,
     include_impulse: bool = False,
+    dynamic_ma_events_by_symbol: Mapping[str, Sequence[Event]] | None = None,
     prior_range_results: Mapping[str, dict[str, Any]] | None = None,
     prior_range_states: Mapping[str, FieldValue] | None = None,
     prior_range_anchors: Mapping[str, Anchor | None] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Anchor]]:
     day = sessions[target_index]
-    coordinate_id = (
+    coordinate_id = observations[target_index].coordinate_id or (
         f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
     )
     window_ref = (
         f"{source_capture_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
     )
     source_ref = f"source_raw_daily:{source_capture_id}:{symbol}"
-    statuses = tuple(
-        (position, "ACTUAL" if item.state == "ACTUAL" else "UNKNOWN")
-        for position, item in enumerate(observations[: target_index + 1])
+    statuses = _window_statuses(observations, target_index)
+    pivot5 = _actual_bars_window(
+        observations, bars, target_index, 5, exclude_current=False
     )
-    pivot5 = tuple(bars[max(0, target_index - 4) : target_index + 1])
-    prior20 = tuple(bars[max(0, target_index - 20) : target_index])
-    immediate_prior = tuple(bars[max(0, target_index - 1) : target_index])
+    prior20 = _actual_bars_window(
+        observations, bars, target_index, 20, exclude_current=True
+    )
+    immediate_prior = _actual_bars_window(
+        observations, bars, target_index, 1, exclude_current=True
+    )
     core_fields = core_previous or {}
     range_inputs = {
         "atr_previous": core_fields.get(
@@ -490,10 +580,18 @@ def _generate_day(
     results: dict[str, dict[str, Any]] = {}
     anchor_models: dict[str, Anchor] = {}
     for kind in STRUCTURE_TYPES:
-        if kind == "GAP_ZONE" and target_index == 0:
+        if kind == "GAP_ZONE" and (target_index == 0 or len(immediate_prior) != 1):
             results[kind] = {
-                "state": "UNKNOWN",
-                "reason": "GAP_PREVIOUS_OFFICIAL_SESSION_UNAVAILABLE",
+                "state": "NOT_GENERATED"
+                if actual.quality == "OBSERVED" and actual.value is False
+                else "UNKNOWN",
+                "reason": "NO_ACTUAL_BAR"
+                if actual.quality == "OBSERVED" and actual.value is False
+                else (
+                    "GAP_PREVIOUS_OFFICIAL_SESSION_UNAVAILABLE"
+                    if target_index == 0
+                    else "GAP_STATUS_OR_ENDPOINT_UNKNOWN"
+                ),
                 "anchor": None,
                 "generation_evidence": _generation_evidence(
                     kind=kind,
@@ -566,8 +664,13 @@ def _generate_day(
                 core_previous=core_previous,
             ),
         }
-    if include_impulse or rel_market_1 is not None:
+    if (
+        include_impulse
+        or rel_market_1 is not None
+        or dynamic_ma_events_by_symbol is not None
+    ):
         today_fields = core_today or {}
+        entity_id = f"SOURCE_SYMBOL_ONLY:{symbol}"
         atr20_prev = core_fields.get("core.atr20", unknown("PREVIOUS_CORE_UNAVAILABLE"))
         clv_today = today_fields.get("core.clv", unknown("TODAY_CLV_UNAVAILABLE"))
         amount_ratio_today = today_fields.get(
@@ -579,7 +682,7 @@ def _generate_day(
             else unknown("CROSS_REL_MARKET_1_UNAVAILABLE")
         )
         impulse_raw = evaluate_d1_impulse_anchors(
-            entity_id=f"SOURCE_SYMBOL_ONLY:{symbol}",
+            entity_id=entity_id,
             ordinal=target_index,
             coordinate_id=coordinate_id,
             source_ref=source_ref,
@@ -615,6 +718,120 @@ def _generate_day(
                     "clv": _render_field(clv_today),
                     "amount_ratio20": _render_field(amount_ratio_today),
                     "rel_market_1": _render_field(rel_m1),
+                },
+            }
+
+        prior_high20_today = today_fields.get(
+            "core.prior_high20", unknown("TODAY_PRIOR_HIGH20_UNAVAILABLE")
+        )
+        atr20_today = today_fields.get("core.atr20", unknown("TODAY_ATR20_UNAVAILABLE"))
+        bp_value = generate(
+            "BREAKOUT_PLATFORM",
+            entity_id=entity_id,
+            ordinal=target_index,
+            coordinate_id=coordinate_id,
+            source_ref=source_ref,
+            window_ref=window_ref,
+            actual=actual,
+            today=bars[target_index],
+            inputs={
+                "prior_high20": prior_high20_today,
+                "atr_today": atr20_today,
+                "clv": clv_today,
+            },
+            capability_state="READY",
+        )
+        bp_classified = _evaluate_generated(
+            bp_value,
+            kind="BREAKOUT_PLATFORM",
+            prior_range_state=None,
+            prior_range_anchor=None,
+        )
+        bp_anchor = bp_classified["anchor"]
+        if isinstance(bp_anchor, Anchor):
+            anchor_models["BREAKOUT_PLATFORM"] = bp_anchor
+        results["BREAKOUT_PLATFORM"] = {
+            **{
+                key: item
+                for key, item in bp_classified.items()
+                if key != "carry_anchor"
+            },
+            "anchor": _anchor_payload(bp_anchor, sessions) if bp_anchor else None,
+            "generation_evidence": {
+                "target_session": day.isoformat(),
+                "prior_high20": _render_field(prior_high20_today),
+                "atr_today": _render_field(atr20_today),
+                "clv": _render_field(clv_today),
+            },
+        }
+
+        for kind, ma_key, input_key, allowed_refs in (
+            ("DYNAMIC_MA5", "core.ma5", "ma5", {"T0_MA5"}),
+            ("DYNAMIC_MA20", "core.ma20", "ma20", {"T0_MA20", "T0_MA20_FALLBACK"}),
+        ):
+            ma_val = today_fields.get(
+                ma_key, unknown(f"TODAY_{input_key.upper()}_UNAVAILABLE")
+            )
+            matched_event = _match_dynamic_ma_event(
+                events_by_symbol=dynamic_ma_events_by_symbol,
+                symbol=symbol,
+                entity_id=entity_id,
+                ordinal=target_index,
+                coordinate_id=coordinate_id,
+                allowed_refs=allowed_refs,
+            )
+            if (
+                dynamic_ma_events_by_symbol is not None
+                and matched_event is None
+                and actual.quality == "OBSERVED"
+                and actual.value is True
+            ):
+                results[kind] = {
+                    "state": "NOT_GENERATED",
+                    "reason": "NO_REGISTERED_MA_SOURCE_EVENT",
+                    "anchor": None,
+                    "generation_evidence": {
+                        "target_session": day.isoformat(),
+                        input_key: _render_field(ma_val),
+                        "source_event_id": None,
+                    },
+                }
+                continue
+            ma_value = generate(
+                kind,
+                entity_id=entity_id,
+                ordinal=target_index,
+                coordinate_id=coordinate_id,
+                source_ref=source_ref,
+                window_ref=window_ref,
+                actual=actual,
+                today=bars[target_index],
+                inputs={input_key: ma_val},
+                source_event=matched_event,
+                capability_state="READY",
+            )
+            ma_classified = _evaluate_generated(
+                ma_value,
+                kind=kind,
+                prior_range_state=None,
+                prior_range_anchor=None,
+            )
+            ma_anchor = ma_classified["anchor"]
+            if isinstance(ma_anchor, Anchor):
+                anchor_models[kind] = ma_anchor
+            results[kind] = {
+                **{
+                    key: item
+                    for key, item in ma_classified.items()
+                    if key != "carry_anchor"
+                },
+                "anchor": _anchor_payload(ma_anchor, sessions) if ma_anchor else None,
+                "generation_evidence": {
+                    "target_session": day.isoformat(),
+                    input_key: _render_field(ma_val),
+                    "source_event_id": matched_event.event_id
+                    if matched_event
+                    else None,
                 },
             }
     return (
@@ -653,18 +870,17 @@ def _range_candidates_for_previous_session(
         )
     previous_index = target_index - 1
     day = sessions[previous_index]
-    coordinate_id = (
+    coordinate_id = observations[previous_index].coordinate_id or (
         f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{symbol}"
     )
     source_ref = f"source_raw_daily:{source_capture_id}:{symbol}"
     window_ref = (
         f"{source_capture_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
     )
-    statuses = tuple(
-        (position, "ACTUAL" if item.state == "ACTUAL" else "UNKNOWN")
-        for position, item in enumerate(observations[: previous_index + 1])
+    statuses = _window_statuses(observations, previous_index)
+    prior20 = _actual_bars_window(
+        observations, bars, previous_index, 20, exclude_current=True
     )
-    prior20 = tuple(bars[max(0, previous_index - 20) : previous_index])
     actual = _actual_field(observations[previous_index])
     for kind in sorted(_RANGE_TYPES):
         inputs = {
@@ -748,6 +964,7 @@ def _pool_candidate_result(
     core_previews_by_session: Mapping[date, Mapping[str, Any]] | None = None,
     rel_market_1: FieldValue | None = None,
     include_impulse: bool = False,
+    dynamic_ma_events_by_symbol: Mapping[str, Sequence[Event]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], int, int, int]:
     symbol = candidate["source_symbol"]
     history_inputs_reused = history_inputs is not None
@@ -770,7 +987,7 @@ def _pool_candidate_result(
             fields = core_previews_by_session[day]["core"]["fields"]
             core_cache[index] = {
                 name: _field_from_rendered(fields.get(name), name)
-                for name in ("core.atr20", "core.ma_slope20_atr", "core.clv")
+                for name in _STRUCTURE_CORE_FIELD_NAMES
             }
 
     def core_at(end_index: int) -> dict[str, FieldValue] | None:
@@ -952,9 +1169,12 @@ def _pool_candidate_result(
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
         core_previous=previous_core,
-        core_today=core_at(target_index) if include_impulse else None,
+        core_today=core_at(target_index)
+        if (include_impulse or dynamic_ma_events_by_symbol is not None)
+        else None,
         rel_market_1=rel_market_1 if include_impulse else None,
         include_impulse=include_impulse,
+        dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol,
         prior_range_results=prior_range_results,
         prior_range_states=prior_range_states,
         prior_range_anchors=prior_range_anchors,
@@ -1470,6 +1690,7 @@ def discover_source_d1_structures(
     include_source_symbol_d1_details: bool = False,
     include_source_symbol_structure_results: bool = False,
     include_impulse: bool = False,
+    dynamic_ma_events_by_symbol: Mapping[str, Sequence[Event]] | None = None,
     cross_section_universe_version: str | None = None,
     cross_section_universe_capture_id: int | None = None,
 ) -> dict[str, Any]:
@@ -1553,7 +1774,11 @@ def discover_source_d1_structures(
     structure_preview_context = (
         prepare_source_d1_preview_context(days) if structure_changes else None
     )
-    active_structure_types = ALL_STRUCTURE_TYPES if include_impulse else STRUCTURE_TYPES
+    active_structure_types = (
+        ALL_STRUCTURE_TYPES
+        if (include_impulse or dynamic_ma_events_by_symbol is not None)
+        else STRUCTURE_TYPES
+    )
     rel_market_1_by_session_symbol: dict[date, dict[str, FieldValue]] = {}
     target_cross_section_scope: dict[str, Any] | None = None
     if include_impulse:
@@ -1781,6 +2006,7 @@ def discover_source_d1_structures(
                     core_previews_by_session=core_previews,
                     rel_market_1=target_rel_m1,
                     include_impulse=include_impulse,
+                    dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol,
                 )
             )
             history_rows_decoded += decoded_count
@@ -1845,6 +2071,7 @@ def discover_source_d1_structures(
                     history_inputs=history_inputs,
                     rel_market_1_by_session=sym_rel_by_day,
                     include_impulse=include_impulse,
+                    dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol,
                 )
                 candidate_changes = _structure_timeline_changes(
                     timeline=timeline,
@@ -1944,15 +2171,11 @@ def discover_source_d1_structures(
                     symbol_change_summary
                 )
                 if include_source_symbol_d1_details:
-                    source_symbol_d1_details[candidate["source_symbol"]] = [
-                        change
-                        for change in candidate_changes
-                        if change["material_change"]
-                        or change["material_change_classification"]
-                        in {"UNKNOWN", "NOT_COMPARABLE", "NOT_EVALUABLE"}
-                    ]
+                    source_symbol_d1_details[candidate["source_symbol"]] = (
+                        candidate_changes
+                    )
                 structure_timeline_candidate_count += 1
-                generation_calls += 5 * len(days)
+                generation_calls += len(active_structure_types) * len(days)
                 if candidate["source_symbol"] == structure_symbol:
                     selected_symbol_anchor_changes = candidate_changes
                     detail["historical_anchor_changes"] = candidate_changes
@@ -2135,11 +2358,11 @@ def discover_source_d1_structures(
         if structure_changes
         else "SOURCE_LEVEL_D1_MULTI_STRUCTURE_DISCOVERY",
         "contract": STRUCTURE_CONTRACT,
-        "producer_version": D1_PRODUCER_VERSION_7
-        if include_impulse
+        "producer_version": D1_PRODUCER_VERSION_10
+        if (include_impulse or dynamic_ma_events_by_symbol is not None)
         else D1_PRODUCER_VERSION_5,
-        "scope": "SEVEN_SOURCE_LEVEL_RESEARCH_TYPES_NOT_FORMAL_D1_TEN_TYPE_CLOSURE"
-        if include_impulse
+        "scope": "TEN_SOURCE_LEVEL_RESEARCH_TYPES_D1_CLOSURE"
+        if (include_impulse or dynamic_ma_events_by_symbol is not None)
         else "FIVE_SOURCE_LEVEL_RESEARCH_TYPES_NOT_FORMAL_D1_TEN_TYPE_CLOSURE",
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
@@ -2348,6 +2571,7 @@ def evaluate_source_d1_structure_timeline(
     history_inputs=None,
     rel_market_1_by_session: Mapping[date, FieldValue] | None = None,
     include_impulse: bool = False,
+    dynamic_ma_events_by_symbol: Mapping[str, Sequence[Event]] | None = None,
 ) -> dict[str, Any]:
     """为单一来源代码沿已存会话生成锚并逐日观察后继，不回写PG。"""
     normalized = symbol.strip().upper()
@@ -2364,7 +2588,11 @@ def evaluate_source_d1_structure_timeline(
             "D1_STRUCTURE_HISTORY_PREVIEW_INCOMPLETE",
             "单股结构观察需要每个输入会话的精确Core预览",
         )
-    enable_impulse = bool(include_impulse or rel_market_1_by_session is not None)
+    enable_impulse = bool(
+        include_impulse
+        or rel_market_1_by_session is not None
+        or dynamic_ma_events_by_symbol is not None
+    )
     active_structure_types = ALL_STRUCTURE_TYPES if enable_impulse else STRUCTURE_TYPES
     range_state = {
         kind: unknown("RANGE_PRIOR_STATE_LEFT_CENSORED") for kind in _RANGE_TYPES
@@ -2405,6 +2633,10 @@ def evaluate_source_d1_structure_timeline(
             {
                 "core.clv": core_field(day, "core.clv"),
                 "core.amount_ratio20": core_field(day, "core.amount_ratio20"),
+                "core.prior_high20": core_field(day, "core.prior_high20"),
+                "core.atr20": core_field(day, "core.atr20"),
+                "core.ma5": core_field(day, "core.ma5"),
+                "core.ma20": core_field(day, "core.ma20"),
             }
             if enable_impulse
             else None
@@ -2428,6 +2660,7 @@ def evaluate_source_d1_structure_timeline(
             core_today=today_fields,
             rel_market_1=day_rel_market_1,
             include_impulse=enable_impulse,
+            dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol,
             prior_range_states=range_state,
             prior_range_anchors=range_anchor,
         )
@@ -2467,29 +2700,55 @@ def evaluate_source_d1_structure_timeline(
             else unknown("PREVIOUS_CORE_UNAVAILABLE")
         )
         observed_anchors = []
+        today_coord = observations[index].coordinate_id
+        prev_obs = observations[index - 1] if index > 0 else None
         for anchor_id, item in anchors.items():
             anchor = item["anchor"]
             if anchor.relation != "SUPPORT" or index <= anchor.created_ordinal:
                 continue
-            observation = observe_support(
-                anchor,
-                today=today,
-                prior=item.get("prior_observation"),
-                lower=FieldValue(anchor.lower),
-                upper=FieldValue(anchor.upper),
-                atr_previous=atr_previous,
-                clv=clv,
-                actual=actual,
-                capability_state="READY",
+            prior_obs = item.get("prior_observation")
+            coordinate_comparable = anchor.coordinate_id == today_coord and (
+                prev_obs is None
+                or prev_obs.state != "ACTUAL"
+                or prev_obs.coordinate_id == anchor.coordinate_id
             )
+            if not coordinate_comparable:
+                observation = SupportObservation(
+                    anchor.anchor_id,
+                    index,
+                    "UNKNOWN",
+                    "UNKNOWN",
+                    "STALE",
+                    0,
+                    0,
+                    prior_obs.test_count if prior_obs else 0,
+                    0,
+                    False,
+                    "NOT_COMPARABLE_PRICE_COORDINATE",
+                )
+            else:
+                observation = observe_support(
+                    anchor,
+                    today=today,
+                    prior=prior_obs,
+                    lower=FieldValue(anchor.lower),
+                    upper=FieldValue(anchor.upper),
+                    atr_previous=atr_previous,
+                    clv=clv,
+                    actual=actual,
+                    capability_state="READY",
+                )
             item["prior_observation"] = observation
-            observation_payload = {
+            observation_payload: dict[str, Any] = {
                 "anchor_id": anchor_id,
                 "type": anchor.kind,
                 "session": day.isoformat(),
                 "state": observation.state,
                 "acceptance": observation.acceptance,
                 "freshness": observation.freshness,
+                "comparability_status": "COMPARABLE"
+                if coordinate_comparable
+                else "NOT_COMPARABLE",
                 "reason": observation.reason,
                 "breach_streak": observation.breach_streak,
                 "acceptance_streak": observation.acceptance_streak,
@@ -2505,15 +2764,39 @@ def evaluate_source_d1_structure_timeline(
                     "low": _render_field(observations[index].low),
                     "close": _render_field(observations[index].close),
                     "price_coordinate": "FORWARD_ADJUSTED",
+                    "coordinate_id": today_coord,
                 },
                 "source": _source_row_identity(row_map.get(day)),
             }
+            if anchor.kind in IMPULSE_STRUCTURE_TYPES:
+                offset_k = index - anchor.created_ordinal
+                if offset_k in (1, 3):
+                    t0_obs = observations[anchor.created_ordinal]
+                    if not coordinate_comparable:
+                        ret_val = unknown("NOT_COMPARABLE_PRICE_COORDINATE")
+                    elif t0_obs.state != "ACTUAL":
+                        ret_val = unknown("IMPULSE_T0_NOT_ACTUAL")
+                    elif observations[index].state != "ACTUAL":
+                        ret_val = unknown("IMPULSE_TK_NOT_ACTUAL")
+                    else:
+                        ret_val = impulse_retention(
+                            t0_obs.close,
+                            FieldValue(anchor.lower),
+                            observations[index].close,
+                        )
+                    observation_payload["impulse_retention_k"] = offset_k
+                    observation_payload["impulse_retention"] = _render_field(ret_val)
+                    item.setdefault("impulse_retention", {})[f"t0_plus_{offset_k}"] = (
+                        _render_field(ret_val)
+                    )
             item["support_observations"].append(observation_payload)
             observed_anchors.append(observation_payload)
 
             if anchor.kind == "GAP_ZONE":
                 prior_fill = item["gap_fill_state"]
-                if prior_fill.quality == "OBSERVED":
+                if not coordinate_comparable:
+                    next_fill = unknown("NOT_COMPARABLE_PRICE_COORDINATE")
+                elif prior_fill.quality == "OBSERVED":
                     next_fill = gap_fill(
                         prior_fill.value,
                         low=(
@@ -2526,7 +2809,9 @@ def evaluate_source_d1_structure_timeline(
                     )
                 else:
                     next_fill = prior_fill
-                item["gap_fill_state"] = next_fill
+                item["gap_fill_state"] = (
+                    next_fill if coordinate_comparable else prior_fill
+                )
                 fill_payload = {
                     "anchor_id": anchor_id,
                     "type": anchor.kind,
@@ -2535,9 +2820,13 @@ def evaluate_source_d1_structure_timeline(
                     if next_fill.quality == "OBSERVED"
                     else "UNKNOWN",
                     "quality": next_fill.quality,
+                    "comparability_status": "COMPARABLE"
+                    if coordinate_comparable
+                    else "NOT_COMPARABLE",
                     "reason": next_fill.reason,
                     "low": _render_field(observations[index].low),
                     "price_coordinate": "FORWARD_ADJUSTED",
+                    "coordinate_id": today_coord,
                     "source": _source_row_identity(row_map.get(day)),
                 }
                 item["gap_fill_observations"].append(fill_payload)
@@ -2582,6 +2871,19 @@ def evaluate_source_d1_structure_timeline(
     event_payloads = []
     for item in anchors.values():
         anchor = item["anchor"]
+        retention_payload = None
+        if anchor.kind in IMPULSE_STRUCTURE_TYPES:
+            stored_ret = item.get("impulse_retention", {})
+            retention_payload = {
+                "t0_plus_1": stored_ret.get(
+                    "t0_plus_1",
+                    _render_field(unknown("FUTURE_SESSION_NOT_IN_WINDOW")),
+                ),
+                "t0_plus_3": stored_ret.get(
+                    "t0_plus_3",
+                    _render_field(unknown("FUTURE_SESSION_NOT_IN_WINDOW")),
+                ),
+            }
         event_payloads.append(
             {
                 **item["birth"],
@@ -2590,6 +2892,7 @@ def evaluate_source_d1_structure_timeline(
                 "gap_fill_observations": item["gap_fill_observations"]
                 if anchor.kind == "GAP_ZONE"
                 else [],
+                "impulse_retention": retention_payload,
                 "support_observation_status": "NOT_APPLICABLE"
                 if anchor.relation == "RESISTANCE"
                 else "NOT_AVAILABLE_AT_REQUEST_WINDOW_END"
@@ -2605,7 +2908,7 @@ def evaluate_source_d1_structure_timeline(
     )
     return {
         "contract": STRUCTURE_CONTRACT,
-        "producer_version": D1_PRODUCER_VERSION_7
+        "producer_version": D1_PRODUCER_VERSION_10
         if enable_impulse
         else D1_PRODUCER_VERSION_5,
         "status": "SOURCE_SYMBOL_D1_STRUCTURE_HISTORY",
@@ -2654,6 +2957,7 @@ def discover_source_d1_prior_support_reference(
     price_coordinate: str = "FORWARD_ADJUSTED",
     rel_market_1_by_session: Mapping[date, FieldValue] | None = None,
     include_impulse: bool = False,
+    dynamic_ma_events_by_symbol: Mapping[str, Sequence[Event]] | None = None,
 ) -> dict[str, Any]:
     """按单股历史生成截至窗口末会话已可见的来源支撑参考。"""
     days = tuple(sessions)
@@ -2692,6 +2996,7 @@ def discover_source_d1_prior_support_reference(
         history_inputs=history_inputs,
         rel_market_1_by_session=rel_market_1_by_session,
         include_impulse=include_impulse,
+        dynamic_ma_events_by_symbol=dynamic_ma_events_by_symbol,
     )
     prior_session = days[-1]
     supported_types = {
@@ -2700,6 +3005,9 @@ def discover_source_d1_prior_support_reference(
         "GAP_ZONE",
         "IMPULSE_BODY",
         "IMPULSE_LOW",
+        "BREAKOUT_PLATFORM",
+        "DYNAMIC_MA5",
+        "DYNAMIC_MA20",
     }
     references = []
     for event in timeline["events"]:

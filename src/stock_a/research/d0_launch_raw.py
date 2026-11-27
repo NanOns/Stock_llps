@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
 
-from stock_a.research.d0_price_facts import calculate_d0_first_day_damage
+from stock_a.research.d0_price_facts import (
+    _has_qfq_comparable_evidence,
+    _resolve_target_qfq_capture_id,
+    calculate_d0_first_day_damage,
+    calculate_d0_liq20,
+    calculate_d0_ols20,
+    calculate_d0_prior5_below,
+    calculate_d0_severe_drop,
+)
 from stock_a.research.entry_history.support import trade_status_state_from_pg_row
 
 
@@ -21,6 +29,7 @@ _REASON_TEXT = {
     "RAW_SOURCE_IDENTITY_MISMATCH": "价格行与来源代码、日期或paired捕获身份不一致。",
     "RAW_TARGET_CAPTURE_MISMATCH": "历史行与paired BaoStock捕获身份不一致。",
     "RAW_COORDINATE_MISMATCH": "价格坐标不是同一BaoStock QFQ坐标。",
+    "MIXED_PRICE_COORDINATE": "严格窗口内QFQ价格来自不同捕获且缺少同basis可比证据。",
     "RAW_PARSER_CONTRACT_MISMATCH": "历史行缺少QFQ价格质量或字段。",
     "RAW_PRICE_QUALITY_UNKNOWN": "严格会话QFQ价格质量未知。",
     "RAW_PRICE_QUALITY_BAD": "严格会话QFQ价格值不合法。",
@@ -143,18 +152,28 @@ def _window_source_row(
     row = rows.get(session)
     if row is None:
         return None, "OFFICIAL_SESSION_ROW_MISSING"
-    if (
-        row.get("session_date") != session
-        or row.get("source_symbol") != source_symbol
-        or row.get("source_capture_id") != source_capture_id
-    ):
+    if row.get("session_date") != session or row.get("source_symbol") != source_symbol:
         return row, "RAW_SOURCE_IDENTITY_MISMATCH"
     if price_coordinate != "FORWARD_ADJUSTED":
         return row, "RAW_COORDINATE_MISMATCH"
+    target_session = rows.get("_target_session")
+    target_row = rows.get(target_session) if isinstance(target_session, date) else None
+    target_qfq_cap = _resolve_target_qfq_capture_id(target_row, source_capture_id)
+    row_qfq_cap = row.get("qfq_source_capture_id")
+    if row_qfq_cap is None:
+        row_qfq_cap = row.get("source_capture_id")
+    if type(row_qfq_cap) is not int or row_qfq_cap <= 0:
+        return row, "RAW_TARGET_CAPTURE_MISMATCH"
     if (
-        row.get("price_coordinate") != "FORWARD_ADJUSTED"
-        or row.get("qfq_price_coordinate") != "FORWARD_ADJUSTED"
-        or row.get("adjustment_flag") not in (2, "2")
+        target_qfq_cap is not None
+        and row_qfq_cap != target_qfq_cap
+        and not _has_qfq_comparable_evidence(row, target_row)
+    ):
+        return row, "MIXED_PRICE_COORDINATE"
+    row_coord = row.get("qfq_price_coordinate", row.get("price_coordinate"))
+    if row_coord != "FORWARD_ADJUSTED" or (
+        row.get("adjustment_flag") is not None
+        and row.get("adjustment_flag") not in (2, "2")
     ):
         return row, "RAW_TARGET_CAPTURE_MISMATCH"
     if row.get("qfq_adjustflag") not in (2, "2"):
@@ -322,8 +341,13 @@ def _raw_amount(
 ) -> tuple[Fraction | None, str | None]:
     if row is None or row.get("bar_status") != "TARGET_PRESENT":
         return None, "OFFICIAL_SESSION_BAR_MISSING"
-    if row.get("source_capture_id") != source_capture_id:
+    row_raw_cap = row.get("raw_source_capture_id")
+    if row_raw_cap is None:
+        row_raw_cap = row.get("source_capture_id")
+    if type(row_raw_cap) is not int or row_raw_cap <= 0:
         return None, "RAW_SOURCE_IDENTITY_MISMATCH"
+    if row.get("raw_adjustflag") not in (None, 3, "3"):
+        return None, "RAW_COORDINATE_MISMATCH"
     trade_state, trade_reason = trade_status_state_from_pg_row(
         row, price_coordinate="RAW_UNADJUSTED"
     )
@@ -347,9 +371,7 @@ def _raw_amount_for_source_row(
     source_capture_id: int,
 ) -> tuple[Fraction | None, str | None]:
     if row is not None and (
-        row.get("source_symbol") != source_symbol
-        or row.get("session_date") != session
-        or row.get("source_capture_id") != source_capture_id
+        row.get("source_symbol") != source_symbol or row.get("session_date") != session
     ):
         return None, "RAW_SOURCE_IDENTITY_MISMATCH"
     return _raw_amount(session, row, source_capture_id=source_capture_id)
@@ -628,6 +650,12 @@ def calculate_d0_launch_confirm_raw(
                 formula=formulas["not_phh20_shadow_rejection"],
             )
 
+    liq20_res = calculate_d0_liq20(
+        target_session=target_session,
+        official_sessions=window,
+        history_rows_by_session=history_rows_by_session,
+        source_symbol=source_symbol,
+    )
     state = _tri_and(predicates)
     main_reason = None
     if state == "FALSE":
@@ -663,7 +691,7 @@ def calculate_d0_launch_confirm_raw(
         "strict_official_sessions": [session.isoformat() for session in window],
         "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
         "research_universe_status": "UNKNOWN",
-        "absolute_liquidity_cny_status": "UNKNOWN_UNIT_UNVERIFIED",
+        "absolute_liquidity_cny_status": liq20_res.reason_code,
         "turn_status": "UNKNOWN_NOT_PRODUCED",
         "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
         "pit_status": "NON_PIT_RETROSPECTIVE",
@@ -759,12 +787,15 @@ def calculate_d0_recovery_turn_raw(
     high, low = price(-1, "high"), price(-1, "low")
     ma5, previous_ma5 = ma(-1, 5), ma(-2, 5)
     ma20, previous_ma20, ma20_minus3 = ma(-1, 20), ma(-2, 20), ma(-4, 20)
-    prior_pairs = [(price(i, "close"), ma(i, 20)) for i in range(-6, -1)]
-    below = (
-        sum(c <= avg for c, avg in prior_pairs)
-        if all(c is not None and avg is not None for c, avg in prior_pairs)
-        else None
+    prior5_res = calculate_d0_prior5_below(
+        target_session=target_session,
+        official_sessions=sessions,
+        history_rows_by_session=history_rows_by_session,
+        source_symbol=source_symbol,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
     )
+    below = prior5_res.below_count
     r5 = (
         previous <= previous_ma5 and close > ma5
         if all(v is not None for v in (previous, previous_ma5, close, ma5))
@@ -892,16 +923,22 @@ def calculate_d0_recovery_turn_raw(
     )
     damage_input_error = next((error for _, _, error in checked[-20:] if error), None)
     damage_state = damage.state if damage_input_error is None else "UNKNOWN"
-    ret1 = close / previous - 1 if close is not None and previous is not None else None
-    severe = (
-        "UNKNOWN"
-        if ret1 is None
-        else "TRUE"
-        if ret1 <= Fraction(-2, 25)
-        else "FALSE"
-        if ret1 > Fraction(-1, 25)
-        else "UNKNOWN"
+    severe_res = calculate_d0_severe_drop(
+        target_session=target_session,
+        official_sessions=sessions,
+        history_rows_by_session=history_rows_by_session,
+        source_symbol=source_symbol,
+        source_capture_id=source_capture_id,
+        price_coordinate=price_coordinate,
     )
+    liq20_res = calculate_d0_liq20(
+        target_session=target_session,
+        official_sessions=sessions,
+        history_rows_by_session=history_rows_by_session,
+        source_symbol=source_symbol,
+    )
+    ret1 = severe_res.ret1
+    severe = severe_res.state
     state = _tri_and(predicates)
     first = (
         next((key for key, item in predicates.items() if item["state"] == state), None)
@@ -927,38 +964,21 @@ def calculate_d0_recovery_turn_raw(
         if low is not None and close is not None and previous_ma10 is not None
         else None
     )
-    prior_closes = (
-        [price(i, "close") for i in range(-21, -1)] if len(sessions) >= 21 else []
-    )
     ols_slope = ols_r2 = None
-    if (
-        include_prior_ols
-        and len(prior_closes) == 20
-        and all(value is not None for value in prior_closes)
-    ):
-        if len(set(prior_closes)) == 1:
-            ols_slope = Decimal(0)
-        else:
-            with localcontext() as context:
-                context.prec = 34
-                logs = [
-                    (Decimal(value.numerator) / Decimal(value.denominator)).ln()
-                    for value in prior_closes
-                ]
-                mean_y = sum(logs, Decimal(0)) / Decimal(20)
-                mean_x = Decimal(19) / 2
-                sxx = sum(((Decimal(i) - mean_x) ** 2 for i in range(20)), Decimal(0))
-                sxy = sum(
-                    (
-                        (Decimal(i) - mean_x) * (value - mean_y)
-                        for i, value in enumerate(logs)
-                    ),
-                    Decimal(0),
-                )
-                syy = sum(((value - mean_y) ** 2 for value in logs), Decimal(0))
-                ols_slope = sxy / sxx
-                if syy != 0:
-                    ols_r2 = sxy * sxy / (sxx * syy)
+    ols_reason_r2 = None
+    if include_prior_ols:
+        ols_res = calculate_d0_ols20(
+            target_session=target_session,
+            official_sessions=sessions,
+            history_rows_by_session=history_rows_by_session,
+            source_symbol=source_symbol,
+            source_capture_id=source_capture_id,
+            price_coordinate=price_coordinate,
+        )
+        ols_slope = ols_res.slope
+        ols_r2 = ols_res.r2
+        if ols_res.reason_code == "OLS20_SST_ZERO":
+            ols_reason_r2 = "前态log收盘价总平方差为零。"
     partial = {
         "STRONG_PULLBACK": {
             "prior_ols_status": "EVALUATED"
@@ -1027,9 +1047,9 @@ def calculate_d0_recovery_turn_raw(
     if not include_prior_ols:
         for key in ("prior_ols_slope_positive", "prior_ols_r2_at_least_040"):
             partial["STRONG_PULLBACK"][key]["reason"] = "未请求指定来源代码的前态OLS。"
-    elif ols_slope is not None and ols_r2 is None:
+    elif ols_reason_r2 is not None:
         partial["STRONG_PULLBACK"]["prior_ols_r2_at_least_040"]["reason"] = (
-            "前态log收盘价总平方差为零。"
+            ols_reason_r2
         )
     line = (
         ma20
@@ -1074,12 +1094,17 @@ def calculate_d0_recovery_turn_raw(
             },
             "severe_drop": {
                 "state": severe,
-                "reason": "PRIOR_SIGMA20_NOT_PRODUCED"
-                if severe == "UNKNOWN"
-                else "DETERMINED_BY_EXACT_RET1_BOUND",
+                "reason": severe_res.reason_code,
                 "ret1": fraction_payload(ret1),
+                "prior_sigma20": str(severe_res.prior_sigma20)
+                if severe_res.prior_sigma20 is not None
+                else None,
             },
-            "liquidity_cny": "UNKNOWN_UNIT_UNVERIFIED",
+            "liquidity_cny": {
+                "state": liq20_res.state,
+                "reason": liq20_res.reason_code,
+                "median_amount_cny": fraction_payload(liq20_res.median_amount_cny),
+            },
             "research_universe": "UNKNOWN",
             "corporate_action_coordinate": "UNKNOWN",
             "formal_admission": "NOT_AUTHORIZED",
@@ -1097,7 +1122,7 @@ def calculate_d0_recovery_turn_raw(
         "price_coordinate": price_coordinate,
         "time_role": "NON_PIT_RETROSPECTIVE",
         "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
-        "absolute_liquidity_cny_status": "UNKNOWN_UNIT_UNVERIFIED",
+        "absolute_liquidity_cny_status": liq20_res.reason_code,
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "episode_status": "NOT_ISSUED",
     }

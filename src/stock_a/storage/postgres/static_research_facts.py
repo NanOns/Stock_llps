@@ -120,6 +120,12 @@ _SEED_COLUMNS = (
     "source_seed_reasons",
     "raw_prewatch_state",
     "raw_prewatch_reasons",
+    "formal_universe_state",
+    "formal_universe_reason",
+    "formal_seed_state",
+    "formal_seed_reasons",
+    "formal_prewatch_state",
+    "formal_prewatch_reasons",
 )
 _D0_COLUMNS = (
     "target_session",
@@ -605,6 +611,15 @@ def _seed_rows(
             )
             values[f"{prefix}_state"] = _state(node)
             values[f"{prefix}_reasons"] = _reasons(node)
+        ru_node = _field(predicates, "research_universe")
+        values["formal_universe_state"] = _state(ru_node)
+        values["formal_universe_reason"] = ru_node.get("reason")
+        fseed_node = fact.get("formal_seed") or {}
+        values["formal_seed_state"] = _state(fseed_node) if fseed_node else "UNKNOWN"
+        values["formal_seed_reasons"] = _reasons(fseed_node) if fseed_node else []
+        fpw_node = fact.get("formal_prewatch") or {}
+        values["formal_prewatch_state"] = _state(fpw_node) if fpw_node else "UNKNOWN"
+        values["formal_prewatch_reasons"] = _reasons(fpw_node) if fpw_node else []
         if not isinstance(symbol, str) or _SYMBOL.fullmatch(symbol) is None:
             raise StaticResearchPgError(
                 "STATIC_SEED_SOURCE_KEY_INVALID", "Seed来源代码无效"

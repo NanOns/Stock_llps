@@ -35,13 +35,23 @@ def prepare_source_d0_launch_formal_admission(
     gates: Mapping[str, FieldValue],
     gate_reasons: Mapping[str, Any],
     close: FieldValue,
-    phc20: FieldValue,
+    phc20: FieldValue | None = None,
     session_ordinal: int,
     next_session: date | None,
     window_start: date,
     evidence_ref: str,
+    scenario: str = "LAUNCH_CONFIRM",
+    ma5: FieldValue | None = None,
+    ma20: FieldValue | None = None,
+    r5: FieldValue | None = None,
+    r20: FieldValue | None = None,
+    prior_episode_id: str | None = None,
+    prior_episode_valid: FieldValue | None = None,
+    support_anchor_id: str | None = None,
+    support_lower: FieldValue | None = None,
+    support_valid: FieldValue | None = None,
 ) -> dict[str, Any]:
-    """将闭合的已存D0原始事实送入R1纯核，诊断Reader语义不变。"""
+    """将闭合的已存D0原始事实送入R1纯核（支持LAUNCH_CONFIRM、RECOVERY_TURN及预留PB/CONT接口）。"""
     gate_order = (
         "research_universe",
         "actual_quote",
@@ -59,6 +69,7 @@ def prepare_source_d0_launch_formal_admission(
         or source_capture_id <= 0
         or type(raw_fact_id) is not int
         or raw_fact_id <= 0
+        or scenario not in SCENARIOS
         or raw_state not in {"TRUE", "FALSE", "UNKNOWN"}
         or raw_role not in {"FORMAL", "DIAGNOSTIC"}
         or set(gates) != set(gate_order)
@@ -77,35 +88,48 @@ def prepare_source_d0_launch_formal_admission(
         or window_start > target_session
         or not evidence_ref
     ):
-        raise ValueError("LAUNCH正式准入必须绑定精确的原始事实、角色、窗口和来源键")
+        raise ValueError("D0正式准入必须绑定精确的原始事实、场景、角色、窗口和来源键")
 
     raw = _raw_field(raw_state, raw_reason or "RAW_SCENARIO_UNKNOWN")
     effective_role = raw_role
     if raw_state in {"FALSE", "UNKNOWN"}:
         # 无事件候选时保留契约三态；诊断TRUE不会被提升为正式事件。
         effective_role = "FORMAL"
+    window_ref_suffix = (
+        "PHC20_STRICT_PRIOR_20"
+        if scenario == "LAUNCH_CONFIRM"
+        else "RECOVERY_R20_OR_R5"
+        if scenario == "RECOVERY_TURN"
+        else f"{scenario}_WINDOW"
+    )
     decision = admit(
         entity_id=entity_id,
         ordinal=session_ordinal,
         next_ordinal=session_ordinal + 1,
         coordinate_id=f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{entity_id}",
-        scenario="LAUNCH_CONFIRM",
+        scenario=scenario,
         role=effective_role,
         raw=raw,
         gates=tuple(gates[key] for key in gate_order),
         close=close,
-        phc20=phc20,
-        ma5=unknown("LAUNCH_MA5_NOT_APPLICABLE"),
-        ma20=unknown("LAUNCH_MA20_NOT_APPLICABLE"),
-        r5=unknown("LAUNCH_R5_NOT_APPLICABLE"),
-        r20=unknown("LAUNCH_R20_NOT_APPLICABLE"),
-        prior_episode_id=None,
-        prior_episode_valid=unknown("LAUNCH_PRIOR_EPISODE_NOT_REQUIRED"),
-        support_anchor_id=None,
-        support_lower=unknown("LAUNCH_SUPPORT_NOT_APPLICABLE"),
-        support_valid=unknown("LAUNCH_SUPPORT_NOT_APPLICABLE"),
+        phc20=phc20 if phc20 is not None else unknown("PHC20_NOT_PROVIDED"),
+        ma5=ma5 if ma5 is not None else unknown(f"{scenario}_MA5_NOT_APPLICABLE"),
+        ma20=ma20 if ma20 is not None else unknown(f"{scenario}_MA20_NOT_APPLICABLE"),
+        r5=r5 if r5 is not None else unknown(f"{scenario}_R5_NOT_APPLICABLE"),
+        r20=r20 if r20 is not None else unknown(f"{scenario}_R20_NOT_APPLICABLE"),
+        prior_episode_id=prior_episode_id,
+        prior_episode_valid=prior_episode_valid
+        if prior_episode_valid is not None
+        else unknown(f"{scenario}_PRIOR_EPISODE_NOT_REQUIRED"),
+        support_anchor_id=support_anchor_id,
+        support_lower=support_lower
+        if support_lower is not None
+        else unknown(f"{scenario}_SUPPORT_NOT_APPLICABLE"),
+        support_valid=support_valid
+        if support_valid is not None
+        else unknown(f"{scenario}_SUPPORT_NOT_APPLICABLE"),
         evidence_ref=evidence_ref,
-        window_ref=f"{window_start.isoformat()}..{target_session.isoformat()}:PHC20_STRICT_PRIOR_20",
+        window_ref=f"{window_start.isoformat()}..{target_session.isoformat()}:{window_ref_suffix}",
         capability_state="READY",
     )
     status = decision.status
@@ -148,14 +172,29 @@ def prepare_source_d0_launch_formal_admission(
 
     event = decision.event if status == "READY" else None
     line_value = Fraction(event.failure_line.value) if event is not None else None
+    line_source = None
+    line_window_count = 20
+    if event is not None:
+        raw_source_ref = event.failure_line.source_ref
+        if scenario == "RECOVERY_TURN":
+            if raw_source_ref == "T0_MA20":
+                line_source = "R20_MA20"
+                line_window_count = 20
+            elif raw_source_ref == "T0_MA5":
+                line_source = "R5_MA5"
+                line_window_count = 5
+            else:
+                line_source = raw_source_ref
+        else:
+            line_source = raw_source_ref
     frozen_line = (
         {
             "numerator": line_value.numerator,
             "denominator": line_value.denominator,
             "coordinate": "FORWARD_ADJUSTED",
-            "source": "T0_PHC20",
+            "source": line_source,
             "source_window_start": window_start.isoformat(),
-            "source_window_session_count": 20,
+            "source_window_session_count": line_window_count,
             "source_event_ref": evidence_ref,
             "effective_from_session": next_session.isoformat()
             if next_session is not None
@@ -167,6 +206,7 @@ def prepare_source_d0_launch_formal_admission(
     if status == "READY" and frozen_line is None:
         raise ValueError("READY事件缺少下一官方会话，不能生成出生冻结线")
     return {
+        "scenario": scenario,
         "raw_role": raw_role,
         "raw_state": raw_state,
         "raw_reason": raw_reason,
@@ -191,6 +231,9 @@ def prepare_source_d0_launch_formal_admission(
         "research_mode": "NON_PIT_EXPLORATORY",
         "price_coordinate": "FORWARD_ADJUSTED",
     }
+
+
+prepare_source_d0_formal_admission = prepare_source_d0_launch_formal_admission
 
 
 def present_source_formal_admission(

@@ -41,6 +41,7 @@ from stock_a.storage.postgres.baostock_price_facts import (
     read_baostock_price_history_batch,
     read_baostock_price_page,
 )
+from stock_a.storage.postgres.baostock_universe import resolve_date_effective_universe
 from stock_a.storage.postgres.static_research_facts import (
     StaticResearchPgError,
     read_source_d0_scenario_day,
@@ -104,7 +105,6 @@ def source_qualification_explanation(
     public_conditions = (
         "research_universe",
         "actual_bar",
-        "non_st",
         "normal_listing_phase",
         "limited_price_rule",
         "coordinate_ready",
@@ -193,14 +193,12 @@ def source_qualification_explanation(
         "s1": dict(s1),
         "s2": dict(s2),
         "source_seed_shape": dict(source_seed),
+        "source_seed": dict(source_seed),
         "seed_safety": dict(safety),
         "formal_seed": dict(seed),
         "formal_candidate_seed": dict(formal_candidate_seed),
-        "raw_prewatch": {
-            **dict(prewatch),
-            "implementation_status": "NOT_IMPLEMENTED",
-            "unbound_condition": "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND",
-        },
+        "formal_prewatch": dict(prewatch),
+        "raw_prewatch": dict(prewatch),
         "known_exclusions": [
             {"condition": condition, "reason": reason}
             for condition, reason in exclusion_pairs
@@ -212,6 +210,7 @@ def source_qualification_explanation(
             "ordinary_candidate_public_gate": _state_counts([public_gate]),
             "formal_seed": _state_counts([seed]),
             "formal_candidate_seed": _state_counts([formal_candidate_seed]),
+            "formal_prewatch": _state_counts([prewatch]),
             "raw_prewatch": _state_counts([prewatch]),
         },
     }
@@ -322,15 +321,13 @@ def unavailable_source_qualification(reason: str) -> dict[str, Any]:
     public_gate = _and(
         predicates["research_universe"],
         predicates["actual_bar"],
-        predicates["non_st"],
         predicates["normal_listing_phase"],
         predicates["limited_price_rule"],
         predicates["coordinate_ready"],
     )
     seed = reduce_seed_with_safety(safety, source_seed)
     formal_candidate_seed = _and(public_gate, seed)
-    prewatch = _and(seed, _tri(None, "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND"))
-    prewatch["implementation_status"] = "NOT_IMPLEMENTED"
+    prewatch = _and(seed, _tri(None, reason))
     return source_qualification_explanation(
         predicates,
         s1=s1,
@@ -344,9 +341,15 @@ def unavailable_source_qualification(reason: str) -> dict[str, Any]:
 
 
 def source_seed_predicates(
-    preview: Mapping[str, Any], delta, previous_cross: dict[str, Any]
+    preview: Mapping[str, Any],
+    delta,
+    previous_cross: dict[str, Any],
+    *,
+    source_symbol: str | None = None,
+    universe_result: Mapping[str, Any] | None = None,
+    target_row: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """按ALG-19/20归约实际字段；缺失正式Universe和单位不冒充已知。"""
+    """按ALG-19/20归约实际字段；接入日期有效Research Universe、CNY_VERIFIED流动性、QFQ坐标与PREWATCH。"""
     core = preview["core"]["fields"]
     components = {
         item["field_id"]: item for item in preview["profile_preview"]["components"]
@@ -386,8 +389,19 @@ def source_seed_predicates(
         lambda value: value != "EXTREME",
         false_reason="EXTENSION_EXTREME_PROVED",
     )
-    # 此读取链仅持有原生金额，未取得人民币单位权威，不能比较绝对金额门槛。
-    liquidity = _tri(None, "UNKNOWN_UNIT_UNVERIFIED")
+    unit_verified = (
+        target_row.get("amount_unit_status") == "CNY_VERIFIED"
+        if isinstance(target_row, Mapping)
+        else preview.get("amount_unit_status") == "CNY_VERIFIED"
+    )
+    if unit_verified:
+        liquidity = _from_field(
+            core["core.liquidity_mean20"],
+            lambda value: value >= Fraction(20_000_000),
+            false_reason="LIQUIDITY_MEAN20_BELOW_20M",
+        )
+    else:
+        liquidity = _tri(None, "UNKNOWN_UNIT_UNVERIFIED")
     actual = (
         _tri(True)
         if preview.get("actual_quote_state") == "ACTUAL"
@@ -398,11 +412,71 @@ def source_seed_predicates(
             str(preview.get("actual_quote_reason") or "TARGET_ACTUAL_OR_PRICE_UNKNOWN"),
         )
     )
-    formal_universe = _tri(None, "DATE_VALID_IDENTITY_LIFECYCLE_EVIDENCE_MISSING")
-    formal_coordinate = _tri(None, "QFQ_NON_PIT_COORDINATE_IS_NOT_FORMAL_PIT")
-    non_st = _tri(None, "DATE_VALID_ST_STATUS_EVIDENCE_MISSING")
-    normal_listing = _tri(None, "DATE_VALID_LISTING_PHASE_EVIDENCE_MISSING")
-    limited_price_rule = _tri(None, "DATE_VALID_LIMIT_APPLICABILITY_EVIDENCE_MISSING")
+    if (
+        isinstance(universe_result, Mapping)
+        and universe_result.get("status") == "AVAILABLE"
+        and source_symbol
+    ):
+        missing_basic = set(universe_result.get("missing_basic_symbols", ()))
+        quarantined = set(universe_result.get("quarantined_symbols", ()))
+        members = set(universe_result.get("members", ()))
+        if source_symbol in missing_basic or source_symbol in quarantined:
+            formal_universe = _tri(None, "STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED")
+            normal_listing = _tri(None, "STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED")
+            limited_price_rule = _tri(
+                None, "STOCK_BASIC_IDENTITY_MISSING_OR_QUARANTINED"
+            )
+        elif source_symbol in members:
+            formal_universe = _tri(True)
+            normal_listing = _tri(True)
+            limited_price_rule = _tri(True)
+        else:
+            formal_universe = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
+            normal_listing = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
+            limited_price_rule = _tri(False, "OUTSIDE_RESEARCH_UNIVERSE")
+    else:
+        missing_reason = (
+            str(universe_result.get("reason"))
+            if isinstance(universe_result, Mapping) and universe_result.get("reason")
+            else "DATE_VALID_IDENTITY_LIFECYCLE_EVIDENCE_MISSING"
+        )
+        formal_universe = _tri(None, missing_reason)
+        normal_listing = _tri(None, "DATE_VALID_LISTING_PHASE_EVIDENCE_MISSING")
+        limited_price_rule = _tri(
+            None, "DATE_VALID_LIMIT_APPLICABILITY_EVIDENCE_MISSING"
+        )
+
+    if (
+        isinstance(target_row, Mapping)
+        and target_row.get("raw_is_st_quality") == "OBSERVED"
+    ):
+        is_st_val = str(target_row.get("raw_is_st_value") or "") == "1"
+        non_st = _tri(not is_st_val, "ST_STATUS_OBSERVED" if is_st_val else None)
+    elif formal_universe["state"] == "TRUE":
+        non_st = _tri(True)
+    else:
+        non_st = _tri(None, "DATE_VALID_ST_STATUS_EVIDENCE_MISSING")
+
+    qfq_coord_ok = (
+        target_row.get("qfq_price_coordinate") == "FORWARD_ADJUSTED"
+        if isinstance(target_row, Mapping)
+        and target_row.get("qfq_price_coordinate") is not None
+        else True
+    )
+    if (
+        preview.get("price_research_status") == "AVAILABLE"
+        and core["core.ma20"].get("quality") == "OBSERVED"
+        and qfq_coord_ok
+    ):
+        formal_coordinate = _tri(True)
+    else:
+        formal_coordinate = _tri(
+            None,
+            str(
+                preview.get("actual_quote_reason") or "QFQ_COORDINATE_WINDOW_NOT_READY"
+            ),
+        )
+
     safety = _and(
         formal_universe, actual, formal_coordinate, liquidity, damage, extension
     )
@@ -413,14 +487,39 @@ def source_seed_predicates(
     public_gate = _and(
         formal_universe,
         actual,
-        non_st,
         normal_listing,
         limited_price_rule,
         formal_coordinate,
     )
     formal_candidate_seed = _and(public_gate, seed)
-    prewatch = _and(seed, _tri(None, "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND"))
-    prewatch["implementation_status"] = "NOT_IMPLEMENTED"
+
+    mandatory_core_keys = (
+        "core.ma20",
+        "core.atr20",
+        "core.bias20_atr",
+        "core.liquidity_mean20",
+        "core.price_damage",
+    )
+    missing_core = [
+        key for key in mandatory_core_keys if core[key].get("quality") != "OBSERVED"
+    ]
+    if actual["state"] == "FALSE":
+        mandatory_core_ready = _tri(False, actual.get("reason"))
+    elif formal_coordinate["state"] != "TRUE":
+        mandatory_core_ready = _tri(
+            False if formal_coordinate["state"] == "FALSE" else None,
+            formal_coordinate.get("reason") or "QFQ_COORDINATE_NOT_READY",
+        )
+    elif missing_core:
+        first_missing = missing_core[0]
+        mandatory_core_ready = _tri(
+            None,
+            str(core[first_missing].get("reason") or f"{first_missing}_UNKNOWN"),
+        )
+    else:
+        mandatory_core_ready = _tri(True)
+
+    prewatch = _and(seed, mandatory_core_ready)
     predicates = {
         "research_universe": formal_universe,
         "actual_bar": actual,
@@ -437,6 +536,7 @@ def source_seed_predicates(
         "rps5_delta3_at_least_10": delta10,
         "bull_transition": bull,
         "previous_ma20_cross": previous_cross,
+        "mandatory_core_quality_ready": mandatory_core_ready,
     }
     qualification = source_qualification_explanation(
         predicates,
@@ -453,9 +553,14 @@ def source_seed_predicates(
         "safety": safety,
         "s1": s1,
         "s2": s2,
+        "source_seed": source_seed,
         "seed": seed,
+        "formal_seed": seed,
+        "formal_prewatch": prewatch,
         "raw_prewatch": prewatch,
-        "formal_eligibility": "NOT_AUTHORIZED",
+        "formal_eligibility": "FORMAL_UNIVERSE_AND_QUALITY_BOUND"
+        if formal_universe["state"] != "UNKNOWN"
+        else "UNKNOWN",
         "qualification": qualification,
     }
 
@@ -624,9 +729,16 @@ def compute_source_pool_seed(
     worker_count: int = 1,
     cross_section_universe_version: str | None = None,
     cross_section_universe_capture_id: int | None = None,
+    universe_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """按现役Core/Profile公式从已存PG原始行计算Seed，供初始化生产使用。"""
     validate_seed_worker_count(worker_count)
+    if universe_result is None:
+        universe_result = resolve_date_effective_universe(
+            config,
+            session_date=target_session,
+            research_eligible_only=True,
+        )
     if selected_symbols is not None and (
         not isinstance(selected_symbols, frozenset)
         or any(not isinstance(symbol, str) or not symbol for symbol in selected_symbols)
@@ -991,6 +1103,9 @@ def compute_source_pool_seed(
                     preview,
                     rps["facts"][symbol]["rps5_delta3_pp"],
                     cross,
+                    source_symbol=symbol,
+                    universe_result=universe_result,
+                    target_row=target_row,
                 )
                 seed["core"] = {
                     key: preview["core"]["fields"][key]

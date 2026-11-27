@@ -128,6 +128,14 @@ _MODULE_PROGRESS_TABLES = {
         }
     ),
     "FORWARD_PATH": frozenset({"stock.source_forward_path_facts"}),
+    "D2_LIFECYCLE": frozenset(
+        {
+            "stock.d2_episode_day_states",
+            "stock.d2_primary_episode_day_facts",
+            "stock.stock_risk_day_facts",
+            "stock.stock_priority_day_facts",
+        }
+    ),
     "COHORT_STATS": frozenset({"stock.source_cohort_group_stats"}),
     "FEP_BASELINE": frozenset({"stock.source_fep_baseline_facts"}),
     "OBSERVATION_SEGMENTS": frozenset(

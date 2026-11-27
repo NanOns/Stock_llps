@@ -104,6 +104,8 @@ _MIGRATION_FILES = (
     "0090_source_s2_capture_provenance_nullable.sql",
     "0091_cross_section_capture_provenance_nullable.sql",
     "0092_market_breadth_capture_provenance_nullable.sql",
+    "0093_r04_round1_business_closure.sql",
+    "0094_r04_admission_failure_source_enum.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -182,6 +184,8 @@ _TASK_SCOPE_MIGRATIONS = {
     "R03_PHASE_CLOSURE_ROUND2_FINAL_20261126": frozenset({86}),
     "SINGLE_EFFECTIVE_FACT_REMOVE_MULTIVERSION_20261126": frozenset({87}),
     "SINGLE_EFFECTIVE_FACT_FINAL_CLOSURE_20261126": frozenset({88}),
+    "R04_ROUND1_INTEGRATED_BUSINESS_CLOSURE_20261127": frozenset({93}),
+    "R04_ROUND1_ADMISSION_ENUM_20261127": frozenset({94}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -437,6 +441,17 @@ _RELATIONS_BY_MIGRATION_COUNT[89] = _RELATIONS_BY_MIGRATION_COUNT[88]
 _RELATIONS_BY_MIGRATION_COUNT[90] = _RELATIONS_BY_MIGRATION_COUNT[89]
 _RELATIONS_BY_MIGRATION_COUNT[91] = _RELATIONS_BY_MIGRATION_COUNT[90]
 _RELATIONS_BY_MIGRATION_COUNT[92] = _RELATIONS_BY_MIGRATION_COUNT[91]
+_RELATIONS_BY_MIGRATION_COUNT[93] = _RELATIONS_BY_MIGRATION_COUNT[92] | {
+    "d2_episodes",
+    "d2_episode_day_states",
+    "d2_primary_episode_day_facts",
+    "d2_parent_peak_events",
+    "stock_risk_day_facts",
+    "stock_priority_day_facts",
+    "stock_radar_day_events",
+    "stock_near_miss_day_facts",
+}
+_RELATIONS_BY_MIGRATION_COUNT[94] = _RELATIONS_BY_MIGRATION_COUNT[93]
 
 
 class BindingRefused(Exception):

@@ -33,23 +33,32 @@ _STRUCTURE_TYPES_7 = _STRUCTURE_TYPES_5 + (
     "IMPULSE_BODY",
     "IMPULSE_LOW",
 )
-_STRUCTURE_TYPES = _STRUCTURE_TYPES_7
+_STRUCTURE_TYPES_10 = _STRUCTURE_TYPES_7 + (
+    "BREAKOUT_PLATFORM",
+    "DYNAMIC_MA5",
+    "DYNAMIC_MA20",
+)
+_STRUCTURE_TYPES = _STRUCTURE_TYPES_10
 _STRUCTURE_TYPE_SET = frozenset(_STRUCTURE_TYPES)
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
 _D0_LAUNCH_ALGORITHM_CONTRACT = "ALG-28 + §11.6 D0_SCENARIO_FACTS_R3"
 _D0_SESSION_CONTRACT = "D0_SESSION_R2"
 _D1_PRODUCER_VERSION_5 = "STOCK_A_D1_BAOSTOCK_QFQ_R3"
 _D1_PRODUCER_VERSION_7 = "STOCK_A_D1_BAOSTOCK_QFQ_R4"
+_D1_PRODUCER_VERSION_10 = "STOCK_A_D1_BAOSTOCK_QFQ_R5"
 _D1_PRODUCER_VERSION = _D1_PRODUCER_VERSION_5
 _D1_SUPPORTED_PRODUCER_VERSIONS = (
     _D1_PRODUCER_VERSION_5,
     _D1_PRODUCER_VERSION_7,
+    _D1_PRODUCER_VERSION_10,
 )
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 
 
 def _expected_d1_structure_types(producer_version: str) -> tuple[str, ...]:
     """按已存或待写入D1生产者版本返回精确结构类型集合。"""
+    if producer_version == _D1_PRODUCER_VERSION_10:
+        return _STRUCTURE_TYPES_10
     if producer_version == _D1_PRODUCER_VERSION_7:
         return _STRUCTURE_TYPES_7
     if producer_version == _D1_PRODUCER_VERSION_5:
@@ -66,7 +75,7 @@ def _select_preferred_d1_scopes(
     version_index: int,
     comparable_indices: Sequence[int],
 ) -> list[Sequence[Any]]:
-    """只在同一可比范围内优先R4，保留异范围与同版多键以报歧义。"""
+    """只在同一可比范围内优先R5/R4，保留异范围与同版多键以报歧义。"""
     items = list(scopes)
     if len(items) <= 1:
         return items
@@ -76,6 +85,12 @@ def _select_preferred_d1_scopes(
         groups.setdefault(key, []).append(row)
     selected: list[Sequence[Any]] = []
     for group in groups.values():
+        r5_items = [
+            row for row in group if row[version_index] == _D1_PRODUCER_VERSION_10
+        ]
+        if r5_items:
+            selected.extend(r5_items)
+            continue
         r4_items = [
             row for row in group if row[version_index] == _D1_PRODUCER_VERSION_7
         ]
@@ -2360,6 +2375,11 @@ def read_source_research_day(
             },
             "results": [by_symbol[symbol] for symbol in page_symbols],
             "selected_board_observation": selected_board_observation,
+            "r04_formal_summary": _read_r04_formal_summary_readonly(
+                config,
+                target_session=target_session,
+                selected_symbols=page_symbols,
+            ),
             "execution": {
                 "database_mode": "READ_ONLY",
                 "database_write_attempted": False,
@@ -2367,6 +2387,122 @@ def read_source_research_day(
                 "dml_executed": False,
             },
         }
+
+
+def _read_r04_formal_summary_readonly(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    selected_symbols: Sequence[str],
+) -> dict[str, Any]:
+    """只读读取当日R04正式D2选主、股票风险、Priority、Radar与Near-Miss汇总；缺结果返回NOT_COMPUTED。"""
+    from stock_a.research.state import CONTRACT as D2_CONTRACT
+    from stock_a.research.state import Rules as D2Rules
+    from stock_a.research.entry_context.sessions import _load_calendar
+    from stock_a.storage.postgres.r04_formal_facts import (
+        read_d2_primary_projections,
+        read_stock_priority_page,
+        read_stock_radar_and_near_miss,
+        read_stock_risk_summary_and_rows,
+    )
+
+    payload, _meta, _chain, _sessions = _load_calendar(target_session)
+    calendar_id = str(payload.get("calendar_id") or "CN_A_SHARE_OFFICIAL")
+    rule_identity = D2Rules(D2_CONTRACT, 2, 10, 3, 3).identity
+    primaries = read_d2_primary_projections(
+        config,
+        session_date=target_session,
+        calendar_id=calendar_id,
+        rule_identity=rule_identity,
+    )
+    risk_summary = read_stock_risk_summary_and_rows(config, session_date=target_session)
+    priority_page = read_stock_priority_page(
+        config, session_date=target_session, page=1, page_size=30
+    )
+    radar_nm = read_stock_radar_and_near_miss(config, session_date=target_session)
+    if not primaries and risk_summary["total"] == 0 and priority_page["total"] == 0:
+        return {
+            "status": "NOT_COMPUTED",
+            "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
+            "session_date": target_session.isoformat(),
+        }
+    selected_set = set(selected_symbols)
+    return {
+        "status": "AVAILABLE",
+        "session_date": target_session.isoformat(),
+        "d2_primary_by_symbol": {
+            row["entity_id"]: row
+            for row in primaries
+            if not selected_set or row["entity_id"] in selected_set
+        },
+        "stock_risk_summary": {
+            "total": risk_summary["total"],
+            "known": risk_summary["known"],
+            "unknown": risk_summary["unknown"],
+            "coverage": risk_summary["coverage"],
+            "by_symbol": {
+                row["source_symbol"]: row
+                for row in risk_summary["items"]
+                if not selected_set or row["source_symbol"] in selected_set
+            },
+        },
+        "stock_priority": priority_page,
+        "radar_events": radar_nm["radar_events"],
+        "near_miss_items": radar_nm["near_miss_items"],
+    }
+
+
+def read_d1_active_support_observations(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_symbol: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """只读读取指定交易日已落库的D1活跃支撑锚观察事实，按证券代码分组供D2与风险消费。"""
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
+        where = ["s.target_session = %s", "a.relation = 'SUPPORT'"]
+        params: list[Any] = [target_session]
+        if source_symbol is not None:
+            where.append("s.source_symbol = %s")
+            params.append(source_symbol)
+        rows = cursor.execute(
+            f"""
+            SELECT s.source_symbol, s.structure_type, s.id AS d1_structure_id,
+                   a.created_session, a.coordinate_id,
+                   a.lower_numerator, a.lower_denominator,
+                   a.upper_numerator, a.upper_denominator,
+                   a.after_state, a.after_quality, a.after_acceptance, a.after_freshness,
+                   a.after_breach_streak, a.after_acceptance_streak, a.after_test_count,
+                   a.after_separated_sessions, a.after_retest_qualified
+            FROM stock.source_d1_material_anchor_day_facts a
+            JOIN stock.source_d1_structure_day_facts s ON s.id = a.d1_structure_id
+            WHERE {" AND ".join(where)}
+            ORDER BY s.source_symbol, a.created_session DESC, s.structure_type
+            """,
+            tuple(params),
+        ).fetchall()
+        cols = [d[0] for d in cursor.description]
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            item = dict(zip(cols, r))
+            if item["lower_numerator"] is not None and item["lower_denominator"]:
+                item["lower"] = Fraction(Decimal(item["lower_numerator"])) / Fraction(
+                    Decimal(item["lower_denominator"])
+                )
+            else:
+                item["lower"] = None
+            if item["upper_numerator"] is not None and item["upper_denominator"]:
+                item["upper"] = Fraction(Decimal(item["upper_numerator"])) / Fraction(
+                    Decimal(item["upper_denominator"])
+                )
+            else:
+                item["upper"] = None
+            grouped.setdefault(item["source_symbol"], []).append(item)
+        return grouped
 
 
 def read_source_research_day_scope(

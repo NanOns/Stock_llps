@@ -12,9 +12,21 @@ from . import source_raw
 
 _TABLE = "source_d0_formal_admission_day_facts"
 _D0_LAUNCH_PRODUCER_VERSION = "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5"
+_D0_SCENARIO_PRODUCER_VERSIONS = {
+    "LAUNCH_CONFIRM": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5",
+    "RECOVERY_TURN": "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R5",
+    "STRONG_PULLBACK": "STOCK_A_D0_PULLBACK_R1",
+    "TREND_CONTINUE": "STOCK_A_D0_CONTINUE_R1",
+}
 _SEED_PRODUCER_VERSION = "SOURCE_POOL_SEED_CORE_PROFILE_R2"
 _ADMISSION_CONTRACT = "STOCK_A_D0_EVENT_ADMISSION_R1"
 _STATES = ("READY", "BLOCKED", "NOT_READY", "NOT_REQUIRED")
+_SCENARIOS = (
+    "LAUNCH_CONFIRM",
+    "RECOVERY_TURN",
+    "STRONG_PULLBACK",
+    "TREND_CONTINUE",
+)
 _GATE_COLUMNS = {
     "research_universe": ("research_universe_state", "research_universe_reason"),
     "actual_quote": ("actual_quote_state", "actual_quote_reason"),
@@ -118,8 +130,12 @@ def list_saved_launch_sessions(
     target_session: date,
     research_cutoff: date,
     source_capture_id: int,
+    scenario: str = "LAUNCH_CONFIRM",
 ) -> list[date]:
-    """只枚举截止日内已有的LAUNCH D0分区，不扩展或回填日期。"""
+    """只枚举截止日内已有的指定D0场景分区，不扩展或回填日期。"""
+    if scenario not in _SCENARIOS:
+        raise ValueError(f"不支持的正式准入场景: {scenario}")
+    producer_version = _D0_SCENARIO_PRODUCER_VERSIONS[scenario]
     if (
         type(start_session) is not date
         or type(target_session) is not date
@@ -138,14 +154,15 @@ def list_saved_launch_sessions(
         cursor.execute(
             """SELECT DISTINCT target_session
                FROM source_d0_scenario_day_facts
-               WHERE scenario='LAUNCH_CONFIRM' AND source_capture_id=%s
+               WHERE scenario=%s AND source_capture_id=%s
                  AND producer_version=%s
                  AND target_session >= %s AND target_session <= %s
                  AND target_session <= %s
                ORDER BY target_session""",
             (
+                scenario,
                 source_capture_id,
-                _D0_LAUNCH_PRODUCER_VERSION,
+                producer_version,
                 start_session,
                 target_session,
                 research_cutoff,
@@ -166,15 +183,22 @@ def read_saved_source_fact_ids(
     profile_revision: str | None,
     seed_producer_version: str | None,
     expected_source_count: int,
+    scenario: str = "LAUNCH_CONFIRM",
 ) -> dict[str, dict[str, Any]]:
     """为完整的D0与Core/Profile输入绑定真实PG事实行编号。"""
-    if producer_version != _D0_LAUNCH_PRODUCER_VERSION or seed_producer_version not in {
+    if scenario not in _SCENARIOS:
+        raise FormalAdmissionPgError(
+            "FORMAL_ADMISSION_SCENARIO_UNSUPPORTED",
+            f"不支持的正式准入场景: {scenario}",
+        )
+    expected_producer = _D0_SCENARIO_PRODUCER_VERSIONS[scenario]
+    if producer_version != expected_producer or seed_producer_version not in {
         None,
         _SEED_PRODUCER_VERSION,
     }:
         raise FormalAdmissionPgError(
             "FORMAL_ADMISSION_PRODUCER_VERSION_UNSUPPORTED",
-            "正式准入读取只接受现役D0 Launch R3与Seed R2生产版本",
+            f"正式准入读取只接受现役{scenario}({expected_producer})与Seed R2生产版本",
         )
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
@@ -189,13 +213,14 @@ def read_saved_source_fact_ids(
                  ON s.target_session=d.target_session
                 AND s.source_symbol=d.source_symbol
                 AND s.producer_version=%s
-               WHERE d.target_session=%s AND d.scenario='LAUNCH_CONFIRM'
+               WHERE d.target_session=%s AND d.scenario=%s
                  AND d.producer_version=%s AND d.algorithm_contract=%s
                  AND d.session_contract=%s AND d.calendar_revision=%s
                ORDER BY d.source_symbol""",
             (
                 seed_producer_version,
                 target_session,
+                scenario,
                 producer_version,
                 algorithm_contract,
                 session_contract,
@@ -233,8 +258,13 @@ def _validate_row(row: Mapping[str, Any]) -> None:
         )
     if row["admission_status"] not in _STATES:
         raise ValueError("正式准入状态不在冻结枚举内")
-    if row["raw_producer_version"] != _D0_LAUNCH_PRODUCER_VERSION:
-        raise ValueError("正式准入只接受当前D0 Launch R3原始事实")
+    if row["scenario"] not in _SCENARIOS:
+        raise ValueError("正式准入场景不在四场景枚举内")
+    expected_producer = _D0_SCENARIO_PRODUCER_VERSIONS[row["scenario"]]
+    if row["raw_producer_version"] != expected_producer:
+        raise ValueError(
+            f"正式准入只接受当前{row['scenario']}({expected_producer})原始事实"
+        )
     if row["seed_producer_version"] not in {None, _SEED_PRODUCER_VERSION}:
         raise ValueError("正式准入只接受当前Seed R2画像事实")
     if row["raw_role"] not in {"FORMAL", "DIAGNOSTIC"}:
@@ -411,8 +441,12 @@ def read_source_formal_admission_day(
     source_symbols: Sequence[str] | None = None,
     profile_history_session_count: int | None = None,
     profile_revision: str | None = None,
+    scenario: str = "LAUNCH_CONFIRM",
 ) -> dict[str, Any]:
     """只读已完成准入事实；不计算Raw、不修复缺失分区。"""
+    if scenario not in _SCENARIOS:
+        raise ValueError(f"不支持的正式准入场景: {scenario}")
+    raw_producer_version = _D0_SCENARIO_PRODUCER_VERSIONS[scenario]
     if (
         type(target_session) is not date
         or type(source_capture_id) is not int
@@ -447,13 +481,14 @@ def read_source_formal_admission_day(
     ):
         scope_predicate = (
             "target_session=%s "
-            "AND scenario='LAUNCH_CONFIRM' AND raw_producer_version=%s "
+            "AND scenario=%s AND raw_producer_version=%s "
             "AND algorithm_contract=%s AND session_contract=%s "
             "AND admission_contract=%s"
         )
         scope_parameters: tuple[Any, ...] = (
             target_session,
-            _D0_LAUNCH_PRODUCER_VERSION,
+            scenario,
+            raw_producer_version,
             algorithm_contract,
             session_contract,
             _ADMISSION_CONTRACT,
@@ -513,14 +548,15 @@ def read_source_formal_admission_day(
                        count(*) FILTER (WHERE admission_status='NOT_REQUIRED')::bigint
                 FROM {_TABLE}
                 WHERE target_session=%s
-                  AND scenario='LAUNCH_CONFIRM'
+                  AND scenario=%s
                   AND raw_producer_version=%s
                   AND algorithm_contract=%s AND session_contract=%s
                   AND admission_contract=%s
                   AND history_session_count IS NOT DISTINCT FROM %s""",
             (
                 target_session,
-                _D0_LAUNCH_PRODUCER_VERSION,
+                scenario,
+                raw_producer_version,
                 algorithm_contract,
                 session_contract,
                 _ADMISSION_CONTRACT,
@@ -635,7 +671,7 @@ def read_source_formal_admission_day(
             cursor.execute(
                 f"SELECT {', '.join(columns)} FROM {_TABLE} "
                 "WHERE target_session=%s "
-                "AND scenario='LAUNCH_CONFIRM' "
+                "AND scenario=%s "
                 "AND raw_producer_version=%s "
                 "AND algorithm_contract=%s AND session_contract=%s "
                 "AND admission_contract=%s "
@@ -643,7 +679,8 @@ def read_source_formal_admission_day(
                 "AND source_symbol=ANY(%s) ORDER BY source_symbol",
                 (
                     target_session,
-                    _D0_LAUNCH_PRODUCER_VERSION,
+                    scenario,
+                    raw_producer_version,
                     algorithm_contract,
                     session_contract,
                     _ADMISSION_CONTRACT,
