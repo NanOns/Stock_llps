@@ -3401,7 +3401,9 @@ class DataJobCoordinator:
             incomplete_unit_keys: set[tuple[str, date, str]] = set()
             if can_reuse_completed:
                 watermarks = data_job_pg.read_module_completion_watermarks(
-                    self.config, cutoff=self.research_cutoff
+                    self.config,
+                    cutoff=self.research_cutoff,
+                    observation_rule_ids=plan.get("observation_rule_ids"),
                 )
                 session_states = watermarks.get("module_session_states", {})
                 source_module_by_stage = {
@@ -6362,6 +6364,30 @@ def _execute_baostock_source_stage(
             batch_started_at=batch_started,
             batch_completed_at=batch_completed,
         )
+        changed_by_day = persisted.get("price_rows_business_changed_by_session", {})
+        raw_changed_by_day = persisted.get("raw_business_changed_by_session", {})
+        changed_syms = persisted.get("business_changed_symbols", ())
+        if isinstance(changed_by_day, Mapping) and any(
+            int(v) > 0 for v in changed_by_day.values()
+        ):
+            changed_dates = [
+                date.fromisoformat(str(d))
+                for d, v in changed_by_day.items()
+                if int(v) > 0
+            ]
+            raw_changed_dates = [
+                date.fromisoformat(str(d))
+                for d, v in raw_changed_by_day.items()
+                if isinstance(raw_changed_by_day, Mapping) and int(v) > 0
+            ]
+            data_job_pg.invalidate_derived_for_raw_price_changes(
+                config,
+                changed_sessions=changed_dates,
+                raw_changed_sessions=raw_changed_dates,
+                changed_symbols=changed_syms,
+                cutoff=cutoff,
+                current_job_id=job_id,
+            )
         if count_login_batches:
             login_used += int(
                 outcome.get("login_budget_batches", outcome.get("login_batches", 0))

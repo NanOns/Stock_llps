@@ -1105,7 +1105,10 @@ _MULTI_SLICE_FACT_TABLES: frozenset[str] = frozenset(
 
 
 def read_module_completion_watermarks(
-    config: Mapping[str, Any], *, cutoff: date
+    config: Mapping[str, Any],
+    *,
+    cutoff: date,
+    observation_rule_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """按当前有效业务事实、最新任务进度与PG读回行数计算模块完成状态与水位。"""
     if type(cutoff) is not date:
@@ -1398,16 +1401,77 @@ def read_module_completion_watermarks(
         module: {} for module in _MODULE_PROGRESS_TABLES
     }
 
+    requested_rule_set = (
+        frozenset(str(r) for r in observation_rule_ids)
+        if observation_rule_ids is not None
+        else None
+    )
+    _rule_sliced_tables = {
+        "stock.source_rule_evaluations",
+        "stock.source_research_observation_segment_days",
+    }
+
     for module, required_tables in _MODULE_PROGRESS_TABLES.items():
         candidate_sessions = {
             sess for (tbl, sess) in latest_by_table_session if tbl in required_tables
         }
         for target_session in sorted(candidate_sessions):
-            table_record_lists = [
-                records_by_table_session.get((tbl, target_session), [])
-                for tbl in required_tables
-            ]
-            if any(not recs for recs in table_record_lists):
+            table_record_lists: list[list[dict[str, Any]]] = []
+            missing_requested_rule_slice = False
+            for tbl in required_tables:
+                recs = list(records_by_table_session.get((tbl, target_session), ()))
+                if tbl in _rule_sliced_tables and recs:
+                    non_null_recs = [r for r in recs if r["rule_ids"] is not None]
+                    if non_null_recs:
+                        recs = non_null_recs
+                    if requested_rule_set is not None:
+                        exact = [
+                            r
+                            for r in recs
+                            if r["rule_ids"] is not None
+                            and frozenset(r["rule_ids"]) == requested_rule_set
+                        ]
+                        if exact:
+                            recs = exact
+                        else:
+                            overlapping = [
+                                r
+                                for r in recs
+                                if r["rule_ids"] is not None
+                                and bool(frozenset(r["rule_ids"]) & requested_rule_set)
+                            ]
+                            if not overlapping:
+                                recs = []
+                            else:
+                                subset_recs = [
+                                    r
+                                    for r in overlapping
+                                    if frozenset(r["rule_ids"]).issubset(
+                                        requested_rule_set
+                                    )
+                                ]
+                                covered_subset = frozenset().union(
+                                    *(frozenset(r["rule_ids"]) for r in subset_recs)
+                                )
+                                if covered_subset == requested_rule_set:
+                                    recs = subset_recs
+                                else:
+                                    superset_recs = [
+                                        r
+                                        for r in overlapping
+                                        if requested_rule_set.issubset(
+                                            frozenset(r["rule_ids"])
+                                        )
+                                    ]
+                                    if superset_recs:
+                                        recs = superset_recs
+                                    else:
+                                        recs = overlapping
+                                        missing_requested_rule_slice = True
+                table_record_lists.append(recs)
+            if missing_requested_rule_slice or any(
+                not recs for recs in table_record_lists
+            ):
                 module_session_states[module][target_session.isoformat()] = (
                     "NOT_COMPUTED"
                 )
@@ -7417,3 +7481,499 @@ def fail_job(
                WHERE job_id=%s AND status='RUNNING'""",
             (status, error_code, error_message, job_id),
         )
+
+
+def invalidate_derived_for_raw_price_changes(
+    config: Mapping[str, Any],
+    *,
+    changed_sessions: Sequence[date],
+    raw_changed_sessions: Sequence[date] | None = None,
+    changed_symbols: Sequence[str] | None = None,
+    cutoff: date,
+    current_job_id: UUID | None = None,
+) -> dict[str, Any]:
+    """Raw/QFQ价格或捕获发生业务变化时，按公式窗口与真实依赖失效下游派生事实与任务进度。"""
+    changed_set = {d for d in changed_sessions if type(d) is date and d <= cutoff}
+    if not changed_set:
+        return {"invalidated_tables": [], "invalidated_sessions": []}
+    raw_changed_set = {
+        d
+        for d in (
+            raw_changed_sessions
+            if raw_changed_sessions is not None
+            else changed_sessions
+        )
+        if type(d) is date and d <= cutoff
+    }
+    symbol_list = sorted({str(s) for s in (changed_symbols or ()) if s})
+
+    from stock_a.application.data_jobs import _load_official_sessions
+    from stock_a.storage.postgres.research_facts import (
+        _invalidate_downstream_stats_in_cursor,
+    )
+
+    _cal_id, _cal_rev, official_sessions = _load_official_sessions(cutoff)
+    sess_index = {d: idx for idx, d in enumerate(official_sessions)}
+
+    def _window_forward(base_days: set[date], max_offset: int) -> set[date]:
+        out: set[date] = set()
+        for base in base_days:
+            out.add(base)
+            idx = sess_index.get(base)
+            if idx is None:
+                continue
+            for off in range(1, max_offset + 1):
+                if idx + off < len(official_sessions):
+                    cand = official_sessions[idx + off]
+                    if cand <= cutoff:
+                        out.add(cand)
+        return out
+
+    price_limit_sessions = _window_forward(raw_changed_set, 1)
+    streak_min_day = min(raw_changed_set) if raw_changed_set else None
+    breadth_sessions: set[date] = set()
+    for base in changed_set:
+        breadth_sessions.add(base)
+        idx = sess_index.get(base)
+        if idx is not None:
+            for off in (1, 3, 4):
+                if idx + off < len(official_sessions):
+                    cand = official_sessions[idx + off]
+                    if cand <= cutoff:
+                        breadth_sessions.add(cand)
+
+    changed_sorted = sorted(changed_set)
+    cs_candidates = sorted(_window_forward(changed_set, 23))
+
+    deleted_by_table: dict[str, int] = {}
+    affected_by_table_sessions: dict[str, set[date]] = {}
+
+    def _mark(tbl: str, days: Sequence[date] | set[date], count: int = 0) -> None:
+        if count:
+            deleted_by_table[tbl] = deleted_by_table.get(tbl, 0) + int(count)
+        bucket = affected_by_table_sessions.setdefault(tbl, set())
+        for d in days:
+            if type(d) is date and d <= cutoff:
+                bucket.add(d)
+
+    with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
+        _conn,
+        cursor,
+        _scope,
+    ):
+        min_changed = min(changed_sorted)
+        cursor.execute(
+            """SELECT DISTINCT target_session
+               FROM stock.source_symbol_price_profiles
+               WHERE target_session >= %s AND target_session <= %s
+                 AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))
+                 AND EXISTS (
+                     SELECT 1 FROM unnest(%s::date[]) AS ch(d)
+                     WHERE history_window_start <= ch.d AND ch.d <= history_window_end
+                 )""",
+            (
+                min_changed,
+                cutoff,
+                symbol_list or None,
+                symbol_list or None,
+                changed_sorted,
+            ),
+        )
+        profile_sessions = {row[0] for row in cursor.fetchall()} | changed_set
+
+        cursor.execute(
+            """SELECT target_session
+               FROM stock.source_cross_section_day_facts
+               WHERE target_session = ANY(%s::date[])
+               UNION
+               SELECT DISTINCT target_session
+               FROM stock.source_cross_section_endpoints
+               WHERE target_session <= %s
+                 AND endpoint_date = ANY(%s::date[])""",
+            (cs_candidates, cutoff, changed_sorted),
+        )
+        cs_sessions = {row[0] for row in cursor.fetchall()} | changed_set
+
+        cursor.execute(
+            """SELECT DISTINCT target_session, COALESCE(d1_history_session_count, 20)
+               FROM stock.source_d1_structure_day_facts
+               WHERE target_session >= %s AND target_session <= %s
+                 AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
+            (min_changed, cutoff, symbol_list or None, symbol_list or None),
+        )
+        d1_sessions = set(profile_sessions) | set(cs_sessions)
+        for d1_day, d1_win in cursor.fetchall():
+            d1_idx = sess_index.get(d1_day)
+            if d1_idx is None:
+                continue
+            win_start_idx = max(0, d1_idx - int(d1_win) + 1)
+            win_start = official_sessions[win_start_idx]
+            if any(win_start <= ch <= d1_day for ch in changed_sorted):
+                d1_sessions.add(d1_day)
+
+        d0_focus_sessions = set(profile_sessions) | set(cs_sessions)
+        participation_sessions = set(profile_sessions) | set(breadth_sessions)
+
+        if raw_changed_set and streak_min_day is not None:
+            cursor.execute(
+                """DELETE FROM stock.source_limit_up_streak_day_facts
+                   WHERE target_session >= %s AND target_session <= %s
+                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))
+                   RETURNING target_session""",
+                (streak_min_day, cutoff, symbol_list or None, symbol_list or None),
+            )
+            streak_days = {row[0] for row in cursor.fetchall()}
+            _mark(
+                "stock.source_limit_up_streak_day_facts",
+                streak_days | raw_changed_set,
+                len(streak_days),
+            )
+            pl_list = sorted(price_limit_sessions)
+            cursor.execute(
+                """DELETE FROM stock.source_price_limit_day_facts
+                   WHERE target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))
+                   RETURNING target_session""",
+                (pl_list, symbol_list or None, symbol_list or None),
+            )
+            pl_days = {row[0] for row in cursor.fetchall()}
+            _mark(
+                "stock.source_price_limit_day_facts",
+                pl_days | price_limit_sessions,
+                len(pl_days),
+            )
+
+        cs_list = sorted(cs_sessions)
+        if cs_list:
+            cursor.execute(
+                """DELETE FROM stock.source_cross_section_endpoints
+                   WHERE target_session = ANY(%s::date[])
+                   RETURNING target_session""",
+                (cs_list,),
+            )
+            cse_days = {row[0] for row in cursor.fetchall()}
+            _mark(
+                "stock.source_cross_section_endpoints",
+                cse_days | cs_sessions,
+                len(cse_days),
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_cross_section_day_facts
+                   WHERE target_session = ANY(%s::date[])
+                   RETURNING target_session""",
+                (cs_list,),
+            )
+            csd_days = {row[0] for row in cursor.fetchall()}
+            _mark(
+                "stock.source_cross_section_day_facts",
+                csd_days | cs_sessions,
+                len(csd_days),
+            )
+
+        br_list = sorted(breadth_sessions)
+        if br_list:
+            cursor.execute(
+                """DELETE FROM stock.source_market_breadth_change_days
+                   WHERE target_session = ANY(%s::date[])
+                      OR before_session = ANY(%s::date[])""",
+                (br_list, br_list),
+            )
+            _mark(
+                "stock.source_market_breadth_change_days",
+                breadth_sessions,
+                cursor.rowcount,
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_market_breadth_symbols s
+                   USING stock.source_market_breadth_days d
+                   WHERE s.breadth_day_id = d.id AND d.target_session = ANY(%s::date[])""",
+                (br_list,),
+            )
+            _mark(
+                "stock.source_market_breadth_symbols", breadth_sessions, cursor.rowcount
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_market_breadth_days
+                   WHERE target_session = ANY(%s::date[])
+                   RETURNING target_session""",
+                (br_list,),
+            )
+            bd_days = {row[0] for row in cursor.fetchall()}
+            _mark(
+                "stock.source_market_breadth_days",
+                bd_days | breadth_sessions,
+                len(bd_days),
+            )
+            cursor.execute(
+                """DELETE FROM stock.r03_formal_market_breadth_facts
+                   WHERE trade_date = ANY(%s::date[])
+                   RETURNING trade_date""",
+                (br_list,),
+            )
+            formal_br_days = sorted({row[0] for row in cursor.fetchall()})
+            _mark(
+                "stock.r03_formal_market_breadth_facts",
+                set(formal_br_days) | breadth_sessions,
+                len(formal_br_days),
+            )
+            if formal_br_days:
+                env_del, _env_inv = (
+                    _cascade_invalidate_market_environment_for_formal_breadth(
+                        cursor,
+                        deleted_formal_sessions=formal_br_days,
+                        cutoff=cutoff,
+                        current_job_id=current_job_id,
+                        error_code="UPSTREAM_SOURCE_CHANGED",
+                    )
+                )
+                if env_del:
+                    deleted_by_table["stock.source_market_environment_day_facts"] = (
+                        deleted_by_table.get(
+                            "stock.source_market_environment_day_facts", 0
+                        )
+                        + env_del
+                    )
+
+        part_list = sorted(participation_sessions)
+        if part_list:
+            cursor.execute(
+                """DELETE FROM stock.source_market_participation_unknown_reasons r
+                   USING stock.source_market_participation_days d
+                   WHERE r.participation_day_id = d.id AND d.target_session = ANY(%s::date[])""",
+                (part_list,),
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_market_participation_days
+                   WHERE target_session = ANY(%s::date[])
+                   RETURNING target_session""",
+                (part_list,),
+            )
+            part_days = {row[0] for row in cursor.fetchall()}
+            _mark(
+                "stock.source_market_participation_days",
+                part_days | participation_sessions,
+                len(part_days),
+            )
+
+        d0_list = sorted(d0_focus_sessions)
+        d1_list = sorted(d1_sessions)
+        if d0_list:
+            cursor.execute(
+                """DELETE FROM stock.source_d0_formal_admission_day_facts
+                   WHERE target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
+                (d0_list, symbol_list or None, symbol_list or None),
+            )
+            _mark(
+                "stock.source_d0_formal_admission_day_facts",
+                d0_focus_sessions,
+                cursor.rowcount,
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_rule_evaluations r
+                   WHERE r.target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR r.source_symbol = ANY(%s::text[]))
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.source_research_enrollments e
+                         WHERE e.rule_fact_id = r.id OR e.previous_rule_fact_id = r.id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.source_t0_early_observation_facts t
+                         WHERE t.rule_fact_id = r.id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.source_research_observation_segment_days o
+                         WHERE o.anchor_rule_fact_id = r.id OR o.evidence_rule_fact_id = r.id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.source_rps_pulse_t0_change_facts c
+                         WHERE c.rule_fact_id = r.id
+                     )""",
+                (d0_list, symbol_list or None, symbol_list or None),
+            )
+            _mark("stock.source_rule_evaluations", d0_focus_sessions, cursor.rowcount)
+
+        if d1_list:
+            cursor.execute(
+                """DELETE FROM stock.source_d1_material_anchor_day_facts a
+                   USING stock.source_d1_structure_day_facts d
+                   WHERE a.d1_structure_id = d.id AND d.target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR d.source_symbol = ANY(%s::text[]))""",
+                (d1_list, symbol_list or None, symbol_list or None),
+            )
+            _mark(
+                "stock.source_d1_material_anchor_day_facts",
+                d1_sessions,
+                cursor.rowcount,
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_d1_structure_day_facts
+                   WHERE target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
+                (d1_list, symbol_list or None, symbol_list or None),
+            )
+            _mark("stock.source_d1_structure_day_facts", d1_sessions, cursor.rowcount)
+
+        if d0_list:
+            cursor.execute(
+                """DELETE FROM stock.source_d0_launch_day_facts d
+                   WHERE d.target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR d.source_symbol = ANY(%s::text[]))
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.source_research_enrollments e
+                         WHERE e.d0_fact_id = d.id OR e.adjacent_d0_fact_id = d.id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.source_t0_early_observation_facts t
+                         WHERE t.d0_fact_id = d.id
+                     )""",
+                (d0_list, symbol_list or None, symbol_list or None),
+            )
+            _mark(
+                "stock.source_d0_launch_day_facts", d0_focus_sessions, cursor.rowcount
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_pool_seed_day_facts
+                   WHERE target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
+                (d0_list, symbol_list or None, symbol_list or None),
+            )
+            _mark(
+                "stock.source_pool_seed_day_facts", d0_focus_sessions, cursor.rowcount
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_d0_scenario_day_facts
+                   WHERE target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
+                (d0_list, symbol_list or None, symbol_list or None),
+            )
+            _mark(
+                "stock.source_d0_scenario_day_facts", d0_focus_sessions, cursor.rowcount
+            )
+
+        prof_list = sorted(profile_sessions)
+        if prof_list:
+            cursor.execute(
+                """DELETE FROM stock.source_symbol_price_profiles
+                   WHERE target_session = ANY(%s::date[])
+                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))
+                   RETURNING target_session""",
+                (prof_list, symbol_list or None, symbol_list or None),
+            )
+            prof_days = {row[0] for row in cursor.fetchall()}
+            _mark(
+                "stock.source_symbol_price_profiles",
+                prof_days | profile_sessions,
+                len(prof_days),
+            )
+
+        if symbol_list:
+            cursor.execute(
+                """DELETE FROM stock.source_forward_path_facts
+                   WHERE source_symbol = ANY(%s::text[])
+                     AND (endpoint_session = ANY(%s::date[]) OR target_session = ANY(%s::date[]))
+                   RETURNING target_session, horizon""",
+                (symbol_list, changed_sorted, changed_sorted),
+            )
+            fwd_rows = cursor.fetchall()
+            if fwd_rows:
+                _mark(
+                    "stock.source_forward_path_facts",
+                    {r[0] for r in fwd_rows},
+                    len(fwd_rows),
+                )
+                for fwd_t0, fwd_h in sorted(set(fwd_rows)):
+                    _invalidate_downstream_stats_in_cursor(
+                        cursor,
+                        target_session=fwd_t0,
+                        horizon=int(fwd_h),
+                        invalidate_s2_t1=(int(fwd_h) == 1),
+                    )
+
+        r03_versions: list[tuple[str, list[dict[str, Any]]]] = []
+        if prof_list:
+            r03_versions.append(
+                (
+                    "CORE_PROFILE",
+                    [{"target_session": d, "version_key": {}} for d in prof_list],
+                )
+            )
+        if cs_list:
+            r03_versions.append(
+                (
+                    "CROSS_SECTION",
+                    [{"target_session": d, "version_key": {}} for d in cs_list],
+                )
+            )
+        r03_invalidated_job_ids: set[Any] = set()
+        for r03_mod, versions_arg in r03_versions:
+            r03_plan = _resolve_r03_upstream_cascade_plan(
+                cursor,
+                module_code=r03_mod,
+                versions=versions_arg,
+                cutoff=cutoff,
+            )
+            if (
+                r03_plan["sector_sessions"]
+                or r03_plan["rotation_episode_cutoffs"]
+                or r03_plan["market_sessions"]
+            ):
+                cnts, sess_set, inv_rows = apply_r03_upstream_cascade_invalidation(
+                    cursor,
+                    r03_plan=r03_plan,
+                    cutoff=cutoff,
+                    current_job_id=current_job_id,
+                    error_code="UPSTREAM_SOURCE_CHANGED",
+                    error_message="上游Raw/QFQ价格或捕获发生业务变化，R03后继需重算。",
+                )
+                for k, v in cnts.items():
+                    if v:
+                        deleted_by_table[k] = deleted_by_table.get(k, 0) + int(v)
+                for jid, _tbl in inv_rows:
+                    r03_invalidated_job_ids.add(jid)
+
+        invalidated_job_ids: set[Any] = set(r03_invalidated_job_ids)
+        for tbl, days_set in affected_by_table_sessions.items():
+            if not days_set:
+                continue
+            cursor.execute(
+                """UPDATE stock.data_job_progress AS p
+                   SET status='NOT_COMPUTED', completed_units=0, expected_rows=NULL,
+                       verified_rows=NULL, inserted_rows=0, updated_rows=0,
+                       quality_status=NULL, error_code='UPSTREAM_SOURCE_CHANGED',
+                       error_message='上游Raw/QFQ价格或捕获发生业务变化，下游派生结果已失效。',
+                       deleted_rows=0, updated_at=clock_timestamp(),
+                       completed_at=NULL, verified_at=NULL
+                   WHERE p.business_table=%s
+                     AND p.target_session = ANY(%s::date[])
+                     AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
+                     AND (%s::uuid IS NULL OR p.job_id<>%s)
+                   RETURNING p.job_id""",
+                (tbl, sorted(days_set), current_job_id, current_job_id),
+            )
+            invalidated_job_ids.update(row[0] for row in cursor.fetchall())
+
+        for jid in invalidated_job_ids:
+            cursor.execute(
+                """UPDATE stock.data_jobs j
+                   SET status='INCOMPLETE',
+                       completed_units=(
+                           SELECT count(*) FROM stock.data_job_progress p
+                           WHERE p.job_id=j.job_id
+                             AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE','CLEARED',
+                                              'SKIPPED_BY_USER','SKIPPED_NOT_IMPLEMENTED')
+                       ),
+                       last_error_code='UPSTREAM_SOURCE_CHANGED',
+                       last_error_message='上游Raw/QFQ价格或捕获发生业务变化，下游任务进度失效。',
+                       updated_at=clock_timestamp(), completed_at=clock_timestamp()
+                   WHERE job_id=%s AND status IN ('COMPLETED','NO_CHANGE')""",
+                (jid,),
+            )
+
+    return {
+        "deleted_by_table": deleted_by_table,
+        "invalidated_tables": sorted(affected_by_table_sessions),
+        "invalidated_sessions": sorted(
+            d.isoformat() for days in affected_by_table_sessions.values() for d in days
+        ),
+    }

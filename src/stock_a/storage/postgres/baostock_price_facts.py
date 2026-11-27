@@ -151,6 +151,9 @@ _PRICE_TRACE_ONLY_COLUMNS = frozenset(
 _PRICE_BUSINESS_COLUMNS = tuple(
     column for column in _PRICE_COLUMNS if column not in _PRICE_TRACE_ONLY_COLUMNS
 )
+_PRICE_RAW_BUSINESS_COLUMNS = tuple(
+    column for column in _PRICE_BUSINESS_COLUMNS if not column.startswith("qfq_")
+)
 _RAW_PRICE_COLUMNS = (
     "raw_open",
     "raw_high",
@@ -2291,6 +2294,8 @@ def persist_baostock_price_batch(
         raw_rows_unchanged = 0
         price_rows_business_changed = 0
         price_rows_business_changed_by_session: dict[date, int] = {}
+        raw_business_changed_by_session: dict[date, int] = {}
+        business_changed_symbols: set[str] = set()
         price_rows_inserted_by_session: dict[date, int] = {}
         price_rows_updated_business_by_session: dict[date, int] = {}
         for key, record in record_by_key.items():
@@ -2384,6 +2389,11 @@ def persist_baostock_price_batch(
                 price_rows_business_changed_by_session[session] = (
                     price_rows_business_changed_by_session.get(session, 0) + 1
                 )
+                business_changed_symbols.add(source_symbol)
+                if _price_row_raw_changed(existing, merged):
+                    raw_business_changed_by_session[session] = (
+                        raw_business_changed_by_session.get(session, 0) + 1
+                    )
             if existing is None:
                 raw_rows_inserted += 1
                 price_rows_inserted_by_session[session] = (
@@ -2580,6 +2590,11 @@ def persist_baostock_price_batch(
                     price_rows_business_changed_by_session.items()
                 )
             },
+            "raw_business_changed_by_session": {
+                session.isoformat(): count
+                for session, count in sorted(raw_business_changed_by_session.items())
+            },
+            "business_changed_symbols": sorted(business_changed_symbols),
             "price_rows_inserted_by_session": {
                 session.isoformat(): count
                 for session, count in sorted(price_rows_inserted_by_session.items())
@@ -2902,6 +2917,16 @@ def _price_row_business_changed(
     return existing is None or any(
         not _same_row_value(existing.get(name), desired.get(name))
         for name in _PRICE_BUSINESS_COLUMNS
+    )
+
+
+def _price_row_raw_changed(
+    existing: Mapping[str, Any] | None, desired: Mapping[str, Any]
+) -> bool:
+    """判断单行RAW坐标价格/质量/制度字段是否变化，排除QFQ与纯溯源列。"""
+    return existing is None or any(
+        not _same_row_value(existing.get(name), desired.get(name))
+        for name in _PRICE_RAW_BUSINESS_COLUMNS
     )
 
 
