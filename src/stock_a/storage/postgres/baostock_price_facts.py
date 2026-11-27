@@ -2175,6 +2175,8 @@ def persist_baostock_price_batch(
     unit_contract: BaoUnitContract,
     batch_started_at: datetime,
     batch_completed_at: datetime,
+    on_persisted_in_tx: Callable[[Any, Mapping[str, Any]], Mapping[str, Any] | None]
+    | None = None,
 ) -> dict[str, Any]:
     """在一笔Stock A事务内写请求状态、双坐标Raw行并逐字段读回。"""
     if type(source_capture_id) is not int or source_capture_id <= 0:
@@ -2576,7 +2578,7 @@ def persist_baostock_price_batch(
             row["request_status"] in {"COMPLETED", "NO_DATA"}
             for row in written_requests.values()
         )
-        return {
+        result = {
             "status": "COMPLETED" if all_requests_complete else "INCOMPLETE",
             "source_capture_id": source_capture_id,
             "request_rows": request_readback_count,
@@ -2610,6 +2612,11 @@ def persist_baostock_price_batch(
             "database_write_attempted": True,
             "source_io_attempted": False,
         }
+        if on_persisted_in_tx is not None:
+            extra = on_persisted_in_tx(cursor, result)
+            if isinstance(extra, Mapping):
+                result["invalidation"] = dict(extra)
+        return result
 
 
 _PRICE_READ_COLUMNS = (

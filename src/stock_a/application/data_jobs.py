@@ -6354,6 +6354,37 @@ def _execute_baostock_source_stage(
                 "BaoStock逐请求时钟缺少时区。",
                 status=409,
             )
+
+        def _invalidate_in_tx(cursor: Any, persisted_result: Mapping[str, Any]) -> None:
+            changed_by_day = persisted_result.get(
+                "price_rows_business_changed_by_session", {}
+            )
+            raw_changed_by_day = persisted_result.get(
+                "raw_business_changed_by_session", {}
+            )
+            changed_syms = persisted_result.get("business_changed_symbols", ())
+            if isinstance(changed_by_day, Mapping) and any(
+                int(v) > 0 for v in changed_by_day.values()
+            ):
+                changed_dates = [
+                    date.fromisoformat(str(d))
+                    for d, v in changed_by_day.items()
+                    if int(v) > 0
+                ]
+                raw_changed_dates = [
+                    date.fromisoformat(str(d))
+                    for d, v in raw_changed_by_day.items()
+                    if isinstance(raw_changed_by_day, Mapping) and int(v) > 0
+                ]
+                data_job_pg.invalidate_derived_for_raw_price_changes_in_cursor(
+                    cursor,
+                    changed_sessions=changed_dates,
+                    raw_changed_sessions=raw_changed_dates,
+                    changed_symbols=changed_syms,
+                    cutoff=cutoff,
+                    current_job_id=job_id,
+                )
+
         persisted = baostock_price_facts.persist_baostock_price_batch(
             dict(config),
             source_capture_id=source_capture_id,
@@ -6363,31 +6394,8 @@ def _execute_baostock_source_stage(
             unit_contract=documented_units,
             batch_started_at=batch_started,
             batch_completed_at=batch_completed,
+            on_persisted_in_tx=_invalidate_in_tx,
         )
-        changed_by_day = persisted.get("price_rows_business_changed_by_session", {})
-        raw_changed_by_day = persisted.get("raw_business_changed_by_session", {})
-        changed_syms = persisted.get("business_changed_symbols", ())
-        if isinstance(changed_by_day, Mapping) and any(
-            int(v) > 0 for v in changed_by_day.values()
-        ):
-            changed_dates = [
-                date.fromisoformat(str(d))
-                for d, v in changed_by_day.items()
-                if int(v) > 0
-            ]
-            raw_changed_dates = [
-                date.fromisoformat(str(d))
-                for d, v in raw_changed_by_day.items()
-                if isinstance(raw_changed_by_day, Mapping) and int(v) > 0
-            ]
-            data_job_pg.invalidate_derived_for_raw_price_changes(
-                config,
-                changed_sessions=changed_dates,
-                raw_changed_sessions=raw_changed_dates,
-                changed_symbols=changed_syms,
-                cutoff=cutoff,
-                current_job_id=job_id,
-            )
         if count_login_batches:
             login_used += int(
                 outcome.get("login_budget_batches", outcome.get("login_batches", 0))

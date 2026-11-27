@@ -7496,6 +7496,34 @@ def invalidate_derived_for_raw_price_changes(
     changed_set = {d for d in changed_sessions if type(d) is date and d <= cutoff}
     if not changed_set:
         return {"invalidated_tables": [], "invalidated_sessions": []}
+    with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
+        _conn,
+        cursor,
+        _scope,
+    ):
+        return invalidate_derived_for_raw_price_changes_in_cursor(
+            cursor,
+            changed_sessions=changed_sessions,
+            raw_changed_sessions=raw_changed_sessions,
+            changed_symbols=changed_symbols,
+            cutoff=cutoff,
+            current_job_id=current_job_id,
+        )
+
+
+def invalidate_derived_for_raw_price_changes_in_cursor(
+    cursor: Any,
+    *,
+    changed_sessions: Sequence[date],
+    raw_changed_sessions: Sequence[date] | None = None,
+    changed_symbols: Sequence[str] | None = None,
+    cutoff: date,
+    current_job_id: UUID | None = None,
+) -> dict[str, Any]:
+    """在既有PG写事务cursor内执行Raw/QFQ价格变化后的下游派生事实与任务进度失效。"""
+    changed_set = {d for d in changed_sessions if type(d) is date and d <= cutoff}
+    if not changed_set:
+        return {"invalidated_tables": [], "invalidated_sessions": []}
     raw_changed_set = {
         d
         for d in (
@@ -7556,11 +7584,7 @@ def invalidate_derived_for_raw_price_changes(
             if type(d) is date and d <= cutoff:
                 bucket.add(d)
 
-    with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
-        _conn,
-        cursor,
-        _scope,
-    ):
+    if True:
         min_changed = min(changed_sorted)
         cursor.execute(
             """SELECT DISTINCT target_session
@@ -7593,6 +7617,7 @@ def invalidate_derived_for_raw_price_changes(
             (cs_candidates, cutoff, changed_sorted),
         )
         cs_sessions = {row[0] for row in cursor.fetchall()} | changed_set
+        profile_sessions = profile_sessions | cs_sessions
 
         cursor.execute(
             """SELECT DISTINCT target_session, COALESCE(d1_history_session_count, 20)
@@ -7761,8 +7786,12 @@ def invalidate_derived_for_raw_price_changes(
             cursor.execute(
                 """DELETE FROM stock.source_d0_formal_admission_day_facts
                    WHERE target_session = ANY(%s::date[])
-                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
-                (d0_list, symbol_list or None, symbol_list or None),
+                     AND (
+                         target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR source_symbol = ANY(%s::text[])
+                     )""",
+                (d0_list, cs_list, symbol_list or None, symbol_list or None),
             )
             _mark(
                 "stock.source_d0_formal_admission_day_facts",
@@ -7772,7 +7801,11 @@ def invalidate_derived_for_raw_price_changes(
             cursor.execute(
                 """DELETE FROM stock.source_rule_evaluations r
                    WHERE r.target_session = ANY(%s::date[])
-                     AND (%s::text[] IS NULL OR r.source_symbol = ANY(%s::text[]))
+                     AND (
+                         r.target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR r.source_symbol = ANY(%s::text[])
+                     )
                      AND NOT EXISTS (
                          SELECT 1 FROM stock.source_research_enrollments e
                          WHERE e.rule_fact_id = r.id OR e.previous_rule_fact_id = r.id
@@ -7789,7 +7822,7 @@ def invalidate_derived_for_raw_price_changes(
                          SELECT 1 FROM stock.source_rps_pulse_t0_change_facts c
                          WHERE c.rule_fact_id = r.id
                      )""",
-                (d0_list, symbol_list or None, symbol_list or None),
+                (d0_list, cs_list, symbol_list or None, symbol_list or None),
             )
             _mark("stock.source_rule_evaluations", d0_focus_sessions, cursor.rowcount)
 
@@ -7798,8 +7831,12 @@ def invalidate_derived_for_raw_price_changes(
                 """DELETE FROM stock.source_d1_material_anchor_day_facts a
                    USING stock.source_d1_structure_day_facts d
                    WHERE a.d1_structure_id = d.id AND d.target_session = ANY(%s::date[])
-                     AND (%s::text[] IS NULL OR d.source_symbol = ANY(%s::text[]))""",
-                (d1_list, symbol_list or None, symbol_list or None),
+                     AND (
+                         d.target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR d.source_symbol = ANY(%s::text[])
+                     )""",
+                (d1_list, cs_list, symbol_list or None, symbol_list or None),
             )
             _mark(
                 "stock.source_d1_material_anchor_day_facts",
@@ -7809,8 +7846,12 @@ def invalidate_derived_for_raw_price_changes(
             cursor.execute(
                 """DELETE FROM stock.source_d1_structure_day_facts
                    WHERE target_session = ANY(%s::date[])
-                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
-                (d1_list, symbol_list or None, symbol_list or None),
+                     AND (
+                         target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR source_symbol = ANY(%s::text[])
+                     )""",
+                (d1_list, cs_list, symbol_list or None, symbol_list or None),
             )
             _mark("stock.source_d1_structure_day_facts", d1_sessions, cursor.rowcount)
 
@@ -7818,7 +7859,11 @@ def invalidate_derived_for_raw_price_changes(
             cursor.execute(
                 """DELETE FROM stock.source_d0_launch_day_facts d
                    WHERE d.target_session = ANY(%s::date[])
-                     AND (%s::text[] IS NULL OR d.source_symbol = ANY(%s::text[]))
+                     AND (
+                         d.target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR d.source_symbol = ANY(%s::text[])
+                     )
                      AND NOT EXISTS (
                          SELECT 1 FROM stock.source_research_enrollments e
                          WHERE e.d0_fact_id = d.id OR e.adjacent_d0_fact_id = d.id
@@ -7827,7 +7872,7 @@ def invalidate_derived_for_raw_price_changes(
                          SELECT 1 FROM stock.source_t0_early_observation_facts t
                          WHERE t.d0_fact_id = d.id
                      )""",
-                (d0_list, symbol_list or None, symbol_list or None),
+                (d0_list, cs_list, symbol_list or None, symbol_list or None),
             )
             _mark(
                 "stock.source_d0_launch_day_facts", d0_focus_sessions, cursor.rowcount
@@ -7835,8 +7880,12 @@ def invalidate_derived_for_raw_price_changes(
             cursor.execute(
                 """DELETE FROM stock.source_pool_seed_day_facts
                    WHERE target_session = ANY(%s::date[])
-                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
-                (d0_list, symbol_list or None, symbol_list or None),
+                     AND (
+                         target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR source_symbol = ANY(%s::text[])
+                     )""",
+                (d0_list, cs_list, symbol_list or None, symbol_list or None),
             )
             _mark(
                 "stock.source_pool_seed_day_facts", d0_focus_sessions, cursor.rowcount
@@ -7844,8 +7893,12 @@ def invalidate_derived_for_raw_price_changes(
             cursor.execute(
                 """DELETE FROM stock.source_d0_scenario_day_facts
                    WHERE target_session = ANY(%s::date[])
-                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))""",
-                (d0_list, symbol_list or None, symbol_list or None),
+                     AND (
+                         target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR source_symbol = ANY(%s::text[])
+                     )""",
+                (d0_list, cs_list, symbol_list or None, symbol_list or None),
             )
             _mark(
                 "stock.source_d0_scenario_day_facts", d0_focus_sessions, cursor.rowcount
@@ -7856,9 +7909,13 @@ def invalidate_derived_for_raw_price_changes(
             cursor.execute(
                 """DELETE FROM stock.source_symbol_price_profiles
                    WHERE target_session = ANY(%s::date[])
-                     AND (%s::text[] IS NULL OR source_symbol = ANY(%s::text[]))
+                     AND (
+                         target_session = ANY(%s::date[])
+                         OR %s::text[] IS NULL
+                         OR source_symbol = ANY(%s::text[])
+                     )
                    RETURNING target_session""",
-                (prof_list, symbol_list or None, symbol_list or None),
+                (prof_list, cs_list, symbol_list or None, symbol_list or None),
             )
             prof_days = {row[0] for row in cursor.fetchall()}
             _mark(
@@ -7869,11 +7926,16 @@ def invalidate_derived_for_raw_price_changes(
 
         if symbol_list:
             cursor.execute(
-                """DELETE FROM stock.source_forward_path_facts
-                   WHERE source_symbol = ANY(%s::text[])
-                     AND (endpoint_session = ANY(%s::date[]) OR target_session = ANY(%s::date[]))
-                   RETURNING target_session, horizon""",
-                (symbol_list, changed_sorted, changed_sorted),
+                """DELETE FROM stock.source_forward_path_facts f
+                   WHERE f.source_symbol = ANY(%s::text[])
+                     AND EXISTS (
+                         SELECT 1
+                         FROM unnest(%s::date[]) AS ch(d)
+                         WHERE f.target_session <= ch.d
+                           AND ch.d <= f.endpoint_session
+                     )
+                   RETURNING f.target_session, f.horizon""",
+                (symbol_list, changed_sorted),
             )
             fwd_rows = cursor.fetchall()
             if fwd_rows:
