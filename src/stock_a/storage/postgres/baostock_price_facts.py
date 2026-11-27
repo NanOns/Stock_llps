@@ -2024,6 +2024,16 @@ def _build_price_row(
 
 
 def _same_row_value(left: Any, right: Any) -> bool:
+    if isinstance(left, datetime) and isinstance(right, str):
+        try:
+            right = datetime.fromisoformat(right.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    elif isinstance(right, datetime) and isinstance(left, str):
+        try:
+            left = datetime.fromisoformat(left.replace("Z", "+00:00"))
+        except ValueError:
+            return False
     if isinstance(left, list) and isinstance(right, tuple):
         return tuple(left) == right
     if isinstance(left, tuple) and isinstance(right, list):

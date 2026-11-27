@@ -1730,10 +1730,16 @@ def build_data_job_plan(
             paired_capture_id = None
             if all(coordinate in versions for coordinate in price_coordinates):
                 capture_ids = {
-                    int(versions[coordinate]["source_capture_id"])
+                    versions[coordinate].get("source_capture_id")
                     for coordinate in price_coordinates
+                    if type(versions[coordinate].get("source_capture_id")) is int
+                    and versions[coordinate]["source_capture_id"] > 0
                 }
-                if len(capture_ids) == 1:
+                if len(capture_ids) == 1 and all(
+                    type(versions[coordinate].get("source_capture_id")) is int
+                    and versions[coordinate]["source_capture_id"] > 0
+                    for coordinate in price_coordinates
+                ):
                     paired_capture_id = next(iter(capture_ids))
             waiting_for_reader = price_reader_status != "AVAILABLE"
             _unit(
@@ -6014,70 +6020,6 @@ def _execute_baostock_source_stage(
             status=409,
         )
     prepared = plan.get("_prepared_baostock_reset_inputs")
-    if not isinstance(prepared, Mapping):
-        required_pairs = {
-            (day.isoformat(), coordinate)
-            for day in sessions
-            for coordinate in ("RAW_UNADJUSTED", "FORWARD_ADJUSTED")
-        }
-        versions = {
-            (item.get("session_date"), item.get("price_coordinate")): item
-            for item in plan.get("price_capture_inputs", ())
-            if isinstance(item, Mapping)
-        }
-        capture_ids = {
-            item.get("source_capture_id")
-            for key, item in versions.items()
-            if key in required_pairs
-        }
-        if (
-            required_pairs
-            and required_pairs.issubset(versions)
-            and len(capture_ids) == 1
-            and type(next(iter(capture_ids), None)) is int
-            and next(iter(capture_ids)) > 0
-        ):
-            reused_capture_id = int(next(iter(capture_ids)))
-            data_job_pg.set_job_source_capture(
-                config, job_id=job_id, source_capture_id=reused_capture_id
-            )
-            source_units = [
-                unit
-                for unit in plan.get("stage_units", ())
-                if unit.get("stage_code") == "SOURCE_BAOSTOCK_PRICES"
-            ]
-            begin_callback(job_id=job_id, units=source_units)
-            for unit in source_units:
-                session = unit["target_session"]
-                row_count = data_job_pg.read_business_table_count(
-                    config,
-                    business_table="stock.source_raw_daily",
-                    target_session=session,
-                    source_capture_id=reused_capture_id,
-                    research_cutoff=cutoff,
-                )
-                progress_callback(
-                    job_id=job_id,
-                    stage_code="SOURCE_BAOSTOCK_PRICES",
-                    target_session=session,
-                    business_table="stock.source_raw_daily",
-                    source_capture_id=reused_capture_id,
-                    profile_history_session_count=None,
-                    d1_history_session_count=None,
-                    expected_rows=row_count,
-                    inserted_rows=0,
-                    quality_status="ALREADY_COMPLETE_PAIRED_CAPTURE",
-                    no_change=True,
-                    producer_version="STOCK_A_BAOSTOCK_SOURCE_CAPTURE_R2",
-                )
-            if isinstance(plan, dict):
-                plan["_paired_source_capture_id"] = reused_capture_id
-                plan["_source_symbols"] = tuple()
-            return {
-                "status": "ALREADY_COMPLETE",
-                "source_capture_id": reused_capture_id,
-                "reused": True,
-            }
     source_policy = config.get("source_policy", {})
     primary = (
         source_policy.get("baostock_primary")
@@ -6215,7 +6157,11 @@ def _execute_baostock_source_stage(
     roster = baostock_price_facts.read_baostock_capture_roster(
         dict(config), source_capture_id=source_capture_id, cutoff=cutoff
     )
-    if roster.get("status") not in {"AVAILABLE", "EMPTY"}:
+    if roster.get("status") not in {"AVAILABLE", "EMPTY"} and not (
+        roster.get("status") == "INCOMPLETE"
+        and roster.get("registration_complete") is False
+        and not roster.get("symbols")
+    ):
         raise DataJobError(
             "BAOSTOCK_CAPTURE_ROSTER_UNAVAILABLE",
             "无法读取paired capture证券×坐标断点，拒绝重取成功请求。",
