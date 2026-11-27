@@ -1114,7 +1114,18 @@ def read_module_completion_watermarks(
         )
     with source_raw._transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT DISTINCT ON (p.business_table, p.target_session)
+            """SELECT DISTINCT ON (
+                          p.business_table,
+                          p.target_session,
+                          CASE
+                              WHEN p.business_table IN (
+                                  'stock.source_rule_evaluations',
+                                  'stock.source_research_observation_segment_days'
+                              )
+                              THEN COALESCE(p.rule_ids, ARRAY[]::text[])
+                              ELSE ARRAY[]::text[]
+                          END
+                      )
                       p.job_id,p.target_session,p.business_table,p.status,
                       p.expected_rows,p.verified_rows,p.source_capture_id,
                       p.profile_revision,p.producer_version,p.profile_history_session_count,
@@ -1126,6 +1137,14 @@ def read_module_completion_watermarks(
                JOIN stock.data_jobs j ON j.job_id=p.job_id
                WHERE p.target_session<=%s
                ORDER BY p.business_table, p.target_session,
+                        CASE
+                            WHEN p.business_table IN (
+                                'stock.source_rule_evaluations',
+                                'stock.source_research_observation_segment_days'
+                            )
+                            THEN COALESCE(p.rule_ids, ARRAY[]::text[])
+                            ELSE ARRAY[]::text[]
+                        END,
                         COALESCE(p.updated_at, j.updated_at) DESC,
                         p.job_id DESC""",
             (cutoff,),
@@ -1313,6 +1332,7 @@ def read_module_completion_watermarks(
                 scoped_fact_counts[scope_key] = int(cursor.fetchone()[0])
 
     latest_by_table_session: dict[tuple[str, date], dict[str, Any]] = {}
+    records_by_table_session: dict[tuple[str, date], list[dict[str, Any]]] = {}
     for (
         job_id,
         target_session,
@@ -1335,7 +1355,7 @@ def read_module_completion_watermarks(
         job_research_cutoff,
     ) in rows:
         module_capture_id = int(capture_id) if capture_id is not None else None
-        latest_by_table_session[(business_table, target_session)] = {
+        record = {
             "job_id": job_id,
             "target_session": target_session,
             "business_table": business_table,
@@ -1360,6 +1380,12 @@ def read_module_completion_watermarks(
             "completed_at": completed_at,
             "job_research_cutoff": job_research_cutoff,
         }
+        records_by_table_session.setdefault(
+            (business_table, target_session), []
+        ).append(record)
+        prev = latest_by_table_session.get((business_table, target_session))
+        if prev is None or int(job_id) > int(prev["job_id"]):
+            latest_by_table_session[(business_table, target_session)] = record
 
     sessions_by_module: dict[str, set[date]] = {
         module: set() for module in _MODULE_PROGRESS_TABLES
@@ -1377,15 +1403,16 @@ def read_module_completion_watermarks(
             sess for (tbl, sess) in latest_by_table_session if tbl in required_tables
         }
         for target_session in sorted(candidate_sessions):
-            table_records = [
-                latest_by_table_session.get((tbl, target_session))
+            table_record_lists = [
+                records_by_table_session.get((tbl, target_session), [])
                 for tbl in required_tables
             ]
-            if any(rec is None for rec in table_records):
+            if any(not recs for recs in table_record_lists):
                 module_session_states[module][target_session.isoformat()] = (
                     "NOT_COMPUTED"
                 )
                 continue
+            table_records = [rec for recs in table_record_lists for rec in recs]
             assert all(rec is not None for rec in table_records)
             if any(rec["status"] == "RUNNING" for rec in table_records if rec):
                 module_session_states[module][target_session.isoformat()] = "RUNNING"

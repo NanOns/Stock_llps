@@ -135,7 +135,6 @@ _PRICE_TRACE_ONLY_COLUMNS = frozenset(
     {
         "source_capture_id",
         "raw_source_capture_id",
-        "qfq_source_capture_id",
         "observed_started_at",
         "observed_completed_at",
         "raw_observed_started_at",

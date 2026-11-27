@@ -619,10 +619,11 @@ def build_source_symbol_raw_periods(
         if row.source_capture_id is not None
     }
     if any(
-        row.bar_status != "HISTORY_ROW_NOT_STORED" and row.source_capture_id is None
-        for row in daily.values()
+        row.valid_price_bar and row.source_capture_id is None for row in daily.values()
     ):
-        raise ContractError("Raw周期历史行缺少paired BaoStock source_capture_id")
+        raise ContractError(
+            "Raw周期历史行存在有效价格但缺少paired BaoStock source_capture_id"
+        )
     if any(
         type(capture_id) is not int or capture_id <= 0 for capture_id in capture_ids
     ):
@@ -691,11 +692,10 @@ def summarize_raw_history_rows(
     capture_ids = {
         row.source_capture_id for row in daily if row.source_capture_id is not None
     }
-    if any(
-        row.bar_status != "HISTORY_ROW_NOT_STORED" and row.source_capture_id is None
-        for row in daily
-    ):
-        raise ContractError("Raw历史统计行缺少paired BaoStock source_capture_id")
+    if any(row.valid_price_bar and row.source_capture_id is None for row in daily):
+        raise ContractError(
+            "Raw历史统计行存在有效价格但缺少paired BaoStock source_capture_id"
+        )
     return {
         "price_coordinate": price_coordinate,
         "source_capture_id": next(iter(capture_ids)) if capture_ids else None,
