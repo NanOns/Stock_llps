@@ -372,6 +372,17 @@ def _source_d1_preview_for_target(
     row_facts: Mapping[date, _SourceD1RowFacts],
     context: _SourceD1PreviewContext,
 ) -> dict[str, Any]:
+    target_source_row = rows_by_session.get(target)
+    target_qfq_capture_id = (
+        target_source_row.get("qfq_source_capture_id")
+        if isinstance(target_source_row, Mapping)
+        and type(target_source_row.get("qfq_source_capture_id")) is int
+        else source_capture_id
+    )
+    source_capture_id = target_qfq_capture_id
+    coordinate_id = (
+        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{target_qfq_capture_id}:{normalized}"
+    )
     target_window = _source_d1_target_window(
         target,
         sessions=sessions,
@@ -544,6 +555,15 @@ def research_stock_pg_d1_history_previews(
     coordinate_id = (
         f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
     )
+
+    def _row_qfq_coordinate(row: Mapping[str, Any] | None) -> str:
+        capture_id = (
+            row.get("qfq_source_capture_id") if isinstance(row, Mapping) else None
+        )
+        if type(capture_id) is int and capture_id > 0:
+            return f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{capture_id}:{normalized}"
+        return f"FORWARD_ADJUSTED:BAOSTOCK_COORDINATE_UNKNOWN:{normalized}"
+
     observations_by_session: dict[date, CoreObservation] = {}
     for day in sessions:
         row = rows_by_session.get(day)
@@ -552,7 +572,7 @@ def research_stock_pg_d1_history_previews(
             session=day,
             source_capture_id=source_capture_id if day == sessions[-1] else None,
             price_coordinate=price_coordinate,
-            coordinate_id=coordinate_id,
+            coordinate_id=_row_qfq_coordinate(row),
         )
 
     row_facts = {
@@ -687,15 +707,20 @@ def research_stock_pg_history_preview(
         len(set(row_dates)) != len(row_dates)
         or any(day not in expected_sessions for day in row_dates)
         or row_dates != tuple(sorted(row_dates))
-        or any(
-            row.get("source_symbol") != normalized
-            or row.get("source_capture_id") != source_capture_id
-            for row in rows
+        or any(row.get("source_symbol") != normalized for row in rows)
+        or (
+            (
+                target_row := next(
+                    (row for row in rows if row.get("session_date") == target), None
+                )
+            )
+            is not None
+            and target_row.get("source_capture_id") != source_capture_id
         )
     ):
         raise ResearchEntryError(
             "PG_HISTORY_CAPTURE_BINDING_INVALID",
-            "PG历史行必须绑定相同BaoStock来源代码、paired capture和递增会话。",
+            "PG历史行必须绑定相同来源代码、目标日paired capture和递增会话；历史捕获仅作逐日溯源。",
         )
     if any(row.get("price_coordinate") not in (None, price_coordinate) for row in rows):
         raise ResearchEntryError(
@@ -719,16 +744,22 @@ def research_stock_pg_history_preview(
             "QFQ历史没有精确目标日行；不回退RAW或最近日期。",
         )
 
-    coordinate_id = (
-        f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{source_capture_id}:{normalized}"
-    )
+    def _row_qfq_coordinate(row: Mapping[str, Any] | None) -> str:
+        capture_id = (
+            row.get("qfq_source_capture_id") if isinstance(row, Mapping) else None
+        )
+        if type(capture_id) is int and capture_id > 0:
+            return f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{capture_id}:{normalized}"
+        return f"FORWARD_ADJUSTED:BAOSTOCK_COORDINATE_UNKNOWN:{normalized}"
+
+    coordinate_id = _row_qfq_coordinate(target_row)
     history = tuple(
         _core_observation_from_pg_price_row(
             rows_by_session.get(session),
             session=session,
-            source_capture_id=source_capture_id,
+            source_capture_id=source_capture_id if session == target else None,
             price_coordinate=price_coordinate,
-            coordinate_id=coordinate_id,
+            coordinate_id=_row_qfq_coordinate(rows_by_session.get(session)),
         )
         for session in expected_sessions
     )
@@ -975,7 +1006,7 @@ def research_stock_pg_history_preview(
     captures_by_session = [
         {
             "session_date": row["session_date"].isoformat(),
-            "source_capture_id": source_capture_id,
+            "source_capture_id": row.get("qfq_source_capture_id"),
             "price_coordinate": price_coordinate,
             "capture_read_started_at": row.get("observed_started_at"),
             "capture_read_completed_at": row.get("observed_completed_at"),

@@ -222,7 +222,12 @@ def _daily_bar(
     )
     values = tuple(_fraction(row.get(name)) for name in price_fields)
     quality = row.get(quality_field)
-    source_capture_id = row.get("source_capture_id")
+    capture_column = (
+        "raw_source_capture_id"
+        if price_coordinate == "RAW_UNADJUSTED"
+        else "qfq_source_capture_id"
+    )
+    source_capture_id = row.get(capture_column)
     if source_capture_id is not None and (
         type(source_capture_id) is not int or source_capture_id <= 0
     ):
@@ -371,7 +376,6 @@ def _aggregate_period(
     *,
     kind: str,
     price_coordinate: str,
-    source_capture_id: int | None,
     key: str,
     ordinal: int,
     expected_sessions: Sequence[date],
@@ -386,6 +390,25 @@ def _aggregate_period(
     )
     daily_rows = tuple(rows_by_session[day] for day in elapsed_sessions)
     valid_rows = tuple(row for row in daily_rows if row.valid_price_bar)
+    period_capture_ids = {
+        row.source_capture_id
+        for row in daily_rows
+        if row.bar_status == "TARGET_PRESENT"
+        and row.trade_status_state == "ACTUAL"
+        and row.source_capture_id is not None
+    }
+    unbound_actual_capture = any(
+        row.bar_status == "TARGET_PRESENT"
+        and row.trade_status_state == "ACTUAL"
+        and row.source_capture_id is None
+        for row in daily_rows
+    )
+    qfq_capture_continuity_unproven = price_coordinate == "FORWARD_ADJUSTED" and (
+        len(period_capture_ids) > 1 or unbound_actual_capture
+    )
+    period_source_capture_id = (
+        next(iter(period_capture_ids)) if len(period_capture_ids) == 1 else None
+    )
     suspended_session_count = sum(
         row.trade_status_state == "CONFIRMED_SUSPENSION" for row in daily_rows
     )
@@ -434,6 +457,8 @@ def _aggregate_period(
         reasons.append("CONFIRMED_SUSPENSION_SKIPPED_FROM_PERIOD_OHLC")
     if unknown_trade_status_count:
         reasons.append("TRADE_STATUS_UNKNOWN")
+    if qfq_capture_continuity_unproven:
+        reasons.append("QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN")
     blocking_reasons.extend(
         reason
         for reason in reasons
@@ -485,7 +510,7 @@ def _aggregate_period(
     return RawPeriodBar(
         kind=kind,
         price_coordinate=price_coordinate,
-        source_capture_id=source_capture_id,
+        source_capture_id=period_source_capture_id,
         time_role="NON_PIT_RETROSPECTIVE",
         key=key,
         calendar_ordinal=ordinal,
@@ -580,20 +605,6 @@ def build_source_symbol_raw_periods(
         if day not in session_dates or day in rows_by_session:
             raise ContractError("Raw周期历史行超出窗口或会话重复")
         rows_by_session[day] = row
-    capture_ids = {
-        row.get("source_capture_id")
-        for row in rows_by_session.values()
-        if row.get("source_capture_id") is not None
-    }
-    if any(row.get("source_capture_id") is None for row in rows_by_session.values()):
-        raise ContractError("Raw周期历史行缺少paired BaoStock source_capture_id")
-    if any(
-        type(capture_id) is not int or capture_id <= 0 for capture_id in capture_ids
-    ):
-        raise ContractError("Raw周期输入来源捕获ID必须是正整数")
-    if len(capture_ids) > 1:
-        raise ContractError("Raw周期窗口混合了多个paired BaoStock source_capture_id")
-    source_capture_id = next(iter(capture_ids)) if capture_ids else None
     daily = {
         day: _daily_bar(
             day,
@@ -602,6 +613,20 @@ def build_source_symbol_raw_periods(
         )
         for day in session_dates
     }
+    capture_ids = {
+        row.source_capture_id
+        for row in daily.values()
+        if row.source_capture_id is not None
+    }
+    if any(
+        row.bar_status != "HISTORY_ROW_NOT_STORED" and row.source_capture_id is None
+        for row in daily.values()
+    ):
+        raise ContractError("Raw周期历史行缺少paired BaoStock source_capture_id")
+    if any(
+        type(capture_id) is not int or capture_id <= 0 for capture_id in capture_ids
+    ):
+        raise ContractError("Raw周期输入来源捕获ID必须是正整数")
     results: dict[str, tuple[RawPeriodBar, ...]] = {}
     for kind in ("WEEK", "MONTH"):
         grouped: dict[str, list[date]] = {}
@@ -618,7 +643,6 @@ def build_source_symbol_raw_periods(
                 _aggregate_period(
                     kind=kind,
                     price_coordinate=price_coordinate,
-                    source_capture_id=source_capture_id,
                     key=key,
                     ordinal=ordinals[key],
                     expected_sessions=expected,
@@ -672,10 +696,6 @@ def summarize_raw_history_rows(
         for row in daily
     ):
         raise ContractError("Raw历史统计行缺少paired BaoStock source_capture_id")
-    if len(capture_ids) > 1:
-        raise ContractError(
-            "Raw周期统计窗口混合了多个paired BaoStock source_capture_id"
-        )
     return {
         "price_coordinate": price_coordinate,
         "source_capture_id": next(iter(capture_ids)) if capture_ids else None,

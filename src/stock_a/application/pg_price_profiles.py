@@ -432,44 +432,9 @@ def _read_baostock_profile_page(
     target_status_counts: Counter[str] = Counter()
     for symbol in source_symbols:
         rows = sorted(histories[symbol], key=lambda item: item["session_date"])
-        qfq_captures = {
-            int(item["source_capture_id"])
-            for item in rows
-            if item.get("bar_status") == "TARGET_PRESENT"
-            and item.get("source_capture_id") is not None
-        }
-        if len(qfq_captures) > 1 or any(
-            item.get("bar_status") == "TARGET_PRESENT"
-            and item.get("source_capture_id") is None
-            for item in rows
-        ):
-            # BaoStock QFQ为后验坐标；不同请求捕获间没有可用的换基连续性证明。
-            # 只将本画像窗口的QFQ输入降为未知，RAW/量额/限价事实不受影响。
-            for item in rows:
-                if item.get("bar_status") == "TARGET_PRESENT":
-                    item["bar_status"] = "UNKNOWN"
-                    item["qfq_bar_status"] = "UNKNOWN"
-                    item["qfq_close_quality"] = "UNKNOWN"
-                    item["qfq_close_reason"] = "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
-                    for field in ("open", "high", "low", "close"):
-                        item[f"qfq_{field}_quality"] = "UNKNOWN"
-                        item[f"qfq_{field}_reason"] = (
-                            "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
-                        )
-                    for field in (
-                        "selected_open",
-                        "selected_high",
-                        "selected_low",
-                        "selected_close",
-                    ):
-                        item[field] = None
-                    for field in (
-                        "selected_open_quality",
-                        "selected_high_quality",
-                        "selected_low_quality",
-                        "selected_close_quality",
-                    ):
-                        item[field] = "UNKNOWN"
+        # 各行保留供应方返回状态和逐坐标来源。Core按实际公式窗口比较
+        # QFQ坐标捕获；闭合在单一捕获内的短窗口仍可计算，跨捕获窗口由
+        # Core的逐行坐标身份降为UNKNOWN，RAW量额不受影响。
         row_dates = {item["session_date"] for item in rows}
         target_row = next(
             (item for item in rows if item["session_date"] == target_session), None
