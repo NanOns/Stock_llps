@@ -803,8 +803,8 @@ def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, ar
             if col not in {"source_capture_id", "endpoint_source_capture_id"}
         ]
         distinct_predicate = sql.SQL(" OR ").join(
-            sql.SQL("{} IS DISTINCT FROM EXCLUDED.{}").format(
-                sql.Identifier(col), sql.Identifier(col)
+            sql.SQL("{}.{} IS DISTINCT FROM EXCLUDED.{}").format(
+                sql.Identifier(table), sql.Identifier(col), sql.Identifier(col)
             )
             for col in comparison_cols
         )

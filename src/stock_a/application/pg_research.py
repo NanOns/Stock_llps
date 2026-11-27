@@ -241,6 +241,12 @@ def read_source_version_context(
         "price_coordinates": ["RAW_UNADJUSTED", "FORWARD_ADJUSTED"],
         "raw_row_count": raw.get("row_count") if raw is not None else None,
         "qfq_row_count": qfq.get("row_count") if qfq is not None else None,
+        "coordinate_row_count": (
+            selected.get("row_count") if selected is not None else None
+        ),
+        "coordinate_expected_row_count": (
+            selected.get("expected_row_count") if selected is not None else None
+        ),
         "capture_expected_row_count": expected_rows,
         "research_expected_row_count": research_expected_rows,
         "raw_coverage_status": raw.get("coverage_status")

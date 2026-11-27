@@ -1301,7 +1301,7 @@ def _read_baostock_d1_candidate_page(
             else "INCOMPLETE",
             "partition_closed": context["version_status"] == "COMPLETE",
             "total_count": 1,
-            "version_row_count": context["raw_row_count"],
+            "version_row_count": context["coordinate_row_count"],
             "version_expected_row_count": context["capture_expected_row_count"],
             "offset": offset,
             "page_count": 1,
@@ -1710,7 +1710,7 @@ def discover_source_d1_structures(
             or page["source_capture_id"] != source_capture_id
             or page["price_coordinate"] != price_coordinate
             or source_context.get("status") != "AVAILABLE"
-            or context.get("raw_row_count") != page["version_row_count"]
+            or context.get("coordinate_row_count") != page["version_row_count"]
             or page["version_expected_row_count"]
             != context.get("capture_expected_row_count")
             or any(
@@ -1723,7 +1723,16 @@ def discover_source_d1_structures(
         ):
             raise PgResearchBindingError(
                 "D1_STRUCTURE_SOURCE_POOL_NOT_CLOSED",
-                "Raw分页、目标日捕获或来源版本未闭合",
+                "Raw分页、目标日捕获或来源版本未闭合："
+                f"target={target_session.isoformat()} capture={source_capture_id} "
+                f"page_capture={page.get('source_capture_id')!r} "
+                f"page_status={page.get('version_status')!r} "
+                f"partition_closed={page.get('partition_closed')!r} "
+                f"page_rows={page.get('version_row_count')!r}/"
+                f"{page.get('version_expected_row_count')!r} "
+                f"coordinate_context={context.get('coordinate_row_count')!r}/"
+                f"{context.get('capture_expected_row_count')!r} "
+                f"source_status={context.get('status')!r}",
             )
 
         for candidate in candidates:
