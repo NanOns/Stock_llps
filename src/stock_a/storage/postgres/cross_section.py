@@ -491,6 +491,9 @@ def read_cross_section_day_bundle(
             "return_start_date": start_d,
             "start_session": start_d,
             "universe_id": u_id,
+            # 单事实迁移后不再存 Universe 多版本修订列；端点 Universe ID
+            # 本身即日期有效总体身份，供 Profile 窗口元数据验证使用。
+            "universe_revision": str(u_id) if u_id is not None else None,
             "denominator": int(denom),
             "known_count": int(known),
             "unknown_count": int(unk),

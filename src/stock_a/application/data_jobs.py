@@ -7715,6 +7715,7 @@ def _execute_shared_production_chain_impl(
             session_count=history_count,
             page_size=100,
             profile_contract=profile_contract,
+            cross_section_universe_capture_id=plan.get("_universe_source_capture_id"),
         )
         profile_revision = profile.get("profile_revision")
         if isinstance(profile_revision, str) and profile_revision:
@@ -7742,6 +7743,154 @@ def _execute_shared_production_chain_impl(
                 upstream_module="CORE_PROFILE",
                 profile_revision_filter=profile.get("profile_revision"),
             )
+
+    # Core/Profile 重算会按实际后继窗口失效正式市场宽度。市场宽度首次生产
+    # 在前面的 MARKET_BREADTH 段；在同一任务内完成画像后，重产本请求选择的
+    # 正式宽度输出，避免任务被标为完成但 GET 已无对应日事实。
+    if "MARKET_BREADTH" in base_modules:
+        from stock_a.application.r03_formal_sector import (
+            R03_CONTRACT_VERSION,
+            produce_formal_market_breadth_for_session,
+        )
+
+        _, final_calendar_revision, official_sessions = _load_official_sessions(cutoff)
+        official_session_index = {
+            session: index for index, session in enumerate(official_sessions)
+        }
+        market_output_days = tuple(
+            date.fromisoformat(value)
+            for value in plan.get("module_output_sessions", {}).get(
+                "MARKET_BREADTH", ()
+            )
+        )
+        for day in market_output_days:
+            unit = next(
+                (
+                    item
+                    for item in plan.get("stage_units", ())
+                    if item.get("stage_code") == "MARKET_BREADTH"
+                    and item.get("business_table")
+                    == "stock.r03_formal_market_breadth_facts"
+                    and item.get("target_session") == day
+                ),
+                None,
+            )
+            if unit is None:
+                continue
+            idx = official_session_index.get(day)
+            t3_session = (
+                official_sessions[idx - 3] if idx is not None and idx >= 3 else None
+            )
+            prev_session_t = (
+                official_sessions[idx - 1] if idx is not None and idx >= 1 else None
+            )
+            prev_session_t3 = (
+                official_sessions[idx - 4] if idx is not None and idx >= 4 else None
+            )
+            prior_progress = data_job_pg.read_progress_unit(
+                config,
+                job_id=job_id,
+                stage_code="MARKET_BREADTH",
+                target_session=day,
+                business_table="stock.r03_formal_market_breadth_facts",
+            )
+            begin_callback(job_id=job_id, units=[unit])
+            try:
+                formal = produce_formal_market_breadth_for_session(
+                    config,
+                    target_session=day,
+                    t3_session=t3_session,
+                    source_capture_id=None,
+                    prev_session_t=prev_session_t,
+                    prev_session_t3=prev_session_t3,
+                    allow_revision=bool(plan.get("allow_revision", False)),
+                )
+                verified_rows = data_job_pg.read_business_table_count(
+                    config,
+                    business_table="stock.r03_formal_market_breadth_facts",
+                    target_session=day,
+                    research_cutoff=cutoff,
+                    producer_version=R03_CONTRACT_VERSION,
+                )
+                if verified_rows != 1:
+                    raise DataJobError(
+                        "FORMAL_MARKET_BREADTH_POST_PROFILE_READBACK_MISMATCH",
+                        "画像失效级联后的正式市场宽度没有唯一有效日事实。",
+                        status=409,
+                    )
+                from stock_a.storage.postgres import source_raw as _sr_post_profile
+
+                with _sr_post_profile._transaction(
+                    config, write=False, statement_timeout_ms=5000
+                ) as (_read_conn, read_cursor, _scope):
+                    read_cursor.execute(
+                        """
+                        SELECT status, n_t, n_t3, n_common, n_eligible,
+                               exact_numerator, exact_denominator
+                        FROM stock.r03_formal_market_breadth_facts
+                        WHERE trade_date=%s
+                        """,
+                        (day,),
+                    )
+                    stored = read_cursor.fetchone()
+                exact = formal.get("exact") or {}
+                expected = (
+                    str(formal["status"]),
+                    int(formal["n_t"]),
+                    int(formal["n_t3"]),
+                    int(formal["n_common"]),
+                    int(formal["n_eligible"]),
+                    exact.get("numerator"),
+                    exact.get("denominator"),
+                )
+                if stored is None or tuple(stored) != expected:
+                    raise DataJobError(
+                        "FORMAL_MARKET_BREADTH_POST_PROFILE_VALUE_MISMATCH",
+                        f"画像失效级联后的正式市场宽度异连接读回不一致：stored={stored}, expected={expected}。",
+                        status=409,
+                    )
+                pg = formal.get("pg_result", {})
+                changed_rows = int(pg.get("inserted", 0)) + int(pg.get("updated", 0))
+                progress_capture_id = (
+                    prior_progress.get("source_capture_id")
+                    if isinstance(prior_progress, Mapping)
+                    and type(prior_progress.get("source_capture_id")) is int
+                    else source_capture_id
+                )
+                progress_callback(
+                    job_id=job_id,
+                    stage_code="MARKET_BREADTH",
+                    target_session=day,
+                    business_table="stock.r03_formal_market_breadth_facts",
+                    source_capture_id=progress_capture_id,
+                    profile_history_session_count=None,
+                    d1_history_session_count=None,
+                    expected_rows=1,
+                    inserted_rows=changed_rows,
+                    quality_status=(
+                        "COMPLETE_FORMAL_MARKET_POST_PROFILE_"
+                        f"{formal.get('status', 'UNKNOWN')}"
+                    ),
+                    no_change=changed_rows == 0 and int(pg.get("skipped", 0)) > 0,
+                    profile_revision=None,
+                    calendar_revision=final_calendar_revision,
+                    producer_version=R03_CONTRACT_VERSION,
+                )
+                resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001 - 逐输出日保留精确失败状态。
+                mark_units_incomplete(
+                    [unit],
+                    stage_code="MARKET_BREADTH",
+                    error=error,
+                    message_prefix="Core/Profile级联后的正式市场宽度补产或读回未闭合",
+                    producer_version=R03_CONTRACT_VERSION,
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"正式市场宽度({day.isoformat()})画像级联后未闭合：{str(error)[:300]}",
+                    )
+                )
 
     # 成交参与使用同捕获、同日完整宽度分母和已保存QFQ Profile中的CNY成交比值。
     if "MARKET_PARTICIPATION" in base_modules:
@@ -7993,6 +8142,9 @@ def _execute_shared_production_chain_impl(
                     include_d0=include_d0,
                     include_d1=include_d1,
                     include_static=include_d0,
+                    cross_section_universe_capture_id=plan.get(
+                        "_universe_source_capture_id"
+                    ),
                 )
                 if report.get("status") != "PERSISTED":
                     raise DataJobError(
