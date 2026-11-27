@@ -161,7 +161,9 @@ def _pulse_rows(
     target_result: Mapping[str, Any],
 ) -> tuple[tuple[Any, ...], ...]:
     capture_id = source_version.get("source_capture_id")
-    source_count = source_version.get("raw_row_count")
+    source_count = source_version.get("coordinate_row_count")
+    if source_count is None:
+        source_count = source_version.get("raw_row_count")
     if (
         type(capture_id) is not int
         or capture_id <= 0
@@ -177,7 +179,16 @@ def _pulse_rows(
         != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
     ):
         raise SectorPulsePgError(
-            "SECTOR_PULSE_SOURCE_BINDING_INVALID", "脉冲事实缺少唯一来源或后验快照绑定"
+            "SECTOR_PULSE_SOURCE_BINDING_INVALID",
+            "脉冲事实缺少唯一来源或后验快照绑定："
+            f"arg_capture={source_capture_id!r} "
+            f"version_capture={capture_id!r} source_count={source_count!r} "
+            f"clock_quality={source_version.get('source_time_quality')!r} "
+            f"clock_role={source_version.get('source_clock_role')!r} "
+            f"available_at={source_version.get('source_available_at')!r} "
+            f"result_capture={target_result.get('source_capture_id')!r} "
+            f"result_session={target_result.get('target_session')!r} "
+            f"membership={target_result.get('membership_mode')!r}",
         )
     snapshots = target_result.get("snapshots_by_kind")
     names = target_result.get("board_names_by_kind")
@@ -411,7 +422,15 @@ def _validate_write_scope(
         (target_session, source_capture_id),
     )
     raw_count, unique_symbols, capture_count = cursor.fetchone()
-    expected_count = int(source_version["raw_row_count"])
+    expected_count_value = source_version.get("coordinate_row_count")
+    if expected_count_value is None:
+        expected_count_value = source_version.get("raw_row_count")
+    if type(expected_count_value) is not int or expected_count_value < 1:
+        raise SectorPulsePgError(
+            "SECTOR_PULSE_RAW_PARTITION_OPEN",
+            "目标QFQ坐标来源分母缺失或非法",
+        )
+    expected_count = expected_count_value
     if (
         int(raw_count),
         int(unique_symbols),

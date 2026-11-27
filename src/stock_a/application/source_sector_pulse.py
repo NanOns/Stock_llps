@@ -449,12 +449,18 @@ def run_source_sector_pulse_day(
             "CONCEPT": concept_snapshot_id,
         },
     )
+    pulse_result = {
+        **calculated,
+        # Rotation计算标记其冻结篮子使用“后验固定当前成员”；Pulse存储合同
+        # 使用当前成员回看枚举。两者时间语义相同，在Pulse适配边界明确映射。
+        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+    }
     persisted = persist_source_sector_pulse_day(
         config,
         target_session=target_session,
         source_capture_id=source_capture_id,
         source_version=source_version,
-        target_result=calculated,
+        target_result=pulse_result,
     )
     pulse_counts = {state: 0 for state in ("TRUE", "FALSE", "UNKNOWN")}
     unknown_reasons: dict[str, int] = {}
@@ -468,7 +474,7 @@ def run_source_sector_pulse_day(
         "status": persisted["status"],
         "target_session": target_session.isoformat(),
         "source_capture_id": source_version["source_capture_id"],
-        "source_pool_count": source_version["raw_row_count"],
+        "source_pool_count": source_version["coordinate_row_count"],
         "snapshot_ids": {
             "INDUSTRY": industry_snapshot_id,
             "CONCEPT": concept_snapshot_id,
@@ -570,8 +576,8 @@ def run_source_sector_pulse_transition_day(
         if (
             source_version.get("status") != "AVAILABLE"
             or source_version.get("version_status") != "COMPLETE"
-            or source_version.get("raw_row_count")
-            != source_version.get("capture_expected_row_count")
+            or source_version.get("coordinate_row_count")
+            != source_version.get("coordinate_expected_row_count")
             or source_version.get("price_coordinate") != "FORWARD_ADJUSTED"
             or source_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
         ):
@@ -583,7 +589,7 @@ def run_source_sector_pulse_transition_day(
             config,
             target_session=session,
             source_capture_id=source_capture_id,
-            source_pool_count=source_version["raw_row_count"],
+            source_pool_count=source_version["coordinate_row_count"],
             snapshot_ids=snapshots,
         )
         pulse["target_session"] = session.isoformat()
@@ -677,14 +683,14 @@ def run_source_sector_pulse_transition_day(
                 key: previous_source[key]
                 for key in (
                     "source_capture_id",
-                    "raw_row_count",
+                    "coordinate_row_count",
                 )
             },
             "target": {
                 key: target_source[key]
                 for key in (
                     "source_capture_id",
-                    "raw_row_count",
+                    "coordinate_row_count",
                 )
             },
         },

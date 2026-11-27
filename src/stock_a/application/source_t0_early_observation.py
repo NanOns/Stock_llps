@@ -220,7 +220,7 @@ def persist_source_t0_early_observations_from_saved(
         or source_version.get("time_role") != "NON_PIT_RETROSPECTIVE"
         or set(source_version.get("price_coordinates", ()))
         != {"RAW_UNADJUSTED", "FORWARD_ADJUSTED"}
-        or source_version.get("raw_row_count")
+        or source_version.get("coordinate_row_count")
         != source_version.get("capture_expected_row_count")
     ):
         raise SourceT0EarlyObservationError(
