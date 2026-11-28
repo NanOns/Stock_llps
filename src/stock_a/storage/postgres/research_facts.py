@@ -97,6 +97,12 @@ PATH_COLUMNS = (
     "mdd_denominator",
     "price_coordinate",
     "scope",
+    "mfe_quality",
+    "mfe_reason",
+    "mae_quality",
+    "mae_reason",
+    "mdd_quality",
+    "mdd_reason",
 )
 RULE_KEY = (
     "target_session",
@@ -221,6 +227,12 @@ def prepare_research_rows(
                     *mdd,
                     "FORWARD_ADJUSTED",
                     SCOPE,
+                    (fact.get("metric_qualities") or {}).get("mfe", "UNKNOWN"),
+                    (fact.get("metric_reasons") or {}).get("mfe"),
+                    (fact.get("metric_qualities") or {}).get("mae", "UNKNOWN"),
+                    (fact.get("metric_reasons") or {}).get("mae"),
+                    (fact.get("metric_qualities") or {}).get("mdd", "UNKNOWN"),
+                    (fact.get("metric_reasons") or {}).get("mdd"),
                 )
             )
     return rules, paths
@@ -280,6 +292,8 @@ def prepare_forward_path_rows(
         mfe = _fraction_pair(values.get("mfe"))
         mae = _fraction_pair(values.get("mae"))
         mdd = _fraction_pair(values.get("mdd"))
+        metric_qualities = fact.get("metric_qualities") or {}
+        metric_reasons = fact.get("metric_reasons") or {}
         rows.append(
             (
                 target,
@@ -305,6 +319,18 @@ def prepare_forward_path_rows(
                 *mdd,
                 "FORWARD_ADJUSTED",
                 SCOPE,
+                metric_qualities.get(
+                    "mfe", "OBSERVED" if mfe[0] is not None else "UNKNOWN"
+                ),
+                metric_reasons.get("mfe"),
+                metric_qualities.get(
+                    "mae", "OBSERVED" if mae[0] is not None else "UNKNOWN"
+                ),
+                metric_reasons.get("mae"),
+                metric_qualities.get(
+                    "mdd", "OBSERVED" if mdd[0] is not None else "UNKNOWN"
+                ),
+                metric_reasons.get("mdd"),
             )
         )
     if len(rows) != len(outcomes):
@@ -516,7 +542,7 @@ def write_forward_path_rows(
         or any(
             row[0] != target
             or row[3:7] != (horizon, path_version, calendar_revision, endpoint_session)
-            or row[-2:] != ("FORWARD_ADJUSTED", SCOPE)
+            or row[20:22] != ("FORWARD_ADJUSTED", SCOPE)
             for row in paths
         )
     ):
@@ -1393,7 +1419,10 @@ def _read_research_rows_cursor(
                   p.mae_denominator, p.mdd_numerator, p.mdd_denominator,
                   r.frozen_line_numerator, r.frozen_line_denominator,
                   r.frozen_line_source, r.source_capture_id,
-                  p.calendar_revision,p.price_coordinate,p.scope
+                  p.calendar_revision, p.price_coordinate, p.scope,
+                  p.mfe_quality, p.mfe_reason,
+                  p.mae_quality, p.mae_reason,
+                  p.mdd_quality, p.mdd_reason
            FROM source_rule_evaluations r
            LEFT JOIN source_forward_path_facts p
              ON p.target_session=r.target_session
@@ -1404,7 +1433,8 @@ def _read_research_rows_cursor(
             AND p.scope='NON_PIT_EXPLORATORY'
             AND p.endpoint_session <= %s
            WHERE r.target_session=%s
-             AND r.rule_id=%s AND r.rule_version=%s AND r.profile_revision=%s
+             AND r.rule_id=%s AND r.rule_version=%s
+             AND (%s::text IS NULL OR r.profile_revision=%s)
              AND r.history_session_count=%s AND r.d1_history_session_count=%s
              AND r.event_window_start=%s AND r.calendar_revision=%s
              AND (%s::text IS NULL OR r.source_symbol=%s)
@@ -1416,6 +1446,7 @@ def _read_research_rows_cursor(
             target,
             rule,
             RULE_VERSION,
+            profile_revision,
             profile_revision,
             history_session_count,
             d1_history_session_count,
@@ -1454,14 +1485,18 @@ def _read_research_rows_cursor(
         if len(compatible) > 1:
             raise ResearchFactConflict("同一规则事实命中多个兼容Forward日历版本")
         if compatible:
-            selected_rows.append(tuple(compatible[0][:22]))
+            selected_rows.append(
+                tuple(compatible[0][:22]) + tuple(compatible[0][25:31])
+            )
             continue
         selected = list(candidates[0][:22])
         selected[4:18] = [None] * 14
         if any(row[4] is not None for row in candidates):
             selected[10] = "UNKNOWN"
             selected[11] = ["FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH"]
-        selected_rows.append(tuple(selected))
+        selected_rows.append(
+            tuple(selected) + ("UNKNOWN", None, "UNKNOWN", None, "UNKNOWN", None)
+        )
     if len({row[0] for row in selected_rows}) != len(selected_rows):
         raise ResearchFactConflict("精确规则版本存在重复证券行")
     return selected_rows

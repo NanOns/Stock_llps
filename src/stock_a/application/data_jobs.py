@@ -191,6 +191,18 @@ _STAGE_TABLES = {
     ),
     "FORWARD_PATH": ("stock.source_forward_path_facts",),
     "COHORT_STATS": ("stock.source_cohort_group_stats",),
+    "FORMAL_FOCUS": ("stock.formal_focus_episode_day_facts",),
+    "FORMAL_COHORT": (
+        "stock.formal_cohort_evaluations",
+        "stock.formal_cohort_event_subrows",
+        "stock.formal_research_observations",
+    ),
+    "FORMAL_BENCHMARK_M5": (
+        "stock.formal_forward_benchmarks",
+        "stock.formal_m5_matched_controls",
+        "stock.formal_m5_control_outcomes",
+    ),
+    "FORMAL_STRUCTURE_EVENTS": ("stock.formal_structure_first_events",),
     "FEP_BASELINE": ("stock.source_fep_baseline_facts",),
     "OBSERVATION_SEGMENTS": ("stock.source_research_observation_segment_days",),
 }
@@ -366,8 +378,12 @@ _STAGE_ORDER = {
     "D2_LIFECYCLE": 12,
     "FORWARD_PATH": 12,
     "COHORT_STATS": 13,
-    "FEP_BASELINE": 14,
-    "OBSERVATION_SEGMENTS": 15,
+    "FORMAL_FOCUS": 14,
+    "FORMAL_COHORT": 15,
+    "FORMAL_BENCHMARK_M5": 16,
+    "FORMAL_STRUCTURE_EVENTS": 17,
+    "FEP_BASELINE": 18,
+    "OBSERVATION_SEGMENTS": 19,
 }
 _RAW_JOB_SCOPE = "STOCK_A_R08_BIZ08_DATA_JOB_RAW_IMPORT_R1"
 
@@ -396,6 +412,10 @@ _MODULES = {
     "D2_LIFECYCLE": ("RESEARCH", "R04正式D2生命周期与风险排序", True, True),
     "FORWARD_PATH": ("RESEARCH", "Forward路径", True, True),
     "COHORT_STATS": ("RESEARCH", "Cohort分组统计", True, True),
+    "FORMAL_FOCUS": ("RESEARCH", "R05正式Focus自动跟踪", True, True),
+    "FORMAL_COHORT": ("RESEARCH", "R05正式13规则Cohort与T0登记", True, True),
+    "FORMAL_BENCHMARK_M5": ("RESEARCH", "R05固定基准与M5对照", True, True),
+    "FORMAL_STRUCTURE_EVENTS": ("RESEARCH", "R05原T0结构首事件", True, True),
     "FEP_BASELINE": ("RESEARCH", "FEP条件基线", True, True),
     "OBSERVATION_SEGMENTS": ("RESEARCH", "观察持续分段", True, True),
 }
@@ -1379,6 +1399,10 @@ def build_data_job_plan(
         "MARKET_INDICES_ENV",
         "FORWARD_PATH",
         "COHORT_STATS",
+        "FORMAL_FOCUS",
+        "FORMAL_COHORT",
+        "FORMAL_BENCHMARK_M5",
+        "FORMAL_STRUCTURE_EVENTS",
         "FEP_BASELINE",
         "OBSERVATION_SEGMENTS",
     ):
@@ -3157,6 +3181,9 @@ class DataJobCoordinator:
             eligible_cutoff = tuple(
                 s for s in official_through_cutoff if s <= cutoff_date
             )
+            fp_completed_sessions = set(
+                coverage.get("module_completed_sessions", {}).get("FORWARD_PATH", ())
+            )
             for day_text in plan.get("module_output_sessions", {}).get(
                 "FORWARD_PATH", ()
             ):
@@ -3184,6 +3211,17 @@ class DataJobCoordinator:
                         is True
                     ),
                 )
+                if (
+                    status == "NOT_STARTED"
+                    and request["operation"] == "FILL_MISSING"
+                    and day_text in fp_completed_sessions
+                    and data_job_pg.read_forward_path_due_complete(
+                        self.config,
+                        target_session=day_date,
+                        due_horizons=tuple(due_horizons),
+                    )
+                ):
+                    status = "NO_CHANGE"
                 _unit(
                     plan["stage_units"],
                     stage="FORWARD_PATH",
@@ -3194,15 +3232,30 @@ class DataJobCoordinator:
                     error_message=error_message,
                 )
         if "COHORT_STATS" in request["selected_modules"]:
+            cs_completed_sessions = set(
+                coverage.get("module_completed_sessions", {}).get("COHORT_STATS", ())
+            )
             for day_text in plan.get("module_output_sessions", {}).get(
                 "COHORT_STATS", ()
             ):
+                day_date = date.fromisoformat(day_text)
+                cs_status = (
+                    "NO_CHANGE"
+                    if request["operation"] == "FILL_MISSING"
+                    and day_text in cs_completed_sessions
+                    and data_job_pg.read_cohort_stats_complete(
+                        self.config,
+                        target_session=day_date,
+                        research_cutoff=date.fromisoformat(plan["research_cutoff"]),
+                    )
+                    else "NOT_STARTED"
+                )
                 _unit(
                     plan["stage_units"],
                     stage="COHORT_STATS",
-                    target_session=date.fromisoformat(day_text),
+                    target_session=day_date,
                     business_table="stock.source_cohort_group_stats",
-                    status="NOT_STARTED",
+                    status=cs_status,
                 )
         if "D2_LIFECYCLE" in request["selected_modules"]:
             d2_completed_sessions = set(
@@ -3231,6 +3284,46 @@ class DataJobCoordinator:
                         stage="D2_LIFECYCLE",
                         target_session=date.fromisoformat(day_text),
                         business_table=d2_tbl,
+                        status=day_status,
+                    )
+        for r05_mod, r05_tables in (
+            ("FORMAL_FOCUS", ("stock.formal_focus_episode_day_facts",)),
+            (
+                "FORMAL_COHORT",
+                (
+                    "stock.formal_cohort_evaluations",
+                    "stock.formal_cohort_event_subrows",
+                    "stock.formal_research_observations",
+                ),
+            ),
+            (
+                "FORMAL_BENCHMARK_M5",
+                (
+                    "stock.formal_forward_benchmarks",
+                    "stock.formal_m5_matched_controls",
+                    "stock.formal_m5_control_outcomes",
+                ),
+            ),
+            ("FORMAL_STRUCTURE_EVENTS", ("stock.formal_structure_first_events",)),
+        ):
+            if r05_mod not in request["selected_modules"]:
+                continue
+            r05_completed = set(
+                coverage.get("module_completed_sessions", {}).get(r05_mod, ())
+            )
+            for day_text in plan.get("module_output_sessions", {}).get(r05_mod, ()):
+                day_status = (
+                    "NO_CHANGE"
+                    if request["operation"] == "FILL_MISSING"
+                    and day_text in r05_completed
+                    else "NOT_STARTED"
+                )
+                for r05_tbl in r05_tables:
+                    _unit(
+                        plan["stage_units"],
+                        stage=r05_mod,
+                        target_session=date.fromisoformat(day_text),
+                        business_table=r05_tbl,
                         status=day_status,
                     )
         if "FEP_BASELINE" in request["selected_modules"]:
@@ -10227,6 +10320,7 @@ def _execute_shared_production_chain_impl(
                     if idx + h < len(cal_sessions) and cal_sessions[idx + h] <= cutoff
                 ]
                 total_inserted = 0
+                expected_fp_rows = 0
                 for h in due_horizons:
                     res = persist_source_t1_forward_from_saved(
                         config,
@@ -10236,6 +10330,7 @@ def _execute_shared_production_chain_impl(
                         horizon=h,
                     )
                     total_inserted += int(res.get("inserted_paths", 0) or 0)
+                    expected_fp_rows += int(res.get("expected_paths", 0) or 0)
                 for unit in day_units:
                     actual_rows = data_job_pg.read_business_table_count(
                         config,
@@ -10245,10 +10340,10 @@ def _execute_shared_production_chain_impl(
                         calendar_revision=cal_revision,
                         research_cutoff=cutoff,
                     )
-                    if actual_rows <= 0:
+                    if expected_fp_rows <= 0 or actual_rows < expected_fp_rows:
                         raise DataJobError(
-                            "FORWARD_PATH_READBACK_EMPTY",
-                            f"Forward路径({day_text})独立读回为空。",
+                            "FORWARD_PATH_READBACK_INCOMPLETE",
+                            f"Forward路径({day_text})独立读回不完整（实际{actual_rows} < 预期{expected_fp_rows}）。",
                             status=409,
                         )
                     progress_callback(
@@ -10259,7 +10354,7 @@ def _execute_shared_production_chain_impl(
                         source_capture_id=source_capture_id,
                         profile_history_session_count=None,
                         d1_history_session_count=None,
-                        expected_rows=actual_rows,
+                        expected_rows=expected_fp_rows,
                         inserted_rows=total_inserted,
                         quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
                         no_change=total_inserted == 0,
@@ -10300,12 +10395,16 @@ def _execute_shared_production_chain_impl(
                 continue
             begin_callback(job_id=job_id, units=day_units)
             try:
+                from stock_a.application.source_cohort_stats import _COHORT_RULE_IDS
+
                 res = persist_cohort_stats(
                     config,
                     target=day,
                     research_cutoff=cutoff,
                     source_capture_id=source_capture_id,
+                    expected_rules=_COHORT_RULE_IDS,
                 )
+                expected_cs_rows = len(_COHORT_RULE_IDS) * 5 * 6
                 for unit in day_units:
                     actual_rows = data_job_pg.read_business_table_count(
                         config,
@@ -10315,10 +10414,13 @@ def _execute_shared_production_chain_impl(
                         calendar_revision=cal_revision,
                         research_cutoff=cutoff,
                     )
-                    if actual_rows < int(res.get("groups", 0)):
+                    if (
+                        actual_rows < expected_cs_rows
+                        or int(res.get("groups", 0)) < expected_cs_rows
+                    ):
                         raise DataJobError(
                             "COHORT_STATS_READBACK_MISMATCH",
-                            f"Cohort分组统计({day_text})独立读回行数不足。",
+                            f"Cohort分组统计({day_text})独立读回行数不足（实际{actual_rows} < 预期{expected_cs_rows}）。",
                             status=409,
                         )
                     progress_callback(
@@ -10329,7 +10431,7 @@ def _execute_shared_production_chain_impl(
                         source_capture_id=source_capture_id,
                         profile_history_session_count=None,
                         d1_history_session_count=None,
-                        expected_rows=actual_rows,
+                        expected_rows=expected_cs_rows,
                         inserted_rows=int(res.get("groups", 0)),
                         quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
                         no_change=False,
@@ -10348,6 +10450,309 @@ def _execute_shared_production_chain_impl(
                     (
                         str(getattr(error, "code", type(error).__name__)),
                         f"Cohort分组统计({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FORMAL_FOCUS" in research_modules:
+        from stock_a.application.formal_focus import produce_formal_focus_day
+
+        for day_text in plan.get("module_output_sessions", {}).get("FORMAL_FOCUS", ()):
+            day = date.fromisoformat(day_text)
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "FORMAL_FOCUS"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                res = produce_formal_focus_day(config, target_session=day)
+                if res.get("status") == "NOT_COMPUTED":
+                    raise DataJobError(
+                        str(res.get("reason_code") or "FORMAL_FOCUS_UPSTREAM_MISSING"),
+                        f"正式Focus({day_text})缺少上游D2事实。",
+                        status=409,
+                    )
+                for unit in day_units:
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=unit["business_table"],
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=cal_revision,
+                        research_cutoff=cutoff,
+                    )
+                    expected_cnt = int(res.get("inserted_rows", 0) or 0)
+                    if actual_rows != expected_cnt:
+                        raise DataJobError(
+                            "FORMAL_FOCUS_READBACK_MISMATCH",
+                            f"正式Focus({day_text})独立读回行数不一致。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="FORMAL_FOCUS",
+                        target_session=day,
+                        business_table=unit["business_table"],
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=expected_cnt,
+                        inserted_rows=expected_cnt,
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=False,
+                        producer_version="TRACKING_COHORT_R1",
+                        calendar_revision=cal_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="FORMAL_FOCUS",
+                    error=error,
+                    message_prefix="正式Focus生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"正式Focus({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FORMAL_COHORT" in research_modules:
+        from stock_a.application.formal_cohort import produce_formal_cohort_day
+
+        for day_text in plan.get("module_output_sessions", {}).get("FORMAL_COHORT", ()):
+            day = date.fromisoformat(day_text)
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "FORMAL_COHORT"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                res = produce_formal_cohort_day(
+                    config,
+                    target_session=day,
+                    research_cutoff=cutoff,
+                )
+                expected_by_tbl = {
+                    "stock.formal_cohort_evaluations": int(
+                        res.get("inserted_evaluations", 0) or 0
+                    ),
+                    "stock.formal_cohort_event_subrows": int(
+                        res.get("inserted_subrows", 0) or 0
+                    ),
+                    "stock.formal_research_observations": int(
+                        res.get("inserted_observations", 0) or 0
+                    ),
+                }
+                for unit in day_units:
+                    tbl = unit["business_table"]
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=tbl,
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=cal_revision,
+                        research_cutoff=cutoff,
+                    )
+                    exp_cnt = expected_by_tbl[tbl]
+                    if actual_rows < exp_cnt:
+                        raise DataJobError(
+                            "FORMAL_COHORT_READBACK_MISMATCH",
+                            f"正式Cohort({day_text})表{tbl}独立读回行数不足。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="FORMAL_COHORT",
+                        target_session=day,
+                        business_table=tbl,
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=exp_cnt,
+                        inserted_rows=exp_cnt,
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=False,
+                        producer_version="TRACKING_COHORT_R1",
+                        calendar_revision=cal_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="FORMAL_COHORT",
+                    error=error,
+                    message_prefix="正式Cohort生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"正式Cohort({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FORMAL_BENCHMARK_M5" in research_modules:
+        from stock_a.application.formal_benchmark_m5 import (
+            produce_formal_benchmarks_and_m5_for_t0,
+        )
+
+        for day_text in plan.get("module_output_sessions", {}).get(
+            "FORMAL_BENCHMARK_M5", ()
+        ):
+            day = date.fromisoformat(day_text)
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "FORMAL_BENCHMARK_M5"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                res = produce_formal_benchmarks_and_m5_for_t0(
+                    config,
+                    t0_session=day,
+                    research_cutoff=cutoff,
+                )
+                expected_by_tbl = {
+                    "stock.formal_forward_benchmarks": int(
+                        res.get("benchmarks_inserted", 0) or 0
+                    ),
+                    "stock.formal_m5_matched_controls": int(
+                        res.get("controls_inserted", 0) or 0
+                    ),
+                    "stock.formal_m5_control_outcomes": int(
+                        res.get("outcomes_inserted", 0) or 0
+                    ),
+                }
+                for unit in day_units:
+                    tbl = unit["business_table"]
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=tbl,
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=cal_revision,
+                        research_cutoff=cutoff,
+                    )
+                    exp_cnt = expected_by_tbl[tbl]
+                    if actual_rows < exp_cnt:
+                        raise DataJobError(
+                            "FORMAL_BENCHMARK_M5_READBACK_MISMATCH",
+                            f"正式基准与M5({day_text})表{tbl}独立读回行数不足。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="FORMAL_BENCHMARK_M5",
+                        target_session=day,
+                        business_table=tbl,
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=exp_cnt,
+                        inserted_rows=exp_cnt,
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=False,
+                        producer_version="FORWARD_COMPARISON_R1",
+                        calendar_revision=cal_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="FORMAL_BENCHMARK_M5",
+                    error=error,
+                    message_prefix="正式基准与M5生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"正式基准与M5({day_text})未闭合：{str(error)[:300]}",
+                    )
+                )
+
+    if "FORMAL_STRUCTURE_EVENTS" in research_modules:
+        from stock_a.application.formal_structure_events import (
+            produce_formal_structure_first_events_for_t0,
+        )
+
+        for day_text in plan.get("module_output_sessions", {}).get(
+            "FORMAL_STRUCTURE_EVENTS", ()
+        ):
+            day = date.fromisoformat(day_text)
+            day_units = [
+                unit
+                for unit in plan.get("stage_units", ())
+                if unit.get("stage_code") == "FORMAL_STRUCTURE_EVENTS"
+                and unit.get("target_session") == day
+                and unit.get("status") == "NOT_STARTED"
+            ]
+            if not day_units:
+                continue
+            begin_callback(job_id=job_id, units=day_units)
+            try:
+                res = produce_formal_structure_first_events_for_t0(
+                    config,
+                    t0_session=day,
+                    research_cutoff=cutoff,
+                )
+                exp_cnt = int(res.get("inserted_rows", 0) or 0)
+                for unit in day_units:
+                    tbl = unit["business_table"]
+                    actual_rows = data_job_pg.read_business_table_count(
+                        config,
+                        business_table=tbl,
+                        target_session=day,
+                        source_capture_id=source_capture_id,
+                        calendar_revision=cal_revision,
+                        research_cutoff=cutoff,
+                    )
+                    if actual_rows < exp_cnt:
+                        raise DataJobError(
+                            "FORMAL_STRUCTURE_EVENTS_READBACK_MISMATCH",
+                            f"原T0结构首事件({day_text})独立读回行数不足。",
+                            status=409,
+                        )
+                    progress_callback(
+                        job_id=job_id,
+                        stage_code="FORMAL_STRUCTURE_EVENTS",
+                        target_session=day,
+                        business_table=tbl,
+                        source_capture_id=source_capture_id,
+                        profile_history_session_count=None,
+                        d1_history_session_count=None,
+                        expected_rows=exp_cnt,
+                        inserted_rows=exp_cnt,
+                        quality_status="COMPLETE_QFQ_NON_PIT_CROSS_TRANSACTION_READBACK",
+                        no_change=False,
+                        producer_version="FORWARD_COMPARISON_R1",
+                        calendar_revision=cal_revision,
+                    )
+                    resolved_unit_keys.add(unit_key(unit))
+            except Exception as error:  # noqa: BLE001
+                mark_units_incomplete(
+                    day_units,
+                    stage_code="FORMAL_STRUCTURE_EVENTS",
+                    error=error,
+                    message_prefix="原T0结构首事件生产或独立读回未闭合",
+                )
+                incomplete_stage_errors.append(
+                    (
+                        str(getattr(error, "code", type(error).__name__)),
+                        f"原T0结构首事件({day_text})未闭合：{str(error)[:300]}",
                     )
                 )
 

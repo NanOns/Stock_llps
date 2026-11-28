@@ -140,6 +140,22 @@ _MODULE_PROGRESS_TABLES = {
         }
     ),
     "COHORT_STATS": frozenset({"stock.source_cohort_group_stats"}),
+    "FORMAL_FOCUS": frozenset({"stock.formal_focus_episode_day_facts"}),
+    "FORMAL_COHORT": frozenset(
+        {
+            "stock.formal_cohort_evaluations",
+            "stock.formal_cohort_event_subrows",
+            "stock.formal_research_observations",
+        }
+    ),
+    "FORMAL_BENCHMARK_M5": frozenset(
+        {
+            "stock.formal_forward_benchmarks",
+            "stock.formal_m5_matched_controls",
+            "stock.formal_m5_control_outcomes",
+        }
+    ),
+    "FORMAL_STRUCTURE_EVENTS": frozenset({"stock.formal_structure_first_events"}),
     "FEP_BASELINE": frozenset({"stock.source_fep_baseline_facts"}),
     "OBSERVATION_SEGMENTS": frozenset(
         {"stock.source_research_observation_segment_days"}
@@ -1083,6 +1099,38 @@ _FACT_DATE_COUNT_QUERIES: dict[str, tuple[str, bool]] = {
     ),
     "stock.source_cohort_group_stats": (
         "SELECT target_session, count(*)::bigint FROM stock.source_cohort_group_stats WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.formal_focus_episode_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.formal_focus_episode_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.formal_cohort_evaluations": (
+        "SELECT target_session, count(*)::bigint FROM stock.formal_cohort_evaluations WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.formal_cohort_event_subrows": (
+        "SELECT target_session, count(*)::bigint FROM stock.formal_cohort_event_subrows WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.formal_research_observations": (
+        "SELECT t0_session, count(*)::bigint FROM stock.formal_research_observations WHERE t0_session<=%s GROUP BY t0_session",
+        True,
+    ),
+    "stock.formal_forward_benchmarks": (
+        "SELECT t0_session, count(*)::bigint FROM stock.formal_forward_benchmarks WHERE t0_session<=%s GROUP BY t0_session",
+        True,
+    ),
+    "stock.formal_m5_matched_controls": (
+        "SELECT t0_session, count(*)::bigint FROM stock.formal_m5_matched_controls WHERE t0_session<=%s GROUP BY t0_session",
+        True,
+    ),
+    "stock.formal_m5_control_outcomes": (
+        "SELECT ob.t0_session, count(*)::bigint FROM stock.formal_m5_control_outcomes o JOIN stock.formal_research_observations ob ON ob.id=o.observation_id WHERE ob.t0_session<=%s GROUP BY ob.t0_session",
+        True,
+    ),
+    "stock.formal_structure_first_events": (
+        "SELECT t0_session, count(*)::bigint FROM stock.formal_structure_first_events WHERE t0_session<=%s GROUP BY t0_session",
         True,
     ),
     "stock.source_fep_baseline_facts": (
@@ -6456,6 +6504,40 @@ def read_business_table_count(
                 effective_cutoff,
             ),
         ),
+        "stock.formal_focus_episode_day_facts": (
+            "SELECT count(*) FROM stock.formal_focus_episode_day_facts WHERE target_session=%s",
+            lambda: (target_session,),
+        ),
+        "stock.formal_cohort_evaluations": (
+            "SELECT count(*) FROM stock.formal_cohort_evaluations WHERE target_session=%s",
+            lambda: (target_session,),
+        ),
+        "stock.formal_cohort_event_subrows": (
+            "SELECT count(*) FROM stock.formal_cohort_event_subrows WHERE target_session=%s",
+            lambda: (target_session,),
+        ),
+        "stock.formal_research_observations": (
+            "SELECT count(*) FROM stock.formal_research_observations WHERE t0_session=%s",
+            lambda: (target_session,),
+        ),
+        "stock.formal_forward_benchmarks": (
+            "SELECT count(*) FROM stock.formal_forward_benchmarks WHERE t0_session=%s",
+            lambda: (target_session,),
+        ),
+        "stock.formal_m5_matched_controls": (
+            "SELECT count(*) FROM stock.formal_m5_matched_controls WHERE t0_session=%s",
+            lambda: (target_session,),
+        ),
+        "stock.formal_m5_control_outcomes": (
+            """SELECT count(*) FROM stock.formal_m5_control_outcomes o
+               JOIN stock.formal_research_observations ob ON ob.id=o.observation_id
+               WHERE ob.t0_session=%s""",
+            lambda: (target_session,),
+        ),
+        "stock.formal_structure_first_events": (
+            "SELECT count(*) FROM stock.formal_structure_first_events WHERE t0_session=%s",
+            lambda: (target_session,),
+        ),
         "stock.source_fep_baseline_facts": (
             """SELECT count(*) FROM stock.source_fep_baseline_facts
                WHERE research_cutoff=%s""",
@@ -8733,3 +8815,68 @@ def invalidate_derived_for_raw_price_changes_in_cursor(
             d.isoformat() for days in affected_by_table_sessions.values() for d in days
         ),
     }
+
+
+def read_forward_path_due_complete(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    due_horizons: Sequence[int],
+) -> bool:
+    """核对T0全部已到期期限在source_forward_path_facts中是否均已完整落库。"""
+    if not due_horizons:
+        return True
+    with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """SELECT count(DISTINCT source_symbol)
+               FROM stock.source_pool_seed_day_facts
+               WHERE target_session=%s
+                 AND producer_version='SOURCE_POOL_SEED_CORE_PROFILE_R2'""",
+            (target_session,),
+        )
+        seed_cnt = int(cursor.fetchone()[0] or 0)
+        if seed_cnt <= 0:
+            return False
+        cursor.execute(
+            """SELECT horizon, count(DISTINCT source_symbol)
+               FROM stock.source_forward_path_facts
+               WHERE target_session=%s AND horizon=ANY(%s)
+               GROUP BY horizon""",
+            (target_session, list(due_horizons)),
+        )
+        counts = {int(row[0]): int(row[1]) for row in cursor.fetchall()}
+    return all(counts.get(int(h), 0) == seed_cnt for h in due_horizons)
+
+
+def read_cohort_stats_complete(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    expected_rules: Sequence[str] | None = None,
+) -> bool:
+    """核对指定目标日与截止日下全部选定规则与5个期限的Cohort统计是否均已完整落库。"""
+    from stock_a.application.source_cohort_stats import _COHORT_RULE_IDS
+
+    rules = tuple(expected_rules) if expected_rules is not None else _COHORT_RULE_IDS
+    expected_rows = len(rules) * 5 * 6
+    with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """SELECT count(*), count(DISTINCT rule_id)
+               FROM stock.source_cohort_group_stats
+               WHERE target_session=%s AND research_cutoff=%s
+                 AND rule_id=ANY(%s)""",
+            (target_session, research_cutoff, list(rules)),
+        )
+        row = cursor.fetchone()
+        actual_rows = int(row[0] or 0)
+        actual_rules = int(row[1] or 0)
+    return actual_rows == expected_rows and actual_rules == len(rules)

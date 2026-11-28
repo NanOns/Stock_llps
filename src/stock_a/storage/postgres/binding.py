@@ -109,6 +109,8 @@ _MIGRATION_FILES = (
     "0095_r04_round2_pipeline_closure.sql",
     "0096_r04_data_jobs_d2_lifecycle_enum.sql",
     "0097_r04_pb_continue_parent_detail_facts.sql",
+    "0098_r05_forward_path_metric_qualities.sql",
+    "0099_r05_formal_focus_cohort_bench_events.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -190,6 +192,8 @@ _TASK_SCOPE_MIGRATIONS = {
     "R04_ROUND1_INTEGRATED_BUSINESS_CLOSURE_20261127": frozenset({93}),
     "R04_ROUND1_ADMISSION_ENUM_20261127": frozenset({94}),
     "R04_ROUND2_PIPELINE_CLOSURE_20261127": frozenset({95, 96}),
+    "R04_ROUND3_TARGETED_CORE_CLOSURE_20261127": frozenset({97}),
+    "R05_INTEGRATED_BUGFIX_AND_FORMAL_RESEARCH_CLOSURE_20261128": frozenset({98, 99}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -461,6 +465,20 @@ _RELATIONS_BY_MIGRATION_COUNT[95] = _RELATIONS_BY_MIGRATION_COUNT[94] | {
     "source_d1_anchor_day_observations",
 }
 _RELATIONS_BY_MIGRATION_COUNT[96] = _RELATIONS_BY_MIGRATION_COUNT[95]
+_RELATIONS_BY_MIGRATION_COUNT[97] = _RELATIONS_BY_MIGRATION_COUNT[96] | {
+    "d0_parent_scenario_detail_facts",
+}
+_RELATIONS_BY_MIGRATION_COUNT[98] = _RELATIONS_BY_MIGRATION_COUNT[97]
+_RELATIONS_BY_MIGRATION_COUNT[99] = _RELATIONS_BY_MIGRATION_COUNT[98] | {
+    "formal_focus_episode_day_facts",
+    "formal_cohort_evaluations",
+    "formal_cohort_event_subrows",
+    "formal_research_observations",
+    "formal_forward_benchmarks",
+    "formal_m5_matched_controls",
+    "formal_m5_control_outcomes",
+    "formal_structure_first_events",
+}
 
 
 class BindingRefused(Exception):

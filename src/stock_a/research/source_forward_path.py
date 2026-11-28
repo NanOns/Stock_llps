@@ -91,6 +91,105 @@ def forward_calendar_revision_compatible(
     return True
 
 
+def _parse_qfq_capture_coordinate(coord_id: str | None) -> int | None:
+    if not isinstance(coord_id, str) or not coord_id:
+        return None
+    for prefix in (
+        "BAOSTOCK_QFQ_CAPTURE_",
+        "FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:",
+    ):
+        if coord_id.startswith(prefix):
+            tail = coord_id[len(prefix) :].split(":", 1)[0]
+            return int(tail) if tail.isdigit() else None
+    return None
+
+
+def _same_economic_coordinate(coord_a: str | None, coord_b: str | None) -> bool:
+    """判断两个坐标标识是否指向同一真实可比经济坐标。"""
+    if not coord_a or not coord_b:
+        return False
+    if coord_a == "FORWARD_ADJUSTED" or coord_b == "FORWARD_ADJUSTED":
+        return False
+    if coord_a == coord_b:
+        return True
+    cap_a = _parse_qfq_capture_coordinate(coord_a)
+    cap_b = _parse_qfq_capture_coordinate(coord_b)
+    return cap_a is not None and cap_a == cap_b
+
+
+def _row_qfq_coordinate_id(row: Mapping[str, Any] | None, *, symbol: str) -> str | None:
+    if row is None:
+        return None
+    for key in ("qfq_coordinate_id", "coordinate_id"):
+        val = row.get(key)
+        if isinstance(val, str) and val and val != "FORWARD_ADJUSTED":
+            return val
+    cap = row.get("qfq_source_capture_id") or row.get("source_capture_id")
+    if type(cap) is int and cap > 0:
+        return f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{cap}:{symbol}"
+    return None
+
+
+def _qfq_row_metric_field(
+    row: Mapping[str, Any] | None, field: str
+) -> tuple[Fraction | None, str, str | None]:
+    """按单字段依赖提取QFQ价格；不因无关字段缺失抹除合法指标，OHLC冲突保守拒绝。"""
+    from stock_a.research.entry_history.support import trade_status_state_from_pg_row
+
+    if row is None:
+        return None, "UNKNOWN", "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+    trade_state, trade_reason = trade_status_state_from_pg_row(
+        row, price_coordinate="FORWARD_ADJUSTED"
+    )
+    if trade_state != "ACTUAL":
+        return None, "UNKNOWN", trade_reason or "QFQ_TRADE_STATUS_NOT_ACTUAL"
+    bar_status = row.get("qfq_bar_status")
+    if bar_status is not None and bar_status != "TARGET_PRESENT":
+        return (
+            None,
+            "UNKNOWN",
+            str(row.get("qfq_bar_reason") or "QFQ_TARGET_BAR_MISSING"),
+        )
+
+    # 检查已有非空OHLC是否存在包络冲突或非正数
+    present_vals: dict[str, Fraction] = {}
+    for name in ("open", "high", "low", "close"):
+        raw_val = row.get(f"qfq_{name}")
+        if raw_val is not None:
+            try:
+                num = exact_number(raw_val)
+            except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+                return None, "BAD_VALUE", "QFQ_PRICE_VALUE_INVALID"
+            if num <= 0:
+                return None, "BAD_VALUE", "QFQ_PRICE_NON_POSITIVE"
+            present_vals[name] = num
+    if len(present_vals) == 4:
+        if present_vals["low"] > min(
+            present_vals["open"], present_vals["close"]
+        ) or present_vals["high"] < max(present_vals["open"], present_vals["close"]):
+            return None, "BAD_VALUE", "QFQ_OHLC_ENVELOPE_INVALID"
+    elif "high" in present_vals and "low" in present_vals:
+        if present_vals["high"] < present_vals["low"]:
+            return None, "BAD_VALUE", "QFQ_OHLC_ENVELOPE_INVALID"
+
+    field_quality_col = f"qfq_{field}_quality"
+    field_reason_col = f"qfq_{field}_reason"
+    if field_quality_col in row:
+        quality = row.get(field_quality_col)
+        reason = row.get(field_reason_col) or row.get("qfq_price_reason")
+    else:
+        quality = row.get("qfq_price_quality")
+        reason = row.get("qfq_price_reason")
+
+    if quality == "OBSERVED" and field in present_vals:
+        return present_vals[field], "OBSERVED", None
+    if quality not in ("OBSERVED", None):
+        return None, "UNKNOWN", str(reason or f"QFQ_{field.upper()}_UNKNOWN")
+    if field in present_vals and row.get("qfq_price_quality") in ("OBSERVED", None):
+        return present_vals[field], "OBSERVED", None
+    return None, "UNKNOWN", str(reason or f"QFQ_{field.upper()}_MISSING")
+
+
 def exploratory_raw_path(
     sessions: Sequence[date],
     rows: Sequence[Mapping[str, Any]],
@@ -145,6 +244,8 @@ def exploratory_raw_path(
             "path_quality": "UNKNOWN",
             "path_reasons": [code],
             "path_values": None,
+            "metric_qualities": {"mfe": "UNKNOWN", "mae": "UNKNOWN", "mdd": "UNKNOWN"},
+            "metric_reasons": {"mfe": code, "mae": code, "mdd": code},
             "database_write": False,
         }
 
@@ -189,19 +290,52 @@ def exploratory_raw_path(
         )
 
     birth = by_date.get(session_vector[0])
-    if (
-        birth is None
-        or _timeline_actual_qfq_ohlc(birth)["close"]["quality"] != "OBSERVED"
-    ):
+    c0_val, c0_qual, c0_reason = _qfq_row_metric_field(birth, "close")
+    if birth is None or c0_qual != "OBSERVED" or c0_val is None:
         return not_computed(
-            "QFQ_T0_CLOSE_UNAVAILABLE",
+            c0_reason or "QFQ_T0_CLOSE_UNAVAILABLE",
             "路径T0没有可观察QFQ收盘价；不回退未复权收盘。",
         )
+    symbol_text = symbols[0]
+    t0_coord = _row_qfq_coordinate_id(birth, symbol=symbol_text)
     facts = post_signal_price_facts(session_vector, rows, horizon)
     endpoint = facts["points"][horizon - 1]
+    is_due = len(session_vector) == horizon + 1
+    if is_due:
+        end_row = by_date.get(session_vector[-1])
+        end_coord = _row_qfq_coordinate_id(end_row, symbol=symbol_text)
+        if not _same_economic_coordinate(t0_coord, end_coord):
+            endpoint = dict(endpoint)
+            endpoint["qfq_close_relative_change"] = {
+                "value": None,
+                "quality": "UNKNOWN",
+                "reason": "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN",
+            }
+        else:
+            cn_val, cn_qual, cn_reason = _qfq_row_metric_field(end_row, "close")
+            if cn_qual == "OBSERVED" and cn_val is not None:
+                ret_val = cn_val / c0_val - 1
+                endpoint = dict(endpoint)
+                endpoint["qfq_close_relative_change"] = {
+                    "value": {
+                        "numerator": str(ret_val.numerator),
+                        "denominator": str(ret_val.denominator),
+                        "exact": str(ret_val),
+                    },
+                    "quality": "OBSERVED",
+                    "reason": None,
+                }
+            else:
+                endpoint = dict(endpoint)
+                endpoint["qfq_close_relative_change"] = {
+                    "value": None,
+                    "quality": "UNKNOWN",
+                    "reason": cn_reason or "QFQ_ENDPOINT_CLOSE_UNKNOWN",
+                }
+
     if target_session is None:
         maturity = "RIGHT_CENSORED"
-    elif len(session_vector) <= horizon:
+    elif not is_due:
         maturity = "NOT_DUE_AT_CUTOFF"
     elif endpoint["qfq_close_relative_change"]["quality"] == "OBSERVED":
         maturity = "ENDPOINT_OBSERVED_NON_PIT"
@@ -210,58 +344,113 @@ def exploratory_raw_path(
     else:
         maturity = "ENDPOINT_UNKNOWN"
 
-    complete = len(session_vector) == horizon + 1 and all(
-        _timeline_actual_qfq_ohlc(by_date.get(session))["quality"] == "OBSERVED"
-        for session in session_vector
-    )
-    path_reasons = []
-    if len(session_vector) <= horizon:
+    path_reasons: list[str] = []
+    if not is_due:
         path_reasons.append("WINDOW_NOT_AVAILABLE")
-    for session in session_vector:
-        row = by_date.get(session)
-        qfq = _timeline_actual_qfq_ohlc(row)
-        if qfq["quality"] != "OBSERVED":
-            path_reasons.append(
-                f"{session.isoformat()}:{qfq['reason'] or 'QFQ_PRICE_UNKNOWN'}"
-            )
-    values = None
-    if complete:
-        selected = {row["session_date"]: row for row in by_date.values()}
-        base = exact_number(selected[session_vector[0]]["qfq_close"])
-        mfe = max(
-            Fraction(0),
-            *(
-                exact_number(selected[day]["qfq_high"]) / base - 1
-                for day in session_vector[1:]
-            ),
-        )
-        mae = min(
-            Fraction(0),
-            *(
-                exact_number(selected[day]["qfq_low"]) / base - 1
-                for day in session_vector[1:]
-            ),
-        )
-        peak = base
-        mdd = Fraction(0)
-        for day in session_vector[1:]:
-            close = exact_number(selected[day]["qfq_close"])
-            peak = max(peak, close)
-            mdd = min(mdd, close / peak - 1)
-        values = {"mfe": str(mfe), "mae": str(mae), "mdd": str(mdd)}
+        metric_qualities = {"mfe": "NOT_DUE", "mae": "NOT_DUE", "mdd": "NOT_DUE"}
+        metric_reasons = {
+            "mfe": "WINDOW_NOT_AVAILABLE",
+            "mae": "WINDOW_NOT_AVAILABLE",
+            "mdd": "WINDOW_NOT_AVAILABLE",
+        }
+        values = None
+        path_quality = "UNKNOWN"
+    else:
+        mfe_vals: list[Fraction] = []
+        mae_vals: list[Fraction] = []
+        mdd_closes: list[Fraction] = []
+        mfe_err: str | None = None
+        mae_err: str | None = None
+        mdd_err: str | None = None
 
+        for day in session_vector[1:]:
+            row = by_date.get(day)
+            day_coord = _row_qfq_coordinate_id(row, symbol=symbol_text)
+            if not _same_economic_coordinate(t0_coord, day_coord):
+                err = "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
+                if mfe_err is None:
+                    mfe_err = err
+                    path_reasons.append(f"{day.isoformat()}:{err}")
+                if mae_err is None:
+                    mae_err = err
+                if mdd_err is None:
+                    mdd_err = err
+                continue
+            h_val, h_qual, h_reason = _qfq_row_metric_field(row, "high")
+            if h_qual == "OBSERVED" and h_val is not None:
+                mfe_vals.append(h_val)
+            elif mfe_err is None:
+                mfe_err = h_reason or "QFQ_HIGH_UNKNOWN"
+                path_reasons.append(f"{day.isoformat()}:{mfe_err}")
+
+            l_val, l_qual, l_reason = _qfq_row_metric_field(row, "low")
+            if l_qual == "OBSERVED" and l_val is not None:
+                mae_vals.append(l_val)
+            elif mae_err is None:
+                mae_err = l_reason or "QFQ_LOW_UNKNOWN"
+                path_reasons.append(f"{day.isoformat()}:{mae_err}")
+
+            c_val, c_qual, c_reason = _qfq_row_metric_field(row, "close")
+            if c_qual == "OBSERVED" and c_val is not None:
+                mdd_closes.append(c_val)
+            elif mdd_err is None:
+                mdd_err = c_reason or "QFQ_CLOSE_UNKNOWN"
+                path_reasons.append(f"{day.isoformat()}:{mdd_err}")
+
+        mfe_str: str | None = None
+        mae_str: str | None = None
+        mdd_str: str | None = None
+        if mfe_err is None and len(mfe_vals) == horizon:
+            mfe_str = str(max(Fraction(0), *(h / c0_val - 1 for h in mfe_vals)))
+        if mae_err is None and len(mae_vals) == horizon:
+            mae_str = str(min(Fraction(0), *(low_v / c0_val - 1 for low_v in mae_vals)))
+        if mdd_err is None and len(mdd_closes) == horizon:
+            peak = c0_val
+            mdd_v = Fraction(0)
+            for close_v in mdd_closes:
+                peak = max(peak, close_v)
+                mdd_v = min(mdd_v, close_v / peak - 1)
+            mdd_str = str(mdd_v)
+
+        metric_qualities = {
+            "mfe": "OBSERVED" if mfe_str is not None else "UNKNOWN",
+            "mae": "OBSERVED" if mae_str is not None else "UNKNOWN",
+            "mdd": "OBSERVED" if mdd_str is not None else "UNKNOWN",
+        }
+        metric_reasons = {
+            "mfe": None if mfe_str is not None else (mfe_err or "QFQ_HIGH_UNKNOWN"),
+            "mae": None if mae_str is not None else (mae_err or "QFQ_LOW_UNKNOWN"),
+            "mdd": None if mdd_str is not None else (mdd_err or "QFQ_CLOSE_UNKNOWN"),
+        }
+        values = (
+            {"mfe": mfe_str, "mae": mae_str, "mdd": mdd_str}
+            if any(v is not None for v in (mfe_str, mae_str, mdd_str))
+            else None
+        )
+        observed_cnt = sum(q == "OBSERVED" for q in metric_qualities.values())
+        path_quality = (
+            "OBSERVED"
+            if observed_cnt == 3
+            else "PARTIAL"
+            if observed_cnt > 0
+            else "UNKNOWN"
+        )
+
+    complete = path_quality == "OBSERVED"
     return {
         "scope": "EXPLORATORY_QFQ_PATH_NON_PIT",
         "status": "AVAILABLE" if complete else "INCOMPLETE",
         "horizon": horizon,
         "target_session": target_session.isoformat() if target_session else None,
         "maturity": maturity,
-        "due": len(session_vector) == horizon + 1,
+        "due": is_due,
         "endpoint": endpoint,
         "points": facts["points"],
-        "path_quality": "OBSERVED" if complete else "UNKNOWN",
-        "path_reasons": path_reasons,
+        "path_quality": path_quality,
+        "path_reasons": list(dict.fromkeys(path_reasons)),
         "path_values": values,
+        "metric_qualities": metric_qualities,
+        "metric_reasons": metric_reasons,
         "source_capture_id": source_capture_id,
         "price_coordinate": price_coordinate,
         "time_role": "NON_PIT_RETROSPECTIVE",

@@ -6230,6 +6230,175 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ) from error
                 self._send_json(200, {"ok": True, **result})
                 return
+            if parsed.path == "/api/product/formal-focus":
+                from stock_a.storage.postgres.formal_focus import read_formal_focus_page
+
+                values = _query(
+                    self.path,
+                    {
+                        "target_session",
+                        "include_exited",
+                        "include_archived",
+                        "symbol",
+                        "offset",
+                        "limit",
+                    },
+                )
+                if "target_session" not in values:
+                    raise PreviewHttpError(400, "QUERY_REQUIRED", "须提供目标交易日")
+                target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
+                symbol = values.get("symbol") or None
+                if symbol is not None and not _SYMBOL.fullmatch(symbol):
+                    raise PreviewHttpError(400, "SYMBOL_INVALID", "来源代码格式无效")
+                result = read_formal_focus_page(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    include_exited=values.get("include_exited") == "true",
+                    include_archived=values.get("include_archived") == "true",
+                    symbol=symbol,
+                    offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                    limit=_positive_int(
+                        _nonnegative_int(values.get("limit", "30"), "limit", 100),
+                        "limit",
+                        100,
+                    ),
+                )
+                self._send_json(200, {"ok": True, **result})
+                return
+            if parsed.path == "/api/product/formal-cohort":
+                from stock_a.storage.postgres.formal_cohort import (
+                    read_formal_cohort_members,
+                    read_formal_cohort_summary,
+                )
+
+                values = _query(
+                    self.path,
+                    {
+                        "target_session",
+                        "rule_id",
+                        "entity_type",
+                        "state",
+                        "offset",
+                        "limit",
+                    },
+                )
+                if "target_session" not in values:
+                    raise PreviewHttpError(400, "QUERY_REQUIRED", "须提供目标交易日")
+                target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
+                rule_id = values.get("rule_id") or None
+                if rule_id is not None:
+                    result = read_formal_cohort_members(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        rule_id=rule_id,
+                        entity_type=values.get("entity_type") or None,
+                        state_filter=values.get("state") or None,
+                        offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                        limit=_positive_int(
+                            _nonnegative_int(values.get("limit", "30"), "limit", 100),
+                            "limit",
+                            100,
+                        ),
+                    )
+                else:
+                    result = read_formal_cohort_summary(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        entity_type=values.get("entity_type") or None,
+                    )
+                self._send_json(200, {"ok": True, **result})
+                return
+            if parsed.path == "/api/product/formal-observations":
+                from stock_a.storage.postgres.formal_cohort import (
+                    read_formal_observations,
+                )
+
+                values = _query(
+                    self.path,
+                    {
+                        "t0_session",
+                        "rule_id",
+                        "time_lane",
+                        "entity_id",
+                        "offset",
+                        "limit",
+                    },
+                )
+                if "t0_session" not in values:
+                    raise PreviewHttpError(400, "QUERY_REQUIRED", "须提供T0交易日")
+                t0 = _iso_date(values["t0_session"])
+                _require_research_cutoff(t0, self.preview_server.state.research_cutoff)
+                result = read_formal_observations(
+                    self.preview_server.state.config,
+                    t0_session=t0,
+                    rule_id=values.get("rule_id") or None,
+                    time_lane=values.get("time_lane") or None,
+                    entity_id=values.get("entity_id") or None,
+                    offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                    limit=_positive_int(
+                        _nonnegative_int(values.get("limit", "50"), "limit", 100),
+                        "limit",
+                        100,
+                    ),
+                )
+                self._send_json(200, {"ok": True, **result})
+                return
+            if parsed.path == "/api/product/formal-benchmarks-m5":
+                from stock_a.application.formal_benchmark_m5 import (
+                    read_formal_benchmarks_and_m5,
+                )
+
+                values = _query(self.path, {"t0_session", "observation_id"})
+                if "t0_session" not in values:
+                    raise PreviewHttpError(400, "QUERY_REQUIRED", "须提供T0交易日")
+                t0 = _iso_date(values["t0_session"])
+                _require_research_cutoff(t0, self.preview_server.state.research_cutoff)
+                obs_id = (
+                    _positive_int(
+                        _nonnegative_int(values["observation_id"], "observation_id"),
+                        "observation_id",
+                    )
+                    if "observation_id" in values
+                    else None
+                )
+                result = read_formal_benchmarks_and_m5(
+                    self.preview_server.state.config,
+                    t0_session=t0,
+                    observation_id=obs_id,
+                )
+                self._send_json(200, {"ok": True, **result})
+                return
+            if parsed.path == "/api/product/formal-structure-events":
+                from stock_a.application.formal_structure_events import (
+                    read_formal_structure_first_events,
+                )
+
+                values = _query(self.path, {"t0_session", "observation_id"})
+                if "t0_session" not in values:
+                    raise PreviewHttpError(400, "QUERY_REQUIRED", "须提供T0交易日")
+                t0 = _iso_date(values["t0_session"])
+                _require_research_cutoff(t0, self.preview_server.state.research_cutoff)
+                obs_id = (
+                    _positive_int(
+                        _nonnegative_int(values["observation_id"], "observation_id"),
+                        "observation_id",
+                    )
+                    if "observation_id" in values
+                    else None
+                )
+                result = read_formal_structure_first_events(
+                    self.preview_server.state.config,
+                    t0_session=t0,
+                    observation_id=obs_id,
+                )
+                self._send_json(200, {"ok": True, **result})
+                return
             if parsed.path == "/api/preview/sector-change-context":
                 values = _query(
                     self.path,

@@ -14,13 +14,25 @@ from stock_a.storage.postgres.source_raw import _transaction
 _COHORT_RULE_IDS = ("LAUNCH_CONFIRM", "RECOVERY_TURN", "s1", "s2", "seed")
 
 
-def persist_cohort_stats(config, *, target, research_cutoff, source_capture_id):
+def persist_cohort_stats(
+    config,
+    *,
+    target,
+    research_cutoff,
+    source_capture_id,
+    expected_rules=None,
+):
     """在单事务内读取完整规则并保存六组typed统计；不读取来源文件。"""
     if target > research_cutoff:
         raise ValueError("目标日不得晚于研究截止日")
     _, _, revision, calendar = _load_calendar(research_cutoff)
     if target not in calendar:
         raise ValueError("目标日不在官方日历中")
+    target_rules = (
+        tuple(expected_rules) if expected_rules is not None else _COHORT_RULE_IDS
+    )
+    if not target_rules:
+        raise ValueError("选定Cohort统计规则集合不能为空")
     with _transaction(config, write=True, statement_timeout_ms=30000) as (_, cursor, _):
         cursor.execute(
             """SELECT rule_id,profile_revision,history_session_count,d1_history_session_count,
@@ -30,11 +42,17 @@ def persist_cohort_stats(config, *, target, research_cutoff, source_capture_id):
                  AND rule_version=%s AND calendar_revision=%s
                  AND rule_id=ANY(%s)
                GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5""",
-            (target, source_capture_id, RULE_VERSION, revision, list(_COHORT_RULE_IDS)),
+            (target, source_capture_id, RULE_VERSION, revision, list(target_rules)),
         )
         keys = cursor.fetchall()
         if not keys:
             raise ValueError("目标日没有可汇总的精确规则事实")
+        found_rules = {row[0] for row in keys}
+        missing_rules = sorted(set(target_rules) - found_rules)
+        if missing_rules:
+            raise ValueError(
+                f"目标日缺少选定Cohort规则事实: {', '.join(missing_rules)}"
+            )
         total = 0
         for (
             rule,

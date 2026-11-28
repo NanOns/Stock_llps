@@ -513,22 +513,46 @@ def post_signal_price_facts(
     base_row = by_date.get(sessions[0])
     base = _timeline_actual_qfq_ohlc(base_row)
     base_raw = _timeline_raw_ohlc(base_row)
+    base_coord = (
+        base_row.get("qfq_coordinate_id")
+        or base_row.get("coordinate_id")
+        or (
+            f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{base_row.get('qfq_source_capture_id') or base_row.get('source_capture_id')}"
+            if base_row
+            and (
+                base_row.get("qfq_source_capture_id")
+                or base_row.get("source_capture_id")
+            )
+            else None
+        )
+    )
     points = []
     for index, session in enumerate(sessions[1:], 1):
         row = by_date.get(session)
         ohlc = _timeline_actual_qfq_ohlc(row)
         raw_ohlc = _timeline_raw_ohlc(row)
+        row_coord = (
+            row.get("qfq_coordinate_id")
+            or row.get("coordinate_id")
+            or (
+                f"FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{row.get('qfq_source_capture_id') or row.get('source_capture_id')}"
+                if row
+                and (row.get("qfq_source_capture_id") or row.get("source_capture_id"))
+                else None
+            )
+        )
         comparison = {
             "quality": "UNKNOWN",
             "reason": "T0_OR_ENDPOINT_QFQ_BAR_UNKNOWN",
             "value": None,
         }
-        if base["quality"] == ohlc["quality"] == "OBSERVED":
-            if (
-                capture_id is None
-                or row is None
-                or row.get("source_capture_id") != capture_id
-            ):
+        if (
+            base["close"]["quality"] == "OBSERVED"
+            and ohlc["close"]["quality"] == "OBSERVED"
+            and base_row is not None
+            and row is not None
+        ):
+            if base_coord is None or row_coord is None or base_coord != row_coord:
                 comparison["reason"] = "PAIRED_SOURCE_CAPTURE_MISMATCH"
             else:
                 value = (

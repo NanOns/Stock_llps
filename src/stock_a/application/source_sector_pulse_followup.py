@@ -17,7 +17,7 @@ from stock_a.storage.postgres.sector_pulse_followups import (
     read_source_sector_pulse_followups,
 )
 
-_HORIZONS = (1, 3, 5)
+_HORIZONS = (1, 3, 5, 10, 20)
 
 
 class SourceSectorPulseFollowupError(ValueError):

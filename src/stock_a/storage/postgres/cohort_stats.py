@@ -1,5 +1,6 @@
 """冻结Cohort的完整统计和有界规则事实只读投影。"""
 
+from datetime import date
 from fractions import Fraction
 
 from stock_a.storage.postgres.research_facts import (
@@ -540,7 +541,7 @@ def read_cohort_symbol_forward_paths(
             if len(horizon_due_sessions) >= horizon
             else None
         )
-        for horizon in (1, 3, 5)
+        for horizon in (1, 3, 5, 10, 20)
     }
     due_horizons = [
         horizon
@@ -594,17 +595,21 @@ def read_cohort_symbol_forward_paths(
             cursor.execute(
                 """SELECT horizon,path_rule_version,calendar_revision,endpoint_session,
                           maturity,endpoint_quality,endpoint_reason,endpoint_numerator,
-                          endpoint_denominator,path_quality,path_reasons,price_coordinate,scope
+                          endpoint_denominator,path_quality,path_reasons,price_coordinate,scope,
+                          mfe_numerator,mfe_denominator,mae_numerator,mae_denominator,
+                          mdd_numerator,mdd_denominator,
+                          mfe_quality,mfe_reason,mae_quality,mae_reason,
+                          mdd_quality,mdd_reason,source_capture_id
                    FROM source_forward_path_facts
-                   WHERE target_session=%s AND source_capture_id=%s
+                   WHERE target_session=%s
                      AND source_symbol=%s AND horizon=ANY(%s)
                    ORDER BY horizon,path_rule_version,calendar_revision""",
-                (target, capture_id, symbol, due_horizons),
+                (target, symbol, due_horizons),
             )
             stored_paths = cursor.fetchall()
 
     paths = []
-    for horizon in (1, 3, 5):
+    for horizon in (1, 3, 5, 10, 20):
         due_session = due_by_horizon[horizon]
         item = {
             "horizon": horizon,
@@ -619,6 +624,15 @@ def read_cohort_symbol_forward_paths(
             "endpoint_denominator": None,
             "path_quality": "UNKNOWN",
             "path_reasons": [],
+            "mfe": None,
+            "mfe_quality": "UNKNOWN",
+            "mfe_reason": None,
+            "mae": None,
+            "mae_quality": "UNKNOWN",
+            "mae_reason": None,
+            "mdd_close": None,
+            "mdd_quality": "UNKNOWN",
+            "mdd_reason": None,
             "path_rule_version": PATH_VERSION,
             "calendar_revision": calendar_revision,
             "price_coordinate": "FORWARD_ADJUSTED",
@@ -629,6 +643,9 @@ def read_cohort_symbol_forward_paths(
         elif due_session > research_cutoff:
             item.update(
                 status="NOT_DUE",
+                mfe_quality="NOT_DUE",
+                mae_quality="NOT_DUE",
+                mdd_quality="NOT_DUE",
                 reason_codes=["WAITING_FOR_FUTURE_OFFICIAL_SESSION"],
             )
         else:
@@ -677,6 +694,19 @@ def read_cohort_symbol_forward_paths(
                     path_reasons,
                     coordinate,
                     path_scope,
+                    mfe_num,
+                    mfe_den,
+                    mae_num,
+                    mae_den,
+                    mdd_num,
+                    mdd_den,
+                    mfe_qual,
+                    mfe_rsn,
+                    mae_qual,
+                    mae_rsn,
+                    mdd_qual,
+                    mdd_rsn,
+                    path_source_capture_id,
                 ) = exact[0]
                 reason_codes = [
                     item for item in (endpoint_reason, *(path_reasons or [])) if item
@@ -717,6 +747,37 @@ def read_cohort_symbol_forward_paths(
                     ),
                     path_quality=path_quality,
                     path_reasons=list(path_reasons or []),
+                    mfe=(
+                        str(Fraction(int(mfe_num), int(mfe_den)))
+                        if mfe_qual == "OBSERVED"
+                        and mfe_num is not None
+                        and mfe_den is not None
+                        and mfe_den > 0
+                        else None
+                    ),
+                    mfe_quality=mfe_qual,
+                    mfe_reason=mfe_rsn,
+                    mae=(
+                        str(Fraction(int(mae_num), int(mae_den)))
+                        if mae_qual == "OBSERVED"
+                        and mae_num is not None
+                        and mae_den is not None
+                        and mae_den > 0
+                        else None
+                    ),
+                    mae_quality=mae_qual,
+                    mae_reason=mae_rsn,
+                    mdd_close=(
+                        str(Fraction(int(mdd_num), int(mdd_den)))
+                        if mdd_qual == "OBSERVED"
+                        and mdd_num is not None
+                        and mdd_den is not None
+                        and mdd_den > 0
+                        else None
+                    ),
+                    mdd_quality=mdd_qual,
+                    mdd_reason=mdd_rsn,
+                    source_capture_id=path_source_capture_id,
                     path_rule_version=path_version,
                     calendar_revision=path_calendar,
                     price_coordinate=coordinate,

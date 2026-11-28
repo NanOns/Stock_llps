@@ -50,30 +50,14 @@ def _read_qfq_forward_rows(
     source_symbol: str,
     sessions: tuple[date, ...],
     research_cutoff: date,
-    source_capture_id: int,
+    source_capture_id: int | None = None,
 ) -> tuple[list[dict[str, Any]], date | None]:
-    """以同一捕获的QFQ价格读路径行及完整请求水位。"""
-    roster = read_baostock_capture_roster(
-        config, source_capture_id=source_capture_id, cutoff=research_cutoff
-    )
-    symbol_entry = next(
-        (
-            item
-            for item in roster.get("symbols", ())
-            if item.get("source_symbol") == source_symbol
-        ),
-        None,
-    )
-    if roster.get("status") != "AVAILABLE" or symbol_entry is None:
-        raise ValueError("BaoStock捕获目录中没有该代码或闭合请求窗口")
-    if tuple(roster.get("price_coordinates", ())) != (RAW_COORDINATE, QFQ_COORDINATE):
-        raise ValueError("BaoStock后继价格必须绑定配对RAW/QFQ捕获")
-
+    """按短业务键与实际QFQ坐标读取路径行及完整请求水位，不强绑paired capture。"""
     batch = read_baostock_price_history_batch(
         config,
         source_symbols=(source_symbol,),
         sessions=sessions,
-        source_capture_id=source_capture_id,
+        source_capture_id=None,
         price_coordinate=QFQ_COORDINATE,
         cutoff=research_cutoff,
         offset=0,
@@ -81,7 +65,6 @@ def _read_qfq_forward_rows(
     )
     if (
         batch.get("status") != "AVAILABLE"
-        or batch.get("source_capture_id") != source_capture_id
         or batch.get("price_coordinate") != QFQ_COORDINATE
         or batch.get("page", {}).get("next_offset") is not None
     ):
@@ -97,14 +80,11 @@ def _read_qfq_forward_rows(
         for row in batch.get("coverage", ())
         if isinstance(row.get("session_date"), str)
     }
-    start = date.fromisoformat(symbol_entry["eligible_start_session"])
-    end = date.fromisoformat(symbol_entry["eligible_end_session"])
     output: list[dict[str, Any]] = []
     saved_through: date | None = None
     contiguous_open = True
     for session in sessions:
         row = rows_by_session.get(session)
-        is_eligible = start <= session <= end
         coverage = coverage_by_session.get(session)
         request_closed = (
             isinstance(coverage, Mapping)
@@ -114,29 +94,9 @@ def _read_qfq_forward_rows(
             and int(coverage.get("symbol_count", 0)) == 1
         )
         if row is not None:
-            if (
-                row.get("source_capture_id") != source_capture_id
-                or row.get("price_coordinate") != QFQ_COORDINATE
-            ):
-                raise ValueError("BaoStock后继价格行与捕获或QFQ坐标不一致")
+            if row.get("price_coordinate") != QFQ_COORDINATE:
+                raise ValueError("BaoStock后继价格行与QFQ坐标不一致")
             output.append(row)
-        elif not is_eligible:
-            output.append(
-                {
-                    "source_symbol": source_symbol,
-                    "session_date": session,
-                    "source_capture_id": source_capture_id,
-                    "price_coordinate": QFQ_COORDINATE,
-                    "bar_status": "TARGET_MISSING",
-                    "bar_reason": "SOURCE_SYMBOL_OUTSIDE_ELIGIBLE_SESSION_WINDOW",
-                    "qfq_price_quality": "UNKNOWN",
-                    "qfq_price_reason": "SOURCE_SYMBOL_OUTSIDE_ELIGIBLE_SESSION_WINDOW",
-                    "qfq_open": None,
-                    "qfq_high": None,
-                    "qfq_low": None,
-                    "qfq_close": None,
-                }
-            )
         elif not request_closed:
             output.append(
                 {
@@ -155,7 +115,22 @@ def _read_qfq_forward_rows(
                 }
             )
         else:
-            raise ValueError("BaoStock完整QFQ请求没有对应的typed历史行，不能推断无Bar")
+            output.append(
+                {
+                    "source_symbol": source_symbol,
+                    "session_date": session,
+                    "source_capture_id": source_capture_id,
+                    "price_coordinate": QFQ_COORDINATE,
+                    "bar_status": "TARGET_MISSING",
+                    "bar_reason": "SOURCE_SYMBOL_OUTSIDE_ELIGIBLE_SESSION_WINDOW",
+                    "qfq_price_quality": "UNKNOWN",
+                    "qfq_price_reason": "SOURCE_SYMBOL_OUTSIDE_ELIGIBLE_SESSION_WINDOW",
+                    "qfq_open": None,
+                    "qfq_high": None,
+                    "qfq_low": None,
+                    "qfq_close": None,
+                }
+            )
 
         if contiguous_open:
             if request_closed and row is not None:
@@ -301,14 +276,20 @@ def read_persisted_cohort(
         birth = next(
             (row for row in source_rows if row["session_date"] == target), None
         )
-        if birth is None or int(birth["source_capture_id"]) != selected[21]:
-            raise ValueError("后继Raw与冻结来源捕获不一致")
+        if birth is None:
+            raise ValueError("T0 QFQ来源行缺失")
+        effective_qfq_capture_id = (
+            birth.get("source_capture_id")
+            if type(birth.get("source_capture_id")) is int
+            and birth.get("source_capture_id") > 0
+            else source_capture_id
+        )
         path = exploratory_raw_path(
             days,
             source_rows,
             horizon,
             target_session=endpoint_day,
-            source_capture_id=source_capture_id,
+            source_capture_id=effective_qfq_capture_id,
             price_coordinate=QFQ_COORDINATE,
             saved_through=saved_through,
         )
@@ -344,31 +325,42 @@ def read_persisted_cohort(
                 horizon=horizon,
                 scenario=rule,
             )
-        d1_rows = (
-            rows
-            if rule == "D1_ANCHOR_WINDOW"
-            else read_cohort_page(
-                **common, rule="D1_ANCHOR_WINDOW", offset=0, limit=1, symbol=symbol
-            )[2]
+        from stock_a.storage.postgres.research_facts import ResearchFactNotFound
+
+        d1_rows = None
+        if rule == "D1_ANCHOR_WINDOW":
+            d1_rows = rows
+        else:
+            try:
+                d1_rows = read_cohort_page(
+                    **common, rule="D1_ANCHOR_WINDOW", offset=0, limit=1, symbol=symbol
+                )[2]
+            except ResearchFactNotFound:
+                d1_rows = None
+        d1 = (
+            next((row for row in d1_rows if row[0] == symbol), None)
+            if d1_rows
+            else None
         )
-        d1 = next((row for row in d1_rows if row[0] == symbol), None)
-        events = read_source_events(
-            config,
-            target=target,
-            source_capture_id=source_capture_id,
-            symbol=symbol,
-            d1_history_session_count=d1_history_session_count,
-            calendar_revision=revision,
-            event_window_start=event_window_start,
-        )
-        if (
-            d1 is None
-            or d1[21] != selected[21]
-            or len(events) != d1[3]
-            or any(event[14] != selected[21] for event in events)
-        ):
-            raise ValueError("逐锚事实与冻结D1事件数或来源捕获不一致")
-        anchor_events = []
+        if d1 is not None:
+            events = read_source_events(
+                config,
+                target=target,
+                source_capture_id=source_capture_id,
+                symbol=symbol,
+                d1_history_session_count=d1_history_session_count,
+                calendar_revision=revision,
+                event_window_start=event_window_start,
+            )
+            if (
+                d1[21] != selected[21]
+                or len(events) != d1[3]
+                or any(event[14] != selected[21] for event in events)
+            ):
+                raise ValueError("逐锚事实与冻结D1事件数或来源捕获不一致")
+        else:
+            events = []
+        anchor_events = [] if d1 is not None else None
         for event in events:
             lower = (
                 {"numerator": str(event[3]), "denominator": str(event[4])}
@@ -420,35 +412,51 @@ def read_persisted_cohort(
                 }
             )
         if include_risk:
-            launch_rows = (
-                rows
-                if rule == "LAUNCH_CONFIRM"
-                else read_cohort_page(
-                    **common, rule="LAUNCH_CONFIRM", offset=0, limit=1, symbol=symbol
-                )[2]
+            if rule == "LAUNCH_CONFIRM":
+                launch_rows = rows
+            else:
+                try:
+                    launch_rows = read_cohort_page(
+                        **common,
+                        rule="LAUNCH_CONFIRM",
+                        offset=0,
+                        limit=1,
+                        symbol=symbol,
+                    )[2]
+                except ResearchFactNotFound:
+                    launch_rows = None
+            launch = (
+                next((row for row in launch_rows if row[0] == symbol), None)
+                if launch_rows
+                else None
             )
-            launch = next((row for row in launch_rows if row[0] == symbol), None)
-            if launch is None or launch[21] != selected[21]:
-                raise ValueError("启动规则与选中来源捕获不一致")
-            diagnostic = {
-                "scenario": "LAUNCH_CONFIRM",
-                "results": [{"source_symbol": symbol, "scenario_raw": launch[1]}],
-            }
-            rps_unavailable = {
-                "target_session": target,
-                "research_cutoff": research_cutoff,
-                "source_capture_id": source_capture_id,
-                "facts": {},
-            }
-            attach_stock_risk_readiness(
-                config,
-                diagnostic,
-                target=target,
-                cutoff=research_cutoff,
-                source_capture_id=source_capture_id,
-                rps_read=rps_unavailable,
-            )
-            risk_readiness = diagnostic["results"][0]["risk_priority_readiness"]
+            if launch is not None:
+                if launch[21] != selected[21]:
+                    raise ValueError("启动规则与选中来源捕获不一致")
+                diagnostic = {
+                    "scenario": "LAUNCH_CONFIRM",
+                    "results": [{"source_symbol": symbol, "scenario_raw": launch[1]}],
+                }
+                rps_unavailable = {
+                    "target_session": target,
+                    "research_cutoff": research_cutoff,
+                    "source_capture_id": source_capture_id,
+                    "facts": {},
+                }
+                attach_stock_risk_readiness(
+                    config,
+                    diagnostic,
+                    target=target,
+                    cutoff=research_cutoff,
+                    source_capture_id=source_capture_id,
+                    rps_read=rps_unavailable,
+                )
+                risk_readiness = diagnostic["results"][0]["risk_priority_readiness"]
+            else:
+                risk_readiness = {
+                    "status": "NOT_COMPUTED",
+                    "reason": "LAUNCH_CONFIRM_STATS_NOT_COMPUTED",
+                }
     return {
         "scope": "NON_PIT_EXPLORATORY",
         "target_session": target.isoformat(),
@@ -476,6 +484,12 @@ def read_persisted_cohort(
                 "endpoint_reason": row[7],
                 "path_quality": row[10],
                 "path_reasons": row[11],
+                "mfe_quality": row[22] if len(row) >= 28 else None,
+                "mfe_reason": row[23] if len(row) >= 28 else None,
+                "mae_quality": row[24] if len(row) >= 28 else None,
+                "mae_reason": row[25] if len(row) >= 28 else None,
+                "mdd_quality": row[26] if len(row) >= 28 else None,
+                "mdd_reason": row[27] if len(row) >= 28 else None,
             }
             for row in rows
         ],

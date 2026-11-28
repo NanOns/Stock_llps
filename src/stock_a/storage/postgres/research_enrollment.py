@@ -768,32 +768,8 @@ def _insert_rule_enrollments(
         if old is None or old == row:
             continue
         same_parent = old[0] is None and old[1] == row[1] and old[5] == row[5]
-        left_censored_correction = (
-            same_parent
-            and old[3] == "FIRST_OBSERVED_LEFT_CENSORED"
-            and old[4] == "NO_PROVED_ADJACENT_ENTRY"
-            and row[3] in {"ENTRY", "DAILY_LANDMARK", "FIRST_OBSERVED_LEFT_CENSORED"}
-        )
-        link_correction = (
-            same_parent
-            and old[3:5] == row[3:5]
-            and old[2] is None
-            and row[2] is not None
-            and old[6] is None
-            and row[6] is None
-        )
-        reentry_correction = (
-            same_parent
-            and old[2] == row[2]
-            and old[3] == "ENTRY"
-            and old[4] == "ADJACENT_FALSE_TO_TRUE"
-            and row[3] == "REENTRY"
-            and row[4] == "MATCH_AFTER_PROVED_EXIT"
-            and old[6] is None
-            and row[6] is not None
-        )
-        if not (left_censored_correction or link_correction or reentry_correction):
-            raise EnrollmentConflict("既存规则登记不符合精确前态纠错边界")
+        if not same_parent:
+            raise EnrollmentConflict("既存规则登记父事实键冲突，事务已回滚")
         corrections.append(row)
     for row in corrections:
         cursor.execute(
@@ -1680,14 +1656,16 @@ def read_enrollment_followups(
                           endpoint_numerator,endpoint_denominator,path_quality,
                           path_reasons,mfe_numerator,mfe_denominator,
                           mae_numerator,mae_denominator,mdd_numerator,mdd_denominator,
-                          price_coordinate,scope
+                          price_coordinate,scope,
+                          mfe_quality,mfe_reason,mae_quality,mae_reason,
+                          mdd_quality,mdd_reason
                    FROM source_forward_path_facts
-                   WHERE target_session=%s AND source_capture_id=%s
+                   WHERE target_session=%s
                      AND source_symbol=ANY(%s)
                      AND horizon=ANY(%s)
-                   ORDER BY source_capture_id,source_symbol,horizon,
+                   ORDER BY source_symbol,horizon,
                             path_rule_version,calendar_revision""",
-                (target, source_capture_id, symbols, due_horizons),
+                (target, symbols, due_horizons),
             )
             stored_paths = cursor.fetchall()
             for enrollment_id, anchor in source_capture_id_anchors:
@@ -1697,9 +1675,7 @@ def read_enrollment_followups(
                     anchor["capture"],
                 )
                 matches = [
-                    row
-                    for row in stored_paths
-                    if row[1] == anchor["source_symbol"] and row[2] == anchor["capture"]
+                    row for row in stored_paths if row[1] == anchor["source_symbol"]
                 ]
                 forward_rows_by_key[key] = matches
     if invalid_anchor_scope:
@@ -2042,7 +2018,7 @@ def _enrollment_forward_paths(
 
     _, _, official_revision_chain, _ = _load_calendar(cutoff)
     result = []
-    for horizon in (1, 3, 5):
+    for horizon in (1, 3, 5, 10, 20):
         due_session = due_by_horizon[horizon]
         item: dict[str, Any] = {
             "horizon": horizon,
@@ -2126,8 +2102,7 @@ def _enrollment_forward_paths(
                         "Forward路径行列类型与source_symbol/source_capture_id合同不符"
                     )
                 valid_key = (
-                    capture_id == anchor.get("capture")
-                    and symbol == anchor.get("source_symbol")
+                    symbol == anchor.get("source_symbol")
                     and endpoint_session == due_session
                     and price_coordinate == "FORWARD_ADJUSTED"
                     and scope == "NON_PIT_EXPLORATORY"
@@ -2151,12 +2126,37 @@ def _enrollment_forward_paths(
                         "mae": (mae_numerator, mae_denominator),
                         "mdd_close": (mdd_numerator, mdd_denominator),
                     }
+                    mfe_qual = (
+                        row[22]
+                        if len(row) >= 28
+                        else ("OBSERVED" if mfe_numerator is not None else "UNKNOWN")
+                    )
+                    mfe_rsn = row[23] if len(row) >= 28 else None
+                    mae_qual = (
+                        row[24]
+                        if len(row) >= 28
+                        else ("OBSERVED" if mae_numerator is not None else "UNKNOWN")
+                    )
+                    mae_rsn = row[25] if len(row) >= 28 else None
+                    mdd_qual = (
+                        row[26]
+                        if len(row) >= 28
+                        else ("OBSERVED" if mdd_numerator is not None else "UNKNOWN")
+                    )
+                    mdd_rsn = row[27] if len(row) >= 28 else None
+                    metric_qual_map = {
+                        "mfe": (mfe_qual, mfe_rsn),
+                        "mae": (mae_qual, mae_rsn),
+                        "mdd_close": (mdd_qual, mdd_rsn),
+                    }
                     for metric, (
                         metric_numerator,
                         metric_denominator,
                     ) in metric_pairs.items():
+                        m_qual, m_rsn = metric_qual_map[metric]
                         valid_metric = (
-                            metric_numerator is not None
+                            m_qual == "OBSERVED"
+                            and metric_numerator is not None
                             and metric_denominator is not None
                             and metric_denominator > 0
                         )
@@ -2173,6 +2173,8 @@ def _enrollment_forward_paths(
                             if valid_metric
                             else None
                         )
+                        metrics[f"{metric}_quality"] = m_qual
+                        metrics[f"{metric}_reason"] = m_rsn
                     metrics_observed = bool(metric_pairs) and all(
                         metrics.get(metric) is not None
                         for metric in ("mfe", "mae", "mdd_close")

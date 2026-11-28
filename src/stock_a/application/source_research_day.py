@@ -170,12 +170,23 @@ def persist_source_t1_forward_from_saved(
             "seed_recalculated": False,
         }
 
-    target_calendar = _load_calendar(target_session)[0]
-    endpoint_calendar = _load_calendar(endpoint_session)[0]
-    if endpoint_calendar["revision"] != target_calendar["revision"]:
+    target_calendar, _, target_revision_chain, _ = _load_calendar(target_session)
+    endpoint_calendar, _, endpoint_revision_chain, _ = _load_calendar(endpoint_session)
+    _, _, cutoff_revision_chain, _ = _load_calendar(research_cutoff)
+    from stock_a.research.source_forward_path import (
+        forward_calendar_revision_compatible,
+    )
+
+    if not forward_calendar_revision_compatible(
+        target_session,
+        endpoint_session,
+        rule_revision=target_calendar["revision"],
+        path_revision=endpoint_calendar["revision"],
+        official_revision_chain=cutoff_revision_chain,
+    ):
         raise SourceResearchDayError(
             "T1_FORWARD_CALENDAR_REVISION_MISMATCH",
-            "T0与T+1使用不同年度日历修订，现有路径业务键不能安全表达该跨年范围",
+            "T0与T+1跨年度官方日历修订不兼容",
         )
 
     source = read_source_version_context(
@@ -340,26 +351,6 @@ def persist_source_t1_forward_from_saved(
             if type(endpoint_capture_id) is int and endpoint_capture_id > 0
             else None
         )
-        qfq_capture_ids = {
-            row.get("source_capture_id")
-            for row in rows_by_symbol[symbol]
-            if row.get("qfq_price_quality") == "OBSERVED"
-        }
-        if len(qfq_capture_ids) != 1 or None in qfq_capture_ids:
-            for row in rows_by_symbol[symbol]:
-                row["bar_status"] = "UNKNOWN"
-                row["qfq_bar_status"] = "UNKNOWN"
-                row["qfq_price_quality"] = "UNKNOWN"
-                row["qfq_price_reason"] = "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
-                for field in ("open", "high", "low", "close"):
-                    row[f"qfq_{field}"] = None
-                    row[f"qfq_{field}_quality"] = "UNKNOWN"
-                    row[f"qfq_{field}_reason"] = "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
-                    row[f"selected_{field}"] = None
-                    row[f"selected_{field}_quality"] = "UNKNOWN"
-                    row[f"selected_{field}_reason"] = (
-                        "QFQ_CROSS_CAPTURE_CONTINUITY_UNPROVEN"
-                    )
         outcomes[symbol] = exploratory_raw_path(
             sessions,
             rows_by_symbol[symbol],
