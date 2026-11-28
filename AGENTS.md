@@ -1,6 +1,6 @@
 # Stock A AGENTS.md：共同开发、数据安全与交付规范 R14
 
-合同：`STOCK-A-AGENT-RULES/R14`。适用唯一工作区 `G:/codex work/Stock A`，对 Codex、Antigravity 及获准开发工具共同生效。本文件是共同边界与最低执行纪律；本地 `GEMINI.md` 为 Antigravity 工作法，不改变本文件、业务合同或授权。常驻规则须精炼且完整加载（Antigravity 单文件上限 24,000 B、共享 20,000 token 预算）；修改业务前按需抽取 [PROJECT_SPEC.md](PROJECT_SPEC.md)、[产品需求.md](docs/requirements/产品需求.md)、[算法合同与升级规则.md](docs/design/算法合同与升级规则.md) 与 [工程与存储规范.md](docs/design/工程与存储规范.md)，禁止凭记忆编码。
+合同：`STOCK-A-AGENT-RULES/R14`。适用唯一工作区 `G:/codex work/Stock A`，对 Codex、Antigravity 及获准开发工具共同生效。本文件是共同边界与最低执行纪律；`GEMINI.md` 为 Antigravity 工作法，不改变本文件、业务合同或授权。常驻规则须精炼且完整加载（Antigravity 单文件上限 24,000 B、共享 20,000 token 预算）；修改业务前按需抽取 [PROJECT_SPEC.md](PROJECT_SPEC.md)、[产品需求.md](docs/requirements/产品需求.md)、[算法合同与升级规则.md](docs/design/算法合同与升级规则.md) 与 [工程与存储规范.md](docs/design/工程与存储规范.md)，禁止凭记忆编码。
 
 ## A01 项目身份
 - 个人 Windows 本地 A 股盘后研究软件，非商业平台、自动交易或分布式系统。优先级：金融数值、时间语义与数据安全 → 正常用户路径与真实闭环 → 原功能保护与必要回归 → 效率与 Token → 文档形式。
@@ -83,7 +83,7 @@
 
 ## A22 Git 白名单、分支授权与禁止 LFS
 - 唯一开发分支 `dev`，远端 `origin=https://github.com/NanOns/Stock_llps.git`，授权内正常中文提交并 `git push origin dev`；禁操作/合并/推送 `main`、force push、改远端或建额外长期分支。推送不等于生产切换。
-- 白名单仅限：`src/`、`web/`、`migrations/`、`resources/`、`config/` 无密生产内容，根 `AGENTS.md / PROJECT_SPEC.md / README.md`，`docs/requirements|design|changes/` 正式规范，必要业务依赖/锁定/打包清单，最小 `.gitignore / .gitattributes` 及唯一守卫 `devtools/stock_a_git_guard.py`（其它 `devtools/` 不开放）。测试、fixture、任务卡、`RESULT_*.md`、回执、日志、截图、缓存、快照、安装包、密钥、IDE 状态及本地 `GEMINI.md` 严禁入 Git。
+- 白名单仅限：`src/`、`web/`、`migrations/`、`resources/`、`config/` 无密生产内容，根 `AGENTS.md / GEMINI.md / PROJECT_SPEC.md / README.md`，`docs/requirements|design|changes/` 正式规范，必要业务依赖/锁定/打包清单，最小 `.gitignore / .gitattributes` 及唯一守卫 `devtools/stock_a_git_guard.py`（其它 `devtools/` 不开放）。测试、fixture、任务卡、`RESULT_*.md`、回执、日志、截图、缓存、快照、安装包、密钥及 IDE 状态严禁入 Git。
 - 保持本地 `pre-commit / pre-push` 守卫有效，守卫不入业务依赖；禁 `git add -f`、`--no-verify` 或关钩子。提交前逐文件查 `git diff --cached`，误暂存仅撤索引不删用户文件。新旧项目全面禁 Git LFS（禁规则、指针、上传及下载依赖，`.gitattributes` 禁 `lfs`），不恢复已删旧仓。
 
 ## A23 已知问题追踪
