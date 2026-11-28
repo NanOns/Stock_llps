@@ -2585,6 +2585,9 @@ def _read_r04_formal_summary_readonly(
     from stock_a.research.state import CONTRACT as D2_CONTRACT
     from stock_a.research.state import Rules as D2Rules
     from stock_a.research.entry_context.sessions import _load_calendar
+    from stock_a.storage.postgres.data_jobs import (
+        check_d2_lifecycle_day_completion_in_cursor,
+    )
     from stock_a.storage.postgres.r04_formal_facts import (
         read_d2_primary_projections,
         read_stock_priority_page,
@@ -2596,46 +2599,18 @@ def _read_r04_formal_summary_readonly(
     calendar_id = str(payload.get("calendar_id") or "CN_A_SHARE_OFFICIAL")
     rule_identity = D2Rules(D2_CONTRACT, 2, 10, 3, 3).identity
     with source_raw._transaction(config, write=False) as (_c, cur, _s):
-        cur.execute(
-            """
-            SELECT
-                (SELECT count(*)::bigint FROM stock.d2_episode_day_states
-                 WHERE entity_type = 'STOCK' AND calendar_id = %s AND rule_identity = %s AND session_date = %s),
-                (SELECT count(*)::bigint FROM stock.d2_primary_episode_day_facts
-                 WHERE entity_type = 'STOCK' AND calendar_id = %s AND rule_identity = %s AND session_date = %s),
-                (SELECT count(*)::bigint FROM stock.stock_risk_day_facts WHERE target_session = %s),
-                (SELECT count(*)::bigint FROM stock.stock_priority_day_facts WHERE target_session = %s),
-                (SELECT count(*)::bigint FROM stock.source_d0_scenario_day_facts
-                 WHERE target_session = %s AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')),
-                (SELECT count(*)::bigint FROM stock.source_d0_formal_admission_day_facts
-                 WHERE target_session = %s AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE'))
-            """,
-            (
-                calendar_id,
-                rule_identity,
-                target_session,
-                calendar_id,
-                rule_identity,
-                target_session,
-                target_session,
-                target_session,
-                target_session,
-                target_session,
-            ),
+        completion = check_d2_lifecycle_day_completion_in_cursor(
+            cur,
+            target_session=target_session,
+            calendar_id=calendar_id,
+            rule_identity=rule_identity,
         )
-        d2_cnt, pri_cnt, risk_cnt, prio_cnt, pb_scen_cnt, pb_adm_cnt = cur.fetchone()
-    if (
-        d2_cnt == 0
-        or pri_cnt == 0
-        or risk_cnt == 0
-        or prio_cnt == 0
-        or pb_scen_cnt == 0
-        or pb_adm_cnt == 0
-        or pb_scen_cnt != pb_adm_cnt
-    ):
+    if not completion.get("is_complete"):
         return {
             "status": "NOT_COMPUTED",
-            "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
+            "reason": str(
+                completion.get("reason") or "R04_FORMAL_LIFECYCLE_NOT_COMPUTED"
+            ),
             "session_date": target_session.isoformat(),
         }
     target_entity = symbol_filter or (

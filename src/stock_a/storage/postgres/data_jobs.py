@@ -1010,7 +1010,7 @@ _FACT_DATE_COUNT_QUERIES: dict[str, tuple[str, bool]] = {
         True,
     ),
     "stock.source_d0_scenario_day_facts": (
-        "SELECT target_session, count(*)::bigint FROM stock.source_d0_scenario_day_facts WHERE target_session<=%s GROUP BY target_session",
+        "SELECT target_session, count(*)::bigint FROM stock.source_d0_scenario_day_facts WHERE target_session<=%s AND scenario IN ('LAUNCH_CONFIRM', 'RECOVERY_TURN') GROUP BY target_session",
         True,
     ),
     "stock.source_d0_launch_day_facts": (
@@ -1022,7 +1022,7 @@ _FACT_DATE_COUNT_QUERIES: dict[str, tuple[str, bool]] = {
         True,
     ),
     "stock.source_d0_formal_admission_day_facts": (
-        "SELECT target_session, count(*)::bigint FROM stock.source_d0_formal_admission_day_facts WHERE target_session<=%s GROUP BY target_session",
+        "SELECT target_session, count(*)::bigint FROM stock.source_d0_formal_admission_day_facts WHERE target_session<=%s AND scenario IN ('LAUNCH_CONFIRM', 'RECOVERY_TURN') GROUP BY target_session",
         True,
     ),
     "stock.source_rule_evaluations": (
@@ -1204,6 +1204,11 @@ def read_module_completion_watermarks(
                FROM stock.data_job_progress p
                JOIN stock.data_jobs j ON j.job_id=p.job_id
                WHERE p.target_session<=%s
+                 AND NOT (
+                     p.status='NO_CHANGE'
+                     AND p.completed_at IS NULL
+                     AND p.expected_rows IS NULL
+                 )
                ORDER BY p.business_table, p.target_session,
                         CASE
                             WHEN p.business_table IN (
@@ -1685,14 +1690,11 @@ def read_module_completion_watermarks(
             if not fact_invalidated and module == "D2_LIFECYCLE":
                 pb_scen_cnt = pb_scen_counts_by_session.get(target_session, 0)
                 pb_adm_cnt = pb_adm_counts_by_session.get(target_session, 0)
-                risk_cnt = fact_counts_by_table_session.get(
-                    "stock.stock_risk_day_facts", {}
+                seed_cnt = fact_counts_by_table_session.get(
+                    "stock.source_pool_seed_day_facts", {}
                 ).get(target_session, 0)
-                if (
-                    pb_scen_cnt == 0
-                    or pb_adm_cnt == 0
-                    or pb_scen_cnt != pb_adm_cnt
-                    or (risk_cnt > 0 and pb_scen_cnt != risk_cnt * 2)
+                if pb_scen_cnt != pb_adm_cnt or (
+                    seed_cnt > 0 and (pb_scen_cnt == 0 or pb_scen_cnt < seed_cnt * 2)
                 ):
                     fact_invalidated = True
             if fact_invalidated:
@@ -3653,8 +3655,9 @@ def _cleanup_version_rows(
                       AND NOT EXISTS (
                           SELECT 1 FROM stock.d2_episode_day_states s
                           WHERE s.episode_id = e.episode_id AND s.session_date < %s
-                      ))""",
-            (min_sess,) * 10,
+                      )),
+                   (SELECT count(*) FROM stock.d0_parent_scenario_detail_facts WHERE target_session >= %s)""",
+            (min_sess,) * 11,
         )
         cnt_row = cursor.fetchone()
         rule_ver = str(cnt_row[0] or "STOCK_A_D2_REDUCER_R1")
@@ -3677,6 +3680,7 @@ def _cleanup_version_rows(
                             "stock.stock_near_miss_day_facts": int(cnt_row[6]),
                             "stock.d2_parent_peak_events": int(cnt_row[7]),
                             "stock.d2_episodes": int(cnt_row[8]),
+                            "stock.d0_parent_scenario_detail_facts": int(cnt_row[9]),
                         },
                         "dependent_target_sessions": tuple(all_d2_dates),
                         "version_key": {"rule_identity": rule_ver},
@@ -6092,6 +6096,126 @@ def read_recent_jobs(
     return rows
 
 
+def check_d2_lifecycle_day_completion_in_cursor(
+    cursor: Any,
+    *,
+    target_session: date,
+    calendar_id: str,
+    rule_identity: str,
+) -> dict[str, Any]:
+    """有界单日只读核对D2生命周期及PB/CONT四场景真实完成状态（与FILL水位线同口径）。"""
+    required_tables = tuple(sorted(_MODULE_PROGRESS_TABLES["D2_LIFECYCLE"]))
+    cursor.execute(
+        """SELECT DISTINCT ON (p.business_table)
+                  p.business_table, p.status, p.expected_rows, p.verified_rows, p.completed_at
+           FROM stock.data_job_progress p
+           JOIN stock.data_jobs j ON j.job_id=p.job_id
+           WHERE p.target_session=%s
+             AND p.business_table=ANY(%s::text[])
+             AND NOT (
+                 p.status='NO_CHANGE'
+                 AND p.completed_at IS NULL
+                 AND p.expected_rows IS NULL
+             )
+           ORDER BY p.business_table,
+                    COALESCE(p.updated_at, j.updated_at) DESC,
+                    p.job_id DESC""",
+        (target_session, list(required_tables)),
+    )
+    progress_rows = cursor.fetchall()
+    if len(progress_rows) < len(required_tables):
+        return {
+            "is_complete": False,
+            "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
+        }
+    expected_by_table: dict[str, int] = {}
+    for tbl, status, expected_rows, verified_rows, completed_at in progress_rows:
+        if (
+            str(status) not in _COMPLETE_PROGRESS_STATUSES
+            or completed_at is None
+            or expected_rows is None
+            or int(verified_rows) != int(expected_rows)
+        ):
+            return {
+                "is_complete": False,
+                "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
+            }
+        expected_by_table[str(tbl)] = int(expected_rows)
+    cursor.execute(
+        """
+        SELECT
+            (SELECT count(*)::bigint FROM stock.d2_episode_day_states
+             WHERE entity_type = 'STOCK' AND calendar_id = %s AND rule_identity = %s AND session_date = %s),
+            (SELECT count(*)::bigint FROM stock.d2_primary_episode_day_facts
+             WHERE entity_type = 'STOCK' AND calendar_id = %s AND rule_identity = %s AND session_date = %s),
+            (SELECT count(*)::bigint FROM stock.stock_risk_day_facts WHERE target_session = %s),
+            (SELECT count(*)::bigint FROM stock.stock_priority_day_facts WHERE target_session = %s),
+            (SELECT count(*)::bigint FROM stock.stock_radar_day_events WHERE target_session = %s),
+            (SELECT count(*)::bigint FROM stock.stock_near_miss_day_facts WHERE target_session = %s),
+            (SELECT count(*)::bigint FROM stock.d0_parent_scenario_detail_facts WHERE target_session = %s),
+            (SELECT count(*)::bigint FROM stock.source_pool_seed_day_facts WHERE target_session = %s),
+            (SELECT count(*)::bigint FROM stock.source_d0_scenario_day_facts
+             WHERE target_session = %s AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')),
+            (SELECT count(*)::bigint FROM stock.source_d0_formal_admission_day_facts
+             WHERE target_session = %s AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE'))
+        """,
+        (
+            calendar_id,
+            rule_identity,
+            target_session,
+            calendar_id,
+            rule_identity,
+            target_session,
+            target_session,
+            target_session,
+            target_session,
+            target_session,
+            target_session,
+            target_session,
+            target_session,
+            target_session,
+        ),
+    )
+    (
+        d2_cnt,
+        pri_cnt,
+        risk_cnt,
+        prio_cnt,
+        radar_cnt,
+        nm_cnt,
+        detail_cnt,
+        seed_cnt,
+        pb_scen_cnt,
+        pb_adm_cnt,
+    ) = (int(v) for v in cursor.fetchone())
+    actual_by_table = {
+        "stock.d2_episode_day_states": d2_cnt,
+        "stock.d2_primary_episode_day_facts": pri_cnt,
+        "stock.stock_risk_day_facts": risk_cnt,
+        "stock.stock_priority_day_facts": prio_cnt,
+        "stock.stock_radar_day_events": radar_cnt,
+        "stock.stock_near_miss_day_facts": nm_cnt,
+        "stock.d0_parent_scenario_detail_facts": detail_cnt,
+    }
+    for tbl, expected_cnt in expected_by_table.items():
+        if actual_by_table.get(tbl) != expected_cnt:
+            return {
+                "is_complete": False,
+                "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
+            }
+    if pb_scen_cnt != pb_adm_cnt or (
+        seed_cnt > 0 and (pb_scen_cnt == 0 or pb_scen_cnt < seed_cnt * 2)
+    ):
+        return {
+            "is_complete": False,
+            "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
+        }
+    return {
+        "is_complete": True,
+        "reason": "OK",
+    }
+
+
 def read_business_table_count(
     cursor_or_conn: Any,
     *,
@@ -6199,7 +6323,8 @@ def read_business_table_count(
         ),
         "stock.source_d0_scenario_day_facts": (
             """SELECT count(*) FROM stock.source_d0_scenario_day_facts
-               WHERE target_session=%s""",
+               WHERE target_session=%s
+                 AND scenario IN ('LAUNCH_CONFIRM', 'RECOVERY_TURN')""",
             lambda: (target_session,),
         ),
         "stock.source_pool_seed_day_facts": (
@@ -6242,7 +6367,8 @@ def read_business_table_count(
         "stock.source_d0_formal_admission_day_facts": (
             """SELECT count(*) FROM stock.source_d0_formal_admission_day_facts
                WHERE target_session=%s
-                 AND admission_contract='STOCK_A_D0_EVENT_ADMISSION_R1'""",
+                 AND admission_contract='STOCK_A_D0_EVENT_ADMISSION_R1'
+                 AND scenario IN ('LAUNCH_CONFIRM', 'RECOVERY_TURN')""",
             lambda: (target_session,),
         ),
         "stock.source_t0_early_observation_facts": (

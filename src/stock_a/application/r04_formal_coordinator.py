@@ -1401,8 +1401,7 @@ def run_r04_d2_and_downstream_day(
         if parent_symbols and pb_sessions:
             pb_raw_rows = cursor.execute(
                 """
-                SELECT DISTINCT ON (source_symbol, session_date)
-                       source_symbol, session_date, source_capture_id,
+                SELECT source_symbol, session_date, source_capture_id,
                        raw_source_capture_id, qfq_source_capture_id,
                        bar_status, bar_reason, raw_adjustflag,
                        CASE WHEN qfq_adjustflag::text = '2' THEN 'FORWARD_ADJUSTED' ELSE NULL END AS qfq_price_coordinate,
@@ -1418,10 +1417,9 @@ def run_r04_d2_and_downstream_day(
                 FROM stock.source_raw_daily
                 WHERE source_symbol = ANY(%s::text[])
                   AND session_date = ANY(%s::date[])
-                  AND source_capture_id <= %s
-                ORDER BY source_symbol, session_date, source_capture_id DESC
+                ORDER BY source_symbol, session_date
                 """,
-                (parent_symbols, list(pb_sessions), source_capture_id),
+                (parent_symbols, list(pb_sessions)),
             ).fetchall()
             pb_cols = [d[0] for d in cursor.description]
             for r in pb_raw_rows:

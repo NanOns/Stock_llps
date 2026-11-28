@@ -2080,6 +2080,42 @@ def build_data_job_plan(
                 error_message="用户关闭D1输出。",
             )
 
+    if (
+        operation == "FILL_MISSING"
+        and not source_will_fill_prices
+        and not bool(request.get("replace_known_incomplete_observation_successors"))
+    ):
+        for unit in units:
+            if unit.get("status") != "NOT_STARTED":
+                continue
+            stage = str(unit["stage_code"])
+            if stage not in {
+                "STATIC_RESEARCH",
+                "D0_D1",
+                "FOCUS_FORMAL",
+                "FOCUS_RESEARCH_CONTEXT",
+            }:
+                continue
+            tbl = str(unit["business_table"])
+            if stage == "STATIC_RESEARCH":
+                state_key = (
+                    "SEED" if tbl == "stock.source_pool_seed_day_facts" else "D0"
+                )
+            elif stage == "D0_D1":
+                state_key = (
+                    "D1"
+                    if tbl
+                    in {
+                        "stock.source_d1_structure_day_facts",
+                        "stock.source_d1_material_anchor_day_facts",
+                    }
+                    else "D0"
+                )
+            else:
+                state_key = stage
+            if _module_completed_for_session(state_key, unit["target_session"]):
+                unit["status"] = "NO_CHANGE"
+
     if operation in _CLEANUP_OPERATIONS:
         for unit in units:
             unit["status"] = "NOT_STARTED"
@@ -3459,7 +3495,26 @@ class DataJobCoordinator:
                     stage = str(unit["stage_code"])
                     sess = unit["target_session"]
                     tbl = str(unit["business_table"])
-                    state_key = source_module_by_stage.get(stage, stage)
+                    if stage in source_module_by_stage:
+                        state_key = source_module_by_stage[stage]
+                    elif stage == "STATIC_RESEARCH":
+                        state_key = (
+                            "SEED"
+                            if tbl == "stock.source_pool_seed_day_facts"
+                            else "D0"
+                        )
+                    elif stage == "D0_D1":
+                        state_key = (
+                            "D1"
+                            if tbl
+                            in {
+                                "stock.source_d1_structure_day_facts",
+                                "stock.source_d1_material_anchor_day_facts",
+                            }
+                            else "D0"
+                        )
+                    else:
+                        state_key = stage
                     state = session_states.get(state_key, {}).get(sess.isoformat())
                     if state not in {"COMPLETED_WITH_ROWS", "COMPLETED_EMPTY"}:
                         incomplete_unit_keys.add((stage, sess, tbl))
