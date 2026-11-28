@@ -136,6 +136,7 @@ _MODULE_PROGRESS_TABLES = {
             "stock.stock_priority_day_facts",
             "stock.stock_radar_day_events",
             "stock.stock_near_miss_day_facts",
+            "stock.d0_parent_scenario_detail_facts",
         }
     ),
     "COHORT_STATS": frozenset({"stock.source_cohort_group_stats"}),
@@ -368,6 +369,7 @@ _CLEANUP_MODULES = {
             "stock.d2_episode_day_states",
             "stock.d2_parent_peak_events",
             "stock.d2_episodes",
+            "stock.d0_parent_scenario_detail_facts",
         ),
         "progress_tables": (
             "stock.d2_episode_day_states",
@@ -376,6 +378,7 @@ _CLEANUP_MODULES = {
             "stock.stock_priority_day_facts",
             "stock.stock_radar_day_events",
             "stock.stock_near_miss_day_facts",
+            "stock.d0_parent_scenario_detail_facts",
         ),
         "algorithm_column": "rule_identity",
         "algorithm_label": "R04正式D2生命周期与下游投影",
@@ -1150,6 +1153,10 @@ _FACT_DATE_COUNT_QUERIES: dict[str, tuple[str, bool]] = {
         "SELECT target_session, count(*)::bigint FROM stock.stock_near_miss_day_facts WHERE target_session<=%s GROUP BY target_session",
         True,
     ),
+    "stock.d0_parent_scenario_detail_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.d0_parent_scenario_detail_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
 }
 
 
@@ -1391,6 +1398,32 @@ def read_module_completion_watermarks(
                     ),
                 )
                 scoped_fact_counts[scope_key] = int(cursor.fetchone()[0])
+        pb_scen_counts_by_session: dict[date, int] = {}
+        pb_adm_counts_by_session: dict[date, int] = {}
+        if "stock.source_d0_scenario_day_facts" in existing_tables:
+            cursor.execute(
+                """SELECT target_session, count(*)::bigint
+                   FROM stock.source_d0_scenario_day_facts
+                   WHERE target_session <= %s
+                     AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')
+                   GROUP BY target_session""",
+                (cutoff,),
+            )
+            pb_scen_counts_by_session = {
+                r[0]: int(r[1]) for r in cursor.fetchall() if r[0] is not None
+            }
+        if "stock.source_d0_formal_admission_day_facts" in existing_tables:
+            cursor.execute(
+                """SELECT target_session, count(*)::bigint
+                   FROM stock.source_d0_formal_admission_day_facts
+                   WHERE target_session <= %s
+                     AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')
+                   GROUP BY target_session""",
+                (cutoff,),
+            )
+            pb_adm_counts_by_session = {
+                r[0]: int(r[1]) for r in cursor.fetchall() if r[0] is not None
+            }
 
     latest_by_table_session: dict[tuple[str, date], dict[str, Any]] = {}
     records_by_table_session: dict[tuple[str, date], list[dict[str, Any]]] = {}
@@ -1649,6 +1682,19 @@ def read_module_completion_watermarks(
                 if actual_cnt < 0 or actual_cnt != expected_cnt:
                     fact_invalidated = True
                     break
+            if not fact_invalidated and module == "D2_LIFECYCLE":
+                pb_scen_cnt = pb_scen_counts_by_session.get(target_session, 0)
+                pb_adm_cnt = pb_adm_counts_by_session.get(target_session, 0)
+                risk_cnt = fact_counts_by_table_session.get(
+                    "stock.stock_risk_day_facts", {}
+                ).get(target_session, 0)
+                if (
+                    pb_scen_cnt == 0
+                    or pb_adm_cnt == 0
+                    or pb_scen_cnt != pb_adm_cnt
+                    or (risk_cnt > 0 and pb_scen_cnt != risk_cnt * 2)
+                ):
+                    fact_invalidated = True
             if fact_invalidated:
                 module_session_states[module][target_session.isoformat()] = (
                     "FAILED_OR_INVALIDATED"
@@ -6388,6 +6434,11 @@ def read_business_table_count(
                WHERE target_session=%s""",
             lambda: (target_session,),
         ),
+        "stock.d0_parent_scenario_detail_facts": (
+            """SELECT count(*) FROM stock.d0_parent_scenario_detail_facts
+               WHERE target_session=%s""",
+            lambda: (target_session,),
+        ),
         "stock.source_sector_cross_period_pulse_facts": (
             """SELECT count(*) FROM stock.source_sector_cross_period_pulse_facts p
                WHERE p.target_session=%s""",
@@ -7425,6 +7476,9 @@ def mark_progress_cleared(
         ),
         "stock.stock_near_miss_day_facts": (
             "SELECT count(*) FROM stock.stock_near_miss_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.d0_parent_scenario_detail_facts": (
+            "SELECT count(*) FROM stock.d0_parent_scenario_detail_facts WHERE target_session=%s AND target_session<=%s",
         ),
     }
     status = "CLEARED" if deleted_rows > 0 or regenerate else "NO_CHANGE"

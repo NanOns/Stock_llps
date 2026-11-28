@@ -176,6 +176,7 @@ _STAGE_TABLES = {
         "stock.stock_priority_day_facts",
         "stock.stock_radar_day_events",
         "stock.stock_near_miss_day_facts",
+        "stock.d0_parent_scenario_detail_facts",
     ),
     "FOCUS_RESEARCH_CONTEXT": (
         "stock.source_rule_evaluations",
@@ -3168,9 +3169,18 @@ class DataJobCoordinator:
                     status="NOT_STARTED",
                 )
         if "D2_LIFECYCLE" in request["selected_modules"]:
+            d2_completed_sessions = set(
+                coverage.get("module_completed_sessions", {}).get("D2_LIFECYCLE", ())
+            )
             for day_text in plan.get("module_output_sessions", {}).get(
                 "D2_LIFECYCLE", ()
             ):
+                day_status = (
+                    "NO_CHANGE"
+                    if request["operation"] == "FILL_MISSING"
+                    and day_text in d2_completed_sessions
+                    else "NOT_STARTED"
+                )
                 for d2_tbl in (
                     "stock.d2_episode_day_states",
                     "stock.d2_primary_episode_day_facts",
@@ -3178,13 +3188,14 @@ class DataJobCoordinator:
                     "stock.stock_priority_day_facts",
                     "stock.stock_radar_day_events",
                     "stock.stock_near_miss_day_facts",
+                    "stock.d0_parent_scenario_detail_facts",
                 ):
                     _unit(
                         plan["stage_units"],
                         stage="D2_LIFECYCLE",
                         target_session=date.fromisoformat(day_text),
                         business_table=d2_tbl,
-                        status="NOT_STARTED",
+                        status=day_status,
                     )
         if "FEP_BASELINE" in request["selected_modules"]:
             fep_days = plan.get("module_output_sessions", {}).get("FEP_BASELINE", ())
@@ -10089,12 +10100,16 @@ def _execute_shared_production_chain_impl(
                     source_capture_id=source_capture_id,
                     research_cutoff=cutoff,
                 )
+                expected_map = d2_report.get("expected_counts_by_table") or {}
                 for unit in day_units:
                     actual_rows = data_job_pg.read_business_table_count(
                         config,
                         business_table=unit["business_table"],
                         target_session=day,
                         research_cutoff=cutoff,
+                    )
+                    expected_rows = int(
+                        expected_map.get(unit["business_table"], actual_rows)
                     )
                     progress_callback(
                         job_id=job_id,
@@ -10104,7 +10119,7 @@ def _execute_shared_production_chain_impl(
                         source_capture_id=source_capture_id,
                         profile_history_session_count=None,
                         d1_history_session_count=None,
-                        expected_rows=actual_rows,
+                        expected_rows=expected_rows,
                         inserted_rows=actual_rows,
                         quality_status="COMPLETE_QFQ_NON_PIT_CAPTURE_READBACK",
                         no_change=False,

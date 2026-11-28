@@ -29,6 +29,31 @@ _D0_PREDICATES = {
         "amr",
         "close_ma20",
     ),
+    "STRONG_PULLBACK": (
+        "birth_age",
+        "peak_age",
+        "no_new_high",
+        "drawdown",
+        "previous_below_peak_close",
+        "ma20_control",
+        "prior_ols",
+        "contraction",
+        "confirmation_amount",
+        "close_ge_prev",
+        "clv",
+        "reclaim_or_ma10",
+        "no_shadow_rejection",
+    ),
+    "TREND_CONTINUE": (
+        "ma_alignment",
+        "core_ma_slope20_atr",
+        "rps20",
+        "positive_ret1",
+        "above_core_prior_high20",
+        "clv",
+        "amr20_band",
+        "loo_confirmed_raw",
+    ),
 }
 _SEED_PREDICATES = (
     "research_universe",
@@ -180,6 +205,8 @@ _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _D0_PRODUCER_VERSIONS = {
     "LAUNCH_CONFIRM": "STOCK_A_D0_LAUNCH_BAOSTOCK_READER_R5",
     "RECOVERY_TURN": "STOCK_A_D0_RECOVERY_BAOSTOCK_READER_R5",
+    "STRONG_PULLBACK": "STOCK_A_D0_PULLBACK_R1",
+    "TREND_CONTINUE": "STOCK_A_D0_CONTINUE_R1",
 }
 
 
@@ -399,7 +426,9 @@ def _d0_rows(
                     "FORWARD_ADJUSTED",
                 )
             )
-    if not scenarios or (require_complete and set(scenarios) != set(_D0_PREDICATES)):
+    if not scenarios or (
+        require_complete and set(scenarios) != {"LAUNCH_CONFIRM", "RECOVERY_TURN"}
+    ):
         raise StaticResearchPgError(
             "STATIC_D0_SCENARIO_SET_INCOMPLETE", "D0需同时闭合启动与恢复场景"
         )
@@ -965,7 +994,16 @@ def read_source_d0_scenario_day(
     results = []
     for row in rows:
         item = dict(zip(_D0_COLUMNS, row, strict=True))
-        if tuple(item["predicate_ids"]) != _D0_PREDICATES[scenario]:
+        allowed_pred_tuples = (
+            (
+                _D0_PREDICATES[scenario],
+                (f"{scenario.lower()}_parent",),
+                (f"{scenario.lower()}_summary",),
+            )
+            if scenario in ("STRONG_PULLBACK", "TREND_CONTINUE")
+            else (_D0_PREDICATES[scenario],)
+        )
+        if tuple(item["predicate_ids"]) not in allowed_pred_tuples:
             raise StaticResearchPgError(
                 "STATIC_D0_PREDICATES_INVALID", "PG D0具名谓词顺序与现役合同不一致"
             )

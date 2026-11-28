@@ -1063,7 +1063,10 @@ def evaluate_trend_continue_day(
         "rps20": _pred(rps_f, "RPS20>=70", value=rps_num),
         "positive_ret1": _pred(ret1_f, "C[i]>C[i-1]"),
         "above_core_prior_high20": _pred(
-            ph20_f, "C[i]>core.prior_high20", prior_high20=ph20_num
+            ph20_f,
+            "C[i]>core.prior_high20",
+            close=cur_vals["close"] if cur_vals is not None else None,
+            prior_high20=ph20_num,
         ),
         "clv": _pred(clv_f, "CLV[i]>=0.55", clv=clv_val),
         "amr20_band": _pred(amr_f, "0.8<=d0.amr20<=2.5", amr20=amr20_cur),

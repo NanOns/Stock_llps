@@ -2348,6 +2348,136 @@ def read_source_research_day(
             by_symbol[item["source_symbol"]].setdefault("material_anchors", []).append(
                 item
             )
+        if page_symbols:
+            cursor.execute(
+                """
+                SELECT s.source_symbol, s.scenario, s.scenario_state, s.scenario_reason,
+                       s.predicate_ids, s.predicate_states, s.predicate_qualities,
+                       s.predicate_reason_codes, s.predicate_value_numerators,
+                       s.predicate_value_denominators,
+                       a.admission_status, a.admission_reason, a.event_id,
+                       a.prior_episode_id, a.linked_anchor_id,
+                       a.failure_level_numerator, a.failure_level_denominator,
+                       a.failure_coordinate, a.failure_source, a.effective_from_session
+                FROM stock.source_d0_scenario_day_facts s
+                LEFT JOIN stock.source_d0_formal_admission_day_facts a
+                  ON a.raw_fact_id = s.id
+                WHERE s.target_session = %s
+                  AND s.source_symbol = ANY(%s)
+                ORDER BY s.source_symbol, s.scenario
+                """,
+                (target_session, page_symbols),
+            )
+            sc_cols = [d[0] for d in cursor.description]
+            for r in cursor.fetchall():
+                sr = dict(zip(sc_cols, r))
+                sym_entry = by_symbol.get(sr["source_symbol"])
+                if sym_entry is None:
+                    continue
+                d0_sc_map = sym_entry.setdefault(
+                    "d0_scenarios", {"scenarios": {}, "parent_details": []}
+                )
+                d0_sc_map["scenarios"][sr["scenario"]] = {
+                    "scenario": sr["scenario"],
+                    "scenario_state": sr["scenario_state"],
+                    "scenario_reason": sr["scenario_reason"],
+                    "admission_status": sr["admission_status"],
+                    "admission_reason": sr["admission_reason"],
+                    "event_id": sr["event_id"],
+                    "prior_episode_id": sr["prior_episode_id"],
+                    "linked_anchor_id": sr["linked_anchor_id"],
+                    "failure_level": _json_value(
+                        Fraction(
+                            int(sr["failure_level_numerator"]),
+                            int(sr["failure_level_denominator"]),
+                        )
+                    )
+                    if sr["failure_level_numerator"] is not None
+                    and sr["failure_level_denominator"] not in (None, 0)
+                    else None,
+                    "failure_coordinate": sr["failure_coordinate"],
+                    "failure_source": sr["failure_source"],
+                    "effective_from_session": _json_value(sr["effective_from_session"]),
+                    "predicate_ids": list(sr["predicate_ids"] or ()),
+                    "predicate_states": list(sr["predicate_states"] or ()),
+                    "predicate_qualities": list(sr["predicate_qualities"] or ()),
+                    "predicate_reason_codes": list(sr["predicate_reason_codes"] or ()),
+                    "predicate_value_numerators": [
+                        _json_value(v) for v in (sr["predicate_value_numerators"] or ())
+                    ],
+                    "predicate_value_denominators": [
+                        _json_value(v)
+                        for v in (sr["predicate_value_denominators"] or ())
+                    ],
+                }
+            cursor.execute(
+                """
+                SELECT source_symbol, scenario, parent_episode_id, peak_event_id,
+                       peak_ordinal_key, raw_state, raw_reason,
+                       predicate_ids, predicate_states, predicate_qualities,
+                       predicate_reason_codes, predicate_value_numerators,
+                       predicate_value_denominators,
+                       admission_status, admission_reason, event_id, linked_anchor_id,
+                       failure_level_numerator, failure_level_denominator,
+                       failure_coordinate, failure_source, effective_from_session
+                FROM stock.d0_parent_scenario_detail_facts
+                WHERE target_session = %s
+                  AND source_symbol = ANY(%s)
+                ORDER BY source_symbol, scenario, parent_episode_id, peak_ordinal_key
+                """,
+                (target_session, page_symbols),
+            )
+            det_cols = [d[0] for d in cursor.description]
+            for r in cursor.fetchall():
+                dr = dict(zip(det_cols, r))
+                sym_entry = by_symbol.get(dr["source_symbol"])
+                if sym_entry is None:
+                    continue
+                d0_sc_map = sym_entry.setdefault(
+                    "d0_scenarios", {"scenarios": {}, "parent_details": []}
+                )
+                d0_sc_map["parent_details"].append(
+                    {
+                        "scenario": dr["scenario"],
+                        "parent_episode_id": dr["parent_episode_id"],
+                        "peak_event_id": dr["peak_event_id"],
+                        "peak_ordinal_key": dr["peak_ordinal_key"],
+                        "raw_state": dr["raw_state"],
+                        "raw_reason": dr["raw_reason"],
+                        "admission_status": dr["admission_status"],
+                        "admission_reason": dr["admission_reason"],
+                        "event_id": dr["event_id"],
+                        "linked_anchor_id": dr["linked_anchor_id"],
+                        "failure_level": _json_value(
+                            Fraction(
+                                int(dr["failure_level_numerator"]),
+                                int(dr["failure_level_denominator"]),
+                            )
+                        )
+                        if dr["failure_level_numerator"] is not None
+                        and dr["failure_level_denominator"] not in (None, 0)
+                        else None,
+                        "failure_coordinate": dr["failure_coordinate"],
+                        "failure_source": dr["failure_source"],
+                        "effective_from_session": _json_value(
+                            dr["effective_from_session"]
+                        ),
+                        "predicate_ids": list(dr["predicate_ids"] or ()),
+                        "predicate_states": list(dr["predicate_states"] or ()),
+                        "predicate_qualities": list(dr["predicate_qualities"] or ()),
+                        "predicate_reason_codes": list(
+                            dr["predicate_reason_codes"] or ()
+                        ),
+                        "predicate_value_numerators": [
+                            _json_value(v)
+                            for v in (dr["predicate_value_numerators"] or ())
+                        ],
+                        "predicate_value_denominators": [
+                            _json_value(v)
+                            for v in (dr["predicate_value_denominators"] or ())
+                        ],
+                    }
+                )
         selected_board_observation = None
         if board_kind is not None and board_native_id is not None:
             selected_board_observation = _read_selected_board_observation(
@@ -2465,6 +2595,49 @@ def _read_r04_formal_summary_readonly(
     payload, _meta, _chain, _sessions = _load_calendar(target_session)
     calendar_id = str(payload.get("calendar_id") or "CN_A_SHARE_OFFICIAL")
     rule_identity = D2Rules(D2_CONTRACT, 2, 10, 3, 3).identity
+    with source_raw._transaction(config, write=False) as (_c, cur, _s):
+        cur.execute(
+            """
+            SELECT
+                (SELECT count(*)::bigint FROM stock.d2_episode_day_states
+                 WHERE entity_type = 'STOCK' AND calendar_id = %s AND rule_identity = %s AND session_date = %s),
+                (SELECT count(*)::bigint FROM stock.d2_primary_episode_day_facts
+                 WHERE entity_type = 'STOCK' AND calendar_id = %s AND rule_identity = %s AND session_date = %s),
+                (SELECT count(*)::bigint FROM stock.stock_risk_day_facts WHERE target_session = %s),
+                (SELECT count(*)::bigint FROM stock.stock_priority_day_facts WHERE target_session = %s),
+                (SELECT count(*)::bigint FROM stock.source_d0_scenario_day_facts
+                 WHERE target_session = %s AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')),
+                (SELECT count(*)::bigint FROM stock.source_d0_formal_admission_day_facts
+                 WHERE target_session = %s AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE'))
+            """,
+            (
+                calendar_id,
+                rule_identity,
+                target_session,
+                calendar_id,
+                rule_identity,
+                target_session,
+                target_session,
+                target_session,
+                target_session,
+                target_session,
+            ),
+        )
+        d2_cnt, pri_cnt, risk_cnt, prio_cnt, pb_scen_cnt, pb_adm_cnt = cur.fetchone()
+    if (
+        d2_cnt == 0
+        or pri_cnt == 0
+        or risk_cnt == 0
+        or prio_cnt == 0
+        or pb_scen_cnt == 0
+        or pb_adm_cnt == 0
+        or pb_scen_cnt != pb_adm_cnt
+    ):
+        return {
+            "status": "NOT_COMPUTED",
+            "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
+            "session_date": target_session.isoformat(),
+        }
     target_entity = symbol_filter or (
         selected_symbols[0] if len(selected_symbols) == 1 else None
     )
@@ -2489,12 +2662,6 @@ def _read_r04_formal_summary_readonly(
     radar_nm = read_stock_radar_and_near_miss(
         config, session_date=target_session, source_symbol=target_entity
     )
-    if not primaries or risk_summary["total"] == 0 or priority_page_data["total"] == 0:
-        return {
-            "status": "NOT_COMPUTED",
-            "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
-            "session_date": target_session.isoformat(),
-        }
     selected_set = set(selected_symbols)
     return {
         "status": "AVAILABLE",

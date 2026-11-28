@@ -311,14 +311,78 @@ def _support_obs_from_pg_rows(
     return tuple(obs)
 
 
-def _build_d0_near_miss_inputs(
-    adm_by_scenario: Mapping[str, Mapping[str, Any]],
-    scen_by_scenario: Mapping[str, Mapping[str, Any]],
-    *,
-    pb_res: Any | None = None,
-    atr_today: FieldValue | None = None,
-) -> tuple[tuple[FieldValue, ...], tuple[D0ScenarioNearMissInput, ...]]:
-    """从PG正式准入共同门与四场景具名谓词事实组装Near-Miss路径输入（严格按§11.7冻结合同）。"""
+_PREDICATE_INPUT_KEYS: dict[str, tuple[str, ...]] = {
+    "birth_age": ("birth_age",),
+    "peak_age": ("peak_age",),
+    "drawdown": ("depth",),
+    "contraction": ("ratio",),
+    "confirmation_amount": ("ratio",),
+    "clv": ("clv",),
+    "core_ma_slope20_atr": ("value",),
+    "rps20": ("value",),
+    "above_core_prior_high20": ("close", "prior_high20"),
+    "amr20_band": ("amr20",),
+}
+
+
+def _parse_predicate_fraction(raw_val: Any) -> Fraction | None:
+    if raw_val is None or isinstance(raw_val, bool):
+        return None
+    if isinstance(raw_val, FieldValue):
+        if raw_val.quality != "OBSERVED":
+            return None
+        return _parse_predicate_fraction(raw_val.value)
+    if isinstance(raw_val, Mapping):
+        if "numerator" in raw_val and "denominator" in raw_val:
+            return _frac(raw_val.get("numerator"), raw_val.get("denominator"))
+        return None
+    if isinstance(raw_val, Fraction):
+        return raw_val
+    if isinstance(raw_val, Decimal):
+        return Fraction(raw_val) if raw_val.is_finite() else None
+    if isinstance(raw_val, int):
+        return Fraction(raw_val)
+    return None
+
+
+def _extract_predicate_value(
+    pid: str,
+    info: Mapping[str, Any],
+) -> FieldValue:
+    """统一从谓词字典提取精确数值（兼容 FieldValue 顶层 value 与 d0_pb_continue._pred 的 inputs payload）。"""
+    top_val = info.get("value")
+    if isinstance(top_val, FieldValue):
+        return top_val
+    st_val = str(info.get("state") or "UNKNOWN")
+    reason_text = str(info.get("reason") or f"{pid.upper()}_UNKNOWN")
+    if top_val is not None:
+        parsed = _parse_predicate_fraction(top_val)
+        if parsed is not None:
+            return FieldValue(parsed)
+    if st_val not in ("TRUE", "FALSE"):
+        return unknown(reason_text)
+    inputs = info.get("inputs")
+    if not isinstance(inputs, Mapping):
+        return unknown(reason_text)
+    keys = _PREDICATE_INPUT_KEYS.get(pid, ("value",))
+    if keys == ("close", "prior_high20"):
+        close_f = _parse_predicate_fraction(inputs.get("close"))
+        ph20_f = _parse_predicate_fraction(inputs.get("prior_high20"))
+        if close_f is not None and ph20_f is not None:
+            return FieldValue(close_f - ph20_f)
+        return unknown(reason_text)
+    for k in keys:
+        parsed = _parse_predicate_fraction(inputs.get(k))
+        if parsed is not None:
+            return FieldValue(parsed)
+    return unknown(reason_text)
+
+
+def _extract_common_gate_fvs(
+    sample_adm: Mapping[str, Any] | None,
+) -> tuple[FieldValue, ...]:
+    if not sample_adm:
+        return ()
     gate_cols = (
         "research_universe_state",
         "actual_quote_state",
@@ -329,13 +393,28 @@ def _build_d0_near_miss_inputs(
         "non_first_day_damage_state",
         "non_severe_drop_state",
     )
-    sample_adm = next(iter(adm_by_scenario.values()), None)
-    if sample_adm is None:
-        return (), ()
-    common_gates = tuple(
+    return tuple(
         _tri_field(sample_adm.get(col), reason_if_unknown=f"{col.upper()}_UNKNOWN")
         for col in gate_cols
     )
+
+
+def _build_d0_near_miss_inputs(
+    adm_by_scenario: Mapping[str, Mapping[str, Any]],
+    scen_by_scenario: Mapping[str, Mapping[str, Any]],
+    *,
+    pb_res: Any | None = None,
+    atr_today: FieldValue | None = None,
+    common_gate_fvs: Sequence[FieldValue] | None = None,
+) -> tuple[tuple[FieldValue, ...], tuple[D0ScenarioNearMissInput, ...]]:
+    """从PG正式准入共同门与四场景具名谓词事实组装Near-Miss路径输入（严格按§11.7冻结合同）。"""
+    sample_adm = next(iter(adm_by_scenario.values()), None)
+    if common_gate_fvs:
+        common_gates = tuple(common_gate_fvs)
+    elif sample_adm is not None:
+        common_gates = _extract_common_gate_fvs(sample_adm)
+    else:
+        return (), ()
     scenario_inputs: list[D0ScenarioNearMissInput] = []
     for scenario_name, spec_map in (
         (
@@ -413,20 +492,28 @@ def _build_d0_near_miss_inputs(
         )
 
     if pb_res is not None:
+        eligible_parents = (
+            getattr(getattr(pb_res, "eligible_parents", None), "parents", ()) or ()
+        )
+        parent_by_id = {p.episode_id: p for p in eligible_parents}
         pb_batch = pb_res.pb_continue_result.pullback
         for d in pb_batch.details:
             if not isinstance(d, PullbackParentDetail) or not d.predicates:
                 continue
             hard_gates = []
             soft_specs = []
+            if d.admission.status == "BLOCKED":
+                hard_gates.append(FieldValue(False))
+            p_ctx = parent_by_id.get(d.parent_episode_id)
+            if p_ctx is not None:
+                hard_gates.append(
+                    FieldValue(False)
+                    if p_ctx.support_valid.quality == "NOT_APPLICABLE"
+                    else p_ctx.support_valid
+                )
             for pid, p_info in d.predicates.items():
                 st_val = p_info.get("state")
-                val_fv = p_info.get("value")
-                actual_fv = (
-                    val_fv
-                    if isinstance(val_fv, FieldValue)
-                    else unknown(f"{pid.upper()}_UNKNOWN")
-                )
+                actual_fv = _extract_predicate_value(pid, p_info)
                 if pid == "drawdown":
                     soft_specs.append(
                         D0SoftPredicateSpec(
@@ -488,14 +575,14 @@ def _build_d0_near_miss_inputs(
                 continue
             hard_gates = []
             soft_specs = []
+            if d.admission.status == "BLOCKED":
+                hard_gates.append(FieldValue(False))
+            p_ctx = parent_by_id.get(d.parent_episode_id)
+            if p_ctx is not None and p_ctx.support_valid.quality != "NOT_APPLICABLE":
+                hard_gates.append(p_ctx.support_valid)
             for pid, p_info in d.predicates.items():
                 st_val = p_info.get("state")
-                val_fv = p_info.get("value")
-                actual_fv = (
-                    val_fv
-                    if isinstance(val_fv, FieldValue)
-                    else unknown(f"{pid.upper()}_UNKNOWN")
-                )
+                actual_fv = _extract_predicate_value(pid, p_info)
                 if pid == "rps20":
                     soft_specs.append(
                         D0SoftPredicateSpec(
@@ -533,6 +620,17 @@ def _build_d0_near_miss_inputs(
                             actual=actual_fv,
                             threshold=FieldValue(Fraction(5, 2)),
                             operator="<=",
+                        )
+                    )
+                elif pid == "above_core_prior_high20":
+                    soft_specs.append(
+                        D0SoftPredicateSpec(
+                            predicate_id="above_core_prior_high20",
+                            soft_kind="breakout_price",
+                            actual=actual_fv,
+                            threshold=FieldValue(Fraction(0)),
+                            operator=">",
+                            atr_today=atr_today,
                         )
                     )
                 else:
@@ -593,8 +691,8 @@ def _predicates_to_pg_arrays(
         p_ids.append(str(pid))
         st = str(info.get("state") or "UNKNOWN")
         p_states.append(st if st in ("TRUE", "FALSE", "UNKNOWN") else "UNKNOWN")
-        val_fv = info.get("value")
-        if isinstance(val_fv, FieldValue) and val_fv.quality == "OBSERVED":
+        val_fv = _extract_predicate_value(str(pid), info)
+        if val_fv.quality == "OBSERVED":
             p_quals.append("OBSERVED")
             p_reasons.append(str(info.get("reason") or "OK"))
             v = val_fv.value
@@ -615,9 +713,7 @@ def _predicates_to_pg_arrays(
             p_quals.append("OBSERVED" if st in ("TRUE", "FALSE") else "UNKNOWN")
             p_reasons.append(
                 str(
-                    (val_fv.reason if isinstance(val_fv, FieldValue) else None)
-                    or info.get("reason")
-                    or f"{str(pid).upper()}_UNKNOWN"
+                    val_fv.reason or info.get("reason") or f"{str(pid).upper()}_UNKNOWN"
                 )
             )
             p_nums.append(None)
@@ -635,20 +731,9 @@ def _pg_coord(coord_id: str | None) -> str | None:
     return coord_id
 
 
-def _serialize_pb_cont_for_pg(
-    *,
-    sym: str,
-    pb_res: Any,
-    seed_row: Mapping[str, Any],
+def _extract_gate_vals_from_adm(
     adm_map: Mapping[str, Mapping[str, Any]],
-    target_session: date,
-    next_session: date | None,
-    sessions: Sequence[date],
-    source_capture_id: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """将单股PB/CONTINUE内存评估结果序列化为PG四场景事实、正式准入及逐父/峰明细。"""
-    if not seed_row or seed_row.get("seed_fact_id") is None:
-        return [], []
+) -> tuple[Mapping[str, Any], dict[str, Any]]:
     sample_adm = next(iter(adm_map.values()), {})
     gate_vals: dict[str, Any] = {}
     for g in (
@@ -666,6 +751,113 @@ def _serialize_pb_cont_for_pg(
         gate_vals[f"{g}_reason"] = sample_adm.get(f"{g}_reason") or (
             "GATE_TRUE" if g_state == "TRUE" else f"{g.upper()}_{g_state}"
         )
+    return sample_adm, gate_vals
+
+
+def _serialize_no_parent_pb_cont_for_pg(
+    *,
+    sym: str,
+    seed_row: Mapping[str, Any],
+    adm_map: Mapping[str, Mapping[str, Any]],
+    prior_gap_reason: str | None,
+    source_capture_id: int,
+    total_source_count: int = 1,
+) -> list[dict[str, Any]]:
+    """为研究总体中无昨日FORMAL父的股票生成PB/CONTINUE诚实总事实（已证无父FALSE，前态缺证UNKNOWN，无虚假父明细）。"""
+    if not seed_row or seed_row.get("seed_fact_id") is None:
+        return []
+    sample_adm, gate_vals = _extract_gate_vals_from_adm(adm_map)
+    if prior_gap_reason is not None:
+        raw_state = "UNKNOWN"
+        summary_reason = prior_gap_reason
+        adm_status = "NOT_READY"
+        pred_state = "UNKNOWN"
+        pred_qual = "UNKNOWN"
+    else:
+        raw_state = "FALSE"
+        summary_reason = "NO_ELIGIBLE_FORMAL_PARENT"
+        adm_status = "NOT_REQUIRED"
+        pred_state = "FALSE"
+        pred_qual = "OBSERVED"
+    src_count = max(1, int(total_source_count))
+    facts: list[dict[str, Any]] = []
+    for scenario_name in ("STRONG_PULLBACK", "TREND_CONTINUE"):
+        facts.append(
+            {
+                "source_symbol": sym,
+                "seed_fact_id": seed_row["seed_fact_id"],
+                "source_capture_id": seed_row.get("source_capture_id")
+                or source_capture_id,
+                "parser_contract": "STOCK_A_D0_PB_CONTINUE_R1",
+                "scenario": scenario_name,
+                "producer_version": _D0_SCENARIO_PRODUCER_VERSIONS[scenario_name],
+                "algorithm_contract": "STOCK_A_D0_PB_CONTINUE_R1",
+                "session_contract": "OFFICIAL_A_SHARE_SESSION",
+                "history_window_start": seed_row["history_window_start"],
+                "history_session_count": seed_row["history_session_count"],
+                "source_count": src_count,
+                "scenario_state": raw_state,
+                "scenario_reason": summary_reason,
+                "predicate_ids": [f"{scenario_name.lower()}_parent"],
+                "predicate_states": [pred_state],
+                "predicate_qualities": [pred_qual],
+                "predicate_reason_codes": [summary_reason],
+                "predicate_value_numerators": [None],
+                "predicate_value_denominators": [None],
+                "source_time_quality": seed_row["source_time_quality"],
+                "source_clock_role": seed_row["source_clock_role"],
+                "source_available_at": seed_row["source_available_at"],
+                "capture_started_at": sample_adm.get("capture_started_at")
+                or seed_row["source_available_at"],
+                "capture_validated_at": sample_adm.get("capture_validated_at")
+                or seed_row["source_available_at"],
+                "profile_revision": sample_adm.get("profile_revision")
+                or "CORE_PROFILE_R1",
+                "seed_producer_version": _SEED_PRODUCER_VERSION,
+                "identity_scope": sample_adm.get("identity_scope")
+                or "SOURCE_SYMBOL_ONLY",
+                "calendar_id": "CN_A_SHARE_OFFICIAL",
+                "calendar_revision": seed_row["calendar_revision"],
+                "research_mode": sample_adm.get("research_mode")
+                or "NON_PIT_EXPLORATORY",
+                "price_coordinate": "FORWARD_ADJUSTED",
+                "admission_contract": _ADMISSION_CONTRACT,
+                "admission_status": adm_status,
+                "admission_reason": summary_reason,
+                "reason_codes": (summary_reason,),
+                **gate_vals,
+                "event_id": None,
+                "failure_level": None,
+                "failure_coordinate": None,
+                "failure_source": None,
+                "failure_window_start": None,
+                "failure_window_session_count": None,
+                "failure_source_event_ref": None,
+                "effective_from_session": None,
+                "prior_episode_id": None,
+                "linked_anchor_id": None,
+            }
+        )
+    return facts
+
+
+def _serialize_pb_cont_for_pg(
+    *,
+    sym: str,
+    pb_res: Any,
+    seed_row: Mapping[str, Any],
+    adm_map: Mapping[str, Mapping[str, Any]],
+    target_session: date,
+    next_session: date | None,
+    sessions: Sequence[date],
+    source_capture_id: int,
+    total_source_count: int = 1,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """将单股PB/CONTINUE内存评估结果序列化为PG四场景事实、正式准入及逐父/峰明细。"""
+    if not seed_row or seed_row.get("seed_fact_id") is None:
+        return [], []
+    sample_adm, gate_vals = _extract_gate_vals_from_adm(adm_map)
+    src_count = max(1, int(total_source_count))
 
     facts: list[dict[str, Any]] = []
     details_out: list[dict[str, Any]] = []
@@ -763,7 +955,7 @@ def _serialize_pb_cont_for_pg(
                 "session_contract": "OFFICIAL_A_SHARE_SESSION",
                 "history_window_start": seed_row["history_window_start"],
                 "history_session_count": seed_row["history_session_count"],
-                "source_count": 1,
+                "source_count": src_count,
                 "scenario_state": raw_state,
                 "scenario_reason": batch.summary_reason,
                 "predicate_ids": p_ids,
@@ -1055,6 +1247,7 @@ def run_r04_d2_and_downstream_day(
                    non_severe_drop_state, non_severe_drop_reason
             FROM stock.source_d0_formal_admission_day_facts
             WHERE target_session = %s
+              AND scenario IN ('LAUNCH_CONFIRM', 'RECOVERY_TURN')
             ORDER BY source_symbol, scenario
             """,
             (target_session,),
@@ -1105,6 +1298,7 @@ def run_r04_d2_and_downstream_day(
                    predicate_value_numerators, predicate_value_denominators
             FROM stock.source_d0_scenario_day_facts
             WHERE target_session = %s
+              AND scenario IN ('LAUNCH_CONFIRM', 'RECOVERY_TURN')
             """,
             (target_session,),
         ).fetchall()
@@ -1207,14 +1401,16 @@ def run_r04_d2_and_downstream_day(
         if parent_symbols and pb_sessions:
             pb_raw_rows = cursor.execute(
                 """
-                SELECT source_symbol, session_date, source_capture_id,
+                SELECT DISTINCT ON (source_symbol, session_date)
+                       source_symbol, session_date, source_capture_id,
                        raw_source_capture_id, qfq_source_capture_id,
                        bar_status, bar_reason, raw_adjustflag,
-                       'FORWARD_ADJUSTED'::text AS qfq_price_coordinate, qfq_adjustflag,
+                       CASE WHEN qfq_adjustflag::text = '2' THEN 'FORWARD_ADJUSTED' ELSE NULL END AS qfq_price_coordinate,
+                       qfq_adjustflag,
                        qfq_response_session_date, qfq_response_source_code,
                        qfq_response_fields, qfq_bar_status, qfq_bar_reason,
                        qfq_tradestatus_value, qfq_tradestatus_quality, qfq_tradestatus_reason,
-                       qfq_price_reason, qfq_price_reason AS qfq_close_reason,
+                       qfq_price_reason, COALESCE(qfq_close_reason, qfq_price_reason) AS qfq_close_reason,
                        qfq_open, qfq_high, qfq_low, qfq_close, qfq_price_quality,
                        qfq_open_quality, qfq_high_quality, qfq_low_quality, qfq_close_quality,
                        raw_amount, raw_amount_quality, raw_amount_reason, amount_unit_status,
@@ -1222,7 +1418,8 @@ def run_r04_d2_and_downstream_day(
                 FROM stock.source_raw_daily
                 WHERE source_symbol = ANY(%s::text[])
                   AND session_date = ANY(%s::date[])
-                  AND source_capture_id = %s
+                  AND source_capture_id <= %s
+                ORDER BY source_symbol, session_date, source_capture_id DESC
                 """,
                 (parent_symbols, list(pb_sessions), source_capture_id),
             ).fetchall()
@@ -1487,6 +1684,7 @@ def run_r04_d2_and_downstream_day(
                 next_session=next_session,
                 sessions=sessions,
                 source_capture_id=source_capture_id,
+                total_source_count=len(seed_by_symbol),
             )
             pb_cont_facts_to_persist.extend(sym_pb_facts)
             pb_cont_details_to_persist.extend(sym_pb_details)
@@ -1517,6 +1715,17 @@ def run_r04_d2_and_downstream_day(
                             "prior_episode_id": pb_ev.prior_episode_id,
                         }
                     )
+        elif sd:
+            pb_cont_facts_to_persist.extend(
+                _serialize_no_parent_pb_cont_for_pg(
+                    sym=sym,
+                    seed_row=sd,
+                    adm_map=adm_by_symbol_scenario.get(sym, {}),
+                    prior_gap_reason=p_gap_reason,
+                    source_capture_id=source_capture_id,
+                    total_source_count=len(seed_by_symbol),
+                )
+            )
         if coord_id != "FORWARD_ADJUSTED":
             ev_list = [
                 Event(
@@ -1714,8 +1923,24 @@ def run_r04_d2_and_downstream_day(
                 }
             )
 
-    # 若 PB/CONTINUE 产生新的动态 MA 事件（含 T0_MA20_FALLBACK），在进入第4步前局部落库当日 BIRTH_IDLE 并刷新当日支撑观察
-    if pb_cont_dynamic_ma_events_by_symbol:
+    # 若 PB/CONTINUE 产生新的动态 MA 事件或存在需随修订清理的旧 PB/CONT 动态 MA 锚，局部刷新当日出生锚并刷新当日支撑观察
+    old_pb_dyn_symbols = {
+        sym
+        for sym, rows in d1_supports_by_symbol.items()
+        if any(
+            r.get("created_session") == target_session
+            and r.get("structure_type") in ("DYNAMIC_MA5", "DYNAMIC_MA20")
+            and (
+                "STRONG_PULLBACK" in str(r.get("source_event_id") or "")
+                or "TREND_CONTINUE" in str(r.get("source_event_id") or "")
+            )
+            for r in rows
+        )
+    }
+    dyn_ma_scoped_symbols = sorted(
+        set(pb_cont_dynamic_ma_events_by_symbol.keys()) | old_pb_dyn_symbols
+    )
+    if dyn_ma_scoped_symbols:
         if research_cutoff is None:
             with source_raw._transaction(config, write=False) as (
                 _cap_conn,
@@ -1729,28 +1954,64 @@ def run_r04_d2_and_downstream_day(
                 cap_row = cap_cur.fetchone()
                 if cap_row and isinstance(cap_row[0], date):
                     effective_cutoff = max(effective_cutoff, cap_row[0])
-        ma_backfill = prepare_dynamic_ma_backfill_facts(
-            config,
-            target_session=target_session,
-            research_cutoff=effective_cutoff,
-            source_capture_id=source_capture_id,
-            d1_history_session_count=max(25, len(sessions)),
-            events_by_symbol=pb_cont_dynamic_ma_events_by_symbol,
-        )
-        if ma_backfill.get("active_anchors") or ma_backfill.get("active_observations"):
-            persist_d1_active_anchors_and_observations(
+        merged_dyn_events: dict[str, list[dict[str, Any]]] = {
+            s: list(evs) for s, evs in pb_cont_dynamic_ma_events_by_symbol.items()
+        }
+        for s in dyn_ma_scoped_symbols:
+            for sc_name, adm_r in adm_by_symbol_scenario.get(s, {}).items():
+                if adm_r.get("admission_status") == "READY" and adm_r.get(
+                    "failure_source"
+                ) in ("T0_MA5", "T0_MA20", "T0_MA20_FALLBACK", "R5_MA5", "R20_MA20"):
+                    fl_v = _frac(
+                        adm_r.get("failure_level_numerator"),
+                        adm_r.get("failure_level_denominator"),
+                    )
+                    if fl_v is not None and adm_r.get("event_id"):
+                        merged_dyn_events.setdefault(s, []).append(
+                            {
+                                "source_symbol": s,
+                                "target_session": target_session,
+                                "scenario": sc_name,
+                                "event_id": adm_r["event_id"],
+                                "source_capture_id": source_capture_id,
+                                "failure_line_value": fl_v,
+                                "failure_coordinate": "FORWARD_ADJUSTED",
+                                "failure_source": adm_r["failure_source"],
+                                "failure_window_start": adm_r.get(
+                                    "failure_window_start"
+                                )
+                                or target_session,
+                                "failure_source_event_ref": f"PG_ADMISSION:{target_session.isoformat()}:{s}:{sc_name}",
+                                "admission_status": "READY",
+                                "linked_anchor_id": adm_r.get("linked_anchor_id"),
+                                "prior_episode_id": adm_r.get("prior_episode_id"),
+                            }
+                        )
+        ma_backfill = (
+            prepare_dynamic_ma_backfill_facts(
                 config,
                 target_session=target_session,
-                active_anchors=ma_backfill.get("active_anchors", ()),
-                active_observations=ma_backfill.get("active_observations", ()),
-                replace_scope="SCOPED",
-                scoped_symbols=sorted(pb_cont_dynamic_ma_events_by_symbol.keys()),
-                scoped_structure_types=("DYNAMIC_MA5", "DYNAMIC_MA20"),
-                scoped_created_session=target_session,
+                research_cutoff=effective_cutoff,
+                source_capture_id=source_capture_id,
+                d1_history_session_count=max(25, len(sessions)),
+                events_by_symbol=merged_dyn_events,
             )
-            d1_supports_by_symbol = read_d1_active_support_observations(
-                config, target_session=target_session, include_inactive=True
-            )
+            if merged_dyn_events
+            else {"active_anchors": (), "active_observations": ()}
+        )
+        persist_d1_active_anchors_and_observations(
+            config,
+            target_session=target_session,
+            active_anchors=ma_backfill.get("active_anchors", ()),
+            active_observations=ma_backfill.get("active_observations", ()),
+            replace_scope="SCOPED",
+            scoped_symbols=dyn_ma_scoped_symbols,
+            scoped_structure_types=("DYNAMIC_MA5", "DYNAMIC_MA20"),
+            scoped_created_session=target_session,
+        )
+        d1_supports_by_symbol = read_d1_active_support_observations(
+            config, target_session=target_session, include_inactive=True
+        )
 
     # 4. 组装下游 Risk / Priority / Radar / Near-Miss
     proj_inputs: list[StockProjectionInput] = []
@@ -2109,4 +2370,14 @@ def run_r04_d2_and_downstream_day(
         "calendar_id": calendar_id,
         "d2": d2_persist_report,
         "downstream": downstream_report,
+        "expected_counts_by_table": {
+            "stock.d2_episode_day_states": len(day_states_to_persist),
+            "stock.d2_primary_episode_day_facts": len(primaries_to_persist),
+            "stock.stock_risk_day_facts": len(risk_pg_rows),
+            "stock.stock_priority_day_facts": len(priority_pg_rows),
+            "stock.stock_radar_day_events": len(radar_pg_rows),
+            "stock.stock_near_miss_day_facts": len(near_miss_pg_rows),
+            "stock.d0_parent_scenario_detail_facts": len(pb_cont_details_to_persist),
+            "pb_cont_facts": len(pb_cont_facts_to_persist),
+        },
     }
