@@ -2489,11 +2489,7 @@ def _read_r04_formal_summary_readonly(
     radar_nm = read_stock_radar_and_near_miss(
         config, session_date=target_session, source_symbol=target_entity
     )
-    if (
-        not primaries
-        and risk_summary["total"] == 0
-        and priority_page_data["total"] == 0
-    ):
+    if not primaries or risk_summary["total"] == 0 or priority_page_data["total"] == 0:
         return {
             "status": "NOT_COMPUTED",
             "reason": "R04_FORMAL_LIFECYCLE_NOT_COMPUTED",
@@ -2534,12 +2530,42 @@ def persist_d1_active_anchors_and_observations_in_cursor(
     replace_scope: str = "FULL",
     scoped_symbols: Sequence[str] | None = None,
     scoped_structure_types: Sequence[str] | None = None,
+    scoped_created_session: date | None = None,
 ) -> dict[str, int]:
     """在既有写事务cursor内幂等持久化D1稳定出生锚与当日支撑观察，并清理不再成立的旧观察与幽灵锚。"""
+    existing_anchor_meta: dict[str, tuple[int, date, Any, Any, Any, Any]] = {}
+    if active_anchors:
+        uids = sorted({str(anc.anchor_uid) for anc in active_anchors})
+        cursor.execute(
+            """
+            SELECT anchor_uid, id, created_session,
+                   lower_numerator, lower_denominator,
+                   upper_numerator, upper_denominator
+            FROM stock.source_d1_anchors
+            WHERE anchor_uid = ANY(%s::text[])
+            """,
+            (uids,),
+        )
+        for row in cursor.fetchall():
+            existing_anchor_meta[str(row[0])] = (
+                int(row[1]),
+                row[2],
+                row[3],
+                row[4],
+                row[5],
+                row[6],
+            )
+
     anchor_id_by_uid: dict[str, int] = {}
+    changed_birth_anchor_ids: list[int] = []
     for anc in active_anchors:
         l_num, l_den = _ratio_pair(anc.lower)
         u_num, u_den = _ratio_pair(anc.upper)
+        prev_meta = existing_anchor_meta.get(str(anc.anchor_uid))
+        if prev_meta is not None and prev_meta[1] < target_session:
+            # 历史已出生锚在后继日推进时仅保原冻结边界与birth_capture_id，不覆盖
+            anchor_id_by_uid[anc.anchor_uid] = prev_meta[0]
+            continue
         cursor.execute(
             """
             INSERT INTO stock.source_d1_anchors (
@@ -2559,7 +2585,10 @@ def persist_d1_active_anchors_and_observations_in_cursor(
                 upper_denominator = EXCLUDED.upper_denominator,
                 source_event_id = EXCLUDED.source_event_id,
                 source_ref = EXCLUDED.source_ref,
-                birth_capture_id = EXCLUDED.birth_capture_id
+                birth_capture_id = COALESCE(
+                    stock.source_d1_anchors.birth_capture_id,
+                    EXCLUDED.birth_capture_id
+                )
             RETURNING id
             """,
             (
@@ -2580,7 +2609,25 @@ def persist_d1_active_anchors_and_observations_in_cursor(
                 anc.birth_capture_id,
             ),
         )
-        anchor_id_by_uid[anc.anchor_uid] = int(cursor.fetchone()[0])
+        aid = int(cursor.fetchone()[0])
+        anchor_id_by_uid[anc.anchor_uid] = aid
+        if prev_meta is not None and (
+            prev_meta[2] != l_num
+            or prev_meta[3] != l_den
+            or prev_meta[4] != u_num
+            or prev_meta[5] != u_den
+        ):
+            changed_birth_anchor_ids.append(aid)
+
+    if changed_birth_anchor_ids:
+        cursor.execute(
+            """
+            DELETE FROM stock.source_d1_anchor_day_observations
+            WHERE anchor_id = ANY(%s::bigint[])
+              AND target_session > %s
+            """,
+            (changed_birth_anchor_ids, target_session),
+        )
 
     missing_uids = sorted(
         {
@@ -2709,27 +2756,40 @@ def persist_d1_active_anchors_and_observations_in_cursor(
     elif replace_scope == "SCOPED" and scoped_symbols and scoped_structure_types:
         sym_list = sorted({str(s) for s in scoped_symbols})
         st_list = sorted({str(s) for s in scoped_structure_types})
+        created_clause = (
+            " AND a.created_session = %s" if scoped_created_session is not None else ""
+        )
+        extra_params: tuple[Any, ...] = (
+            (scoped_created_session,) if scoped_created_session is not None else ()
+        )
         if kept_uids:
             cursor.execute(
-                """
-                DELETE FROM stock.source_d1_anchor_day_observations
-                WHERE target_session = %s
-                  AND source_symbol = ANY(%s::text[])
-                  AND structure_type = ANY(%s::text[])
-                  AND NOT (anchor_uid = ANY(%s::text[]))
+                f"""
+                DELETE FROM stock.source_d1_anchor_day_observations o
+                USING stock.source_d1_anchors a
+                WHERE o.anchor_id = a.id
+                  AND o.target_session = %s
+                  AND o.source_symbol = ANY(%s::text[])
+                  AND o.structure_type = ANY(%s::text[])
+                  {created_clause}
+                  AND NOT (o.anchor_uid = ANY(%s::text[]))
                 """,
-                (target_session, sym_list, st_list, kept_uids),
+                (target_session, sym_list, st_list, *extra_params, kept_uids),
             )
         else:
             cursor.execute(
-                """
-                DELETE FROM stock.source_d1_anchor_day_observations
-                WHERE target_session = %s
-                  AND source_symbol = ANY(%s::text[])
-                  AND structure_type = ANY(%s::text[])
+                f"""
+                DELETE FROM stock.source_d1_anchor_day_observations o
+                USING stock.source_d1_anchors a
+                WHERE o.anchor_id = a.id
+                  AND o.target_session = %s
+                  AND o.source_symbol = ANY(%s::text[])
+                  AND o.structure_type = ANY(%s::text[])
+                  {created_clause}
                 """,
-                (target_session, sym_list, st_list),
+                (target_session, sym_list, st_list, *extra_params),
             )
+        anchor_created = scoped_created_session or target_session
         cursor.execute(
             """
             DELETE FROM stock.source_d1_anchors a
@@ -2741,7 +2801,7 @@ def persist_d1_active_anchors_and_observations_in_cursor(
                   WHERE o.anchor_id = a.id
               )
             """,
-            (target_session, sym_list, st_list),
+            (anchor_created, sym_list, st_list),
         )
     return {
         "anchors_upserted": len(anchor_id_by_uid),
@@ -2758,6 +2818,7 @@ def persist_d1_active_anchors_and_observations(
     replace_scope: str = "FULL",
     scoped_symbols: Sequence[str] | None = None,
     scoped_structure_types: Sequence[str] | None = None,
+    scoped_created_session: date | None = None,
 ) -> dict[str, int]:
     """在独立事务中持久化D1稳定出生锚与当日全量支撑观察（供动态MA局部补齐调用）。"""
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
@@ -2770,6 +2831,10 @@ def persist_d1_active_anchors_and_observations(
             target_session=target_session,
             active_anchors=active_anchors,
             active_observations=active_observations,
+            replace_scope=replace_scope,
+            scoped_symbols=scoped_symbols,
+            scoped_structure_types=scoped_structure_types,
+            scoped_created_session=scoped_created_session,
         )
 
 

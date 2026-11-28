@@ -351,6 +351,33 @@ def select_prior_peaks_by_parent(
     return selected
 
 
+def _parse_qfq_capture_coordinate(coord_id: str | None) -> int | None:
+    """解析精确QFQ捕获坐标ID（支持BAOSTOCK_QFQ:{cap}与FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:{cap}:{sym}）。"""
+    if not coord_id:
+        return None
+    if coord_id.startswith("BAOSTOCK_QFQ:"):
+        tail = coord_id.split(":", 1)[1]
+        return int(tail) if tail.isdigit() else None
+    prefix = "FORWARD_ADJUSTED:BAOSTOCK_SOURCE_CAPTURE:"
+    if coord_id.startswith(prefix):
+        parts = coord_id[len(prefix) :].split(":", 1)
+        return int(parts[0]) if parts and parts[0].isdigit() else None
+    return None
+
+
+def _same_economic_coordinate(coord_a: str | None, coord_b: str | None) -> bool:
+    """判断两个坐标标识是否指向同一真实可比经济坐标（禁止退化占位FORWARD_ADJUSTED冒充）。"""
+    if not coord_a or not coord_b:
+        return False
+    if coord_a == "FORWARD_ADJUSTED" or coord_b == "FORWARD_ADJUSTED":
+        return False
+    if coord_a == coord_b:
+        return True
+    cap_a = _parse_qfq_capture_coordinate(coord_a)
+    cap_b = _parse_qfq_capture_coordinate(coord_b)
+    return cap_a is not None and cap_a == cap_b
+
+
 def _support_binding_from_observation(
     anchor_id: str,
     obs: Mapping[str, Any] | None,
@@ -364,15 +391,17 @@ def _support_binding_from_observation(
             support_valid=unknown("PRIOR_SUPPORT_OBSERVATION_MISSING"),
         )
     obs_coord = obs.get("coordinate_id")
-    if (
-        obs_coord
-        and obs_coord != target_coordinate_id
-        and obs.get("comparability_status") != "COMPARABLE"
-    ):
+    if not _same_economic_coordinate(obs_coord, target_coordinate_id):
         return SupportBinding(
             support_anchor_id=anchor_id,
             support_lower=unknown("PRIOR_SUPPORT_COORDINATE_MISMATCH"),
             support_valid=unknown("PRIOR_SUPPORT_COORDINATE_MISMATCH"),
+        )
+    if obs.get("after_quality") != "OBSERVED" or obs.get("is_active") is False:
+        return SupportBinding(
+            support_anchor_id=anchor_id,
+            support_lower=unknown(obs.get("reason") or "PRIOR_SUPPORT_QUALITY_UNKNOWN"),
+            support_valid=unknown(obs.get("reason") or "PRIOR_SUPPORT_QUALITY_UNKNOWN"),
         )
     state_val = obs.get("after_state") or obs.get("state")
     if state_val in ("BROKEN", "EXPIRED"):
@@ -432,30 +461,47 @@ def build_support_bindings_for_parents(
     prior_states: Sequence[State],
     d1_supports_by_anchor_id: Mapping[str, Mapping[str, Any]],
     target_coordinate_id: str,
-    applicable_prior_anchor_ids: Sequence[str] = (),
+    applicable_prior_anchor_ids: Sequence[str] | frozenset[str] = (),
     supports_proven_complete: bool = False,
 ) -> dict[str, SupportBinding]:
     """为 t-1 合法父构造真实旧 support 绑定；不可用旁支/坏锚，无证缺失不可 MA20 回退。"""
+    applicable_set = frozenset(applicable_prior_anchor_ids)
     bindings: dict[str, SupportBinding] = {}
     for st in prior_states:
         if st.entity_type != "STOCK" or st.kind != "FORMAL" or not st.episode_id:
             continue
         linked_anchor_id = st.event.linked_anchor_id if st.event is not None else None
         if linked_anchor_id:
+            obs = d1_supports_by_anchor_id.get(linked_anchor_id)
             bindings[st.episode_id] = _support_binding_from_observation(
                 linked_anchor_id,
-                d1_supports_by_anchor_id.get(linked_anchor_id),
+                obs,
                 target_coordinate_id=target_coordinate_id,
             )
-        elif applicable_prior_anchor_ids:
-            anchor_id = applicable_prior_anchor_ids[0]
+            continue
+
+        matched_event_anchors = [
+            uid
+            for uid in applicable_set
+            if st.event_id
+            and d1_supports_by_anchor_id.get(uid, {}).get("source_event_id")
+            == st.event_id
+        ]
+        if len(matched_event_anchors) == 1:
+            anchor_id = matched_event_anchors[0]
             bindings[st.episode_id] = _support_binding_from_observation(
                 anchor_id,
                 d1_supports_by_anchor_id.get(anchor_id),
                 target_coordinate_id=target_coordinate_id,
             )
+        elif len(matched_event_anchors) > 1:
+            bindings[st.episode_id] = SupportBinding(
+                support_anchor_id=None,
+                support_lower=unknown("PRIOR_SUPPORT_AMBIGUOUS"),
+                support_valid=unknown("PRIOR_SUPPORT_AMBIGUOUS"),
+            )
         elif supports_proven_complete:
-            # 仅当已证明无任何适用旧 support 时，允许 CONTINUE 走 T0_MA20_FALLBACK
+            # 仅当已证明本股昨日无任何适用旧 support 时，允许 CONTINUE 走 T0_MA20_FALLBACK
             bindings[st.episode_id] = SupportBinding(
                 support_anchor_id=None,
                 support_lower=FieldValue(
@@ -685,7 +731,9 @@ def _build_invalidation_facts(
                 source_ref=inputs.input_ref,
                 episode_id=prior.episode_id,
             )
-        elif provided.coordinate_id != inputs.coordinate_id:
+        elif not _same_economic_coordinate(
+            provided.coordinate_id, inputs.coordinate_id
+        ):
             linked_fact = Fact(
                 field=unknown("LINKED_ANCHOR_COORDINATE_MISMATCH"),
                 entity_id=inputs.entity_id,

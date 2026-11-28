@@ -626,7 +626,11 @@ def evaluate_strong_pullback_day(
         peak_age_f = FieldValue(2 <= peak_age <= 10 and h_ord <= target_ordinal - 2)
 
         # 3. H_i <= peak_high（严格高于时记 RESET_NEW_HIGH；需同经济坐标可比）
-        peak_comparable = not peak.coordinate_id or peak.coordinate_id == coordinate_id
+        peak_comparable = (
+            bool(peak.coordinate_id)
+            and peak.coordinate_id == coordinate_id
+            and coordinate_id != "FORWARD_ADJUSTED"
+        )
         if not peak_comparable:
             no_new_high_f = unknown("PEAK_COORDINATE_NOT_COMPARABLE")
         elif cur_vals is None:

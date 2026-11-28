@@ -169,7 +169,14 @@ _STAGE_TABLES = {
         "stock.source_research_enrollments",
     ),
     "FOCUS_FORMAL": ("stock.source_d0_formal_admission_day_facts",),
-    "D2_LIFECYCLE": ("stock.d2_episode_day_states",),
+    "D2_LIFECYCLE": (
+        "stock.d2_episode_day_states",
+        "stock.d2_primary_episode_day_facts",
+        "stock.stock_risk_day_facts",
+        "stock.stock_priority_day_facts",
+        "stock.stock_radar_day_events",
+        "stock.stock_near_miss_day_facts",
+    ),
     "FOCUS_RESEARCH_CONTEXT": (
         "stock.source_rule_evaluations",
         "stock.source_t0_early_observation_facts",
@@ -8615,60 +8622,76 @@ def _execute_shared_production_chain_impl(
                         "Focus正式准入读取键或完整来源池行数未闭合。",
                         status=409,
                     )
-                # 同日局部补齐动态MA5/MA20，仅处理当日READY正式事件
-                d1_win_for_ma = int(plan.get("d1_history_session_count") or 20)
+                # 同日局部补齐动态MA5/MA20（含当日出生BIRTH_IDLE与历史动态MA锚今日T+1/T+2观察，并清理不再成立的幽灵锚）
+                d1_win_for_ma = max(
+                    25,
+                    int(
+                        plan.get("d1_history_session_counts_by_session", {}).get(
+                            day_text
+                        )
+                        or plan.get("d1_calculation_session_count")
+                        or 25
+                    ),
+                )
                 from stock_a.application.source_research_day import (
+                    load_ready_dynamic_ma_events,
                     prepare_dynamic_ma_backfill_facts,
+                    resolve_pg_history_window,
                 )
                 from stock_a.storage.postgres.research_day_facts import (
                     persist_d1_active_anchors_and_observations,
                 )
                 from stock_a.storage.postgres import source_raw as _src_raw
 
-                ma_events_by_sym: dict[str, list[dict[str, Any]]] = {}
+                _t_ma, d1_ma_sessions, _cal_ma = resolve_pg_history_window(
+                    day.isoformat(), d1_win_for_ma
+                )
+                ma_events_by_sym = load_ready_dynamic_ma_events(
+                    config,
+                    start_session=d1_ma_sessions[0],
+                    end_session=day,
+                )
+                existing_ma_syms: set[str] = set()
                 with _src_raw._transaction(config, write=False) as (
                     _ma_conn,
                     ma_cur,
                     _ma_scope,
                 ):
                     ma_cur.execute(
-                        """SELECT source_symbol, scenario, event_id,
-                                  failure_level_numerator, failure_level_denominator,
-                                  failure_coordinate, failure_source, failure_window_start,
-                                  effective_from_session, admission_status
-                           FROM stock.source_d0_formal_admission_day_facts
-                           WHERE target_session = %s AND admission_status = 'READY'""",
+                        """SELECT DISTINCT source_symbol
+                           FROM stock.source_d1_anchors
+                           WHERE created_session <= %s
+                             AND structure_type IN ('DYNAMIC_MA5', 'DYNAMIC_MA20')""",
                         (day,),
                     )
-                    ma_cols = [d[0] for d in ma_cur.description]
-                    for mrow in ma_cur.fetchall():
-                        md = dict(zip(ma_cols, mrow))
-                        md["target_session"] = day
-                        md["source_capture_id"] = source_capture_id
-                        ma_events_by_sym.setdefault(md["source_symbol"], []).append(md)
-                if ma_events_by_sym:
-                    ma_backfill = prepare_dynamic_ma_backfill_facts(
-                        config,
-                        target_session=day,
-                        research_cutoff=cutoff,
-                        source_capture_id=source_capture_id,
-                        d1_history_session_count=d1_win_for_ma,
-                        events_by_symbol=ma_events_by_sym,
-                    )
-                    if ma_backfill.get("active_anchors") or ma_backfill.get(
-                        "active_observations"
-                    ):
-                        persist_d1_active_anchors_and_observations(
+                    existing_ma_syms = {str(r[0]) for r in ma_cur.fetchall()}
+                scoped_ma_syms = sorted(set(ma_events_by_sym.keys()) | existing_ma_syms)
+                if scoped_ma_syms:
+                    ma_backfill = (
+                        prepare_dynamic_ma_backfill_facts(
                             config,
                             target_session=day,
-                            active_anchors=ma_backfill.get("active_anchors", ()),
-                            active_observations=ma_backfill.get(
-                                "active_observations", ()
-                            ),
-                            replace_scope="SCOPED",
-                            scoped_symbols=sorted(ma_events_by_sym.keys()),
-                            scoped_structure_types=("DYNAMIC_MA5", "DYNAMIC_MA20"),
+                            research_cutoff=cutoff,
+                            source_capture_id=source_capture_id,
+                            d1_history_session_count=d1_win_for_ma,
+                            events_by_symbol={
+                                sym: ma_events_by_sym.get(sym, ())
+                                for sym in scoped_ma_syms
+                            },
+                            include_prior_observations=True,
                         )
+                        if ma_events_by_sym
+                        else {"active_anchors": (), "active_observations": ()}
+                    )
+                    persist_d1_active_anchors_and_observations(
+                        config,
+                        target_session=day,
+                        active_anchors=ma_backfill.get("active_anchors", ()),
+                        active_observations=ma_backfill.get("active_observations", ()),
+                        replace_scope="SCOPED",
+                        scoped_symbols=scoped_ma_syms,
+                        scoped_structure_types=("DYNAMIC_MA5", "DYNAMIC_MA20"),
+                    )
                 progress_callback(
                     job_id=job_id,
                     stage_code="FOCUS_FORMAL",
@@ -10064,6 +10087,7 @@ def _execute_shared_production_chain_impl(
                     config,
                     target_session=day,
                     source_capture_id=source_capture_id,
+                    research_cutoff=cutoff,
                 )
                 for unit in day_units:
                     actual_rows = data_job_pg.read_business_table_count(

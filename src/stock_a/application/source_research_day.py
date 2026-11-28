@@ -1675,6 +1675,78 @@ def prepare_d1_active_anchor_facts(
     return ordered_anchors, tuple(obs_facts)
 
 
+def load_ready_dynamic_ma_events(
+    config: Mapping[str, Any],
+    *,
+    start_session: date,
+    end_session: date,
+) -> dict[str, list[dict[str, Any]]]:
+    """只读读取指定日期区间内所有合法READY动态MA事件（合并正式准入表与D2 PB/CONTINUE派生事件）。"""
+    from stock_a.storage.postgres import source_raw
+
+    events_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    seen_event_ids: set[str] = set()
+    with source_raw._transaction(config, write=False) as (_conn, cur, _scope):
+        cur.execute(
+            """
+            SELECT source_symbol, target_session, scenario, event_id, source_capture_id,
+                   failure_level_numerator, failure_level_denominator,
+                   failure_coordinate, failure_source, failure_window_start,
+                   failure_source_event_ref, effective_from_session,
+                   admission_status, linked_anchor_id, prior_episode_id
+            FROM stock.source_d0_formal_admission_day_facts
+            WHERE target_session >= %s AND target_session <= %s
+              AND admission_status = 'READY'
+            ORDER BY target_session ASC, source_symbol ASC, scenario ASC
+            """,
+            (start_session, end_session),
+        )
+        adm_cols = [d[0] for d in cur.description]
+        for row in cur.fetchall():
+            rec = dict(zip(adm_cols, row))
+            ev_id = str(rec.get("event_id") or "")
+            if not ev_id or ev_id in seen_event_ids:
+                continue
+            seen_event_ids.add(ev_id)
+            events_by_symbol.setdefault(str(rec["source_symbol"]), []).append(rec)
+
+        cur.execute(
+            """
+            SELECT entity_id AS source_symbol, birth_session AS target_session,
+                   scenario, event_id, failure_level_numerator, failure_level_denominator,
+                   failure_coordinate, failure_source, failure_window AS failure_window_start,
+                   effective_from_session, linked_anchor_id,
+                   parent_episode_id AS prior_episode_id,
+                   evidence_ref AS failure_source_event_ref
+            FROM stock.d2_episodes
+            WHERE entity_type = 'STOCK'
+              AND kind = 'FORMAL'
+              AND birth_session >= %s AND birth_session <= %s
+              AND event_id IS NOT NULL
+              AND failure_source IN ('T0_MA5', 'T0_MA20', 'T0_MA20_FALLBACK', 'R5_MA5', 'R20_MA20')
+            ORDER BY birth_session ASC, entity_id ASC, event_id ASC
+            """,
+            (start_session, end_session),
+        )
+        ep_cols = [d[0] for d in cur.description]
+        for row in cur.fetchall():
+            rec = dict(zip(ep_cols, row))
+            ev_id = str(rec.get("event_id") or "")
+            if not ev_id or ev_id in seen_event_ids:
+                continue
+            coord = str(rec.get("failure_coordinate") or "")
+            if coord.startswith("BAOSTOCK_QFQ:"):
+                try:
+                    rec["source_capture_id"] = int(coord.split(":", 1)[1])
+                    rec["failure_coordinate"] = "FORWARD_ADJUSTED"
+                except ValueError:
+                    continue
+            rec["admission_status"] = "READY"
+            seen_event_ids.add(ev_id)
+            events_by_symbol.setdefault(str(rec["source_symbol"]), []).append(rec)
+    return events_by_symbol
+
+
 def prepare_dynamic_ma_backfill_facts(
     config: Mapping[str, Any] | None,
     *,
@@ -1686,6 +1758,7 @@ def prepare_dynamic_ma_backfill_facts(
     history_rows_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     core_previews_by_symbol: Mapping[str, Mapping[date, Mapping[str, Any]]]
     | None = None,
+    include_prior_observations: bool = False,
 ) -> dict[str, Any]:
     """在FOCUS_FORMAL准入后同日局部补齐DYNAMIC_MA5/20，仅处理有真实事件的标的，不重跑全量D1。"""
     target_symbols = sorted(sym for sym, evs in events_by_symbol.items() if evs)
@@ -1722,7 +1795,7 @@ def prepare_dynamic_ma_backfill_facts(
                     sessions=sessions,
                     source_capture_id=source_capture_id,
                     price_coordinate="FORWARD_ADJUSTED",
-                    cutoff=target_session,
+                    cutoff=research_cutoff,
                     offset=offset,
                     limit=1000,
                 )
@@ -1740,6 +1813,61 @@ def prepare_dynamic_ma_backfill_facts(
     active_anchors: list[D1ActiveAnchorFact] = []
     active_observations: list[D1ActiveAnchorObservationFact] = []
     results_by_symbol: dict[str, Any] = {}
+    if include_prior_observations:
+        from stock_a.application.source_d1_structures import (
+            evaluate_source_d1_structure_timeline,
+        )
+
+        dyn_events_by_sym: dict[str, list[dict[str, Any]]] = {}
+        for symbol in target_symbols:
+            rows = history_rows_by_symbol.get(symbol, ())
+            previews = (
+                core_previews_by_symbol[symbol]
+                if core_previews_by_symbol is not None
+                and symbol in core_previews_by_symbol
+                else _structure_history_core_previews(
+                    symbol=symbol,
+                    sessions=sessions,
+                    history_rows=rows,
+                    source_capture_id=source_capture_id,
+                    preview_context=preview_context,
+                )
+            )
+            tl = evaluate_source_d1_structure_timeline(
+                symbol=symbol,
+                sessions=sessions,
+                history_rows=rows,
+                source_capture_id=source_capture_id,
+                core_previews_by_session=previews,
+                include_impulse=True,
+                dynamic_ma_events_by_symbol={symbol: events_by_symbol.get(symbol, ())},
+            )
+            results_by_symbol[symbol] = tl
+            dyn_evs = [
+                ev
+                for ev in tl.get("events", ())
+                if isinstance(ev, Mapping)
+                and ev.get("type") in {"DYNAMIC_MA5", "DYNAMIC_MA20"}
+            ]
+            if dyn_evs:
+                dyn_events_by_sym[symbol] = dyn_evs
+        anc_tup, obs_tup = prepare_d1_active_anchor_facts(
+            {
+                "historical_anchor_changes": {
+                    "source_symbol_active_anchors": dyn_events_by_sym
+                }
+            },
+            target_session=target_session,
+            observation_capture_id=source_capture_id,
+        )
+        return {
+            "target_session": target_session.isoformat(),
+            "research_cutoff": research_cutoff.isoformat(),
+            "symbol_count": len(target_symbols),
+            "active_anchors": anc_tup,
+            "active_observations": obs_tup,
+            "results_by_symbol": results_by_symbol,
+        }
     for symbol in target_symbols:
         rows = history_rows_by_symbol.get(symbol, ())
         previews = (
@@ -1935,33 +2063,11 @@ def prepare_source_research_day(
                 "D1_ADJACENT_SESSION_MISMATCH", "D1目标与前一官方会话不一致"
             )
         d1_started = time.perf_counter()
-        from stock_a.storage.postgres import source_raw
-
-        dynamic_ma_events_by_symbol: dict[str, list[dict[str, Any]]] = {}
-        with source_raw._transaction(config, write=False) as (_conn, cur, _scope):
-            cur.execute(
-                """
-                SELECT source_symbol, target_session, scenario, event_id, source_capture_id
-                FROM stock.source_d0_formal_admission_day_facts
-                WHERE target_session >= %s AND target_session <= %s
-                  AND admission_status = 'READY'
-                ORDER BY target_session ASC, source_symbol ASC, scenario ASC
-                """,
-                (d1_sessions[0], target_session),
-            )
-            for row_sym, row_sess, row_scen, row_ev_id, row_cap in cur.fetchall():
-                dynamic_ma_events_by_symbol.setdefault(str(row_sym), []).append(
-                    {
-                        "event_id": str(
-                            row_ev_id or f"{row_sym}:{row_sess.isoformat()}:{row_scen}"
-                        ),
-                        "scenario": str(row_scen),
-                        "birth_session": row_sess,
-                        "coordinate_id": f"BAOSTOCK_QFQ:{int(row_cap)}"
-                        if row_cap is not None
-                        else None,
-                    }
-                )
+        dynamic_ma_events_by_symbol = load_ready_dynamic_ma_events(
+            config,
+            start_session=d1_sessions[0],
+            end_session=target_session,
+        )
         prepared = prepare_d1_material_observation(
             config,
             target_session=target_session,

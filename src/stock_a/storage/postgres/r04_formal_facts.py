@@ -69,14 +69,38 @@ def _persist_d2_day_bundle_in_cursor(
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (episode_id) DO UPDATE SET
-                failure_level_numerator = COALESCE(stock.d2_episodes.failure_level_numerator, EXCLUDED.failure_level_numerator),
-                failure_level_denominator = COALESCE(stock.d2_episodes.failure_level_denominator, EXCLUDED.failure_level_denominator),
-                failure_coordinate = COALESCE(stock.d2_episodes.failure_coordinate, EXCLUDED.failure_coordinate),
-                failure_source = COALESCE(stock.d2_episodes.failure_source, EXCLUDED.failure_source),
-                effective_from_session = COALESCE(stock.d2_episodes.effective_from_session, EXCLUDED.effective_from_session),
-                linked_anchor_id = COALESCE(stock.d2_episodes.linked_anchor_id, EXCLUDED.linked_anchor_id),
-                failure_window = COALESCE(stock.d2_episodes.failure_window, EXCLUDED.failure_window),
-                evidence_ref = COALESCE(stock.d2_episodes.evidence_ref, EXCLUDED.evidence_ref)
+                failure_level_numerator = CASE
+                    WHEN stock.d2_episodes.birth_session = %s THEN EXCLUDED.failure_level_numerator
+                    ELSE COALESCE(stock.d2_episodes.failure_level_numerator, EXCLUDED.failure_level_numerator)
+                END,
+                failure_level_denominator = CASE
+                    WHEN stock.d2_episodes.birth_session = %s THEN EXCLUDED.failure_level_denominator
+                    ELSE COALESCE(stock.d2_episodes.failure_level_denominator, EXCLUDED.failure_level_denominator)
+                END,
+                failure_coordinate = CASE
+                    WHEN stock.d2_episodes.birth_session = %s THEN EXCLUDED.failure_coordinate
+                    ELSE COALESCE(stock.d2_episodes.failure_coordinate, EXCLUDED.failure_coordinate)
+                END,
+                failure_source = CASE
+                    WHEN stock.d2_episodes.birth_session = %s THEN EXCLUDED.failure_source
+                    ELSE COALESCE(stock.d2_episodes.failure_source, EXCLUDED.failure_source)
+                END,
+                effective_from_session = CASE
+                    WHEN stock.d2_episodes.birth_session = %s THEN EXCLUDED.effective_from_session
+                    ELSE COALESCE(stock.d2_episodes.effective_from_session, EXCLUDED.effective_from_session)
+                END,
+                linked_anchor_id = CASE
+                    WHEN stock.d2_episodes.birth_session = %s THEN EXCLUDED.linked_anchor_id
+                    ELSE COALESCE(stock.d2_episodes.linked_anchor_id, EXCLUDED.linked_anchor_id)
+                END,
+                failure_window = CASE
+                    WHEN stock.d2_episodes.birth_session = %s THEN EXCLUDED.failure_window
+                    ELSE COALESCE(stock.d2_episodes.failure_window, EXCLUDED.failure_window)
+                END,
+                evidence_ref = CASE
+                    WHEN stock.d2_episodes.birth_session = %s THEN EXCLUDED.evidence_ref
+                    ELSE COALESCE(stock.d2_episodes.evidence_ref, EXCLUDED.evidence_ref)
+                END
             """,
             (
                 ep["episode_id"],
@@ -98,6 +122,14 @@ def _persist_d2_day_bundle_in_cursor(
                 ep.get("linked_anchor_id"),
                 ep.get("failure_window"),
                 ep.get("evidence_ref"),
+                session_date,
+                session_date,
+                session_date,
+                session_date,
+                session_date,
+                session_date,
+                session_date,
+                session_date,
             ),
         )
 
@@ -603,6 +635,246 @@ def persist_downstream_projections_day(
         )
 
 
+def _persist_d0_pb_continue_in_cursor(
+    cursor: Any,
+    *,
+    session_date: date,
+    pb_cont_facts: Sequence[Mapping[str, Any]],
+    pb_cont_details: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    """在同事务内持久化PB/CONTINUE证券级场景事实、正式准入及逐父/峰明细。"""
+    cursor.execute(
+        """
+        DELETE FROM stock.d0_parent_scenario_detail_facts
+        WHERE target_session = %s
+        """,
+        (session_date,),
+    )
+    cursor.execute(
+        """
+        DELETE FROM stock.source_d0_formal_admission_day_facts
+        WHERE target_session = %s
+          AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')
+        """,
+        (session_date,),
+    )
+    cursor.execute(
+        """
+        DELETE FROM stock.source_d0_scenario_day_facts
+        WHERE target_session = %s
+          AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')
+        """,
+        (session_date,),
+    )
+    scen_upserted = 0
+    adm_upserted = 0
+    for item in pb_cont_facts:
+        p_ids = list(item["predicate_ids"])
+        p_states = list(item["predicate_states"])
+        p_quals = list(item["predicate_qualities"])
+        p_reasons = list(item["predicate_reason_codes"])
+        p_nums = list(item["predicate_value_numerators"])
+        p_dens = list(item["predicate_value_denominators"])
+        cursor.execute(
+            """
+            INSERT INTO stock.source_d0_scenario_day_facts (
+                target_session, source_symbol, source_capture_id, parser_contract,
+                scenario, producer_version, algorithm_contract, session_contract,
+                history_window_start, history_session_count, source_count,
+                scenario_state, scenario_reason,
+                predicate_ids, predicate_states, predicate_qualities,
+                predicate_reason_codes, predicate_value_numerators, predicate_value_denominators,
+                source_time_quality, source_clock_role, source_available_at,
+                calendar_id, calendar_revision, research_mode, price_coordinate
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            RETURNING id
+            """,
+            (
+                session_date,
+                item["source_symbol"],
+                int(item["source_capture_id"]),
+                item["parser_contract"],
+                item["scenario"],
+                item["producer_version"],
+                item["algorithm_contract"],
+                item["session_contract"],
+                item["history_window_start"],
+                int(item["history_session_count"]),
+                int(item["source_count"]),
+                item["scenario_state"],
+                item["scenario_reason"],
+                p_ids,
+                p_states,
+                p_quals,
+                p_reasons,
+                p_nums,
+                p_dens,
+                item["source_time_quality"],
+                item["source_clock_role"],
+                item["source_available_at"],
+                item["calendar_id"],
+                item["calendar_revision"],
+                item["research_mode"],
+                item["price_coordinate"],
+            ),
+        )
+        raw_fact_id = int(cursor.fetchone()[0])
+        scen_upserted += 1
+
+        fl_num, fl_den = _num_den(item.get("failure_level"))
+        cursor.execute(
+            """
+            INSERT INTO stock.source_d0_formal_admission_day_facts (
+                raw_fact_id, seed_fact_id, source_capture_id, target_session,
+                source_symbol, scenario, raw_role, raw_state, raw_reason,
+                raw_producer_version, algorithm_contract, session_contract,
+                history_window_start, history_session_count, source_count,
+                calendar_id, calendar_revision, source_time_quality, source_clock_role,
+                source_available_at, capture_started_at, capture_validated_at,
+                profile_revision, seed_producer_version, identity_scope, research_mode,
+                price_coordinate, admission_contract, admission_status, admission_reason,
+                research_universe_state, research_universe_reason,
+                actual_quote_state, actual_quote_reason,
+                coordinate_window_state, coordinate_window_reason,
+                d0_liquidity_state, d0_liquidity_reason,
+                non_core_damage_state, non_core_damage_reason,
+                non_extreme_extension_state, non_extreme_extension_reason,
+                non_first_day_damage_state, non_first_day_damage_reason,
+                non_severe_drop_state, non_severe_drop_reason,
+                reason_codes, event_id, failure_level_numerator, failure_level_denominator,
+                failure_coordinate, failure_source, failure_window_start,
+                failure_window_session_count, failure_source_event_ref,
+                effective_from_session, prior_episode_id, linked_anchor_id
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            """,
+            (
+                raw_fact_id,
+                int(item["seed_fact_id"]),
+                int(item["source_capture_id"]),
+                session_date,
+                item["source_symbol"],
+                item["scenario"],
+                "FORMAL",
+                item["scenario_state"],
+                item["scenario_reason"],
+                item["producer_version"],
+                item["algorithm_contract"],
+                item["session_contract"],
+                item["history_window_start"],
+                int(item["history_session_count"]),
+                int(item["source_count"]),
+                item["calendar_id"],
+                item["calendar_revision"],
+                item["source_time_quality"],
+                item["source_clock_role"],
+                item["source_available_at"],
+                item.get("capture_started_at"),
+                item.get("capture_validated_at"),
+                item["profile_revision"],
+                item["seed_producer_version"],
+                item["identity_scope"],
+                item["research_mode"],
+                item["price_coordinate"],
+                item["admission_contract"],
+                item["admission_status"],
+                item["admission_reason"],
+                item["research_universe_state"],
+                item.get("research_universe_reason"),
+                item["actual_quote_state"],
+                item.get("actual_quote_reason"),
+                item["coordinate_window_state"],
+                item.get("coordinate_window_reason"),
+                item["d0_liquidity_state"],
+                item.get("d0_liquidity_reason"),
+                item["non_core_damage_state"],
+                item.get("non_core_damage_reason"),
+                item["non_extreme_extension_state"],
+                item.get("non_extreme_extension_reason"),
+                item["non_first_day_damage_state"],
+                item.get("non_first_day_damage_reason"),
+                item["non_severe_drop_state"],
+                item.get("non_severe_drop_reason"),
+                list(item.get("reason_codes") or ()),
+                item.get("event_id"),
+                fl_num,
+                fl_den,
+                item.get("failure_coordinate"),
+                item.get("failure_source"),
+                item.get("failure_window_start"),
+                item.get("failure_window_session_count"),
+                item.get("failure_source_event_ref"),
+                item.get("effective_from_session"),
+                item.get("prior_episode_id"),
+                item.get("linked_anchor_id"),
+            ),
+        )
+        adm_upserted += 1
+
+    detail_inserted = 0
+    for d in pb_cont_details:
+        fl_num, fl_den = _num_den(d.get("failure_level"))
+        cursor.execute(
+            """
+            INSERT INTO stock.d0_parent_scenario_detail_facts (
+                target_session, source_symbol, scenario, parent_episode_id,
+                peak_event_id, peak_ordinal_key, raw_state, raw_reason,
+                predicate_ids, predicate_states, predicate_qualities,
+                predicate_reason_codes, predicate_value_numerators, predicate_value_denominators,
+                admission_status, admission_reason, reason_codes,
+                event_id, linked_anchor_id,
+                failure_level_numerator, failure_level_denominator,
+                failure_coordinate, failure_source, failure_window_start,
+                failure_window_session_count, effective_from_session
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            """,
+            (
+                session_date,
+                d["source_symbol"],
+                d["scenario"],
+                d["parent_episode_id"],
+                d.get("peak_event_id"),
+                int(d.get("peak_ordinal_key", -1)),
+                d["raw_state"],
+                d["raw_reason"],
+                list(d["predicate_ids"]),
+                list(d["predicate_states"]),
+                list(d["predicate_qualities"]),
+                list(d["predicate_reason_codes"]),
+                list(d["predicate_value_numerators"]),
+                list(d["predicate_value_denominators"]),
+                d["admission_status"],
+                d["admission_reason"],
+                list(d.get("reason_codes") or ()),
+                d.get("event_id"),
+                d.get("linked_anchor_id"),
+                fl_num,
+                fl_den,
+                d.get("failure_coordinate"),
+                d.get("failure_source"),
+                d.get("failure_window_start"),
+                d.get("failure_window_session_count"),
+                d.get("effective_from_session"),
+            ),
+        )
+        detail_inserted += 1
+
+    return {
+        "scenario_facts": scen_upserted,
+        "admission_facts": adm_upserted,
+        "parent_details": detail_inserted,
+    }
+
+
 def persist_d2_and_downstream_day_bundle(
     config: Mapping[str, Any],
     *,
@@ -617,14 +889,22 @@ def persist_d2_and_downstream_day_bundle(
     priority_rows: Sequence[Mapping[str, Any]],
     radar_events: Sequence[Mapping[str, Any]],
     near_miss_rows: Sequence[Mapping[str, Any]],
+    pb_cont_facts: Sequence[Mapping[str, Any]] = (),
+    pb_cont_details: Sequence[Mapping[str, Any]] = (),
     entity_type: str = "STOCK",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """在单一SERIALIZABLE事务中原子持久化当日D2生命周期与全部下游事实，阻断半成品暴露。"""
+    """在单一SERIALIZABLE事务中原子持久化当日PB/CONT四场景、D2生命周期与全部下游事实，阻断半成品暴露。"""
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _conn,
         cursor,
         _scope,
     ):
+        pb_cont_report = _persist_d0_pb_continue_in_cursor(
+            cursor,
+            session_date=session_date,
+            pb_cont_facts=pb_cont_facts,
+            pb_cont_details=pb_cont_details,
+        )
         d2_report = _persist_d2_day_bundle_in_cursor(
             cursor,
             session_date=session_date,
@@ -644,6 +924,7 @@ def persist_d2_and_downstream_day_bundle(
             radar_events=radar_events,
             near_miss_rows=near_miss_rows,
         )
+        d2_report["pb_continue"] = pb_cont_report
         return d2_report, proj_report
 
 
@@ -824,4 +1105,91 @@ def read_stock_radar_and_near_miss(
             "session_date": session_date.isoformat(),
             "radar_events": [dict(zip(r_cols, r)) for r in radar_rows],
             "near_miss_items": nm_items,
+        }
+
+
+def read_d0_pb_continue_day_facts(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_symbol: str | None = None,
+) -> dict[str, Any]:
+    """只读读取指定交易日PB/CONTINUE四场景日事实、正式准入与多父/峰明细。"""
+    with source_raw._transaction(config, write=False) as (_conn, cursor, _scope):
+        where = ["target_session = %s"]
+        params: list[Any] = [target_session]
+        if source_symbol is not None:
+            where.append("source_symbol = %s")
+            params.append(source_symbol)
+        where_sql = " AND ".join(where)
+
+        scen_rows = cursor.execute(
+            f"""
+            SELECT target_session, source_symbol, scenario, scenario_state, scenario_reason,
+                   predicate_ids, predicate_states, predicate_qualities, predicate_reason_codes,
+                   predicate_value_numerators, predicate_value_denominators
+            FROM stock.source_d0_scenario_day_facts
+            WHERE {where_sql}
+              AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')
+            ORDER BY source_symbol, scenario
+            """,
+            tuple(params),
+        ).fetchall()
+        scen_cols = [d[0] for d in cursor.description]
+
+        adm_rows = cursor.execute(
+            f"""
+            SELECT target_session, source_symbol, scenario, raw_state, raw_reason,
+                   admission_status, admission_reason, reason_codes, event_id,
+                   prior_episode_id, linked_anchor_id,
+                   failure_level_numerator, failure_level_denominator,
+                   failure_coordinate, failure_source, failure_window_start,
+                   failure_window_session_count, effective_from_session
+            FROM stock.source_d0_formal_admission_day_facts
+            WHERE {where_sql}
+              AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')
+            ORDER BY source_symbol, scenario
+            """,
+            tuple(params),
+        ).fetchall()
+        adm_cols = [d[0] for d in cursor.description]
+        adm_items = []
+        for r in adm_rows:
+            item = dict(zip(adm_cols, r))
+            item["failure_level"] = _to_fraction(
+                item["failure_level_numerator"], item["failure_level_denominator"]
+            )
+            adm_items.append(item)
+
+        detail_rows = cursor.execute(
+            f"""
+            SELECT target_session, source_symbol, scenario, parent_episode_id,
+                   peak_event_id, peak_ordinal_key, raw_state, raw_reason,
+                   predicate_ids, predicate_states, predicate_qualities,
+                   predicate_reason_codes, predicate_value_numerators, predicate_value_denominators,
+                   admission_status, admission_reason, reason_codes,
+                   event_id, linked_anchor_id,
+                   failure_level_numerator, failure_level_denominator,
+                   failure_coordinate, failure_source, failure_window_start,
+                   failure_window_session_count, effective_from_session
+            FROM stock.d0_parent_scenario_detail_facts
+            WHERE {where_sql}
+            ORDER BY source_symbol, scenario, parent_episode_id, peak_ordinal_key
+            """,
+            tuple(params),
+        ).fetchall()
+        detail_cols = [d[0] for d in cursor.description]
+        detail_items = []
+        for r in detail_rows:
+            item = dict(zip(detail_cols, r))
+            item["failure_level"] = _to_fraction(
+                item["failure_level_numerator"], item["failure_level_denominator"]
+            )
+            detail_items.append(item)
+
+        return {
+            "session_date": target_session.isoformat(),
+            "scenario_facts": [dict(zip(scen_cols, r)) for r in scen_rows],
+            "admission_facts": adm_items,
+            "parent_details": detail_items,
         }

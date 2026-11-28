@@ -108,6 +108,7 @@ _MIGRATION_FILES = (
     "0094_r04_admission_failure_source_enum.sql",
     "0095_r04_round2_pipeline_closure.sql",
     "0096_r04_data_jobs_d2_lifecycle_enum.sql",
+    "0097_r04_pb_continue_parent_detail_facts.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))

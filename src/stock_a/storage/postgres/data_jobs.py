@@ -1126,6 +1126,30 @@ _FACT_DATE_COUNT_QUERIES: dict[str, tuple[str, bool]] = {
         "SELECT target_session, count(*)::bigint FROM stock.source_market_index_day_facts WHERE target_session<=%s GROUP BY target_session",
         True,
     ),
+    "stock.d2_episode_day_states": (
+        "SELECT session_date, count(*)::bigint FROM stock.d2_episode_day_states WHERE session_date<=%s GROUP BY session_date",
+        True,
+    ),
+    "stock.d2_primary_episode_day_facts": (
+        "SELECT session_date, count(*)::bigint FROM stock.d2_primary_episode_day_facts WHERE session_date<=%s GROUP BY session_date",
+        True,
+    ),
+    "stock.stock_risk_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.stock_risk_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.stock_priority_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.stock_priority_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.stock_radar_day_events": (
+        "SELECT target_session, count(*)::bigint FROM stock.stock_radar_day_events WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
+    "stock.stock_near_miss_day_facts": (
+        "SELECT target_session, count(*)::bigint FROM stock.stock_near_miss_day_facts WHERE target_session<=%s GROUP BY target_session",
+        True,
+    ),
 }
 
 
@@ -3536,6 +3560,96 @@ def _cleanup_version_rows(
             }
             for row in cursor.fetchall()
         ]
+    if module_code == "D2_LIFECYCLE":
+        if not target_sessions:
+            return []
+        min_sess = min(target_sessions)
+        cursor.execute(
+            """WITH d2_dates AS (
+                   SELECT session_date AS target_session FROM stock.d2_episode_day_states
+                   WHERE session_date >= %s AND session_date <= %s
+                   UNION
+                   SELECT session_date FROM stock.d2_primary_episode_day_facts
+                   WHERE session_date >= %s AND session_date <= %s
+                   UNION
+                   SELECT target_session FROM stock.stock_risk_day_facts
+                   WHERE target_session >= %s AND target_session <= %s
+                   UNION
+                   SELECT target_session FROM stock.stock_priority_day_facts
+                   WHERE target_session >= %s AND target_session <= %s
+                   UNION
+                   SELECT target_session FROM stock.stock_radar_day_events
+                   WHERE target_session >= %s AND target_session <= %s
+                   UNION
+                   SELECT target_session FROM stock.stock_near_miss_day_facts
+                   WHERE target_session >= %s AND target_session <= %s
+               )
+               SELECT target_session FROM d2_dates ORDER BY target_session""",
+            (min_sess, cutoff) * 6,
+        )
+        all_d2_dates = [row[0] for row in cursor.fetchall()]
+        if not all_d2_dates:
+            return []
+        cursor.execute(
+            """SELECT
+                   (SELECT max(e.rule_identity) FROM stock.d2_episodes e
+                    JOIN stock.d2_episode_day_states s ON s.episode_id = e.episode_id
+                    WHERE s.session_date >= %s),
+                   (SELECT count(*) FROM stock.d2_episode_day_states WHERE session_date >= %s),
+                   (SELECT count(*) FROM stock.d2_primary_episode_day_facts WHERE session_date >= %s),
+                   (SELECT count(*) FROM stock.stock_risk_day_facts WHERE target_session >= %s),
+                   (SELECT count(*) FROM stock.stock_priority_day_facts WHERE target_session >= %s),
+                   (SELECT count(*) FROM stock.stock_radar_day_events WHERE target_session >= %s),
+                   (SELECT count(*) FROM stock.stock_near_miss_day_facts WHERE target_session >= %s),
+                   (SELECT count(*) FROM stock.d2_parent_peak_events WHERE peak_session >= %s),
+                   (SELECT count(*) FROM stock.d2_episodes e
+                    WHERE e.birth_session >= %s
+                      AND NOT EXISTS (
+                          SELECT 1 FROM stock.d2_episode_day_states s
+                          WHERE s.episode_id = e.episode_id AND s.session_date < %s
+                      ))""",
+            (min_sess,) * 10,
+        )
+        cnt_row = cursor.fetchone()
+        rule_ver = str(cnt_row[0] or "STOCK_A_D2_REDUCER_R1")
+        req_dates = [d for d in all_d2_dates if d in set(target_sessions)] or [min_sess]
+        out_versions = []
+        for idx, d_sess in enumerate(req_dates):
+            if idx == 0:
+                out_versions.append(
+                    {
+                        "target_session": d_sess,
+                        "source_version": {},
+                        "algorithm_version": rule_ver,
+                        "parent_rows": int(cnt_row[1]),
+                        "child_rows": 0,
+                        "dependent_rows": {
+                            "stock.d2_primary_episode_day_facts": int(cnt_row[2]),
+                            "stock.stock_risk_day_facts": int(cnt_row[3]),
+                            "stock.stock_priority_day_facts": int(cnt_row[4]),
+                            "stock.stock_radar_day_events": int(cnt_row[5]),
+                            "stock.stock_near_miss_day_facts": int(cnt_row[6]),
+                            "stock.d2_parent_peak_events": int(cnt_row[7]),
+                            "stock.d2_episodes": int(cnt_row[8]),
+                        },
+                        "dependent_target_sessions": tuple(all_d2_dates),
+                        "version_key": {"rule_identity": rule_ver},
+                    }
+                )
+            else:
+                out_versions.append(
+                    {
+                        "target_session": d_sess,
+                        "source_version": {},
+                        "algorithm_version": rule_ver,
+                        "parent_rows": 0,
+                        "child_rows": 0,
+                        "dependent_rows": {},
+                        "dependent_target_sessions": (),
+                        "version_key": {"rule_identity": rule_ver},
+                    }
+                )
+        return out_versions
     raise DataJobPgError(
         "DATA_JOB_CLEANUP_MODULE_REJECTED", "模块没有对应的精确来源捕获版本查询"
     )
@@ -4793,6 +4907,7 @@ def clear_derived_module(
                 pass
             elif module_code == "D2_LIFECYCLE":
                 for tbl, date_col in (
+                    ("stock.d0_parent_scenario_detail_facts", "target_session"),
                     ("stock.stock_near_miss_day_facts", "target_session"),
                     ("stock.stock_radar_day_events", "target_session"),
                     ("stock.stock_priority_day_facts", "target_session"),
@@ -4802,16 +4917,29 @@ def clear_derived_module(
                     ("stock.d2_parent_peak_events", "peak_session"),
                 ):
                     cursor.execute(
-                        f"DELETE FROM {tbl} WHERE {date_col}=%s",
+                        f"DELETE FROM {tbl} WHERE {date_col}>=%s",
                         (target_session,),
                     )
-                    deleted_rows[tbl] += cursor.rowcount
-                    deleted_by_session[target_session.isoformat()][tbl] += (
-                        cursor.rowcount
-                    )
+                    if tbl in deleted_rows:
+                        deleted_rows[tbl] += cursor.rowcount
+                        deleted_by_session[target_session.isoformat()][tbl] += (
+                            cursor.rowcount
+                        )
+                cursor.execute(
+                    """DELETE FROM stock.source_d0_formal_admission_day_facts
+                       WHERE target_session >= %s
+                         AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')""",
+                    (target_session,),
+                )
+                cursor.execute(
+                    """DELETE FROM stock.source_d0_scenario_day_facts
+                       WHERE target_session >= %s
+                         AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')""",
+                    (target_session,),
+                )
                 cursor.execute(
                     """DELETE FROM stock.d2_episodes e
-                       WHERE e.birth_session=%s
+                       WHERE e.birth_session >= %s
                          AND NOT EXISTS (
                              SELECT 1 FROM stock.d2_episode_day_states s
                              WHERE s.episode_id = e.episode_id
@@ -5600,7 +5728,124 @@ def clear_derived_module(
                     "stock.source_market_environment_day_facts_subsequent"
                 ] = len(subsequent)
 
-        invalidated_rows: list[tuple[Any, str]] = []
+        r04_cascade_inv_rows: list[tuple[Any, str]] = []
+        if module_code == "D2_LIFECYCLE" and sessions:
+            min_d2_day = min(sessions)
+            cursor.execute(
+                """SELECT DISTINCT target_session FROM stock.data_job_progress
+                   WHERE target_session >= %s
+                     AND business_table = ANY(%s)
+                     AND status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')""",
+                (
+                    min_d2_day,
+                    [
+                        "stock.d2_episode_day_states",
+                        "stock.d2_primary_episode_day_facts",
+                        "stock.stock_risk_day_facts",
+                        "stock.stock_priority_day_facts",
+                        "stock.stock_radar_day_events",
+                        "stock.stock_near_miss_day_facts",
+                    ],
+                ),
+            )
+            extra_d2_days = [r[0] for r in cursor.fetchall()]
+            if extra_d2_days:
+                invalidated_sessions = sorted(
+                    set(invalidated_sessions) | set(extra_d2_days)
+                )
+        elif (
+            module_code
+            in (
+                "D0_D1",
+                "STATIC_RESEARCH",
+                "FOCUS_FORMAL",
+                "R03_SECTOR_LOO",
+                "R03_SECTOR_NATIVE",
+            )
+            and sessions
+        ):
+            min_r04_day = min(sessions)
+            if module_code == "FOCUS_FORMAL":
+                cursor.execute(
+                    """DELETE FROM stock.source_d1_anchors
+                       WHERE created_session = ANY(%s::date[])
+                         AND structure_type IN ('DYNAMIC_MA5', 'DYNAMIC_MA20')""",
+                    (list(sessions),),
+                )
+            cursor.execute(
+                """SELECT DISTINCT session_date FROM stock.d2_episode_day_states
+                   WHERE session_date >= %s""",
+                (min_r04_day,),
+            )
+            d2_subsequent_days = [r[0] for r in cursor.fetchall()]
+            r04_d2_tables = (
+                ("stock.d0_parent_scenario_detail_facts", "target_session"),
+                ("stock.stock_near_miss_day_facts", "target_session"),
+                ("stock.stock_radar_day_events", "target_session"),
+                ("stock.stock_priority_day_facts", "target_session"),
+                ("stock.stock_risk_day_facts", "target_session"),
+                ("stock.d2_primary_episode_day_facts", "session_date"),
+                ("stock.d2_episode_day_states", "session_date"),
+                ("stock.d2_parent_peak_events", "peak_session"),
+            )
+            for tbl, date_col in r04_d2_tables:
+                cursor.execute(
+                    f"DELETE FROM {tbl} WHERE {date_col} >= %s",
+                    (min_r04_day,),
+                )
+            cursor.execute(
+                """DELETE FROM stock.source_d0_formal_admission_day_facts
+                   WHERE target_session >= %s
+                     AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')""",
+                (min_r04_day,),
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_d0_scenario_day_facts
+                   WHERE target_session >= %s
+                     AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')""",
+                (min_r04_day,),
+            )
+            cursor.execute(
+                """DELETE FROM stock.d2_episodes e
+                   WHERE e.birth_session >= %s
+                     AND NOT EXISTS (
+                         SELECT 1 FROM stock.d2_episode_day_states s
+                         WHERE s.episode_id = e.episode_id
+                     )""",
+                (min_r04_day,),
+            )
+            r04_progress_days = sorted(set(d2_subsequent_days) | set(sessions))
+            r04_progress_tables = [
+                "stock.d2_episode_day_states",
+                "stock.d2_primary_episode_day_facts",
+                "stock.stock_risk_day_facts",
+                "stock.stock_priority_day_facts",
+                "stock.stock_radar_day_events",
+                "stock.stock_near_miss_day_facts",
+            ]
+            cursor.execute(
+                """UPDATE stock.data_job_progress AS p
+                   SET status='NOT_COMPUTED',completed_units=0,expected_rows=NULL,
+                       verified_rows=NULL,inserted_rows=0,updated_rows=0,
+                       quality_status=NULL,error_code='DERIVED_RESULT_CLEARED',
+                       error_message='上游R04依赖已清理，后继D2及下游投影失效；需重新生成。',
+                       deleted_rows=0,
+                       updated_at=clock_timestamp(),completed_at=NULL,verified_at=NULL
+                   WHERE p.target_session=ANY(%s)
+                     AND p.business_table=ANY(%s)
+                     AND p.status IN ('COMPLETED','ALREADY_COMPLETE','NO_CHANGE')
+                     AND (%s::uuid IS NULL OR p.job_id<>%s)
+                   RETURNING job_id, business_table""",
+                (
+                    r04_progress_days,
+                    r04_progress_tables,
+                    current_job_id,
+                    current_job_id,
+                ),
+            )
+            r04_cascade_inv_rows.extend(cursor.fetchall())
+
+        invalidated_rows: list[tuple[Any, str]] = list(r04_cascade_inv_rows)
         if invalidated_sessions and cleanup_count_tables:
             cursor.execute(
                 """UPDATE stock.data_job_progress AS p
@@ -6130,6 +6375,16 @@ def read_business_table_count(
         ),
         "stock.stock_priority_day_facts": (
             """SELECT count(*) FROM stock.stock_priority_day_facts
+               WHERE target_session=%s""",
+            lambda: (target_session,),
+        ),
+        "stock.stock_radar_day_events": (
+            """SELECT count(*) FROM stock.stock_radar_day_events
+               WHERE target_session=%s""",
+            lambda: (target_session,),
+        ),
+        "stock.stock_near_miss_day_facts": (
+            """SELECT count(*) FROM stock.stock_near_miss_day_facts
                WHERE target_session=%s""",
             lambda: (target_session,),
         ),
@@ -7153,6 +7408,24 @@ def mark_progress_cleared(
         "stock.r03_formal_market_breadth_facts": (
             "SELECT count(*) FROM stock.r03_formal_market_breadth_facts WHERE trade_date=%s AND trade_date<=%s",
         ),
+        "stock.d2_episode_day_states": (
+            "SELECT count(*) FROM stock.d2_episode_day_states WHERE session_date=%s AND session_date<=%s",
+        ),
+        "stock.d2_primary_episode_day_facts": (
+            "SELECT count(*) FROM stock.d2_primary_episode_day_facts WHERE session_date=%s AND session_date<=%s",
+        ),
+        "stock.stock_risk_day_facts": (
+            "SELECT count(*) FROM stock.stock_risk_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.stock_priority_day_facts": (
+            "SELECT count(*) FROM stock.stock_priority_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.stock_radar_day_events": (
+            "SELECT count(*) FROM stock.stock_radar_day_events WHERE target_session=%s AND target_session<=%s",
+        ),
+        "stock.stock_near_miss_day_facts": (
+            "SELECT count(*) FROM stock.stock_near_miss_day_facts WHERE target_session=%s AND target_session<=%s",
+        ),
     }
     status = "CLEARED" if deleted_rows > 0 or regenerate else "NO_CHANGE"
     quality_status = status
@@ -7964,12 +8237,14 @@ def invalidate_derived_for_raw_price_changes_in_cursor(
             r04_min_day = min(r04_affected)
             cursor.execute(
                 """SELECT DISTINCT session_date FROM stock.d2_episode_day_states
-                   WHERE session_date >= %s AND session_date <= %s""",
-                (r04_min_day, cutoff),
+                   WHERE session_date >= %s""",
+                (r04_min_day,),
             )
             d2_existing_days = {row[0] for row in cursor.fetchall()}
+            r04_max_day = max(d2_existing_days | {cutoff})
             d2_del_days = sorted(d2_existing_days | set(r04_affected))
             for tbl, date_col in (
+                ("stock.d0_parent_scenario_detail_facts", "target_session"),
                 ("stock.stock_near_miss_day_facts", "target_session"),
                 ("stock.stock_radar_day_events", "target_session"),
                 ("stock.stock_priority_day_facts", "target_session"),
@@ -7980,14 +8255,33 @@ def invalidate_derived_for_raw_price_changes_in_cursor(
             ):
                 cursor.execute(
                     f"DELETE FROM {tbl} WHERE {date_col} >= %s AND {date_col} <= %s",
-                    (r04_min_day, cutoff),
+                    (r04_min_day, r04_max_day),
                 )
-                if tbl == "stock.d2_episode_day_states":
+                if tbl in (
+                    "stock.d2_episode_day_states",
+                    "stock.d2_primary_episode_day_facts",
+                    "stock.stock_risk_day_facts",
+                    "stock.stock_priority_day_facts",
+                    "stock.stock_radar_day_events",
+                    "stock.stock_near_miss_day_facts",
+                ):
                     _mark(tbl, d2_del_days, cursor.rowcount)
                 elif cursor.rowcount:
                     deleted_by_table[tbl] = deleted_by_table.get(tbl, 0) + int(
                         cursor.rowcount
                     )
+            cursor.execute(
+                """DELETE FROM stock.source_d0_formal_admission_day_facts
+                   WHERE target_session >= %s AND target_session <= %s
+                     AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')""",
+                (r04_min_day, r04_max_day),
+            )
+            cursor.execute(
+                """DELETE FROM stock.source_d0_scenario_day_facts
+                   WHERE target_session >= %s AND target_session <= %s
+                     AND scenario IN ('STRONG_PULLBACK', 'TREND_CONTINUE')""",
+                (r04_min_day, r04_max_day),
+            )
             cursor.execute(
                 """DELETE FROM stock.d2_episodes e
                    WHERE e.birth_session >= %s AND e.birth_session <= %s
@@ -7995,7 +8289,7 @@ def invalidate_derived_for_raw_price_changes_in_cursor(
                          SELECT 1 FROM stock.d2_episode_day_states s
                          WHERE s.episode_id = e.episode_id
                      )""",
-                (r04_min_day, cutoff),
+                (r04_min_day, r04_max_day),
             )
 
         if d0_list:
